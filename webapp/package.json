@@ -1,0 +1,18 @@
+{
+  "name": "ac-webapp",
+  "version": "0.1.0",
+  "description": "AI Coder / DeCoder webapp",
+  "type": "module",
+  "scripts": {
+    "start": "web-dev-server --node-resolve --watch --port ${PORT:-8999}"
+  },
+  "dependencies": {
+    "@flatmax/jrpc-oo": "^1.0.0",
+    "lit": "^2.8.0",
+    "marked": "^9.0.0",
+    "prismjs": "^1.29.0"
+  },
+  "devDependencies": {
+    "@web/dev-server": "^0.4.0"
+  }
+}
