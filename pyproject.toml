@@ -14,3 +14,8 @@ dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     "litellm",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "playwright",
+]

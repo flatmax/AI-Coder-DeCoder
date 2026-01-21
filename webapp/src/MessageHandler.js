@@ -8,11 +8,22 @@ export class MessageHandler extends JRPCClient {
 
   constructor() {
     super();
+    console.log('MessageHandler::constructor');
     this.messageHistory = [];
     this._messageId = 0;
   }
 
+  connectedCallback() {
+    console.log('MessageHandler::connectedCallback');
+    super.connectedCallback();
+    if (this.port) {
+      this.serverURI = `ws://localhost:${this.port}`;
+      console.log('PromptView::constructor - serverURI:', this.serverURI);
+    }
+  }
+
   addMessage(role, content) {
+    console.log('MessageHandler::addMessage', { role, content });
     this.messageHistory = [
       ...this.messageHistory,
       { id: this._messageId++, role, content }
@@ -20,10 +31,12 @@ export class MessageHandler extends JRPCClient {
   }
 
   streamWrite(chunk, final = false, role = 'assistant') {
+    console.log('MessageHandler::streamWrite', { chunk, final, role });
     setTimeout(() => this._processStreamChunk(chunk, final, role), 0);
   }
 
   _processStreamChunk(chunk, final, role) {
+    console.log('MessageHandler::_processStreamChunk', { chunk, final, role });
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     
     if (lastMessage && lastMessage.role === role && !lastMessage.final) {
@@ -39,6 +52,7 @@ export class MessageHandler extends JRPCClient {
   }
 
   clearHistory() {
+    console.log('MessageHandler::clearHistory');
     this.messageHistory = [];
   }
 }
