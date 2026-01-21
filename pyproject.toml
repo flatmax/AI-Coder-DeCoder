@@ -13,6 +13,7 @@ requires-python = ">=3.8"
 dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     "litellm",
+    "GitPython",
 ]
 
 [project.optional-dependencies]

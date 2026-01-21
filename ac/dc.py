@@ -18,6 +18,8 @@ def parse_args():
                         help='Webapp port (default: 18999)')
     parser.add_argument('--no-browser', action='store_true',
                         help='Do not open browser automatically')
+    parser.add_argument('--repo-path', type=str, default=None,
+                        help='Path to git repository (default: current directory)')
     return parser.parse_args()
 
 
@@ -49,7 +51,7 @@ async def main_starter_async(args):
     print(f"Browser URL: {get_browser_url(actual_webapp_port, actual_server_port)}")
 
     server = JRPCServer(port=actual_server_port)
-    server.add_class(LiteLLM())
+    server.add_class(LiteLLM(repo_path=args.repo_path))
 
     webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
 
