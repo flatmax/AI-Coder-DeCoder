@@ -75,6 +75,68 @@ export const promptViewStyles = css`
     gap: 12px;
   }
 
+  .image-preview-area {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid #0f3460;
+    background: #1a1a2e;
+    align-items: center;
+  }
+
+  .image-preview {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid #0f3460;
+  }
+
+  .image-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .image-preview .remove-image {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #e94560;
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .image-preview .remove-image:hover {
+    background: #ff6b6b;
+  }
+
+  .clear-images {
+    background: #0f3460;
+    color: #eee;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  .clear-images:hover {
+    background: #1a3a6e;
+  }
+
   .input-area {
     display: flex;
     padding: 12px;

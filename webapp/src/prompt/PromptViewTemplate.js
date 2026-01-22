@@ -36,13 +36,24 @@ export function renderPromptView(component) {
                 }
               )}
             </div>
+            ${component.pastedImages.length > 0 ? html`
+              <div class="image-preview-area">
+                ${component.pastedImages.map((img, index) => html`
+                  <div class="image-preview">
+                    <img src=${img.preview} alt=${img.name}>
+                    <button class="remove-image" @click=${() => component.removeImage(index)}>×</button>
+                  </div>
+                `)}
+                <button class="clear-images" @click=${() => component.clearImages()}>Clear all</button>
+              </div>
+            ` : ''}
             <div class="input-area">
               <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
                 📁 ${component.selectedFiles.length || ''}
               </button>
               <textarea
                 rows="2"
-                placeholder="Type a message..."
+                placeholder="Type a message... (paste images with Ctrl+V)"
                 .value=${component.inputValue}
                 @input=${component.handleInput}
                 @keydown=${component.handleKeyDown}

@@ -13,7 +13,8 @@ export class PromptView extends MessageHandler {
     modifiedFiles: { type: Array },
     stagedFiles: { type: Array },
     selectedFiles: { type: Array },
-    showFilePicker: { type: Boolean }
+    showFilePicker: { type: Boolean },
+    pastedImages: { type: Array }
   };
 
   static styles = promptViewStyles;
@@ -28,6 +29,7 @@ export class PromptView extends MessageHandler {
     this.stagedFiles = [];
     this.selectedFiles = [];
     this.showFilePicker = false;
+    this.pastedImages = [];
     
     // Check if port is specified in URL parameters
     const urlParams = new URLSearchParams(window.location.search);
@@ -37,6 +39,12 @@ export class PromptView extends MessageHandler {
   connectedCallback() {
     super.connectedCallback();
     this.addClass(this);
+    document.addEventListener('paste', this.handlePaste.bind(this));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    document.removeEventListener('paste', this.handlePaste.bind(this));
   }
 
   remoteIsUp() {
@@ -89,17 +97,74 @@ export class PromptView extends MessageHandler {
     this.selectedFiles = e.detail;
   }
 
+  handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          this.processImageFile(file);
+        }
+        break;
+      }
+    }
+  }
+
+  processImageFile(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64Data = e.target.result.split(',')[1];
+      const mimeType = file.type;
+      this.pastedImages = [
+        ...this.pastedImages,
+        {
+          data: base64Data,
+          mime_type: mimeType,
+          preview: e.target.result,
+          name: file.name || `image-${Date.now()}.${mimeType.split('/')[1]}`
+        }
+      ];
+    };
+    reader.readAsDataURL(file);
+  }
+
+  removeImage(index) {
+    this.pastedImages = this.pastedImages.filter((_, i) => i !== index);
+  }
+
+  clearImages() {
+    this.pastedImages = [];
+  }
+
   async sendMessage() {
-    if (!this.inputValue.trim()) return;
+    if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
     
-    this.addMessage('user', this.inputValue);
+    // Build message content for display
+    const userContent = this.inputValue;
+    const imagesToSend = this.pastedImages.length > 0 
+      ? this.pastedImages.map(img => ({ data: img.data, mime_type: img.mime_type }))
+      : null;
+    
+    // Add user message with image indicator
+    if (this.pastedImages.length > 0) {
+      this.addMessage('user', `${userContent}\n[${this.pastedImages.length} image(s) attached]`);
+    } else {
+      this.addMessage('user', userContent);
+    }
+    
     const message = this.inputValue;
     this.inputValue = '';
+    const images = imagesToSend;
+    this.pastedImages = [];
     
     try {
       const response = await this.call['LiteLLM.chat'](
         message,
-        this.selectedFiles.length > 0 ? this.selectedFiles : null
+        this.selectedFiles.length > 0 ? this.selectedFiles : null,
+        images
       );
       const responseText = this.extractResponse(response);
       this.addMessage('assistant', responseText);
