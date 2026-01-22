@@ -1,5 +1,5 @@
 import { LitElement, html, css } from 'lit';
-import { CardMarkdown } from './CardMarkdown.js';
+import './CardMarkdown.js';
 
 export class AssistantCard extends LitElement {
   static properties = {
@@ -27,11 +27,6 @@ export class AssistantCard extends LitElement {
       font-weight: 600;
     }
   `;
-
-  constructor() {
-    super();
-    this.markdown = new CardMarkdown();
-  }
 
   render() {
     return html`

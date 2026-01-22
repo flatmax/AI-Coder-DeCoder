@@ -5,7 +5,7 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
 from jrpc_oo import JRPCServer
-from LiteLLM import LiteLLM
+from llm import LiteLLM
 from repo import Repo
 from port_utils import find_available_port
 from webapp_server import start_npm_dev_server
