@@ -26,10 +26,15 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
         # Set model from config or use default
         self.model = self.config.get('model', 'gpt-4o-mini')
         self.smaller_model = self.config.get('smallerModel', 'gpt-4o-mini')
+        
+        # Lazy-loaded aider integration
+        self._aider_chat = None
     
     def set_model(self, model):
         """Set the LLM model to use."""
         self.model = model
+        if self._aider_chat:
+            self._aider_chat.model = model
         return f"Model set to: {model}"
     
     def get_model(self):
@@ -56,4 +61,51 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
     def clear_history(self):
         """Clear the conversation history."""
         self.conversation_history = []
+        if self._aider_chat:
+            self._aider_chat.clear_history()
         return "Conversation history cleared"
+    
+    def get_aider_chat(self):
+        """Get or create the AiderChat instance for edit operations."""
+        if self._aider_chat is None:
+            from ..aider.chat_integration import AiderChat
+            self._aider_chat = AiderChat(model=self.model, repo=self.repo)
+        return self._aider_chat
+    
+    def parse_edits(self, response_text, file_paths=None):
+        """
+        Parse a response for search/replace blocks without applying them.
+        
+        Args:
+            response_text: LLM response containing edit blocks
+            file_paths: Optional list of valid file paths
+            
+        Returns:
+            Dict with file_edits and shell_commands
+        """
+        aider = self.get_aider_chat()
+        
+        if file_paths:
+            aider.clear_files()
+            for path in file_paths:
+                aider.add_file(path)
+        
+        file_edits, shell_commands = aider.editor.parse_response(response_text)
+        return {
+            "file_edits": file_edits,
+            "shell_commands": shell_commands
+        }
+    
+    def apply_edits(self, edits, dry_run=False):
+        """
+        Apply previously parsed edits to files.
+        
+        Args:
+            edits: List of (filename, original, updated) tuples
+            dry_run: If True, don't write changes to disk
+            
+        Returns:
+            Dict with passed, failed, and content
+        """
+        aider = self.get_aider_chat()
+        return aider.editor.apply_edits(edits, dry_run=dry_run)

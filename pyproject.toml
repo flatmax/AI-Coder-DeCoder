@@ -9,12 +9,13 @@ include = ["ac*"]
 name = "ac"
 version = "0.1.0"
 description = "AC service with LiteLLM"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     "litellm",
     "GitPython",
     "boto3",
+    "aider-chat @ git+https://github.com/Aider-AI/aider.git@59250e070e6472967b9c83069baa33eb32d69faf",
 ]
 
 [project.optional-dependencies]

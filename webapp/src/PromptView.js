@@ -31,7 +31,6 @@ export class PromptView extends MessageHandler {
     this.showFilePicker = false;
     this.pastedImages = [];
     
-    // Check if port is specified in URL parameters
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
   }
@@ -47,9 +46,7 @@ export class PromptView extends MessageHandler {
     document.removeEventListener('paste', this.handlePaste.bind(this));
   }
 
-  remoteIsUp() {
-    // WebSocket connected
-  }
+  remoteIsUp() {}
 
   async setupDone() {
     this.isConnected = true;
@@ -61,8 +58,6 @@ export class PromptView extends MessageHandler {
   }
 
   extractResponse(response) {
-    // Response is in format {uuid: data}
-    // Extract the data from the first (and typically only) uuid key
     if (response && typeof response === 'object') {
       const keys = Object.keys(response);
       if (keys.length > 0) {
@@ -142,13 +137,11 @@ export class PromptView extends MessageHandler {
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
     
-    // Build message content for display
     const userContent = this.inputValue;
     const imagesToSend = this.pastedImages.length > 0 
       ? this.pastedImages.map(img => ({ data: img.data, mime_type: img.mime_type }))
       : null;
     
-    // Add user message with image indicator
     if (this.pastedImages.length > 0) {
       this.addMessage('user', `${userContent}\n[${this.pastedImages.length} image(s) attached]`);
     } else {
@@ -166,8 +159,16 @@ export class PromptView extends MessageHandler {
         this.selectedFiles.length > 0 ? this.selectedFiles : null,
         images
       );
-      const responseText = this.extractResponse(response);
+      const result = this.extractResponse(response);
+      
+      // Display the response text
+      const responseText = result.response || result.error || 'No response';
       this.addMessage('assistant', responseText);
+      
+      // Refresh file tree if edits were applied
+      if (result.passed && result.passed.length > 0) {
+        await this.loadFileTree();
+      }
     } catch (e) {
       console.error('Error sending message:', e);
       this.addMessage('assistant', `Error: ${e.message}`);

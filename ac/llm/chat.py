@@ -2,128 +2,53 @@ import litellm as _litellm
 
 
 class ChatMixin:
-    """Mixin for chat and message building operations."""
-    
-    def _build_messages(self, user_prompt, files_content=None, images=None, system_prompt=None):
-        """
-        Build the messages array for the LLM API call.
-        
-        Args:
-            user_prompt: The user's message
-            files_content: Optional list of file content dicts
-            images: Optional list of base64 encoded images
-            system_prompt: Optional system prompt
-        
-        Returns:
-            List of message dicts for the API
-        """
-        messages = []
-        
-        # Add system prompt if provided (with cache control for Anthropic)
-        if system_prompt:
-            messages.append({
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            })
-        
-        # Add conversation history
-        messages.extend(self.conversation_history)
-        
-        # Build user message content
-        user_content = []
-        
-        # Add file context if provided (with cache control - files are good cache candidates)
-        if files_content:
-            file_context = self._format_files_for_prompt(files_content)
-            user_content.append({
-                "type": "text",
-                "text": f"Here are the relevant files:\n\n{file_context}",
-                "cache_control": {"type": "ephemeral"}
-            })
-        
-        # Add images if provided
-        if images:
-            for image_data in images:
-                if isinstance(image_data, dict):
-                    # Already formatted with mime type
-                    mime_type = image_data.get('mime_type', 'image/png')
-                    base64_data = image_data.get('data')
-                else:
-                    # Assume base64 string, default to png
-                    mime_type = 'image/png'
-                    base64_data = image_data
-                
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}"
-                    }
-                })
-        
-        # Add the user's text prompt
-        user_content.append({
-            "type": "text",
-            "text": user_prompt
-        })
-        
-        # If only text content without cache control, simplify the message format
-        if len(user_content) == 1 and user_content[0]["type"] == "text" and "cache_control" not in user_content[0]:
-            messages.append({"role": "user", "content": user_prompt})
-        else:
-            messages.append({"role": "user", "content": user_content})
-        
-        return messages
+    """Mixin for chat operations using aider's edit format."""
     
     def chat(self, user_prompt, file_paths=None, images=None, system_prompt=None, 
-             file_version='working', stream=False, use_smaller_model=False):
+             file_version='working', stream=False, use_smaller_model=False,
+             dry_run=False, auto_apply=True):
         """
-        Send a chat message with optional file and image context.
+        Send a chat message using aider's search/replace format.
         
         Args:
             user_prompt: The user's message
             file_paths: Optional list of file paths to include as context
             images: Optional list of base64 encoded images or dicts with 'data' and 'mime_type'
-            system_prompt: Optional system prompt
+            system_prompt: Optional system prompt (currently unused, aider provides its own)
             file_version: Version of files to load ('working', 'HEAD', or commit hash)
             stream: Whether to stream the response (not yet implemented)
             use_smaller_model: Whether to use the smaller/faster model
+            dry_run: If True, don't write changes to disk
+            auto_apply: If True, automatically apply edits; if False, just return parsed edits
         
         Returns:
-            The assistant's response text
+            Dict with:
+            - response: Raw LLM response text
+            - file_edits: List of (filename, original, updated) tuples
+            - shell_commands: List of shell command strings
+            - passed: List of successfully applied edits (if auto_apply)
+            - failed: List of failed edits (if auto_apply)
+            - content: Dict of new file contents
         """
-        # Load file contents if paths provided
-        files_content = None
+        aider_chat = self.get_aider_chat()
+        aider_chat.model = self.smaller_model if use_smaller_model else self.model
+        aider_chat.clear_files()
+        
+        # Load files into aider context
         if file_paths:
-            files_content = self.load_files_as_context(file_paths, file_version)
+            for path in file_paths:
+                try:
+                    aider_chat.add_file(path)
+                except FileNotFoundError as e:
+                    return {"error": str(e), "response": ""}
         
-        # Build messages
-        messages = self._build_messages(user_prompt, files_content, images, system_prompt)
+        # Handle images by appending to prompt
+        if images:
+            # Note: aider doesn't natively support images, so we note them in the prompt
+            image_note = f"\n[{len(images)} image(s) provided - image analysis not yet supported in edit mode]"
+            user_prompt = user_prompt + image_note
         
-        # Select model
-        model = self.smaller_model if use_smaller_model else self.model
-        
-        try:
-            # Call LiteLLM
-            response = _litellm.completion(
-                model=model,
-                messages=messages
-            )
-            
-            assistant_message = response.choices[0].message.content
-            
-            # Store in conversation history (simplified version without images)
-            self.conversation_history.append({"role": "user", "content": user_prompt})
-            self.conversation_history.append({"role": "assistant", "content": assistant_message})
-            
-            return assistant_message
-            
-        except Exception as e:
-            error_msg = f"Error calling LLM: {str(e)}"
-            print(error_msg)
-            return error_msg
+        if auto_apply:
+            return aider_chat.request_and_apply(user_prompt, dry_run=dry_run)
+        else:
+            return aider_chat.request_changes(user_prompt)

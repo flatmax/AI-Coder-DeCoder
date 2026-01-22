@@ -42,20 +42,6 @@ class FileContextMixin:
         
         return files_content
     
-    def _format_files_for_prompt(self, files_content):
-        """Format loaded files into a prompt-friendly string."""
-        formatted_parts = []
-        for file_info in files_content:
-            if file_info.get('error'):
-                formatted_parts.append(f"File: {file_info['path']}\nError: {file_info['error']}\n")
-            elif file_info.get('is_binary'):
-                formatted_parts.append(f"File: {file_info['path']}\n[Binary file]\n")
-            else:
-                formatted_parts.append(
-                    f"File: {file_info['path']}\n```\n{file_info['content']}\n```\n"
-                )
-        return "\n".join(formatted_parts)
-    
     def list_files_in_context(self, file_paths):
         """
         Check which files exist and can be loaded.
