@@ -165,14 +165,87 @@ export class PromptView extends MessageHandler {
       const responseText = result.response || result.error || 'No response';
       this.addMessage('assistant', responseText);
       
-      // Refresh file tree if edits were applied
+      // If edits were applied, emit event with diff data
       if (result.passed && result.passed.length > 0) {
         await this.loadFileTree();
+        
+        // Build diff files data for the diff viewer
+        const diffFiles = await this._buildDiffFiles(result);
+        if (diffFiles.length > 0) {
+          this.dispatchEvent(new CustomEvent('edits-applied', {
+            detail: { files: diffFiles },
+            bubbles: true,
+            composed: true
+          }));
+        }
       }
     } catch (e) {
       console.error('Error sending message:', e);
       this.addMessage('assistant', `Error: ${e.message}`);
     }
+  }
+
+  async _buildDiffFiles(result) {
+    const diffFiles = [];
+    
+    // Get the content from the result
+    const newContents = result.content || {};
+    
+    for (const edit of result.passed) {
+      const [filePath, original, updated] = edit;
+      
+      // Try to get the original file content
+      let originalContent = '';
+      try {
+        // If original is empty, it's a new file
+        if (original === '') {
+          originalContent = '';
+        } else {
+          // The original content from the edit block
+          // For a full file view, we'd need to fetch the previous version
+          // For now, we'll reconstruct from the edit
+          const fullContent = newContents[filePath] || '';
+          // Simple approach: show the search block as original context
+          originalContent = await this._getOriginalFileContent(filePath, fullContent, original, updated);
+        }
+      } catch (e) {
+        console.error('Error getting original content:', e);
+        originalContent = original;
+      }
+      
+      const modifiedContent = newContents[filePath] || updated;
+      
+      diffFiles.push({
+        path: filePath,
+        original: originalContent,
+        modified: modifiedContent,
+        isNew: original === ''
+      });
+    }
+    
+    return diffFiles;
+  }
+
+  async _getOriginalFileContent(filePath, newContent, searchBlock, replaceBlock) {
+    // Try to reconstruct the original by reversing the edit
+    // This is a simplified approach - ideally we'd fetch from git
+    if (searchBlock && replaceBlock && newContent) {
+      // Replace the new content back with the old to get original
+      return newContent.replace(replaceBlock, searchBlock);
+    }
+    
+    // Fallback: try to get from git HEAD
+    try {
+      const response = await this.call['Repo.get_file_content'](filePath, 'HEAD');
+      const content = this.extractResponse(response);
+      if (content && typeof content === 'string') {
+        return content;
+      }
+    } catch (e) {
+      console.error('Could not fetch original from git:', e);
+    }
+    
+    return searchBlock || '';
   }
 
   handleKeyDown(e) {
@@ -194,3 +267,5 @@ export class PromptView extends MessageHandler {
     return renderPromptView(this);
   }
 }
+
+customElements.define('prompt-view', PromptView);

@@ -7,7 +7,7 @@ export function renderPromptView(component) {
   return html`
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''}">
       <div class="header" @click=${component.toggleMinimize}>
-        <span>AI Coder</span>
+        <span>💬 Chat</span>
         <button>${component.minimized ? '▲' : '▼'}</button>
       </div>
       ${component.minimized ? '' : html`
