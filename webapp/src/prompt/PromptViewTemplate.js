@@ -18,6 +18,7 @@ export function renderPromptView(component) {
                 .tree=${component.fileTree}
                 .modified=${component.modifiedFiles}
                 .staged=${component.stagedFiles}
+                .untracked=${component.untrackedFiles}
                 @selection-change=${component.handleSelectionChange}
               ></file-picker>
             </div>

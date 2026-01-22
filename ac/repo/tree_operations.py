@@ -32,7 +32,8 @@ class TreeOperationsMixin:
             return {
                 'tree': root,
                 'modified': status.get('modified_files', []),
-                'staged': status.get('staged_files', [])
+                'staged': status.get('staged_files', []),
+                'untracked': status.get('untracked_files', [])
             }
         except Exception as e:
             return self._create_error_response(str(e))

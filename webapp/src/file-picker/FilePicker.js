@@ -5,6 +5,7 @@ export class FilePicker extends LitElement {
     tree: { type: Object },
     modified: { type: Array },
     staged: { type: Array },
+    untracked: { type: Array },
     selected: { type: Object },
     expanded: { type: Object },
     filter: { type: String }
@@ -39,9 +40,23 @@ export class FilePicker extends LitElement {
       color: #666; 
       flex-shrink: 0;
     }
-    .name { color: #eee; flex: 1; }
-    .name.modified { color: #f0a500; }
-    .name.staged { color: #7ec699; }
+    .name { color: #888; flex: 1; }
+    .name.clean { color: #888; }
+    .name.modified { color: #e2c08d; }
+    .name.staged { color: #73c991; }
+    .name.untracked { color: #73c991; }
+    .name.staged-modified { color: #73c991; }
+    .status-indicator {
+      font-size: 10px;
+      font-weight: bold;
+      width: 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .status-indicator.modified { color: #e2c08d; }
+    .status-indicator.staged { color: #73c991; }
+    .status-indicator.untracked { color: #73c991; }
+    .status-indicator.staged-modified { color: #73c991; }
     input[type="checkbox"] { 
       margin: 0; 
       width: 14px; 
@@ -61,6 +76,7 @@ export class FilePicker extends LitElement {
     this.tree = null;
     this.modified = [];
     this.staged = [];
+    this.untracked = [];
     this.selected = {};
     this.expanded = {};
     this.filter = '';
@@ -178,12 +194,31 @@ export class FilePicker extends LitElement {
     const filePath = node.path;
     const isModified = this.modified.includes(filePath);
     const isStaged = this.staged.includes(filePath);
-    const statusClass = isStaged ? 'staged' : isModified ? 'modified' : '';
+    const isUntracked = this.untracked.includes(filePath);
+    
+    // Determine status class and indicator
+    let statusClass = 'clean';
+    let statusIndicator = '';
+    
+    if (isStaged && isModified) {
+      statusClass = 'staged-modified';
+      statusIndicator = 'M';
+    } else if (isStaged) {
+      statusClass = 'staged';
+      statusIndicator = 'A';
+    } else if (isModified) {
+      statusClass = 'modified';
+      statusIndicator = 'M';
+    } else if (isUntracked) {
+      statusClass = 'untracked';
+      statusIndicator = 'U';
+    }
 
     return html`
       <div class="node">
         <div class="row" @click=${(e) => this.toggleSelect(filePath, e)}>
           <input type="checkbox" .checked=${!!this.selected[filePath]} @click=${(e) => this.toggleSelect(filePath, e)}>
+          ${statusIndicator ? html`<span class="status-indicator ${statusClass}">${statusIndicator}</span>` : html`<span class="status-indicator"></span>`}
           <span class="name ${statusClass}">${node.name}</span>
         </div>
       </div>

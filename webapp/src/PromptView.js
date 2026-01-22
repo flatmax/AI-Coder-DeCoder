@@ -12,6 +12,7 @@ export class PromptView extends MessageHandler {
     fileTree: { type: Object },
     modifiedFiles: { type: Array },
     stagedFiles: { type: Array },
+    untrackedFiles: { type: Array },
     selectedFiles: { type: Array },
     showFilePicker: { type: Boolean },
     pastedImages: { type: Array }
@@ -27,6 +28,7 @@ export class PromptView extends MessageHandler {
     this.fileTree = null;
     this.modifiedFiles = [];
     this.stagedFiles = [];
+    this.untrackedFiles = [];
     this.selectedFiles = [];
     this.showFilePicker = false;
     this.pastedImages = [];
@@ -75,6 +77,7 @@ export class PromptView extends MessageHandler {
         this.fileTree = data.tree;
         this.modifiedFiles = data.modified || [];
         this.stagedFiles = data.staged || [];
+        this.untrackedFiles = data.untracked || [];
       }
     } catch (e) {
       console.error('Error loading file tree:', e);
