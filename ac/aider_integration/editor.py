@@ -17,13 +17,15 @@ class AiderEditor(PromptMixin, FileContextMixin, EditApplierMixin):
     blocks and apply them to files.
     """
     
-    def __init__(self, fence=None):
+    def __init__(self, fence=None, repo=None):
         """
         Initialize the editor.
         
         Args:
             fence: Tuple of (open_fence, close_fence), defaults to ("```", "```")
+            repo: Optional Repo instance for git operations (e.g., auto-adding new files)
         """
         self.fence = fence or ("```", "```")
+        self.repo = repo
         self._init_prompts()
         self._init_files()

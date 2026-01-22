@@ -28,7 +28,7 @@ class AiderChat(MessageBuilderMixin):
         """
         self.model = model
         self.repo = repo
-        self.editor = AiderEditor()
+        self.editor = AiderEditor(repo=repo)
         self.messages = []
     
     def add_file(self, filepath):

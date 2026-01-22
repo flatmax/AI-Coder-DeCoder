@@ -55,6 +55,7 @@ class EditApplierMixin:
         passed = []
         failed = []
         new_contents = {}
+        new_files = []
         
         for edit in edits:
             filename, original, updated = edit
@@ -62,11 +63,14 @@ class EditApplierMixin:
             # Get current content
             if filename in self.files:
                 content = self.files[filename]
+                is_new_file = False
             elif Path(filename).exists():
                 content = Path(filename).read_text()
+                is_new_file = False
             else:
                 # New file
                 content = ""
+                is_new_file = True
             
             # Apply the replacement
             new_content = do_replace(filename, content, original, updated, self.fence)
@@ -79,11 +83,31 @@ class EditApplierMixin:
                     # Write to disk
                     Path(filename).parent.mkdir(parents=True, exist_ok=True)
                     Path(filename).write_text(new_content)
+                    # Track new files for git add
+                    if is_new_file:
+                        new_files.append(filename)
                 passed.append(edit)
             else:
                 failed.append(edit)
         
+        # Git add new files
+        if not dry_run and new_files and self.repo:
+            self._git_add_files(new_files)
+        
         return {"passed": passed, "failed": failed, "content": new_contents}
+    
+    def _git_add_files(self, file_paths):
+        """
+        Add files to git staging area.
+        
+        Args:
+            file_paths: List of file paths to add
+        """
+        try:
+            for file_path in file_paths:
+                self.repo._repo.index.add([file_path])
+        except Exception as e:
+            print(f"Warning: Failed to git add files: {e}")
     
     def apply_edits_to_content(self, edits, file_contents):
         """
