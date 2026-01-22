@@ -88,6 +88,46 @@ export class FilePicker extends LitElement {
     this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
   }
 
+  collectFilesInDir(node, currentPath = '') {
+    const files = [];
+    if (node.path) {
+      files.push(node.path);
+    }
+    if (node.children) {
+      for (const child of node.children) {
+        const childPath = currentPath ? `${currentPath}/${child.name}` : child.name;
+        files.push(...this.collectFilesInDir(child, childPath));
+      }
+    }
+    return files;
+  }
+
+  toggleSelectDir(node, currentPath, e) {
+    e.stopPropagation();
+    const filesInDir = this.collectFilesInDir(node, currentPath);
+    const allSelected = filesInDir.every(f => this.selected[f]);
+    
+    const newSelected = { ...this.selected };
+    for (const file of filesInDir) {
+      newSelected[file] = !allSelected;
+    }
+    this.selected = newSelected;
+    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+  }
+
+  isDirFullySelected(node, currentPath) {
+    const filesInDir = this.collectFilesInDir(node, currentPath);
+    if (filesInDir.length === 0) return false;
+    return filesInDir.every(f => this.selected[f]);
+  }
+
+  isDirPartiallySelected(node, currentPath) {
+    const filesInDir = this.collectFilesInDir(node, currentPath);
+    if (filesInDir.length === 0) return false;
+    const selectedCount = filesInDir.filter(f => this.selected[f]).length;
+    return selectedCount > 0 && selectedCount < filesInDir.length;
+  }
+
   selectAll() {
     const all = {};
     const collect = (node) => {
@@ -113,11 +153,20 @@ export class FilePicker extends LitElement {
 
     if (isDir) {
       const isExpanded = this.expanded[currentPath] ?? (this.filter ? true : false);
+      const isFullySelected = this.isDirFullySelected(node, currentPath);
+      const isPartiallySelected = this.isDirPartiallySelected(node, currentPath);
+      
       return html`
         <div class="node">
-          <div class="row" @click=${() => this.toggleExpand(currentPath)}>
-            <span class="icon">${isExpanded ? '▾' : '▸'}</span>
-            <span class="name">${node.name}</span>
+          <div class="row">
+            <input 
+              type="checkbox" 
+              .checked=${isFullySelected}
+              .indeterminate=${isPartiallySelected}
+              @click=${(e) => this.toggleSelectDir(node, currentPath, e)}
+            >
+            <span class="icon" @click=${() => this.toggleExpand(currentPath)}>${isExpanded ? '▾' : '▸'}</span>
+            <span class="name" @click=${() => this.toggleExpand(currentPath)}>${node.name}</span>
           </div>
           <div class="children ${isExpanded ? '' : 'hidden'}">
             ${node.children.map(c => this.renderNode(c, currentPath))}
