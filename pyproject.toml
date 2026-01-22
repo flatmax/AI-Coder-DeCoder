@@ -14,6 +14,7 @@ dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     "litellm",
     "GitPython",
+    "boto3",
 ]
 
 [project.optional-dependencies]
