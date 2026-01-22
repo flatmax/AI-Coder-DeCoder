@@ -42,13 +42,7 @@ class ChatMixin:
                 except FileNotFoundError as e:
                     return {"error": str(e), "response": ""}
         
-        # Handle images by appending to prompt
-        if images:
-            # Note: aider doesn't natively support images, so we note them in the prompt
-            image_note = f"\n[{len(images)} image(s) provided - image analysis not yet supported in edit mode]"
-            user_prompt = user_prompt + image_note
-        
         if auto_apply:
-            return aider_chat.request_and_apply(user_prompt, dry_run=dry_run)
+            return aider_chat.request_and_apply(user_prompt, dry_run=dry_run, images=images)
         else:
-            return aider_chat.request_changes(user_prompt)
+            return aider_chat.request_changes(user_prompt, images=images)
