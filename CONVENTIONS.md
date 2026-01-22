@@ -1,3 +1,4 @@
+be lean where possible, but not too lean if it needs to be understandable
 ```code```
 JRPC-OO lifecycle:
 in javascript :

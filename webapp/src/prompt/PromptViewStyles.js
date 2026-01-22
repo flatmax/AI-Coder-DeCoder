@@ -24,6 +24,10 @@ export const promptViewStyles = css`
     max-height: 48px;
   }
 
+  .dialog.with-picker {
+    width: 700px;
+  }
+
   .header {
     display: flex;
     justify-content: space-between;
@@ -41,6 +45,25 @@ export const promptViewStyles = css`
     color: #e94560;
     cursor: pointer;
     font-size: 18px;
+  }
+
+  .main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .picker-panel {
+    width: 280px;
+    border-right: 1px solid #0f3460;
+    overflow-y: auto;
+  }
+
+  .chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .messages {
@@ -87,5 +110,28 @@ export const promptViewStyles = css`
 
   .send-btn:hover {
     background: #ff6b6b;
+  }
+
+  .file-btn {
+    background: #1a1a2e;
+    color: #eee;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  .file-btn:hover {
+    background: #0f3460;
+  }
+
+  .file-btn.active {
+    background: #0f3460;
+    border-color: #e94560;
+  }
+
+  file-picker {
+    display: block;
   }
 `;

@@ -4,21 +4,20 @@ import mimetypes
 import os
 
 from litellm import completion
-from Repo import Repo
 
 
 class LiteLLM:
     """LiteLLM wrapper for AI completions with file context support."""
     
-    def __init__(self, repo_path=None, config_path=None):
+    def __init__(self, repo=None, config_path=None):
         """
-        Initialize LiteLLM with optional repository path.
+        Initialize LiteLLM with optional repository.
         
         Args:
-            repo_path: Path to git repository. If None, uses current directory.
+            repo: Repo instance for file access. If None, file operations won't be available.
             config_path: Path to llm.json config file. If None, looks in ac/ directory.
         """
-        self.repo = Repo(repo_path)
+        self.repo = repo
         self.conversation_history = []
         
         # Load configuration
@@ -104,6 +103,9 @@ class LiteLLM:
         Returns:
             List of dicts with file path and content
         """
+        if not self.repo:
+            return [{'error': 'No repository configured'}]
+        
         files_content = []
         for file_path in file_paths:
             if self.repo.is_binary_file(file_path):
@@ -259,14 +261,6 @@ class LiteLLM:
             print(error_msg)
             return error_msg
     
-    def get_repo_info(self):
-        """Get information about the current repository."""
-        return {
-            'name': self.repo.get_repo_name(),
-            'root': self.repo.get_repo_root(),
-            'status': self.repo.get_status()
-        }
-    
     def list_files_in_context(self, file_paths):
         """
         Check which files exist and can be loaded.
@@ -277,6 +271,9 @@ class LiteLLM:
         Returns:
             Dict with 'valid' and 'invalid' file lists
         """
+        if not self.repo:
+            return {'error': 'No repository configured'}
+        
         valid = []
         invalid = []
         

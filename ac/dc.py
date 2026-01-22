@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from jrpc_oo import JRPCServer
 from LiteLLM import LiteLLM
+from Repo import Repo
 from port_utils import find_available_port
 from webapp_server import start_npm_dev_server
 
@@ -50,8 +51,11 @@ async def main_starter_async(args):
     print(f"WebSocket URI: ws://localhost:{actual_server_port}")
     print(f"Browser URL: {get_browser_url(actual_webapp_port, actual_server_port)}")
 
+    repo = Repo(args.repo_path)
+    
     server = JRPCServer(port=actual_server_port)
-    server.add_class(LiteLLM(repo_path=args.repo_path))
+    server.add_class(repo)
+    server.add_class(LiteLLM(repo=repo))
 
     webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
 

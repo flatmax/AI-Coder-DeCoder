@@ -2,12 +2,18 @@ import { html } from 'lit';
 import { MessageHandler } from './MessageHandler.js';
 import { promptViewStyles } from './prompt/PromptViewStyles.js';
 import { renderPromptView } from './prompt/PromptViewTemplate.js';
+import './file-picker/FilePicker.js';
 
 export class PromptView extends MessageHandler {
   static properties = {
     inputValue: { type: String },
     minimized: { type: Boolean },
-    isConnected: { type: Boolean }
+    isConnected: { type: Boolean },
+    fileTree: { type: Object },
+    modifiedFiles: { type: Array },
+    stagedFiles: { type: Array },
+    selectedFiles: { type: Array },
+    showFilePicker: { type: Boolean }
   };
 
   static styles = promptViewStyles;
@@ -17,6 +23,11 @@ export class PromptView extends MessageHandler {
     this.inputValue = '';
     this.minimized = false;
     this.isConnected = false;
+    this.fileTree = null;
+    this.modifiedFiles = [];
+    this.stagedFiles = [];
+    this.selectedFiles = [];
+    this.showFilePicker = false;
     
     // Check if port is specified in URL parameters
     const urlParams = new URLSearchParams(window.location.search);
@@ -32,8 +43,9 @@ export class PromptView extends MessageHandler {
     // WebSocket connected
   }
 
-  setupDone() {
+  async setupDone() {
     this.isConnected = true;
+    await this.loadFileTree();
   }
 
   remoteDisconnected(uuid) {
@@ -52,6 +64,31 @@ export class PromptView extends MessageHandler {
     return response;
   }
 
+  async loadFileTree() {
+    try {
+      const response = await this.call['Repo.get_file_tree']();
+      const data = this.extractResponse(response);
+      if (data && !data.error) {
+        this.fileTree = data.tree;
+        this.modifiedFiles = data.modified || [];
+        this.stagedFiles = data.staged || [];
+      }
+    } catch (e) {
+      console.error('Error loading file tree:', e);
+    }
+  }
+
+  toggleFilePicker() {
+    this.showFilePicker = !this.showFilePicker;
+    if (this.showFilePicker && !this.fileTree) {
+      this.loadFileTree();
+    }
+  }
+
+  handleSelectionChange(e) {
+    this.selectedFiles = e.detail;
+  }
+
   async sendMessage() {
     if (!this.inputValue.trim()) return;
     
@@ -60,7 +97,10 @@ export class PromptView extends MessageHandler {
     this.inputValue = '';
     
     try {
-      const response = await this.call['LiteLLM.chat'](message);
+      const response = await this.call['LiteLLM.chat'](
+        message,
+        this.selectedFiles.length > 0 ? this.selectedFiles : null
+      );
       const responseText = this.extractResponse(response);
       this.addMessage('assistant', responseText);
     } catch (e) {
