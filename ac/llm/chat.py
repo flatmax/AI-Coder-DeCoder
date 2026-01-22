@@ -19,9 +19,18 @@ class ChatMixin:
         """
         messages = []
         
-        # Add system prompt if provided
+        # Add system prompt if provided (with cache control for Anthropic)
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            messages.append({
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
         
         # Add conversation history
         messages.extend(self.conversation_history)
@@ -29,12 +38,13 @@ class ChatMixin:
         # Build user message content
         user_content = []
         
-        # Add file context if provided
+        # Add file context if provided (with cache control - files are good cache candidates)
         if files_content:
             file_context = self._format_files_for_prompt(files_content)
             user_content.append({
                 "type": "text",
-                "text": f"Here are the relevant files:\n\n{file_context}"
+                "text": f"Here are the relevant files:\n\n{file_context}",
+                "cache_control": {"type": "ephemeral"}
             })
         
         # Add images if provided
@@ -62,8 +72,8 @@ class ChatMixin:
             "text": user_prompt
         })
         
-        # If only text content, simplify the message format
-        if len(user_content) == 1 and user_content[0]["type"] == "text":
+        # If only text content without cache control, simplify the message format
+        if len(user_content) == 1 and user_content[0]["type"] == "text" and "cache_control" not in user_content[0]:
             messages.append({"role": "user", "content": user_prompt})
         else:
             messages.append({"role": "user", "content": user_content})
