@@ -46,7 +46,7 @@ export function renderPromptView(component) {
             </div>
           ` : ''}
           <div class="chat-panel">
-            <div class="messages">
+            <div class="messages" id="messages-container">
               ${repeat(
                 component.messageHistory,
                 (message) => message.id,

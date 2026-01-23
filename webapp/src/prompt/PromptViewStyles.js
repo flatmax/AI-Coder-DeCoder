@@ -104,7 +104,14 @@ export const promptViewStyles = css`
   .picker-panel {
     width: 280px;
     border-right: 1px solid #0f3460;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  file-picker {
+    flex: 1;
+    min-height: 0;
   }
 
   .chat-panel {
@@ -241,7 +248,4 @@ export const promptViewStyles = css`
     border-color: #e94560;
   }
 
-  file-picker {
-    display: block;
-  }
 `;

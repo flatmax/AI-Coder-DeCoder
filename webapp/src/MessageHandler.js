@@ -43,6 +43,16 @@ export class MessageHandler extends JRPCClient {
         { id: this._messageId++, role, content: chunk, final }
       ];
     }
+    this._scrollToBottom();
+  }
+
+  _scrollToBottom() {
+    this.updateComplete.then(() => {
+      const container = this.shadowRoot?.querySelector('#messages-container');
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
   }
 
   clearHistory() {
