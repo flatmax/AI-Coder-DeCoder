@@ -19,11 +19,12 @@ export class MessageHandler extends JRPCClient {
     }
   }
 
-  addMessage(role, content) {
-    this.messageHistory = [
-      ...this.messageHistory,
-      { id: this._messageId++, role, content }
-    ];
+  addMessage(role, content, images = null) {
+    const message = { id: this._messageId++, role, content };
+    if (images) {
+      message.images = images;
+    }
+    this.messageHistory = [...this.messageHistory, message];
   }
 
   streamWrite(chunk, final = false, role = 'assistant') {

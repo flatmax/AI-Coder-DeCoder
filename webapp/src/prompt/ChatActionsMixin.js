@@ -93,12 +93,9 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     
     const userContent = this.inputValue;
     const imagesToSend = this.getImagesForSend();
+    const imagesToStore = this.pastedImages.length > 0 ? [...this.pastedImages] : null;
     
-    if (this.pastedImages.length > 0) {
-      this.addMessage('user', `${userContent}\n[${this.pastedImages.length} image(s) attached]`);
-    } else {
-      this.addMessage('user', userContent);
-    }
+    this.addMessage('user', userContent, imagesToStore);
     
     const message = this.inputValue;
     this.inputValue = '';
