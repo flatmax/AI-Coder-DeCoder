@@ -34,16 +34,20 @@ export function renderPromptView(component) {
         <div class="header-left" @click=${component.toggleMinimize}>
           <span>💬 Chat</span>
         </div>
-        <div class="header-right">
+        <div class="header-center">
           ${!component.minimized ? html`
-            <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
-              📊 Tokens
-            </button>
             <button class="clear-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
               💾 Commit
             </button>
             <button class="clear-btn reset-btn" @click=${component.handleResetHard} title="Reset to HEAD (discard all changes)">
               ⚠️ Reset
+            </button>
+          ` : ''}
+        </div>
+        <div class="header-right">
+          ${!component.minimized ? html`
+            <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
+              📊 Tokens
             </button>
             <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
               🗑️ Clear
