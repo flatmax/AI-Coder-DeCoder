@@ -24,7 +24,8 @@ class ChatMixin:
     
     def chat(self, user_prompt, file_paths=None, images=None, system_prompt=None, 
              file_version='working', stream=False, use_smaller_model=False,
-             dry_run=False, auto_apply=True, use_repo_map=True):
+             dry_run=False, auto_apply=True, use_repo_map=True,
+             auto_add_files=False, max_rounds=3):
         """
         Send a chat message using aider's search/replace format.
         
@@ -39,6 +40,8 @@ class ChatMixin:
             dry_run: If True, don't write changes to disk
             auto_apply: If True, automatically apply edits; if False, just return parsed edits
             use_repo_map: If True, include intelligent repo map in context
+            auto_add_files: If True, automatically add files the LLM mentions and retry
+            max_rounds: Maximum retry rounds when auto-adding files (default 3)
         
         Returns:
             Dict with:
@@ -51,6 +54,8 @@ class ChatMixin:
             - token_budget: Token usage information
             - summarized: Whether history was summarized before this request
             - token_usage: Accumulated token usage statistics
+            - mentioned_files: Files mentioned but not in context
+            - files_added: Files that were auto-added (if auto_add_files=True)
         """
         aider_chat = self.get_aider_chat()
         aider_chat.model = self.smaller_model if use_smaller_model else self.model
@@ -79,11 +84,13 @@ class ChatMixin:
         
         if auto_apply:
             result = aider_chat.request_and_apply(
-                user_prompt, dry_run=dry_run, images=images, use_repo_map=use_repo_map
+                user_prompt, dry_run=dry_run, images=images, use_repo_map=use_repo_map,
+                auto_add_files=auto_add_files, max_rounds=max_rounds
             )
         else:
             result = aider_chat.request_changes(
-                user_prompt, images=images, use_repo_map=use_repo_map
+                user_prompt, images=images, use_repo_map=use_repo_map,
+                auto_add_files=auto_add_files, max_rounds=max_rounds
             )
         
         result["summarized"] = summarized

@@ -145,6 +145,7 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       // Generate request ID and track it
       const requestId = this._generateRequestId();
       this._streamingRequests.set(requestId, { message });
+      this.isStreaming = true;
       
       // Add empty assistant message that will be filled by streaming
       this.addMessage('assistant', '');
@@ -160,6 +161,7 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       
       if (result.error) {
         this._streamingRequests.delete(requestId);
+        this.isStreaming = false;
         // Update the empty message with error
         const lastMessage = this.messageHistory[this.messageHistory.length - 1];
         if (lastMessage && lastMessage.role === 'assistant') {

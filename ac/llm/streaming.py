@@ -3,11 +3,40 @@ Streaming mixin for LiteLLM chat operations.
 """
 
 import asyncio
+import threading
 import litellm as _litellm
 
 
 class StreamingMixin:
     """Mixin for streaming chat operations."""
+    
+    # Class-level set to track cancelled requests (thread-safe)
+    _cancelled_requests = set()
+    _cancelled_lock = threading.Lock()
+    
+    def cancel_streaming(self, request_id):
+        """
+        Cancel an in-progress streaming request.
+        
+        Args:
+            request_id: The request ID to cancel
+            
+        Returns:
+            Dict with status
+        """
+        with self._cancelled_lock:
+            self._cancelled_requests.add(request_id)
+        return {"status": "cancelled", "request_id": request_id}
+    
+    def _is_cancelled(self, request_id):
+        """Check if a request has been cancelled."""
+        with self._cancelled_lock:
+            return request_id in self._cancelled_requests
+    
+    def _clear_cancelled(self, request_id):
+        """Remove a request from the cancelled set."""
+        with self._cancelled_lock:
+            self._cancelled_requests.discard(request_id)
     
     def chat_streaming(self, request_id, user_prompt, file_paths=None, images=None,
                        use_smaller_model=False, dry_run=False, use_repo_map=True):
@@ -75,7 +104,7 @@ class StreamingMixin:
             loop = asyncio.get_running_loop()
             
             # Run the synchronous streaming in a thread to not block the event loop
-            full_content = await loop.run_in_executor(
+            full_content, was_cancelled = await loop.run_in_executor(
                 None,
                 self._run_streaming_completion,
                 request_id,
@@ -83,6 +112,21 @@ class StreamingMixin:
                 messages,
                 loop  # Pass the loop to the thread
             )
+            
+            # If cancelled, send completion with cancelled flag and return early
+            if was_cancelled:
+                await self._send_stream_complete(request_id, {
+                    "response": full_content,
+                    "cancelled": True,
+                    "summarized": summarized,
+                    "file_edits": [],
+                    "shell_commands": [],
+                    "passed": [],
+                    "failed": [],
+                    "content": {},
+                    "token_usage": self.get_token_usage()
+                })
+                return
             
             # Store in conversation history
             aider_chat.messages.append({"role": "user", "content": user_text})
@@ -135,6 +179,9 @@ class StreamingMixin:
             model: The model to use
             messages: The messages to send
             loop: The asyncio event loop from the main thread
+            
+        Returns:
+            Tuple of (full_content, was_cancelled)
         """
         response = _litellm.completion(
             model=model,
@@ -144,10 +191,16 @@ class StreamingMixin:
         )
         
         full_content = ""
+        was_cancelled = False
         
         final_chunk = None
         try:
             for chunk in response:
+                # Check for cancellation
+                if self._is_cancelled(request_id):
+                    was_cancelled = True
+                    break
+                
                 final_chunk = chunk
                 delta = chunk.choices[0].delta.content or ""
                 if delta:
@@ -157,12 +210,14 @@ class StreamingMixin:
         finally:
             if hasattr(response, 'close'):
                 response.close()
+            # Clean up cancelled state
+            self._clear_cancelled(request_id)
         
         # Track token usage from the final chunk if available
         if final_chunk and hasattr(final_chunk, 'usage') and final_chunk.usage:
             self.track_token_usage(final_chunk)
         
-        return full_content
+        return full_content, was_cancelled
     
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire-and-forget stream chunk send.

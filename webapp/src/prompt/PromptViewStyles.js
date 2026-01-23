@@ -243,6 +243,19 @@ export const promptViewStyles = css`
     background: #ff6b6b;
   }
 
+  .send-btn.stop-btn {
+    background: #f0a500;
+  }
+
+  .send-btn.stop-btn:hover {
+    background: #ffb732;
+  }
+
+  textarea:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
   .file-btn {
     background: #1a1a2e;
     color: #eee;

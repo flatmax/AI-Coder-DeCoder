@@ -11,9 +11,10 @@ from .context_manager import AiderContextManager
 from .file_management_mixin import FileManagementMixin
 from .chat_history_mixin import ChatHistoryMixin
 from .request_mixin import RequestMixin
+from .file_mention_mixin import FileMentionMixin
 
 
-class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, RequestMixin):
+class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, RequestMixin, FileMentionMixin):
     """
     High-level interface for LLM-based code editing using aider's format.
     

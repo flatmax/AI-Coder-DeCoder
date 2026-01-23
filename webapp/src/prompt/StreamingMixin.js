@@ -3,8 +3,16 @@
  */
 export const StreamingMixin = (superClass) => class extends superClass {
 
+  static get properties() {
+    return {
+      ...super.properties,
+      isStreaming: { type: Boolean }
+    };
+  }
+
   initStreaming() {
     this._streamingRequests = new Map();
+    this.isStreaming = false;
   }
 
   /**
@@ -20,6 +28,22 @@ export const StreamingMixin = (superClass) => class extends superClass {
   }
 
   /**
+   * Stop the current streaming request.
+   */
+  async stopStreaming() {
+    if (this._streamingRequests.size === 0) return;
+    
+    // Get the first (and typically only) streaming request
+    const [requestId] = this._streamingRequests.keys();
+    
+    try {
+      await this.call['LiteLLM.cancel_streaming'](requestId);
+    } catch (e) {
+      console.error('Error cancelling stream:', e);
+    }
+  }
+
+  /**
    * Called by server when streaming is complete.
    * @param {string} requestId - The request ID
    * @param {object} result - The final result with edits
@@ -29,10 +53,14 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (!request) return;
     
     this._streamingRequests.delete(requestId);
+    this.isStreaming = false;
     
-    // Mark the message as final
+    // Mark the message as final, append [stopped] if cancelled
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     if (lastMessage && lastMessage.role === 'assistant') {
+      if (result.cancelled) {
+        lastMessage.content = lastMessage.content + '\n\n*[stopped]*';
+      }
       lastMessage.final = true;
       this.messageHistory = [...this.messageHistory];
     }
