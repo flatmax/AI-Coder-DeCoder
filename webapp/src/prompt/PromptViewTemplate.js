@@ -6,9 +6,18 @@ import './AssistantCard.js';
 export function renderPromptView(component) {
   return html`
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''}">
-      <div class="header" @click=${component.toggleMinimize}>
-        <span>💬 Chat</span>
-        <button>${component.minimized ? '▲' : '▼'}</button>
+      <div class="header">
+        <div class="header-left" @click=${component.toggleMinimize}>
+          <span>💬 Chat</span>
+        </div>
+        <div class="header-right">
+          ${!component.minimized ? html`
+            <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
+              🗑️ Clear
+            </button>
+          ` : ''}
+          <button @click=${component.toggleMinimize}>${component.minimized ? '▲' : '▼'}</button>
+        </div>
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">

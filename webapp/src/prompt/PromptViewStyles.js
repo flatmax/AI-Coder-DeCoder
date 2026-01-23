@@ -33,7 +33,19 @@ export const promptViewStyles = css`
     background: #0f3460;
     color: #e94560;
     font-weight: 600;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     cursor: pointer;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .header button {
@@ -42,6 +54,21 @@ export const promptViewStyles = css`
     color: #e94560;
     cursor: pointer;
     font-size: 18px;
+    padding: 0;
+  }
+
+  .clear-btn {
+    background: #1a1a2e !important;
+    border: 1px solid #e94560 !important;
+    border-radius: 4px !important;
+    padding: 4px 8px !important;
+    font-size: 11px !important;
+    color: #e94560 !important;
+  }
+
+  .clear-btn:hover {
+    background: #e94560 !important;
+    color: white !important;
   }
 
   .main-content {

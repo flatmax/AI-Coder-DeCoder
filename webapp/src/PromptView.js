@@ -173,6 +173,19 @@ export class PromptView extends MessageHandler {
     this.pastedImages = [];
   }
 
+  async clearContext() {
+    try {
+      const response = await this.call['LiteLLM.clear_history']();
+      this.extractResponse(response);
+      // Clear local message history
+      this.messageHistory = [];
+      this.addMessage('assistant', 'Context cleared. Starting fresh conversation.');
+    } catch (e) {
+      console.error('Error clearing context:', e);
+      this.addMessage('assistant', `Error clearing context: ${e.message}`);
+    }
+  }
+
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
     

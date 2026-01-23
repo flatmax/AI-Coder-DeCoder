@@ -12,8 +12,8 @@ class HistoryMixin:
         """Side-load a completed exchange into history"""
         self.done_messages.append({"role": "user", "content": user_msg})
         self.done_messages.append({"role": "assistant", "content": assistant_msg})
-        # Print compact HUD after exchange
-        self.print_compact_hud()
+        # Print full HUD after exchange
+        self.print_hud()
 
     def add_message(self, role: str, content: str):
         """Side-load a single message into history"""
@@ -26,10 +26,25 @@ class HistoryMixin:
         """Replace history entirely (e.g., after your own summarization)"""
         self.done_messages = messages.copy()
         print(f"📊 History reset: {len(messages)} messages")
+        self.print_hud()
 
     def clear_history(self):
+        """Clear chat history (like aider's /clear)"""
         self.done_messages = []
         print("📊 History cleared")
+        self.print_hud()
+
+    def clear(self):
+        """Alias for clear_history - matches aider's /clear command"""
+        self.clear_history()
+
+    def reset(self):
+        """Clear history and reset state (like aider's /reset)"""
+        self.done_messages = []
+        self._last_repo_map_tokens = 0
+        self._last_chat_files_count = 0
+        print("📊 Context reset (history cleared)")
+        self.print_hud()
 
     def history_too_big(self) -> bool:
         if not self.done_messages:
