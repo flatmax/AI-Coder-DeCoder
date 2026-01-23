@@ -46,7 +46,7 @@ export function renderPromptView(component) {
             </div>
           ` : ''}
           <div class="chat-panel">
-            <div class="messages" id="messages-container">
+            <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)}>
               ${repeat(
                 component.messageHistory,
                 (message) => message.id,

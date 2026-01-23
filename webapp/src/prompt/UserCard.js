@@ -25,11 +25,44 @@ export class UserCard extends LitElement {
       margin-left: 40px;
     }
 
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
     .label {
       font-size: 11px;
       color: #e94560;
-      margin-bottom: 4px;
       font-weight: 600;
+    }
+
+    .actions {
+      display: flex;
+      gap: 4px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .card:hover .actions {
+      opacity: 1;
+    }
+
+    .action-btn {
+      background: #1a1a2e;
+      border: none;
+      border-radius: 4px;
+      padding: 2px 6px;
+      cursor: pointer;
+      font-size: 11px;
+      color: #888;
+      transition: color 0.2s, background 0.2s;
+    }
+
+    .action-btn:hover {
+      background: #0f3460;
+      color: #e94560;
     }
 
     .content {
@@ -80,6 +113,18 @@ export class UserCard extends LitElement {
     }
   `;
 
+  copyToClipboard() {
+    navigator.clipboard.writeText(this.content);
+  }
+
+  copyToPrompt() {
+    this.dispatchEvent(new CustomEvent('copy-to-prompt', {
+      detail: { content: this.content },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
   openLightbox(imageSrc) {
     const dialog = this.shadowRoot.querySelector('dialog');
     const img = dialog.querySelector('img');
@@ -103,7 +148,13 @@ export class UserCard extends LitElement {
   render() {
     return html`
       <div class="card">
-        <div class="label">You</div>
+        <div class="header">
+          <div class="label">You</div>
+          <div class="actions">
+            <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
+            <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
+          </div>
+        </div>
         <div class="content">${this.content}</div>
         ${this.images && this.images.length > 0 ? html`
           <div class="images">

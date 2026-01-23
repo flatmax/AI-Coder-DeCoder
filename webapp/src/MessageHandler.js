@@ -25,6 +25,7 @@ export class MessageHandler extends JRPCClient {
       message.images = images;
     }
     this.messageHistory = [...this.messageHistory, message];
+    this._scrollToBottom();
   }
 
   streamWrite(chunk, final = false, role = 'assistant') {
@@ -51,7 +52,10 @@ export class MessageHandler extends JRPCClient {
     this.updateComplete.then(() => {
       const container = this.shadowRoot?.querySelector('#messages-container');
       if (container) {
-        container.scrollTop = container.scrollHeight;
+        // Use requestAnimationFrame to ensure DOM has fully rendered
+        requestAnimationFrame(() => {
+          container.scrollTop = container.scrollHeight;
+        });
       }
     });
   }

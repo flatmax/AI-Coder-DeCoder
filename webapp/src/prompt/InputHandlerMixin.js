@@ -3,6 +3,18 @@
  */
 export const InputHandlerMixin = (superClass) => class extends superClass {
 
+  handleCopyToPrompt(e) {
+    const { content } = e.detail;
+    this.inputValue = content;
+    // Focus the textarea
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.focus();
+      }
+    });
+  }
+
   handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
