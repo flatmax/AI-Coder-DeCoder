@@ -8,6 +8,7 @@ export const promptViewStyles = css`
   }
 
   .dialog {
+    position: relative;
     width: 400px;
     height: 100%;
     background: #16213e;
@@ -249,6 +250,80 @@ export const promptViewStyles = css`
   .file-btn.active {
     background: #0f3460;
     border-color: #e94560;
+  }
+
+  /* Resize handles */
+  .resize-handle {
+    position: absolute;
+    background: transparent;
+  }
+
+  .resize-handle-n {
+    top: 0;
+    left: 10px;
+    right: 10px;
+    height: 6px;
+    cursor: n-resize;
+  }
+
+  .resize-handle-s {
+    bottom: 0;
+    left: 10px;
+    right: 10px;
+    height: 6px;
+    cursor: s-resize;
+  }
+
+  .resize-handle-e {
+    right: 0;
+    top: 10px;
+    bottom: 10px;
+    width: 6px;
+    cursor: e-resize;
+  }
+
+  .resize-handle-w {
+    left: 0;
+    top: 10px;
+    bottom: 10px;
+    width: 6px;
+    cursor: w-resize;
+  }
+
+  .resize-handle-ne {
+    top: 0;
+    right: 0;
+    width: 12px;
+    height: 12px;
+    cursor: ne-resize;
+  }
+
+  .resize-handle-nw {
+    top: 0;
+    left: 0;
+    width: 12px;
+    height: 12px;
+    cursor: nw-resize;
+  }
+
+  .resize-handle-se {
+    bottom: 0;
+    right: 0;
+    width: 12px;
+    height: 12px;
+    cursor: se-resize;
+  }
+
+  .resize-handle-sw {
+    bottom: 0;
+    left: 0;
+    width: 12px;
+    height: 12px;
+    cursor: sw-resize;
+  }
+
+  .resize-handle:hover {
+    background: rgba(233, 69, 96, 0.3);
   }
 
 `;

@@ -3,15 +3,33 @@ import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
 
+function renderResizeHandles(component) {
+  if (component.minimized) return '';
+  
+  return html`
+    <div class="resize-handle resize-handle-n" @mousedown=${(e) => component._handleResizeStart(e, 'n')}></div>
+    <div class="resize-handle resize-handle-s" @mousedown=${(e) => component._handleResizeStart(e, 's')}></div>
+    <div class="resize-handle resize-handle-e" @mousedown=${(e) => component._handleResizeStart(e, 'e')}></div>
+    <div class="resize-handle resize-handle-w" @mousedown=${(e) => component._handleResizeStart(e, 'w')}></div>
+    <div class="resize-handle resize-handle-ne" @mousedown=${(e) => component._handleResizeStart(e, 'ne')}></div>
+    <div class="resize-handle resize-handle-nw" @mousedown=${(e) => component._handleResizeStart(e, 'nw')}></div>
+    <div class="resize-handle resize-handle-se" @mousedown=${(e) => component._handleResizeStart(e, 'se')}></div>
+    <div class="resize-handle resize-handle-sw" @mousedown=${(e) => component._handleResizeStart(e, 'sw')}></div>
+  `;
+}
+
 export function renderPromptView(component) {
   const isDragged = component.dialogX !== null && component.dialogY !== null;
-  const dialogStyle = isDragged 
+  const positionStyle = isDragged 
     ? `left: ${component.dialogX}px; top: ${component.dialogY}px;` 
     : '';
+  const resizeStyle = component.getResizeStyle ? component.getResizeStyle() : '';
+  const dialogStyle = [positionStyle, resizeStyle].filter(Boolean).join('; ');
   
   return html`
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''} ${isDragged ? 'dragged' : ''}"
          style=${dialogStyle}>
+      ${renderResizeHandles(component)}
       <div class="header" @mousedown=${(e) => component._handleDragStart(e)}>
         <div class="header-left" @click=${component.toggleMinimize}>
           <span>💬 Chat</span>

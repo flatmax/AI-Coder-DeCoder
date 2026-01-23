@@ -7,15 +7,18 @@ import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
 import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
+import { ResizeHandlerMixin } from './prompt/ResizeHandlerMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import './file-picker/FilePicker.js';
 
 const MixedBase = StreamingMixin(
-  DragHandlerMixin(
-    InputHandlerMixin(
-      ChatActionsMixin(
-        ImageHandlerMixin(
-          FileHandlerMixin(MessageHandler)
+  ResizeHandlerMixin(
+    DragHandlerMixin(
+      InputHandlerMixin(
+        ChatActionsMixin(
+          ImageHandlerMixin(
+            FileHandlerMixin(MessageHandler)
+          )
         )
       )
     )
@@ -64,6 +67,7 @@ export class PromptView extends MixedBase {
     this.addClass(this);
     this.initImageHandler();
     this.initDragHandler();
+    this.initResizeHandler();
     this.initStreaming();
   }
 
@@ -71,6 +75,7 @@ export class PromptView extends MixedBase {
     super.disconnectedCallback();
     this.destroyImageHandler();
     this.destroyDragHandler();
+    this.destroyResizeHandler();
   }
 
   remoteIsUp() {}
