@@ -209,6 +209,9 @@ export const promptViewStyles = css`
     color: #eee;
     font-family: inherit;
     font-size: 14px;
+    min-height: 40px;
+    max-height: var(--textarea-max-height, 200px);
+    overflow-y: auto;
   }
 
   textarea:focus {

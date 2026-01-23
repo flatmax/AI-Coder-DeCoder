@@ -75,7 +75,6 @@ export function renderPromptView(component) {
                 📁 ${component.selectedFiles.length || ''}
               </button>
               <textarea
-                rows="2"
                 placeholder="Type a message... (paste images with Ctrl+V)"
                 .value=${component.inputValue}
                 @input=${component.handleInput}

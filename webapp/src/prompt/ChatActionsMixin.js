@@ -101,6 +101,13 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     this.inputValue = '';
     this.pastedImages = [];
     
+    // Reset textarea height
+    const textarea = this.shadowRoot?.querySelector('textarea');
+    if (textarea) {
+      textarea.style.height = 'auto';
+      textarea.style.overflowY = 'hidden';
+    }
+    
     try {
       const response = await this.call['LiteLLM.chat'](
         message,
