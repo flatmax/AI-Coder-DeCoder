@@ -1,6 +1,14 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement } from 'lit';
+import { filePickerStyles } from './FilePickerStyles.js';
+import { renderFilePicker } from './FilePickerTemplate.js';
+import { FileSelectionMixin } from './FileSelectionMixin.js';
+import { FileNodeRendererMixin } from './FileNodeRendererMixin.js';
 
-export class FilePicker extends LitElement {
+const MixedBase = FileNodeRendererMixin(
+  FileSelectionMixin(LitElement)
+);
+
+export class FilePicker extends MixedBase {
   static properties = {
     tree: { type: Object },
     modified: { type: Array },
@@ -11,66 +19,7 @@ export class FilePicker extends LitElement {
     filter: { type: String }
   };
 
-  static styles = css`
-    :host { display: block; font-size: 13px; }
-    .container { background: #1a1a2e; }
-    .header { padding: 8px 12px; background: #0f3460; display: flex; gap: 8px; }
-    input[type="text"] { flex: 1; padding: 6px 10px; border: none; border-radius: 4px; background: #16213e; color: #eee; }
-    input[type="text"]:focus { outline: 1px solid #e94560; }
-    .tree { max-height: 400px; overflow-y: auto; padding: 8px; }
-    .node { padding: 1px 0; }
-    .row { 
-      display: flex; 
-      align-items: center; 
-      gap: 6px; 
-      padding: 3px 6px; 
-      border-radius: 4px; 
-      cursor: pointer; 
-      line-height: 1;
-    }
-    .row:hover { background: #0f3460; }
-    .children { margin-left: 18px; }
-    .icon { 
-      width: 14px; 
-      height: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 10px;
-      color: #666; 
-      flex-shrink: 0;
-    }
-    .name { color: #888; flex: 1; }
-    .name:hover { text-decoration: underline; }
-    .name.clean { color: #888; }
-    .name.modified { color: #e2c08d; }
-    .name.staged { color: #73c991; }
-    .name.untracked { color: #73c991; }
-    .name.staged-modified { color: #73c991; }
-    .status-indicator {
-      font-size: 10px;
-      font-weight: bold;
-      width: 14px;
-      text-align: center;
-      flex-shrink: 0;
-    }
-    .status-indicator.modified { color: #e2c08d; }
-    .status-indicator.staged { color: #73c991; }
-    .status-indicator.untracked { color: #73c991; }
-    .status-indicator.staged-modified { color: #73c991; }
-    input[type="checkbox"] { 
-      margin: 0; 
-      width: 14px; 
-      height: 14px;
-      flex-shrink: 0;
-      cursor: pointer;
-    }
-    .hidden { display: none; }
-    .actions { padding: 8px 12px; border-top: 1px solid #0f3460; display: flex; gap: 8px; align-items: center; }
-    button { padding: 4px 10px; border: none; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; }
-    button:hover { background: #1a3a6e; }
-    .count { margin-left: auto; color: #7ec699; font-size: 12px; }
-  `;
+  static styles = filePickerStyles;
 
   constructor() {
     super();
@@ -83,173 +32,8 @@ export class FilePicker extends LitElement {
     this.filter = '';
   }
 
-  get selectedFiles() {
-    return Object.keys(this.selected).filter(k => this.selected[k]);
-  }
-
-  matchesFilter(node, filter) {
-    if (!filter) return true;
-    const f = filter.toLowerCase();
-    if (node.path) return node.path.toLowerCase().includes(f);
-    if (node.children) return node.children.some(c => this.matchesFilter(c, f));
-    return false;
-  }
-
-  toggleExpand(path) {
-    this.expanded = { ...this.expanded, [path]: !this.expanded[path] };
-  }
-
-  toggleSelect(path, e) {
-    e.stopPropagation();
-    this.selected = { ...this.selected, [path]: !this.selected[path] };
-    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
-  }
-
-  viewFile(filePath, e) {
-    e.stopPropagation();
-    this.dispatchEvent(new CustomEvent('file-view', { 
-      detail: { path: filePath },
-      bubbles: true,
-      composed: true
-    }));
-  }
-
-  collectFilesInDir(node, currentPath = '') {
-    const files = [];
-    if (node.path) {
-      files.push(node.path);
-    }
-    if (node.children) {
-      for (const child of node.children) {
-        const childPath = currentPath ? `${currentPath}/${child.name}` : child.name;
-        files.push(...this.collectFilesInDir(child, childPath));
-      }
-    }
-    return files;
-  }
-
-  toggleSelectDir(node, currentPath, e) {
-    e.stopPropagation();
-    const filesInDir = this.collectFilesInDir(node, currentPath);
-    const allSelected = filesInDir.every(f => this.selected[f]);
-    
-    const newSelected = { ...this.selected };
-    for (const file of filesInDir) {
-      newSelected[file] = !allSelected;
-    }
-    this.selected = newSelected;
-    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
-  }
-
-  isDirFullySelected(node, currentPath) {
-    const filesInDir = this.collectFilesInDir(node, currentPath);
-    if (filesInDir.length === 0) return false;
-    return filesInDir.every(f => this.selected[f]);
-  }
-
-  isDirPartiallySelected(node, currentPath) {
-    const filesInDir = this.collectFilesInDir(node, currentPath);
-    if (filesInDir.length === 0) return false;
-    const selectedCount = filesInDir.filter(f => this.selected[f]).length;
-    return selectedCount > 0 && selectedCount < filesInDir.length;
-  }
-
-  selectAll() {
-    const all = {};
-    const collect = (node) => {
-      if (node.path) all[node.path] = true;
-      node.children?.forEach(collect);
-    };
-    if (this.tree) collect(this.tree);
-    this.selected = all;
-    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
-  }
-
-  clearAll() {
-    this.selected = {};
-    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
-  }
-
-  renderNode(node, path = '') {
-    const currentPath = path ? `${path}/${node.name}` : node.name;
-    const isDir = !!node.children;
-    const visible = this.matchesFilter(node, this.filter);
-    
-    if (!visible) return '';
-
-    if (isDir) {
-      const isExpanded = this.expanded[currentPath] ?? (this.filter ? true : false);
-      const isFullySelected = this.isDirFullySelected(node, currentPath);
-      const isPartiallySelected = this.isDirPartiallySelected(node, currentPath);
-      
-      return html`
-        <div class="node">
-          <div class="row">
-            <input 
-              type="checkbox" 
-              .checked=${isFullySelected}
-              .indeterminate=${isPartiallySelected}
-              @click=${(e) => this.toggleSelectDir(node, currentPath, e)}
-            >
-            <span class="icon" @click=${() => this.toggleExpand(currentPath)}>${isExpanded ? '▾' : '▸'}</span>
-            <span class="name" @click=${() => this.toggleExpand(currentPath)}>${node.name}</span>
-          </div>
-          <div class="children ${isExpanded ? '' : 'hidden'}">
-            ${node.children.map(c => this.renderNode(c, currentPath))}
-          </div>
-        </div>
-      `;
-    }
-
-    const filePath = node.path;
-    const isModified = this.modified.includes(filePath);
-    const isStaged = this.staged.includes(filePath);
-    const isUntracked = this.untracked.includes(filePath);
-    
-    let statusClass = 'clean';
-    let statusIndicator = '';
-    
-    if (isStaged && isModified) {
-      statusClass = 'staged-modified';
-      statusIndicator = 'M';
-    } else if (isStaged) {
-      statusClass = 'staged';
-      statusIndicator = 'A';
-    } else if (isModified) {
-      statusClass = 'modified';
-      statusIndicator = 'M';
-    } else if (isUntracked) {
-      statusClass = 'untracked';
-      statusIndicator = 'U';
-    }
-
-    return html`
-      <div class="node">
-        <div class="row">
-          <input type="checkbox" .checked=${!!this.selected[filePath]} @click=${(e) => this.toggleSelect(filePath, e)}>
-          ${statusIndicator ? html`<span class="status-indicator ${statusClass}">${statusIndicator}</span>` : html`<span class="status-indicator"></span>`}
-          <span class="name ${statusClass}" @click=${(e) => this.viewFile(filePath, e)}>${node.name}</span>
-        </div>
-      </div>
-    `;
-  }
-
   render() {
-    return html`
-      <div class="container">
-        <div class="header">
-          <input type="text" placeholder="Filter files..." .value=${this.filter} @input=${e => this.filter = e.target.value}>
-        </div>
-        <div class="tree">
-          ${this.tree ? this.renderNode(this.tree) : html`<div style="color:#666;padding:20px;text-align:center;">Loading...</div>`}
-        </div>
-        <div class="actions">
-          <button @click=${this.selectAll}>Select All</button>
-          <button @click=${this.clearAll}>Clear</button>
-          <span class="count">${this.selectedFiles.length} selected</span>
-        </div>
-      </div>
-    `;
+    return renderFilePicker(this);
   }
 }
 
