@@ -41,6 +41,7 @@ class AiderChat(MessageBuilderMixin):
                     repo_root=repo.get_repo_root(),
                     model_name=model
                 )
+                print(f"📊 Context manager initialized for: {repo.get_repo_name()}")
             except Exception as e:
                 print(f"Warning: Could not initialize context manager: {e}")
     
@@ -104,12 +105,19 @@ class AiderChat(MessageBuilderMixin):
             user_request, images, include_examples, use_repo_map
         )
         
+        print(f"🚀 Sending request to {self.model}...")
+        
         response = _litellm.completion(
             model=self.model,
             messages=messages,
         )
         
         assistant_content = response.choices[0].message.content
+        
+        # Print response stats
+        usage = getattr(response, 'usage', None)
+        if usage:
+            print(f"✓ Response received: {usage.completion_tokens} tokens generated")
         
         # Store in conversation history (text version only)
         self.messages.append({"role": "user", "content": user_text})
@@ -120,6 +128,11 @@ class AiderChat(MessageBuilderMixin):
             self._context_manager.add_exchange(user_text, assistant_content)
         
         file_edits, shell_commands = self.editor.parse_response(assistant_content)
+        
+        if file_edits:
+            print(f"📝 Parsed {len(file_edits)} edit(s)")
+        if shell_commands:
+            print(f"🖥️  Parsed {len(shell_commands)} shell command(s)")
         
         return {
             "file_edits": file_edits,
@@ -139,7 +152,14 @@ class AiderChat(MessageBuilderMixin):
         Returns:
             Dict with 'passed', 'failed', and 'content'
         """
-        return self.editor.apply_edits(edits, dry_run=dry_run)
+        result = self.editor.apply_edits(edits, dry_run=dry_run)
+        
+        if result["passed"]:
+            print(f"✓ Applied {len(result['passed'])} edit(s)")
+        if result["failed"]:
+            print(f"✗ Failed {len(result['failed'])} edit(s)")
+        
+        return result
     
     def request_and_apply(self, user_request, dry_run=False, include_examples=True, 
                           images=None, use_repo_map=True):
