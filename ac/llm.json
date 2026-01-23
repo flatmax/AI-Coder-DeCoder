@@ -4,5 +4,5 @@
     "AWS_REGION": "us-east-1"
   },
   "model": "global.anthropic.claude-opus-4-5-20251101-v1:0",
-  "smallerModel": "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+  "smallerModel": "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
