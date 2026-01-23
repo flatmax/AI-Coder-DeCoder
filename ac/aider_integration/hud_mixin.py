@@ -60,18 +60,31 @@ class HudMixin:
         if chat_files:
             print(f"Chat Files: {len(chat_files)} files")
         
-        # Session totals from token tracker
+        # Session totals from token tracker - horizontal layout
         if self.token_tracker and hasattr(self.token_tracker, 'get_token_usage'):
             usage = self.token_tracker.get_token_usage()
             print("-" * 60)
-            print("Session Totals:")
-            print(f"  Prompt:     {_format_tokens(usage.get('prompt_tokens', 0)):>8}")
-            print(f"  Completion: {_format_tokens(usage.get('completion_tokens', 0)):>8}")
-            print(f"  Total:      {_format_tokens(usage.get('total_tokens', 0)):>8}")
-            if usage.get('cache_hit_tokens', 0):
-                print(f"  Cache Hit:  {_format_tokens(usage.get('cache_hit_tokens', 0)):>8}")
-            if usage.get('cache_write_tokens', 0):
-                print(f"  Cache Write:{_format_tokens(usage.get('cache_write_tokens', 0)):>8}")
+            
+            # Last request info
+            last_req = getattr(self.token_tracker, '_last_request_tokens', None)
+            if last_req:
+                print(f"Last: +{last_req.get('prompt', 0)} prompt, +{last_req.get('completion', 0)} completion" +
+                      (f", {last_req.get('cache_hit', 0)} cache hit" if last_req.get('cache_hit', 0) else "") +
+                      (f", {last_req.get('cache_write', 0)} cache write" if last_req.get('cache_write', 0) else ""))
+            
+            # Session totals - horizontal
+            prompt = _format_tokens(usage.get('prompt_tokens', 0))
+            completion = _format_tokens(usage.get('completion_tokens', 0))
+            total = _format_tokens(usage.get('total_tokens', 0))
+            cache_hit = usage.get('cache_hit_tokens', 0)
+            cache_write = usage.get('cache_write_tokens', 0)
+            
+            session_line = f"Session: {prompt} prompt, {completion} completion, {total} total"
+            if cache_hit:
+                session_line += f", {_format_tokens(cache_hit)} cache hit"
+            if cache_write:
+                session_line += f", {_format_tokens(cache_write)} cache write"
+            print(session_line)
         
         print("=" * 60 + "\n")
 

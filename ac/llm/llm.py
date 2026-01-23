@@ -23,6 +23,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
         self._total_cache_hit_tokens = 0
         self._total_cache_write_tokens = 0
         
+        # Last request tokens for HUD display
+        self._last_request_tokens = None
+        
         # Load configuration
         self.config = self._load_config(config_path)
         
@@ -98,9 +101,13 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
             self._total_cache_hit_tokens += cache_hit_tokens
             self._total_cache_write_tokens += cache_write_tokens
             
-            print(f"📊 Tokens: +{prompt_tokens} prompt, +{completion_tokens} completion" +
-                  (f", {cache_hit_tokens} cache hit" if cache_hit_tokens else "") +
-                  (f", {cache_write_tokens} cache write" if cache_write_tokens else ""))
+            # Store last request for HUD display
+            self._last_request_tokens = {
+                'prompt': prompt_tokens,
+                'completion': completion_tokens,
+                'cache_hit': cache_hit_tokens,
+                'cache_write': cache_write_tokens
+            }
     
     def get_token_usage(self):
         """
@@ -124,6 +131,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
         self._total_completion_tokens = 0
         self._total_cache_hit_tokens = 0
         self._total_cache_write_tokens = 0
+        self._last_request_tokens = None
         return "Token usage statistics reset"
     
     def get_token_report(self, file_paths=None, read_only_files=None):
