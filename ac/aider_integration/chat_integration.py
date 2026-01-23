@@ -21,16 +21,18 @@ class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, Requ
     Uses AiderContextManager for repo map and token management.
     """
     
-    def __init__(self, model="gpt-4", repo=None):
+    def __init__(self, model="gpt-4", repo=None, token_tracker=None):
         """
         Initialize the chat interface.
         
         Args:
             model: The LiteLLM model identifier
             repo: Optional Repo instance for file access
+            token_tracker: Optional object with track_token_usage(completion) method
         """
         self.model = model
         self.repo = repo
+        self.token_tracker = token_tracker
         self.editor = AiderEditor(repo=repo)
         self.messages = []
         
@@ -44,7 +46,8 @@ class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, Requ
         try:
             self._context_manager = AiderContextManager(
                 repo_root=self.repo.get_repo_root(),
-                model_name=self.model
+                model_name=self.model,
+                token_tracker=self.token_tracker
             )
             print(f"📊 Context manager initialized for: {self.repo.get_repo_name()}")
         except Exception as e:

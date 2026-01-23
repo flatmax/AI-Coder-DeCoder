@@ -17,6 +17,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
         self.repo = repo
         self.conversation_history = []
         
+        # Token usage tracking
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_cache_hit_tokens = 0
+        self._total_cache_write_tokens = 0
+        
         # Load configuration
         self.config = self._load_config(config_path)
         
@@ -69,8 +75,56 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
         """Get or create the AiderChat instance for edit operations."""
         if self._aider_chat is None:
             from aider_integration.chat_integration import AiderChat
-            self._aider_chat = AiderChat(model=self.model, repo=self.repo)
+            self._aider_chat = AiderChat(model=self.model, repo=self.repo, token_tracker=self)
         return self._aider_chat
+    
+    def track_token_usage(self, completion):
+        """
+        Extract and accumulate token usage from a litellm completion response.
+        
+        Args:
+            completion: The litellm completion response object
+        """
+        if completion and hasattr(completion, "usage") and completion.usage is not None:
+            prompt_tokens = completion.usage.prompt_tokens or 0
+            completion_tokens = completion.usage.completion_tokens or 0
+            cache_hit_tokens = getattr(completion.usage, "prompt_cache_hit_tokens", 0) or getattr(
+                completion.usage, "cache_read_input_tokens", 0
+            ) or 0
+            cache_write_tokens = getattr(completion.usage, "cache_creation_input_tokens", 0) or 0
+            
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_cache_hit_tokens += cache_hit_tokens
+            self._total_cache_write_tokens += cache_write_tokens
+            
+            print(f"📊 Tokens: +{prompt_tokens} prompt, +{completion_tokens} completion" +
+                  (f", {cache_hit_tokens} cache hit" if cache_hit_tokens else "") +
+                  (f", {cache_write_tokens} cache write" if cache_write_tokens else ""))
+    
+    def get_token_usage(self):
+        """
+        Get accumulated token usage statistics.
+        
+        Returns:
+            Dict with token usage breakdown
+        """
+        total_tokens = self._total_prompt_tokens + self._total_completion_tokens
+        return {
+            "prompt_tokens": self._total_prompt_tokens,
+            "completion_tokens": self._total_completion_tokens,
+            "total_tokens": total_tokens,
+            "cache_hit_tokens": self._total_cache_hit_tokens,
+            "cache_write_tokens": self._total_cache_write_tokens
+        }
+    
+    def reset_token_usage(self):
+        """Reset accumulated token usage statistics."""
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_cache_hit_tokens = 0
+        self._total_cache_write_tokens = 0
+        return "Token usage statistics reset"
     
     def get_token_report(self, file_paths=None, read_only_files=None):
         """

@@ -32,6 +32,7 @@ class ChatMixin:
             - content: Dict of new file contents
             - token_budget: Token usage information
             - summarized: Whether history was summarized before this request
+            - token_usage: Accumulated token usage statistics
         """
         print(f"🔍 DEBUG: chat() called")
         
@@ -72,6 +73,7 @@ class ChatMixin:
             )
         
         result["summarized"] = summarized
+        result["token_usage"] = self.get_token_usage()
         return result
     
     def get_token_budget(self):
@@ -127,6 +129,10 @@ class ChatMixin:
                     {"role": "user", "content": summary_prompt}
                 ]
             )
+            
+            # Track token usage from summarization
+            self.track_token_usage(response)
+            
             summary = response.choices[0].message.content
             
             # Update history with summary

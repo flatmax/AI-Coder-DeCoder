@@ -60,6 +60,19 @@ class HudMixin:
         if chat_files:
             print(f"Chat Files: {len(chat_files)} files")
         
+        # Session totals from token tracker
+        if self.token_tracker and hasattr(self.token_tracker, 'get_token_usage'):
+            usage = self.token_tracker.get_token_usage()
+            print("-" * 60)
+            print("Session Totals:")
+            print(f"  Prompt:     {_format_tokens(usage.get('prompt_tokens', 0)):>8}")
+            print(f"  Completion: {_format_tokens(usage.get('completion_tokens', 0)):>8}")
+            print(f"  Total:      {_format_tokens(usage.get('total_tokens', 0)):>8}")
+            if usage.get('cache_hit_tokens', 0):
+                print(f"  Cache Hit:  {_format_tokens(usage.get('cache_hit_tokens', 0)):>8}")
+            if usage.get('cache_write_tokens', 0):
+                print(f"  Cache Write:{_format_tokens(usage.get('cache_write_tokens', 0)):>8}")
+        
         print("=" * 60 + "\n")
 
     def print_compact_hud(self, messages: list = None):
@@ -71,4 +84,12 @@ class HudMixin:
         pct = messages_tokens * 100 // max_input if max_input else 0
         history_warn = " ⚠️SUMMARIZE" if self.history_too_big() else ""
         
-        print(f"📊 Tokens: {_format_tokens(messages_tokens)}/{_format_tokens(max_input)} ({pct}%) | History: {_format_tokens(history_tokens)} | Msgs: {len(self.done_messages)}{history_warn}")
+        # Include session totals if available
+        session_info = ""
+        if self.token_tracker and hasattr(self.token_tracker, 'get_token_usage'):
+            usage = self.token_tracker.get_token_usage()
+            total = usage.get('total_tokens', 0)
+            if total:
+                session_info = f" | Session: {_format_tokens(total)}"
+        
+        print(f"📊 Tokens: {_format_tokens(messages_tokens)}/{_format_tokens(max_input)} ({pct}%) | History: {_format_tokens(history_tokens)} | Msgs: {len(self.done_messages)}{session_info}{history_warn}")

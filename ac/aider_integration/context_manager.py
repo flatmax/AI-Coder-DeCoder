@@ -29,12 +29,13 @@ class AiderContextManager(
     No LLM calls - you handle those.
     """
 
-    def __init__(self, repo_root: str, model_name: str):
+    def __init__(self, repo_root: str, model_name: str, token_tracker=None):
         from aider.repo import GitRepo
         from aider.repomap import RepoMap
 
         self.repo_root = Path(repo_root)
         self.model_name = model_name
+        self.token_tracker = token_tracker
         self.token_counter = TokenCounter(model_name)
         self.io = MinimalIO()
 

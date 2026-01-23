@@ -38,6 +38,10 @@ class RequestMixin:
             messages=messages,
         )
         
+        # Track token usage if tracker is available
+        if self.token_tracker and hasattr(self.token_tracker, 'track_token_usage'):
+            self.token_tracker.track_token_usage(response)
+        
         assistant_content = response.choices[0].message.content
         
         # Print response stats
