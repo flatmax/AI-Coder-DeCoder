@@ -2,12 +2,14 @@ import { css } from 'lit';
 
 export const promptViewStyles = css`
   :host {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
   }
 
   .dialog {
     width: 400px;
-    max-height: 500px;
+    height: 100%;
     background: #16213e;
     border-radius: 12px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -75,7 +77,6 @@ export const promptViewStyles = css`
     display: flex;
     flex: 1;
     overflow: hidden;
-    max-height: 452px;
   }
 
   .picker-panel {
@@ -98,7 +99,6 @@ export const promptViewStyles = css`
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-height: 300px;
   }
 
   .image-preview-area {
