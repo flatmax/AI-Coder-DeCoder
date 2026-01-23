@@ -7,13 +7,16 @@ import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
 import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
+import { StreamingMixin } from './prompt/StreamingMixin.js';
 import './file-picker/FilePicker.js';
 
-const MixedBase = DragHandlerMixin(
-  InputHandlerMixin(
-    ChatActionsMixin(
-      ImageHandlerMixin(
-        FileHandlerMixin(MessageHandler)
+const MixedBase = StreamingMixin(
+  DragHandlerMixin(
+    InputHandlerMixin(
+      ChatActionsMixin(
+        ImageHandlerMixin(
+          FileHandlerMixin(MessageHandler)
+        )
       )
     )
   )
@@ -61,6 +64,7 @@ export class PromptView extends MixedBase {
     this.addClass(this);
     this.initImageHandler();
     this.initDragHandler();
+    this.initStreaming();
   }
 
   disconnectedCallback() {
@@ -88,6 +92,24 @@ export class PromptView extends MixedBase {
       }
     }
     return response;
+  }
+
+  /**
+   * Called by server when a chunk of the response is available.
+   * Explicitly defined here so JRPC-OO can find it.
+   * Delegates to mixin implementation.
+   */
+  streamChunk(requestId, content) {
+    super.streamChunk(requestId, content);
+  }
+
+  /**
+   * Called by server when streaming is complete.
+   * Explicitly defined here so JRPC-OO can find it.
+   * Delegates to mixin implementation.
+   */
+  async streamComplete(requestId, result) {
+    await super.streamComplete(requestId, result);
   }
 
   render() {

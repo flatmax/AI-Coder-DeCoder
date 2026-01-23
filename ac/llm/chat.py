@@ -52,8 +52,6 @@ class ChatMixin:
             - summarized: Whether history was summarized before this request
             - token_usage: Accumulated token usage statistics
         """
-        print(f"🔍 DEBUG: chat() called")
-        
         aider_chat = self.get_aider_chat()
         aider_chat.model = self.smaller_model if use_smaller_model else self.model
         aider_chat.clear_files()
@@ -61,12 +59,10 @@ class ChatMixin:
         # Check if history needs summarization before making the request
         summarized = False
         needs_summary = self.check_history_needs_summarization()
-        print(f"🔍 DEBUG: check_history_needs_summarization() returned: {needs_summary}")
         
         if needs_summary:
             print("📝 History too large, summarizing...")
             summary_result = self.summarize_history()
-            print(f"🔍 DEBUG: summarize_history() returned: {summary_result.get('status')}")
             if summary_result.get("status") == "summarized":
                 summarized = True
                 print(f"✓ History summarized successfully")
@@ -161,13 +157,7 @@ class ChatMixin:
     def check_history_needs_summarization(self):
         """Check if conversation history needs summarization."""
         aider_chat = self.get_aider_chat()
-        result = aider_chat.check_history_size()
-        print(f"🔍 DEBUG: aider_chat.check_history_size() = {result}")
-        if aider_chat._context_manager:
-            cm = aider_chat._context_manager
-            history_tokens = cm.count_tokens(cm.done_messages) if cm.done_messages else 0
-            print(f"🔍 DEBUG: history_tokens={history_tokens}, max_history_tokens={cm.max_history_tokens}, done_messages count={len(cm.done_messages)}")
-        return result
+        return aider_chat.check_history_size()
     
     def summarize_history(self):
         """
@@ -179,11 +169,9 @@ class ChatMixin:
         aider_chat = self.get_aider_chat()
         
         if not aider_chat.check_history_size():
-            print("🔍 DEBUG: summarize_history() - check_history_size() returned False")
             return {"status": "not_needed", "message": "History size is within limits"}
         
         head, tail = aider_chat.get_summarization_split()
-        print(f"🔍 DEBUG: summarize_history() - head={len(head)} messages, tail={len(tail)} messages")
         
         if not head:
             return {"status": "not_needed", "message": "No messages to summarize"}
@@ -224,5 +212,4 @@ class ChatMixin:
                 "token_budget": new_budget
             }
         except Exception as e:
-            print(f"🔍 DEBUG: summarize_history() exception: {e}")
             return {"status": "error", "error": str(e)}

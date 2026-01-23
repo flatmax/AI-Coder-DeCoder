@@ -1,9 +1,10 @@
 from .config import ConfigMixin
 from .file_context import FileContextMixin
 from .chat import ChatMixin
+from .streaming import StreamingMixin
 
 
-class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
+class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin):
     """LiteLLM wrapper for AI completions with file context support."""
     
     def __init__(self, repo=None, config_path=None):

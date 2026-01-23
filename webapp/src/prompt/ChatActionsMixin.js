@@ -109,27 +109,34 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     }
     
     try {
-      const response = await this.call['LiteLLM.chat'](
+      // Generate request ID and track it
+      const requestId = this._generateRequestId();
+      this._streamingRequests.set(requestId, { message });
+      
+      // Add empty assistant message that will be filled by streaming
+      this.addMessage('assistant', '');
+      
+      // Start streaming request
+      const response = await this.call['LiteLLM.chat_streaming'](
+        requestId,
         message,
         this.selectedFiles.length > 0 ? this.selectedFiles : null,
         imagesToSend
       );
       const result = this.extractResponse(response);
       
-      const responseText = result.response || result.error || 'No response';
-      this.addMessage('assistant', responseText);
-      
-      if (result.passed && result.passed.length > 0) {
-        await this.loadFileTree();
-        const diffFiles = await this._buildDiffFiles(result);
-        if (diffFiles.length > 0) {
-          this.dispatchEvent(new CustomEvent('edits-applied', {
-            detail: { files: diffFiles },
-            bubbles: true,
-            composed: true
-          }));
+      if (result.error) {
+        this._streamingRequests.delete(requestId);
+        // Update the empty message with error
+        const lastMessage = this.messageHistory[this.messageHistory.length - 1];
+        if (lastMessage && lastMessage.role === 'assistant') {
+          lastMessage.content = `Error: ${result.error}`;
+          lastMessage.final = true;
+          this.messageHistory = [...this.messageHistory];
         }
       }
+      // Otherwise, streaming callbacks will handle the response
+      
     } catch (e) {
       console.error('Error sending message:', e);
       this.addMessage('assistant', `Error: ${e.message}`);

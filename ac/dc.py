@@ -55,7 +55,9 @@ async def main_starter_async(args):
     
     server = JRPCServer(port=actual_server_port)
     server.add_class(repo)
-    server.add_class(LiteLLM(repo=repo))
+    llm = LiteLLM(repo=repo)
+    llm.server = server  # Give LiteLLM access to server for callbacks
+    server.add_class(llm)
 
     webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
 
