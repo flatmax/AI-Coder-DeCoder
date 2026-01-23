@@ -6,7 +6,8 @@ import './PrismSetup.js';
 export class CardMarkdown extends LitElement {
   static properties = {
     content: { type: String },
-    role: { type: String }
+    role: { type: String },
+    mentionedFiles: { type: Array }
   };
 
   static styles = css`
@@ -36,6 +37,19 @@ export class CardMarkdown extends LitElement {
       background: #0f3460;
       padding: 2px 6px;
       border-radius: 4px;
+    }
+
+    .file-mention {
+      color: #7ec699;
+      cursor: pointer;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
+    }
+
+    .file-mention:hover {
+      color: #a3e4b8;
+      text-decoration-style: solid;
     }
 
     .code-wrapper {
@@ -92,6 +106,7 @@ export class CardMarkdown extends LitElement {
     super();
     this.content = '';
     this.role = 'assistant';
+    this.mentionedFiles = [];
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -113,7 +128,9 @@ export class CardMarkdown extends LitElement {
     }
     
     let processed = marked.parse(this.content);
-    return this.wrapCodeBlocksWithCopyButton(processed);
+    processed = this.wrapCodeBlocksWithCopyButton(processed);
+    processed = this.highlightFileMentions(processed);
+    return processed;
   }
 
   escapeHtml(text) {
@@ -129,9 +146,47 @@ export class CardMarkdown extends LitElement {
     });
   }
 
+  highlightFileMentions(htmlContent) {
+    if (!this.mentionedFiles || this.mentionedFiles.length === 0) {
+      return htmlContent;
+    }
+    
+    let result = htmlContent;
+    
+    // Sort by length descending to match longer paths first
+    const sortedFiles = [...this.mentionedFiles].sort((a, b) => b.length - a.length);
+    
+    for (const filePath of sortedFiles) {
+      // Escape special regex characters in the file path
+      const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      // Match the file path but not if it's already inside an HTML tag or anchor
+      // Also avoid matching inside code blocks (already processed)
+      const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
+      
+      result = result.replace(regex, `<span class="file-mention" data-file="${filePath}">$1</span>`);
+    }
+    
+    return result;
+  }
+
+  handleClick(e) {
+    const fileMention = e.target.closest('.file-mention');
+    if (fileMention) {
+      const filePath = fileMention.dataset.file;
+      if (filePath) {
+        this.dispatchEvent(new CustomEvent('file-mention-click', {
+          detail: { path: filePath },
+          bubbles: true,
+          composed: true
+        }));
+      }
+    }
+  }
+
   render() {
     return html`
-      <div class="content">
+      <div class="content" @click=${this.handleClick}>
         ${unsafeHTML(this.processContent())}
       </div>
     `;

@@ -86,4 +86,41 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       filePicker.filter = filterText;
     }
   }
+
+  handleFileMentionClick(e) {
+    const { path } = e.detail;
+    if (!path) return;
+    
+    // Toggle the file selection in the file picker
+    const filePicker = this.shadowRoot?.querySelector('file-picker');
+    if (filePicker) {
+      // Toggle the selection
+      const newSelected = { ...filePicker.selected };
+      newSelected[path] = !newSelected[path];
+      filePicker.selected = newSelected;
+      
+      // Update our selectedFiles to match
+      this.selectedFiles = Object.keys(newSelected).filter(k => newSelected[k]);
+      
+      // Dispatch the selection change event
+      filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+    }
+  }
+
+  getAddableFiles() {
+    // Return all files in the tree that could be added
+    if (!this.fileTree) return [];
+    
+    const files = [];
+    const collectFiles = (node) => {
+      if (node.path) {
+        files.push(node.path);
+      }
+      if (node.children) {
+        node.children.forEach(collectFiles);
+      }
+    };
+    collectFiles(this.fileTree);
+    return files;
+  }
 };

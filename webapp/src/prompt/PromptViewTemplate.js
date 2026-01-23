@@ -72,7 +72,7 @@ export function renderPromptView(component) {
             </div>
           ` : ''}
           <div class="chat-panel">
-            <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)}>
+            <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
               ${repeat(
                 component.messageHistory,
                 (message) => message.id,
@@ -80,7 +80,7 @@ export function renderPromptView(component) {
                   if (message.role === 'user') {
                     return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
                   } else if (message.role === 'assistant') {
-                    return html`<assistant-card .content=${message.content}></assistant-card>`;
+                    return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()}></assistant-card>`;
                   }
                 }
               )}
