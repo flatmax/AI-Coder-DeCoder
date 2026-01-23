@@ -111,12 +111,12 @@ class MessageBuilderMixin:
                 chat_files.append(full_path)
         return chat_files
     
-    def _build_user_text(self, user_request):
-        """Build user text with file context if available."""
+    def _build_file_context_message(self):
+        """Build file context as a separate message (not stored in history)."""
         file_context = self.editor.format_files_for_prompt()
         if file_context:
-            return f"Here are the files:\n\n{file_context}\n\n{user_request}"
-        return user_request
+            return f"Here are the files:\n\n{file_context}"
+        return None
     
     def _add_examples_if_needed(self, messages, include_examples):
         """Add few-shot examples if no history exists."""
@@ -129,7 +129,6 @@ class MessageBuilderMixin:
         """Build messages using the context manager for repo map."""
         system_content = self._get_system_prompt()
         chat_files = self._get_chat_files_absolute()
-        user_text = self._build_user_text(user_request)
         
         # Start with system message
         messages = [{"role": "system", "content": system_content}]
@@ -147,22 +146,28 @@ class MessageBuilderMixin:
         # Add few-shot examples (only if no history yet)
         self._add_examples_if_needed(messages, include_examples)
         
-        # Add conversation history from context manager
+        # Add conversation history from context manager (does NOT include file contents)
         messages.extend(self._context_manager.get_history())
         
-        # Build user content (with images if provided)
-        user_content = self._build_user_content(user_text, images)
+        # Add file context as a separate message (not stored in history)
+        file_context_msg = self._build_file_context_message()
+        if file_context_msg:
+            messages.append({"role": "user", "content": file_context_msg})
+            messages.append({"role": "assistant", "content": "Ok, I see the files."})
+        
+        # Build user content (with images if provided) - just the request, no files
+        user_content = self._build_user_content(user_request, images)
         messages.append({"role": "user", "content": user_content})
         
         # Final filter
         messages = self._filter_empty_messages(messages)
         
-        return messages, user_text
+        # Return messages and ONLY the user request for history (not file contents)
+        return messages, user_request
     
     def _build_messages_simple(self, user_request, images=None, include_examples=True):
         """Build messages without context manager (original behavior)."""
         system_content = self._get_system_prompt()
-        user_text = self._build_user_text(user_request)
         
         # Start with system message
         messages = [{"role": "system", "content": system_content}]
@@ -174,11 +179,18 @@ class MessageBuilderMixin:
         # Few-shot examples (only if no history yet)
         self._add_examples_if_needed(messages, include_examples)
         
-        # Build user content (with images if provided)
-        user_content = self._build_user_content(user_text, images)
+        # Add file context as a separate message (not stored in history)
+        file_context_msg = self._build_file_context_message()
+        if file_context_msg:
+            messages.append({"role": "user", "content": file_context_msg})
+            messages.append({"role": "assistant", "content": "Ok, I see the files."})
+        
+        # Build user content (with images if provided) - just the request, no files
+        user_content = self._build_user_content(user_request, images)
         messages.append({"role": "user", "content": user_content})
         
         # Final filter
         messages = self._filter_empty_messages(messages)
         
-        return messages, user_text
+        # Return messages and ONLY the user request for history (not file contents)
+        return messages, user_request
