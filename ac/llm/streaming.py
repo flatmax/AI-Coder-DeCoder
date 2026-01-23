@@ -91,6 +91,10 @@ class StreamingMixin:
             if aider_chat._context_manager:
                 aider_chat._context_manager.add_exchange(user_text, full_content)
             
+            # Print HUD after streaming completes
+            if aider_chat._context_manager:
+                aider_chat._context_manager.print_hud(messages)
+            
             # Parse and apply edits
             file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
             
@@ -135,13 +139,16 @@ class StreamingMixin:
         response = _litellm.completion(
             model=model,
             messages=messages,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
         
         full_content = ""
         
+        final_chunk = None
         try:
             for chunk in response:
+                final_chunk = chunk
                 delta = chunk.choices[0].delta.content or ""
                 if delta:
                     full_content += delta
@@ -150,6 +157,10 @@ class StreamingMixin:
         finally:
             if hasattr(response, 'close'):
                 response.close()
+        
+        # Track token usage from the final chunk if available
+        if final_chunk and hasattr(final_chunk, 'usage') and final_chunk.usage:
+            self.track_token_usage(final_chunk)
         
         return full_content
     

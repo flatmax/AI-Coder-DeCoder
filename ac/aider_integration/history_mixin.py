@@ -12,8 +12,6 @@ class HistoryMixin:
         """Side-load a completed exchange into history"""
         self.done_messages.append({"role": "user", "content": user_msg})
         self.done_messages.append({"role": "assistant", "content": assistant_msg})
-        # Print full HUD after exchange
-        self.print_hud()
 
     def add_message(self, role: str, content: str):
         """Side-load a single message into history"""

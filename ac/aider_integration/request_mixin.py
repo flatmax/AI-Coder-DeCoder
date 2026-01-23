@@ -53,9 +53,10 @@ class RequestMixin:
         self.messages.append({"role": "user", "content": user_text})
         self.messages.append({"role": "assistant", "content": assistant_content})
         
-        # Also update context manager history
+        # Also update context manager history and print HUD
         if self._context_manager:
             self._context_manager.add_exchange(user_text, assistant_content)
+            self._context_manager.print_hud(messages)
         
         file_edits, shell_commands = self.editor.parse_response(assistant_content)
         

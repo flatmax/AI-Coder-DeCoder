@@ -39,9 +39,6 @@ class ContextBuilderMixin:
         messages.extend(self.done_messages)
         messages.append({"role": "user", "content": current_message})
 
-        # Print HUD after building messages
-        self.print_hud(messages, chat_files)
-
         return messages
 
     def get_budget(self, messages: list = None) -> dict:
