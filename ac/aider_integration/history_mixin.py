@@ -1,0 +1,62 @@
+"""
+History management mixin for context manager.
+
+Handles conversation history side-loading and summarization.
+"""
+
+
+class HistoryMixin:
+    """Mixin for history management operations."""
+
+    def add_exchange(self, user_msg: str, assistant_msg: str):
+        """Side-load a completed exchange into history"""
+        self.done_messages.append({"role": "user", "content": user_msg})
+        self.done_messages.append({"role": "assistant", "content": assistant_msg})
+        # Print compact HUD after exchange
+        self.print_compact_hud()
+
+    def add_message(self, role: str, content: str):
+        """Side-load a single message into history"""
+        self.done_messages.append({"role": role, "content": content})
+
+    def get_history(self) -> list:
+        return self.done_messages.copy()
+
+    def set_history(self, messages: list):
+        """Replace history entirely (e.g., after your own summarization)"""
+        self.done_messages = messages.copy()
+        print(f"📊 History reset: {len(messages)} messages")
+
+    def clear_history(self):
+        self.done_messages = []
+        print("📊 History cleared")
+
+    def history_too_big(self) -> bool:
+        if not self.done_messages:
+            return False
+        return self.count_tokens(self.done_messages) > self.max_history_tokens
+
+    def get_summarization_split(self) -> tuple:
+        """
+        Returns (head, tail) for summarization.
+        Head = messages to summarize (~75%)
+        Tail = recent messages to keep verbatim (~25%)
+        """
+        if not self.history_too_big():
+            return [], self.done_messages.copy()
+
+        tail_budget = self.max_history_tokens // 4
+        tail = []
+        tail_tokens = 0
+
+        for msg in reversed(self.done_messages):
+            msg_tokens = self.count_tokens(msg)
+            if tail_tokens + msg_tokens > tail_budget:
+                break
+            tail.insert(0, msg)
+            tail_tokens += msg_tokens
+
+        head_count = len(self.done_messages) - len(tail)
+        head = self.done_messages[:head_count]
+
+        return head, tail

@@ -6,69 +6,14 @@ Aider handles: repo map, token counting, history management, context assembly
 
 from pathlib import Path
 
-import litellm as _litellm
+from .token_counter import TokenCounter
+from .minimal_io import MinimalIO
+from .hud_mixin import HudMixin
+from .history_mixin import HistoryMixin
+from .repo_map_mixin import RepoMapMixin
 
 
-class MinimalIO:
-    """Minimal IO stub for RepoMap"""
-    def __init__(self, encoding="utf-8"):
-        self.encoding = encoding
-
-    def read_text(self, filename, silent=False):
-        try:
-            with open(str(filename), "r", encoding=self.encoding) as f:
-                return f.read()
-        except (FileNotFoundError, IsADirectoryError, OSError, UnicodeError):
-            return None
-
-    def tool_output(self, msg): pass
-    def tool_error(self, msg): pass
-    def tool_warning(self, msg): pass
-
-
-class TokenCounter:
-    """Wraps litellm token counting - satisfies RepoMap's main_model interface"""
-    def __init__(self, model_name: str):
-        self.model_name = model_name
-        try:
-            self.info = _litellm.get_model_info(model_name)
-        except Exception:
-            self.info = {"max_input_tokens": 128000, "max_output_tokens": 4096}
-
-    def token_count(self, content) -> int:
-        try:
-            if isinstance(content, str):
-                return _litellm.token_counter(model=self.model_name, text=content)
-            elif isinstance(content, list):
-                return _litellm.token_counter(model=self.model_name, messages=content)
-            elif isinstance(content, dict):
-                return _litellm.token_counter(model=self.model_name, messages=[content])
-        except Exception:
-            # Fallback: rough estimate
-            if isinstance(content, str):
-                return len(content) // 4
-            return 0
-        return 0
-
-
-def _format_tokens(count):
-    """Format token count with K suffix for readability."""
-    if count >= 1000:
-        return f"{count / 1000:.1f}K"
-    return str(count)
-
-
-def _progress_bar(used, total, width=20):
-    """Create a simple ASCII progress bar."""
-    if total == 0:
-        return "[" + "?" * width + "]"
-    ratio = min(used / total, 1.0)
-    filled = int(width * ratio)
-    bar = "█" * filled + "░" * (width - filled)
-    return f"[{bar}]"
-
-
-class AiderContextManager:
+class AiderContextManager(HudMixin, HistoryMixin, RepoMapMixin):
     """
     Side-load messages in/out for context management.
     No LLM calls - you handle those.
@@ -108,58 +53,6 @@ class AiderContextManager:
         self._last_chat_files_count = 0
 
     # =========================================================================
-    # HUD - Heads Up Display
-    # =========================================================================
-
-    def print_hud(self, messages: list = None, chat_files: list = None):
-        """Print context HUD to terminal."""
-        max_input = self.token_counter.info.get("max_input_tokens", 128000)
-        max_output = self.token_counter.info.get("max_output_tokens", 4096)
-        
-        # Calculate token usage
-        history_tokens = self.count_tokens(self.done_messages) if self.done_messages else 0
-        messages_tokens = self.count_tokens(messages) if messages else 0
-        repo_map_tokens = self._last_repo_map_tokens
-        
-        # History status
-        history_status = "⚠️  NEEDS SUMMARY" if self.history_too_big() else "✓"
-        
-        print("\n" + "=" * 60)
-        print("📊 CONTEXT HUD")
-        print("=" * 60)
-        print(f"Model: {self.model_name}")
-        print(f"Max Input: {_format_tokens(max_input)} | Max Output: {_format_tokens(max_output)}")
-        print("-" * 60)
-        
-        # Token breakdown
-        print("Token Usage:")
-        print(f"  History:    {_format_tokens(history_tokens):>8} / {_format_tokens(self.max_history_tokens)} {history_status}")
-        print(f"  Repo Map:   {_format_tokens(repo_map_tokens):>8}")
-        if messages_tokens:
-            print(f"  Total Msg:  {_format_tokens(messages_tokens):>8} / {_format_tokens(max_input)}")
-            print(f"  {_progress_bar(messages_tokens, max_input, 40)} {messages_tokens * 100 // max_input}%")
-        
-        print("-" * 60)
-        
-        # History info
-        print(f"History: {len(self.done_messages)} messages")
-        if chat_files:
-            print(f"Chat Files: {len(chat_files)} files")
-        
-        print("=" * 60 + "\n")
-
-    def print_compact_hud(self, messages: list = None):
-        """Print a compact one-line HUD."""
-        max_input = self.token_counter.info.get("max_input_tokens", 128000)
-        history_tokens = self.count_tokens(self.done_messages) if self.done_messages else 0
-        messages_tokens = self.count_tokens(messages) if messages else 0
-        
-        pct = messages_tokens * 100 // max_input if max_input else 0
-        history_warn = " ⚠️SUMMARIZE" if self.history_too_big() else ""
-        
-        print(f"📊 Tokens: {_format_tokens(messages_tokens)}/{_format_tokens(max_input)} ({pct}%) | History: {_format_tokens(history_tokens)} | Msgs: {len(self.done_messages)}{history_warn}")
-
-    # =========================================================================
     # TOKEN COUNTING
     # =========================================================================
 
@@ -178,40 +71,6 @@ class AiderContextManager:
         }
 
     # =========================================================================
-    # REPO MAP
-    # =========================================================================
-
-    def get_repo_map(
-        self,
-        chat_files: list,
-        mentioned_fnames: set = None,
-        mentioned_idents: set = None,
-    ) -> str:
-        """Generate intelligent repo map. Returns formatted string or None."""
-        # Get git-tracked files only (respects .gitignore)
-        tracked = self.git_repo.get_tracked_files()
-
-        # Convert to absolute paths, excluding chat_files
-        other_files = [
-            str(self.repo_root / f)
-            for f in tracked
-            if str(self.repo_root / f) not in chat_files
-        ]
-
-        result = self.repo_map.get_repo_map(
-            chat_files=chat_files,
-            other_files=other_files,
-            mentioned_fnames=mentioned_fnames or set(),
-            mentioned_idents=mentioned_idents or set(),
-        )
-        
-        # Track for HUD
-        self._last_repo_map_tokens = self.count_tokens(result) if result else 0
-        self._last_chat_files_count = len(chat_files)
-        
-        return result
-
-    # =========================================================================
     # FILE CONTENT
     # =========================================================================
 
@@ -227,63 +86,6 @@ class AiderContextManager:
                     rel = fpath
                 output += f"{rel}\n{fence[0]}\n{content}\n{fence[1]}\n\n"
         return output
-
-    # =========================================================================
-    # HISTORY MANAGEMENT (side-load in/out)
-    # =========================================================================
-
-    def add_exchange(self, user_msg: str, assistant_msg: str):
-        """Side-load a completed exchange into history"""
-        self.done_messages.append({"role": "user", "content": user_msg})
-        self.done_messages.append({"role": "assistant", "content": assistant_msg})
-        # Print compact HUD after exchange
-        self.print_compact_hud()
-
-    def add_message(self, role: str, content: str):
-        """Side-load a single message into history"""
-        self.done_messages.append({"role": role, "content": content})
-
-    def get_history(self) -> list:
-        return self.done_messages.copy()
-
-    def set_history(self, messages: list):
-        """Replace history entirely (e.g., after your own summarization)"""
-        self.done_messages = messages.copy()
-        print(f"📊 History reset: {len(messages)} messages")
-
-    def clear_history(self):
-        self.done_messages = []
-        print("📊 History cleared")
-
-    def history_too_big(self) -> bool:
-        if not self.done_messages:
-            return False
-        return self.count_tokens(self.done_messages) > self.max_history_tokens
-
-    def get_summarization_split(self) -> tuple:
-        """
-        Returns (head, tail) for summarization.
-        Head = messages to summarize (~75%)
-        Tail = recent messages to keep verbatim (~25%)
-        """
-        if not self.history_too_big():
-            return [], self.done_messages.copy()
-
-        tail_budget = self.max_history_tokens // 4
-        tail = []
-        tail_tokens = 0
-
-        for msg in reversed(self.done_messages):
-            msg_tokens = self.count_tokens(msg)
-            if tail_tokens + msg_tokens > tail_budget:
-                break
-            tail.insert(0, msg)
-            tail_tokens += msg_tokens
-
-        head_count = len(self.done_messages) - len(tail)
-        head = self.done_messages[:head_count]
-
-        return head, tail
 
     # =========================================================================
     # CONTEXT ASSEMBLY
