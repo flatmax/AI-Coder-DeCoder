@@ -5,16 +5,15 @@ Provides a high-level interface for requesting code changes via LLM
 and applying them using aider's search/replace format.
 """
 
-import os
-
-import litellm as _litellm
-
 from .editor import AiderEditor
 from .message_builder import MessageBuilderMixin
 from .context_manager import AiderContextManager
+from .file_management_mixin import FileManagementMixin
+from .chat_history_mixin import ChatHistoryMixin
+from .request_mixin import RequestMixin
 
 
-class AiderChat(MessageBuilderMixin):
+class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, RequestMixin):
     """
     High-level interface for LLM-based code editing using aider's format.
     
@@ -38,226 +37,20 @@ class AiderChat(MessageBuilderMixin):
         # Initialize context manager if we have a repo
         self._context_manager = None
         if repo:
-            try:
-                self._context_manager = AiderContextManager(
-                    repo_root=repo.get_repo_root(),
-                    model_name=model
-                )
-                print(f"📊 Context manager initialized for: {repo.get_repo_name()}")
-            except Exception as e:
-                print(f"Warning: Could not initialize context manager: {e}")
+            self._init_context_manager()
+    
+    def _init_context_manager(self):
+        """Initialize the context manager for repo map support."""
+        try:
+            self._context_manager = AiderContextManager(
+                repo_root=self.repo.get_repo_root(),
+                model_name=self.model
+            )
+            print(f"📊 Context manager initialized for: {self.repo.get_repo_name()}")
+        except Exception as e:
+            print(f"Warning: Could not initialize context manager: {e}")
     
     @property
     def context_manager(self):
         """Get the context manager, creating if needed."""
         return self._context_manager
-    
-    def add_file(self, filepath):
-        """Add a file to the editing context."""
-        if self.repo:
-            content = self.repo.get_file_content(filepath)
-            if isinstance(content, dict) and 'error' in content:
-                raise FileNotFoundError(content['error'])
-            self.editor.add_file_content(filepath, content)
-        else:
-            self.editor.add_file(filepath)
-    
-    def add_file_content(self, filepath, content):
-        """Add a file with provided content."""
-        self.editor.add_file_content(filepath, content)
-    
-    def get_files(self):
-        """Get list of files in context."""
-        return self.editor.get_file_list()
-    
-    def clear_files(self):
-        """Clear all files from context."""
-        self.editor.clear_files()
-    
-    def clear_history(self):
-        """Clear conversation history."""
-        self.messages = []
-        if self._context_manager:
-            self._context_manager.clear_history()
-    
-    def get_token_budget(self, messages=None):
-        """Get token budget information."""
-        if self._context_manager:
-            return self._context_manager.get_budget(messages)
-        return {"used": 0, "max_input": 128000, "remaining": 128000}
-    
-    def get_token_report(self, read_only_files=None):
-        """
-        Get detailed token usage report (like aider's /tokens command).
-        
-        Args:
-            read_only_files: Optional list of read-only file paths
-            
-        Returns:
-            Formatted string with token breakdown, or error message if no context manager
-        """
-        if not self._context_manager:
-            return "Token report unavailable: no repository configured"
-        
-        # Build system prompt
-        system_prompt = self.editor.get_system_prompt()
-        system_prompt += "\n\n" + self.editor.get_system_reminder()
-        
-        # Get chat files as absolute paths
-        chat_files = []
-        if self.repo:
-            repo_root = self.repo.get_repo_root()
-            for fpath in self.editor.get_file_list():
-                chat_files.append(os.path.join(repo_root, fpath))
-        
-        # Convert read_only_files to absolute paths if provided
-        abs_read_only = []
-        if read_only_files and self.repo:
-            repo_root = self.repo.get_repo_root()
-            for fpath in read_only_files:
-                if os.path.isabs(fpath):
-                    abs_read_only.append(fpath)
-                else:
-                    abs_read_only.append(os.path.join(repo_root, fpath))
-        
-        return self._context_manager.print_tokens(
-            system_prompt=system_prompt,
-            chat_files=chat_files,
-            read_only_files=abs_read_only,
-        )
-    
-    def request_changes(self, user_request, include_examples=True, images=None, use_repo_map=True):
-        """
-        Send a request to the LLM and parse the response for edits.
-        
-        Args:
-            user_request: The user's request for changes
-            include_examples: Whether to include few-shot examples
-            images: Optional list of image dicts with 'data' and 'mime_type'
-            use_repo_map: Whether to include repo map in context
-            
-        Returns:
-            Dict with:
-            - file_edits: List of (filename, original, updated) tuples
-            - shell_commands: List of shell command strings
-            - response: The raw LLM response text
-            - token_budget: Token usage information
-        """
-        messages, user_text = self._build_messages(
-            user_request, images, include_examples, use_repo_map
-        )
-        
-        print(f"🚀 Sending request to {self.model}...")
-        
-        response = _litellm.completion(
-            model=self.model,
-            messages=messages,
-        )
-        
-        assistant_content = response.choices[0].message.content
-        
-        # Print response stats
-        usage = getattr(response, 'usage', None)
-        if usage:
-            print(f"✓ Response received: {usage.completion_tokens} tokens generated")
-        
-        # Store in conversation history (text version only)
-        self.messages.append({"role": "user", "content": user_text})
-        self.messages.append({"role": "assistant", "content": assistant_content})
-        
-        # Also update context manager history
-        if self._context_manager:
-            self._context_manager.add_exchange(user_text, assistant_content)
-        
-        file_edits, shell_commands = self.editor.parse_response(assistant_content)
-        
-        if file_edits:
-            print(f"📝 Parsed {len(file_edits)} edit(s)")
-        if shell_commands:
-            print(f"🖥️  Parsed {len(shell_commands)} shell command(s)")
-        
-        return {
-            "file_edits": file_edits,
-            "shell_commands": shell_commands,
-            "response": assistant_content,
-            "token_budget": self.get_token_budget(messages)
-        }
-    
-    def apply_edits(self, edits, dry_run=False):
-        """
-        Apply edits to files.
-        
-        Args:
-            edits: List of (filename, original, updated) tuples
-            dry_run: If True, don't actually write files
-            
-        Returns:
-            Dict with 'passed', 'failed', and 'content'
-        """
-        result = self.editor.apply_edits(edits, dry_run=dry_run)
-        
-        if result["passed"]:
-            print(f"✓ Applied {len(result['passed'])} edit(s)")
-        if result["failed"]:
-            print(f"✗ Failed {len(result['failed'])} edit(s)")
-        
-        return result
-    
-    def request_and_apply(self, user_request, dry_run=False, include_examples=True, 
-                          images=None, use_repo_map=True):
-        """
-        Request changes and apply them in one step.
-        
-        Args:
-            user_request: The user's request for changes
-            dry_run: If True, don't actually write files
-            include_examples: Whether to include few-shot examples
-            images: Optional list of image dicts with 'data' and 'mime_type'
-            use_repo_map: Whether to include repo map in context
-            
-        Returns:
-            Dict with:
-            - file_edits: List of edits that were requested
-            - shell_commands: List of shell commands
-            - response: Raw LLM response
-            - passed: List of successfully applied edits
-            - failed: List of failed edits
-            - content: Dict of new file contents
-            - token_budget: Token usage information
-        """
-        result = self.request_changes(
-            user_request, include_examples, images=images, use_repo_map=use_repo_map
-        )
-        
-        if result["file_edits"]:
-            apply_result = self.apply_edits(result["file_edits"], dry_run=dry_run)
-            result.update(apply_result)
-        else:
-            result["passed"] = []
-            result["failed"] = []
-            result["content"] = {}
-        
-        return result
-    
-    def check_history_size(self):
-        """Check if history needs summarization."""
-        if self._context_manager:
-            return self._context_manager.history_too_big()
-        return False
-    
-    def get_summarization_split(self):
-        """Get messages split for summarization."""
-        if self._context_manager:
-            return self._context_manager.get_summarization_split()
-        return [], self.messages.copy()
-    
-    def set_summarized_history(self, summary, tail):
-        """Set history after summarization."""
-        new_history = [
-            {"role": "user", "content": f"Summary of previous conversation:\n{summary}"},
-            {"role": "assistant", "content": "Ok, I understand the context."}
-        ] + tail
-        
-        self.messages = new_history
-        if self._context_manager:
-            self._context_manager.set_history(new_history)
