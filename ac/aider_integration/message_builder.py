@@ -10,70 +10,20 @@ Expected attributes on the host class:
 - _context_manager: Optional AiderContextManager instance
 """
 
-import os
+from .message_utils import filter_empty_messages, build_user_content
+from .message_context import MessageContextMixin
+from .message_simple import MessageSimpleMixin
 
 
-class MessageBuilderMixin:
+class MessageBuilderMixin(MessageContextMixin, MessageSimpleMixin):
     """Mixin for building LLM messages."""
     
     @staticmethod
     def _filter_empty_messages(messages):
-        """
-        Filter out messages with empty content that some providers reject.
-        
-        Args:
-            messages: List of message dicts
-            
-        Returns:
-            Filtered list with no empty content fields
-        """
-        filtered = []
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                has_content = any(
-                    (part.get("type") == "text" and part.get("text", "").strip()) or
-                    part.get("type") == "image_url"
-                    for part in content
-                )
-                if has_content:
-                    filtered.append(msg)
-            elif content and content.strip():
-                filtered.append(msg)
-        return filtered
+        return filter_empty_messages(messages)
     
     def _build_user_content(self, text, images=None):
-        """
-        Build user message content, optionally with images.
-        
-        Args:
-            text: The text content
-            images: Optional list of image dicts with 'data' and 'mime_type'
-            
-        Returns:
-            String for text-only, or list for multimodal content
-        """
-        if not images:
-            return text
-        
-        content = [{"type": "text", "text": text}]
-        
-        for img in images:
-            if isinstance(img, dict):
-                data = img.get('data', '')
-                mime_type = img.get('mime_type', 'image/png')
-            else:
-                data = img
-                mime_type = 'image/png'
-            
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime_type};base64,{data}"
-                }
-            })
-        
-        return content
+        return build_user_content(text, images)
     
     def _build_messages(self, user_request, images=None, include_examples=True, use_repo_map=True):
         """
@@ -88,109 +38,6 @@ class MessageBuilderMixin:
         Returns:
             Tuple of (messages list, user_text for history)
         """
-        # If we have a context manager, use it for building messages
         if self._context_manager and use_repo_map:
             return self._build_messages_with_context(user_request, images, include_examples)
-        
-        # Fallback to original behavior
         return self._build_messages_simple(user_request, images, include_examples)
-    
-    def _get_system_prompt(self):
-        """Get combined system prompt from editor."""
-        system_content = self.editor.get_system_prompt()
-        system_content += "\n\n" + self.editor.get_system_reminder()
-        return system_content
-    
-    def _get_chat_files_absolute(self):
-        """Get chat files as absolute paths."""
-        chat_files = []
-        if self.repo:
-            repo_root = self.repo.get_repo_root()
-            for fpath in self.editor.get_file_list():
-                full_path = os.path.join(repo_root, fpath)
-                chat_files.append(full_path)
-        return chat_files
-    
-    def _build_file_context_message(self):
-        """Build file context as a separate message (not stored in history)."""
-        file_context = self.editor.format_files_for_prompt()
-        if file_context:
-            return f"Here are the files:\n\n{file_context}"
-        return None
-    
-    def _add_examples_if_needed(self, messages, include_examples):
-        """Add few-shot examples if no history exists."""
-        if include_examples and not self.messages:
-            example_messages = self.editor.get_example_messages()
-            example_messages = self._filter_empty_messages(example_messages)
-            messages.extend(example_messages)
-    
-    def _build_messages_with_context(self, user_request, images=None, include_examples=True):
-        """Build messages using the context manager for repo map."""
-        system_content = self._get_system_prompt()
-        chat_files = self._get_chat_files_absolute()
-        
-        # Start with system message
-        messages = [{"role": "system", "content": system_content}]
-        
-        # Add repo map if available
-        repo_map = self._context_manager.get_repo_map(
-            chat_files=chat_files,
-            mentioned_fnames=set(),
-            mentioned_idents=set()
-        )
-        if repo_map:
-            messages.append({"role": "user", "content": f"Repository map:\n{repo_map}"})
-            messages.append({"role": "assistant", "content": "Ok."})
-        
-        # Add few-shot examples (only if no history yet)
-        self._add_examples_if_needed(messages, include_examples)
-        
-        # Add conversation history from context manager (does NOT include file contents)
-        messages.extend(self._context_manager.get_history())
-        
-        # Add file context as a separate message (not stored in history)
-        file_context_msg = self._build_file_context_message()
-        if file_context_msg:
-            messages.append({"role": "user", "content": file_context_msg})
-            messages.append({"role": "assistant", "content": "Ok, I see the files."})
-        
-        # Build user content (with images if provided) - just the request, no files
-        user_content = self._build_user_content(user_request, images)
-        messages.append({"role": "user", "content": user_content})
-        
-        # Final filter
-        messages = self._filter_empty_messages(messages)
-        
-        # Return messages and ONLY the user request for history (not file contents)
-        return messages, user_request
-    
-    def _build_messages_simple(self, user_request, images=None, include_examples=True):
-        """Build messages without context manager (original behavior)."""
-        system_content = self._get_system_prompt()
-        
-        # Start with system message
-        messages = [{"role": "system", "content": system_content}]
-        
-        # Add conversation history
-        if self.messages:
-            messages.extend(self.messages)
-        
-        # Few-shot examples (only if no history yet)
-        self._add_examples_if_needed(messages, include_examples)
-        
-        # Add file context as a separate message (not stored in history)
-        file_context_msg = self._build_file_context_message()
-        if file_context_msg:
-            messages.append({"role": "user", "content": file_context_msg})
-            messages.append({"role": "assistant", "content": "Ok, I see the files."})
-        
-        # Build user content (with images if provided) - just the request, no files
-        user_content = self._build_user_content(user_request, images)
-        messages.append({"role": "user", "content": user_content})
-        
-        # Final filter
-        messages = self._filter_empty_messages(messages)
-        
-        # Return messages and ONLY the user request for history (not file contents)
-        return messages, user_request
