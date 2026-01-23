@@ -1,5 +1,23 @@
+import os
+
+
 class TreeOperationsMixin:
     """Mixin for file tree operations."""
+    
+    def _count_file_lines(self, file_path):
+        """Count lines in a file. Returns 0 for binary files."""
+        full_path = os.path.join(self.get_repo_root(), file_path)
+        try:
+            # Check if binary
+            with open(full_path, 'rb') as f:
+                chunk = f.read(8192)
+                if b'\x00' in chunk:
+                    return 0
+            # Count lines
+            with open(full_path, 'r', encoding='utf-8') as f:
+                return sum(1 for _ in f)
+        except (OSError, UnicodeDecodeError):
+            return 0
     
     def get_file_tree(self):
         """
@@ -27,7 +45,8 @@ class TreeOperationsMixin:
                         current['children'].append(new_dir)
                         current = new_dir
                 
-                current['children'].append({'name': parts[-1], 'path': file_path})
+                lines = self._count_file_lines(file_path)
+                current['children'].append({'name': parts[-1], 'path': file_path, 'lines': lines})
             
             return {
                 'tree': root,

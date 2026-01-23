@@ -54,6 +54,14 @@ export const filePickerStyles = css`
     flex-shrink: 0;
     cursor: pointer;
   }
+  .line-count {
+    width: 32px;
+    text-align: right;
+    color: #555;
+    font-size: 11px;
+    margin-left: -40px;
+    flex-shrink: 0;
+  }
   .hidden { display: none; }
   .actions { padding: 8px 12px; border-top: 1px solid #0f3460; display: flex; gap: 8px; align-items: center; }
   button { padding: 4px 10px; border: none; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; }
