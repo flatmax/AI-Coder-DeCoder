@@ -4,9 +4,15 @@ import './UserCard.js';
 import './AssistantCard.js';
 
 export function renderPromptView(component) {
+  const isDragged = component.dialogX !== null && component.dialogY !== null;
+  const dialogStyle = isDragged 
+    ? `left: ${component.dialogX}px; top: ${component.dialogY}px;` 
+    : '';
+  
   return html`
-    <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''}">
-      <div class="header">
+    <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''} ${isDragged ? 'dragged' : ''}"
+         style=${dialogStyle}>
+      <div class="header" @mousedown=${(e) => component._handleDragStart(e)}>
         <div class="header-left" @click=${component.toggleMinimize}>
           <span>💬 Chat</span>
         </div>

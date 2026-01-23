@@ -6,12 +6,15 @@ import { FileHandlerMixin } from './prompt/FileHandlerMixin.js';
 import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
+import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
 import './file-picker/FilePicker.js';
 
-const MixedBase = InputHandlerMixin(
-  ChatActionsMixin(
-    ImageHandlerMixin(
-      FileHandlerMixin(MessageHandler)
+const MixedBase = DragHandlerMixin(
+  InputHandlerMixin(
+    ChatActionsMixin(
+      ImageHandlerMixin(
+        FileHandlerMixin(MessageHandler)
+      )
     )
   )
 );
@@ -27,7 +30,9 @@ export class PromptView extends MixedBase {
     untrackedFiles: { type: Array },
     selectedFiles: { type: Array },
     showFilePicker: { type: Boolean },
-    pastedImages: { type: Array }
+    pastedImages: { type: Array },
+    dialogX: { type: Number },
+    dialogY: { type: Number }
   };
 
   static styles = promptViewStyles;
@@ -44,6 +49,8 @@ export class PromptView extends MixedBase {
     this.selectedFiles = [];
     this.showFilePicker = false;
     this.pastedImages = [];
+    this.dialogX = null;
+    this.dialogY = null;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
@@ -53,11 +60,13 @@ export class PromptView extends MixedBase {
     super.connectedCallback();
     this.addClass(this);
     this.initImageHandler();
+    this.initDragHandler();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this.destroyImageHandler();
+    this.destroyDragHandler();
   }
 
   remoteIsUp() {}

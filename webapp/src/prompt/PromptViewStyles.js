@@ -18,6 +18,12 @@ export const promptViewStyles = css`
     overflow: hidden;
   }
 
+  .dialog.dragged {
+    position: fixed;
+    height: calc(100vh - 80px);
+    max-height: calc(100vh - 80px);
+  }
+
   .dialog.minimized {
     width: 200px;
     max-height: 48px;
@@ -35,6 +41,12 @@ export const promptViewStyles = css`
     background: #0f3460;
     color: #e94560;
     font-weight: 600;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .header:active {
+    cursor: grabbing;
   }
 
   .header-left {
