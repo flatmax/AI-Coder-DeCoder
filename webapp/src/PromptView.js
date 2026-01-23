@@ -95,6 +95,42 @@ export class PromptView extends MessageHandler {
     this.selectedFiles = e.detail;
   }
 
+  async handleFileView(e) {
+    const { path } = e.detail;
+    try {
+      const workingResponse = await this.call['Repo.get_file_content'](path, 'working');
+      const workingContent = this.extractResponse(workingResponse);
+      
+      let headContent = '';
+      try {
+        const headResponse = await this.call['Repo.get_file_content'](path, 'HEAD');
+        headContent = this.extractResponse(headResponse);
+        if (typeof headContent !== 'string') headContent = '';
+      } catch (e) {
+        // File might be new/untracked
+        headContent = '';
+      }
+
+      const isNew = headContent === '';
+      const isModified = this.modifiedFiles.includes(path);
+      
+      this.dispatchEvent(new CustomEvent('edits-applied', {
+        detail: {
+          files: [{
+            path,
+            original: headContent,
+            modified: typeof workingContent === 'string' ? workingContent : '',
+            isNew: isNew && !isModified
+          }]
+        },
+        bubbles: true,
+        composed: true
+      }));
+    } catch (e) {
+      console.error('Error viewing file:', e);
+    }
+  }
+
   handlePaste(e) {
     const items = e.clipboardData?.items;
     if (!items) return;

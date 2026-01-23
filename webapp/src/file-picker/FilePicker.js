@@ -41,6 +41,7 @@ export class FilePicker extends LitElement {
       flex-shrink: 0;
     }
     .name { color: #888; flex: 1; }
+    .name:hover { text-decoration: underline; }
     .name.clean { color: #888; }
     .name.modified { color: #e2c08d; }
     .name.staged { color: #73c991; }
@@ -102,6 +103,15 @@ export class FilePicker extends LitElement {
     e.stopPropagation();
     this.selected = { ...this.selected, [path]: !this.selected[path] };
     this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+  }
+
+  viewFile(filePath, e) {
+    e.stopPropagation();
+    this.dispatchEvent(new CustomEvent('file-view', { 
+      detail: { path: filePath },
+      bubbles: true,
+      composed: true
+    }));
   }
 
   collectFilesInDir(node, currentPath = '') {
@@ -196,7 +206,6 @@ export class FilePicker extends LitElement {
     const isStaged = this.staged.includes(filePath);
     const isUntracked = this.untracked.includes(filePath);
     
-    // Determine status class and indicator
     let statusClass = 'clean';
     let statusIndicator = '';
     
@@ -216,10 +225,10 @@ export class FilePicker extends LitElement {
 
     return html`
       <div class="node">
-        <div class="row" @click=${(e) => this.toggleSelect(filePath, e)}>
+        <div class="row">
           <input type="checkbox" .checked=${!!this.selected[filePath]} @click=${(e) => this.toggleSelect(filePath, e)}>
           ${statusIndicator ? html`<span class="status-indicator ${statusClass}">${statusIndicator}</span>` : html`<span class="status-indicator"></span>`}
-          <span class="name ${statusClass}">${node.name}</span>
+          <span class="name ${statusClass}" @click=${(e) => this.viewFile(filePath, e)}>${node.name}</span>
         </div>
       </div>
     `;

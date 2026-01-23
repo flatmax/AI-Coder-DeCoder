@@ -20,6 +20,7 @@ export function renderPromptView(component) {
                 .staged=${component.stagedFiles}
                 .untracked=${component.untrackedFiles}
                 @selection-change=${component.handleSelectionChange}
+                @file-view=${component.handleFileView}
               ></file-picker>
             </div>
           ` : ''}
