@@ -47,7 +47,7 @@ export class PromptView extends MixedBase {
     this.stagedFiles = [];
     this.untrackedFiles = [];
     this.selectedFiles = [];
-    this.showFilePicker = false;
+    this.showFilePicker = true;
     this.pastedImages = [];
     this.dialogX = null;
     this.dialogY = null;
