@@ -2,6 +2,12 @@
 Message building utilities for AiderChat.
 
 Handles construction of LLM messages including multimodal content.
+
+Expected attributes on the host class:
+- editor: AiderEditor instance
+- repo: Optional Repo instance
+- messages: List of conversation history messages
+- _context_manager: Optional AiderContextManager instance
 """
 
 import os
@@ -10,7 +16,8 @@ import os
 class MessageBuilderMixin:
     """Mixin for building LLM messages."""
     
-    def _filter_empty_messages(self, messages):
+    @staticmethod
+    def _filter_empty_messages(messages):
         """
         Filter out messages with empty content that some providers reject.
         
@@ -88,28 +95,41 @@ class MessageBuilderMixin:
         # Fallback to original behavior
         return self._build_messages_simple(user_request, images, include_examples)
     
-    def _build_messages_with_context(self, user_request, images=None, include_examples=True):
-        """Build messages using the context manager for repo map."""
-        # Get system prompt from editor
+    def _get_system_prompt(self):
+        """Get combined system prompt from editor."""
         system_content = self.editor.get_system_prompt()
         system_content += "\n\n" + self.editor.get_system_reminder()
-        
-        # Get chat files (files in editor context)
+        return system_content
+    
+    def _get_chat_files_absolute(self):
+        """Get chat files as absolute paths."""
         chat_files = []
         if self.repo:
             repo_root = self.repo.get_repo_root()
             for fpath in self.editor.get_file_list():
                 full_path = os.path.join(repo_root, fpath)
                 chat_files.append(full_path)
-        
-        # Build file context string
+        return chat_files
+    
+    def _build_user_text(self, user_request):
+        """Build user text with file context if available."""
         file_context = self.editor.format_files_for_prompt()
-        
-        # Build user text
         if file_context:
-            user_text = f"Here are the files:\n\n{file_context}\n\n{user_request}"
-        else:
-            user_text = user_request
+            return f"Here are the files:\n\n{file_context}\n\n{user_request}"
+        return user_request
+    
+    def _add_examples_if_needed(self, messages, include_examples):
+        """Add few-shot examples if no history exists."""
+        if include_examples and not self.messages:
+            example_messages = self.editor.get_example_messages()
+            example_messages = self._filter_empty_messages(example_messages)
+            messages.extend(example_messages)
+    
+    def _build_messages_with_context(self, user_request, images=None, include_examples=True):
+        """Build messages using the context manager for repo map."""
+        system_content = self._get_system_prompt()
+        chat_files = self._get_chat_files_absolute()
+        user_text = self._build_user_text(user_request)
         
         # Start with system message
         messages = [{"role": "system", "content": system_content}]
@@ -125,10 +145,7 @@ class MessageBuilderMixin:
             messages.append({"role": "assistant", "content": "Ok."})
         
         # Add few-shot examples (only if no history yet)
-        if include_examples and not self.messages:
-            example_messages = self.editor.get_example_messages()
-            example_messages = self._filter_empty_messages(example_messages)
-            messages.extend(example_messages)
+        self._add_examples_if_needed(messages, include_examples)
         
         # Add conversation history from context manager
         messages.extend(self._context_manager.get_history())
@@ -144,31 +161,18 @@ class MessageBuilderMixin:
     
     def _build_messages_simple(self, user_request, images=None, include_examples=True):
         """Build messages without context manager (original behavior)."""
-        messages = []
+        system_content = self._get_system_prompt()
+        user_text = self._build_user_text(user_request)
         
-        # System prompt
-        system_content = self.editor.get_system_prompt()
-        system_content += "\n\n" + self.editor.get_system_reminder()
-        messages.append({"role": "system", "content": system_content})
+        # Start with system message
+        messages = [{"role": "system", "content": system_content}]
         
         # Add conversation history
         if self.messages:
             messages.extend(self.messages)
         
         # Few-shot examples (only if no history yet)
-        if include_examples and not self.messages:
-            example_messages = self.editor.get_example_messages()
-            example_messages = self._filter_empty_messages(example_messages)
-            messages.extend(example_messages)
-        
-        # File context
-        file_context = self.editor.format_files_for_prompt()
-        
-        # Build user text
-        if file_context:
-            user_text = f"Here are the files:\n\n{file_context}\n\n{user_request}"
-        else:
-            user_text = user_request
+        self._add_examples_if_needed(messages, include_examples)
         
         # Build user content (with images if provided)
         user_content = self._build_user_content(user_text, images)

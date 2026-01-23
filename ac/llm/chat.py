@@ -31,10 +31,22 @@ class ChatMixin:
             - failed: List of failed edits (if auto_apply)
             - content: Dict of new file contents
             - token_budget: Token usage information
+            - summarized: Whether history was summarized before this request
         """
         aider_chat = self.get_aider_chat()
         aider_chat.model = self.smaller_model if use_smaller_model else self.model
         aider_chat.clear_files()
+        
+        # Check if history needs summarization before making the request
+        summarized = False
+        if self.check_history_needs_summarization():
+            print("📝 History too large, summarizing...")
+            summary_result = self.summarize_history()
+            if summary_result.get("status") == "summarized":
+                summarized = True
+                print(f"✓ History summarized successfully")
+            elif summary_result.get("status") == "error":
+                print(f"⚠️ Summarization failed: {summary_result.get('error')}")
         
         # Load files into aider context
         if file_paths:
@@ -42,16 +54,19 @@ class ChatMixin:
                 try:
                     aider_chat.add_file(path)
                 except FileNotFoundError as e:
-                    return {"error": str(e), "response": ""}
+                    return {"error": str(e), "response": "", "summarized": summarized}
         
         if auto_apply:
-            return aider_chat.request_and_apply(
+            result = aider_chat.request_and_apply(
                 user_prompt, dry_run=dry_run, images=images, use_repo_map=use_repo_map
             )
         else:
-            return aider_chat.request_changes(
+            result = aider_chat.request_changes(
                 user_prompt, images=images, use_repo_map=use_repo_map
             )
+        
+        result["summarized"] = summarized
+        return result
     
     def get_token_budget(self):
         """Get current token budget information."""
@@ -90,10 +105,11 @@ class ChatMixin:
         
         # Call LLM for summarization using smaller model
         try:
+            print(f"🤖 Calling {self.smaller_model} for summarization...")
             response = _litellm.completion(
                 model=self.smaller_model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that summarizes conversations concisely."},
+                    {"role": "system", "content": "You are a helpful assistant that summarizes conversations concisely. Focus on: 1) What files were discussed/modified, 2) Key decisions made, 3) Important context for continuing the conversation."},
                     {"role": "user", "content": summary_prompt}
                 ]
             )
@@ -102,10 +118,13 @@ class ChatMixin:
             # Update history with summary
             aider_chat.set_summarized_history(summary, tail)
             
+            new_budget = aider_chat.get_token_budget()
+            print(f"✓ History reduced to {new_budget.get('history_tokens', 0)} tokens")
+            
             return {
                 "status": "summarized",
                 "summary": summary,
-                "token_budget": aider_chat.get_token_budget()
+                "token_budget": new_budget
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
