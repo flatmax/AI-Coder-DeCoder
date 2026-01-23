@@ -126,3 +126,20 @@ class CommitOperationsMixin:
             }
         except Exception as e:
             return self._create_error_response(str(e))
+    
+    def reset_hard(self):
+        """
+        Reset the repository to HEAD, discarding all changes.
+        Equivalent to 'git reset --hard HEAD'.
+        
+        Returns:
+            Dict with status or error
+        """
+        try:
+            self._repo.git.reset('--hard', 'HEAD')
+            return {
+                'status': 'success',
+                'message': 'Repository reset to HEAD'
+            }
+        except Exception as e:
+            return self._create_error_response(str(e))

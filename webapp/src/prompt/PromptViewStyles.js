@@ -96,6 +96,16 @@ export const promptViewStyles = css`
     color: #1a1a2e !important;
   }
 
+  .clear-btn.reset-btn {
+    border-color: #f0a500 !important;
+    color: #f0a500 !important;
+  }
+
+  .clear-btn.reset-btn:hover {
+    background: #f0a500 !important;
+    color: #1a1a2e !important;
+  }
+
   .main-content {
     display: flex;
     flex: 1;

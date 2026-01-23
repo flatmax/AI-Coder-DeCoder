@@ -42,6 +42,9 @@ export function renderPromptView(component) {
             <button class="clear-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
               💾 Commit
             </button>
+            <button class="clear-btn reset-btn" @click=${component.handleResetHard} title="Reset to HEAD (discard all changes)">
+              ⚠️ Reset
+            </button>
             <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
               🗑️ Clear
             </button>

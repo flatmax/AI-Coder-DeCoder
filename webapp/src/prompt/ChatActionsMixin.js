@@ -3,6 +3,39 @@
  */
 export const ChatActionsMixin = (superClass) => class extends superClass {
 
+  async handleResetHard() {
+    if (!confirm('⚠️ This will discard ALL uncommitted changes!\n\nAre you sure you want to reset to HEAD?')) {
+      return;
+    }
+    
+    try {
+      this.addMessage('assistant', '🔄 Resetting repository to HEAD...');
+      const response = await this.call['Repo.reset_hard']();
+      const result = this.extractResponse(response);
+      
+      if (result && result.error) {
+        this.addMessage('assistant', `Error resetting: ${result.error}`);
+        return;
+      }
+      
+      this.addMessage('assistant', '✅ Repository reset to HEAD. All uncommitted changes have been discarded.');
+      
+      // Refresh the file tree to update status indicators
+      await this.loadFileTree();
+      
+      // Clear the diff viewer
+      this.dispatchEvent(new CustomEvent('edits-applied', {
+        detail: { files: [] },
+        bubbles: true,
+        composed: true
+      }));
+      
+    } catch (e) {
+      console.error('Error during reset:', e);
+      this.addMessage('assistant', `Error during reset: ${e.message}`);
+    }
+  }
+
   async clearContext() {
     try {
       const response = await this.call['LiteLLM.clear_history']();
