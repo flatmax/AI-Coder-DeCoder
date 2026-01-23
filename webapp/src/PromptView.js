@@ -34,6 +34,7 @@ export class PromptView extends MixedBase {
     modifiedFiles: { type: Array },
     stagedFiles: { type: Array },
     untrackedFiles: { type: Array },
+    diffStats: { type: Object },
     selectedFiles: { type: Array },
     showFilePicker: { type: Boolean },
     pastedImages: { type: Array },
@@ -52,6 +53,7 @@ export class PromptView extends MixedBase {
     this.modifiedFiles = [];
     this.stagedFiles = [];
     this.untrackedFiles = [];
+    this.diffStats = {};
     this.selectedFiles = [];
     this.showFilePicker = true;
     this.pastedImages = [];

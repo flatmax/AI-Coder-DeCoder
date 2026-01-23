@@ -62,6 +62,19 @@ export const filePickerStyles = css`
     margin-left: -40px;
     flex-shrink: 0;
   }
+  .diff-stats {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+    font-size: 11px;
+    font-family: monospace;
+  }
+  .diff-stats .additions {
+    color: #7ec699;
+  }
+  .diff-stats .deletions {
+    color: #e94560;
+  }
   .hidden { display: none; }
   .actions { padding: 8px 12px; border-top: 1px solid #0f3460; display: flex; gap: 8px; align-items: center; }
   button { padding: 4px 10px; border: none; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; }

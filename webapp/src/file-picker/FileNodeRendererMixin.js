@@ -92,6 +92,7 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     const filePath = node.path;
     const { statusClass, statusIndicator } = this.getFileStatus(filePath);
     const lineCount = node.lines || 0;
+    const stats = this.diffStats?.[filePath];
 
     return html`
       <div class="node">
@@ -107,6 +108,12 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
             : html`<span class="status-indicator"></span>`
           }
           <span class="name ${statusClass}" @click=${(e) => this.viewFile(filePath, e)}>${node.name}</span>
+          ${stats ? html`
+            <span class="diff-stats">
+              ${stats.additions > 0 ? html`<span class="additions">+${stats.additions}</span>` : ''}
+              ${stats.deletions > 0 ? html`<span class="deletions">-${stats.deletions}</span>` : ''}
+            </span>
+          ` : ''}
         </div>
       </div>
     `;

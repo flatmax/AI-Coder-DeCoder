@@ -14,6 +14,7 @@ export class FilePicker extends MixedBase {
     modified: { type: Array },
     staged: { type: Array },
     untracked: { type: Array },
+    diffStats: { type: Object },
     selected: { type: Object },
     expanded: { type: Object },
     filter: { type: String }
@@ -27,6 +28,7 @@ export class FilePicker extends MixedBase {
     this.modified = [];
     this.staged = [];
     this.untracked = [];
+    this.diffStats = {};
     this.selected = {};
     this.expanded = {};
     this.filter = '';

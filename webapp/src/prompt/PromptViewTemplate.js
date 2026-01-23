@@ -65,6 +65,7 @@ export function renderPromptView(component) {
                 .modified=${component.modifiedFiles}
                 .staged=${component.stagedFiles}
                 .untracked=${component.untrackedFiles}
+                .diffStats=${component.diffStats}
                 @selection-change=${component.handleSelectionChange}
                 @file-view=${component.handleFileView}
               ></file-picker>

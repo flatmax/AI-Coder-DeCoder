@@ -29,6 +29,7 @@ class TreeOperationsMixin:
         try:
             tracked = [f for f in self._repo.git.ls_files().split('\n') if f]
             status = self.get_status()
+            diff_stats = self.get_diff_stats()
             
             root = {'name': self.get_repo_name(), 'children': []}
             
@@ -52,7 +53,8 @@ class TreeOperationsMixin:
                 'tree': root,
                 'modified': status.get('modified_files', []),
                 'staged': status.get('staged_files', []),
-                'untracked': status.get('untracked_files', [])
+                'untracked': status.get('untracked_files', []),
+                'diffStats': diff_stats if not isinstance(diff_stats, dict) or 'error' not in diff_stats else {}
             }
         except Exception as e:
             return self._create_error_response(str(e))

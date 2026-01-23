@@ -143,3 +143,49 @@ class CommitOperationsMixin:
             }
         except Exception as e:
             return self._create_error_response(str(e))
+    
+    def get_diff_stats(self):
+        """
+        Get line change statistics for modified files.
+        
+        Returns:
+            Dict mapping file paths to {additions, deletions} counts
+        """
+        try:
+            stats = {}
+            
+            # Get stats for unstaged changes
+            diff_output = self._repo.git.diff('--numstat')
+            for line in diff_output.split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        additions = int(parts[0]) if parts[0] != '-' else 0
+                        deletions = int(parts[1]) if parts[1] != '-' else 0
+                        file_path = parts[2]
+                        stats[file_path] = {
+                            'additions': additions,
+                            'deletions': deletions
+                        }
+            
+            # Get stats for staged changes
+            staged_output = self._repo.git.diff('--cached', '--numstat')
+            for line in staged_output.split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        additions = int(parts[0]) if parts[0] != '-' else 0
+                        deletions = int(parts[1]) if parts[1] != '-' else 0
+                        file_path = parts[2]
+                        if file_path in stats:
+                            stats[file_path]['additions'] += additions
+                            stats[file_path]['deletions'] += deletions
+                        else:
+                            stats[file_path] = {
+                                'additions': additions,
+                                'deletions': deletions
+                            }
+            
+            return stats
+        except Exception as e:
+            return self._create_error_response(str(e))

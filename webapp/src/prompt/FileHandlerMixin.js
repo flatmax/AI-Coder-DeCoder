@@ -12,6 +12,7 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
         this.modifiedFiles = data.modified || [];
         this.stagedFiles = data.staged || [];
         this.untrackedFiles = data.untracked || [];
+        this.diffStats = data.diffStats || {};
       }
     } catch (e) {
       console.error('Error loading file tree:', e);
