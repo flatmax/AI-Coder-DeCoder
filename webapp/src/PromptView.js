@@ -186,6 +186,20 @@ export class PromptView extends MessageHandler {
     }
   }
 
+  async showTokenReport() {
+    try {
+      const filePaths = this.selectedFiles.length > 0 ? this.selectedFiles : null;
+      const response = await this.call['LiteLLM.get_token_report'](filePaths, null);
+      const report = this.extractResponse(response);
+      
+      // Display the token report as an assistant message
+      this.addMessage('assistant', '```\n' + report + '\n```');
+    } catch (e) {
+      console.error('Error getting token report:', e);
+      this.addMessage('assistant', `Error getting token report: ${e.message}`);
+    }
+  }
+
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
     

@@ -72,6 +72,30 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin):
             self._aider_chat = AiderChat(model=self.model, repo=self.repo)
         return self._aider_chat
     
+    def get_token_report(self, file_paths=None, read_only_files=None):
+        """
+        Get detailed token usage report (like aider's /tokens command).
+        
+        Args:
+            file_paths: Optional list of file paths to include in context
+            read_only_files: Optional list of read-only file paths
+            
+        Returns:
+            Formatted string with token breakdown
+        """
+        aider = self.get_aider_chat()
+        
+        # Add files to context if provided
+        if file_paths:
+            aider.clear_files()
+            for path in file_paths:
+                try:
+                    aider.add_file(path)
+                except FileNotFoundError:
+                    pass  # Skip files that don't exist
+        
+        return aider.get_token_report(read_only_files=read_only_files)
+    
     def parse_edits(self, response_text, file_paths=None):
         """
         Parse a response for search/replace blocks without applying them.

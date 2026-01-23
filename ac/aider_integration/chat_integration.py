@@ -5,6 +5,8 @@ Provides a high-level interface for requesting code changes via LLM
 and applying them using aider's search/replace format.
 """
 
+import os
+
 import litellm as _litellm
 
 from .editor import AiderEditor
@@ -83,6 +85,46 @@ class AiderChat(MessageBuilderMixin):
         if self._context_manager:
             return self._context_manager.get_budget(messages)
         return {"used": 0, "max_input": 128000, "remaining": 128000}
+    
+    def get_token_report(self, read_only_files=None):
+        """
+        Get detailed token usage report (like aider's /tokens command).
+        
+        Args:
+            read_only_files: Optional list of read-only file paths
+            
+        Returns:
+            Formatted string with token breakdown, or error message if no context manager
+        """
+        if not self._context_manager:
+            return "Token report unavailable: no repository configured"
+        
+        # Build system prompt
+        system_prompt = self.editor.get_system_prompt()
+        system_prompt += "\n\n" + self.editor.get_system_reminder()
+        
+        # Get chat files as absolute paths
+        chat_files = []
+        if self.repo:
+            repo_root = self.repo.get_repo_root()
+            for fpath in self.editor.get_file_list():
+                chat_files.append(os.path.join(repo_root, fpath))
+        
+        # Convert read_only_files to absolute paths if provided
+        abs_read_only = []
+        if read_only_files and self.repo:
+            repo_root = self.repo.get_repo_root()
+            for fpath in read_only_files:
+                if os.path.isabs(fpath):
+                    abs_read_only.append(fpath)
+                else:
+                    abs_read_only.append(os.path.join(repo_root, fpath))
+        
+        return self._context_manager.print_tokens(
+            system_prompt=system_prompt,
+            chat_files=chat_files,
+            read_only_files=abs_read_only,
+        )
     
     def request_changes(self, user_request, include_examples=True, images=None, use_repo_map=True):
         """

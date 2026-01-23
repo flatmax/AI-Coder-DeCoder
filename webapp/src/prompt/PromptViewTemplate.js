@@ -12,6 +12,9 @@ export function renderPromptView(component) {
         </div>
         <div class="header-right">
           ${!component.minimized ? html`
+            <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
+              📊 Tokens
+            </button>
             <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
               🗑️ Clear
             </button>
