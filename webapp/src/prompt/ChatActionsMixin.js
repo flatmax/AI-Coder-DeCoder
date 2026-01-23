@@ -1,5 +1,5 @@
 /**
- * Mixin for chat actions (send, clear, token report).
+ * Mixin for chat actions (send, clear, token report, commit).
  */
 export const ChatActionsMixin = (superClass) => class extends superClass {
 
@@ -24,6 +24,67 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     } catch (e) {
       console.error('Error getting token report:', e);
       this.addMessage('assistant', `Error getting token report: ${e.message}`);
+    }
+  }
+
+  async handleCommit() {
+    try {
+      // First, stage all changes
+      this.addMessage('assistant', '📦 Staging all changes...');
+      const stageResponse = await this.call['Repo.stage_all']();
+      const stageResult = this.extractResponse(stageResponse);
+      
+      if (stageResult && stageResult.error) {
+        this.addMessage('assistant', `Error staging changes: ${stageResult.error}`);
+        return;
+      }
+      
+      // Get the staged diff to show what will be committed
+      const diffResponse = await this.call['Repo.get_staged_diff']();
+      const diff = this.extractResponse(diffResponse);
+      
+      if (!diff || (typeof diff === 'object' && diff.error)) {
+        this.addMessage('assistant', `Error getting diff: ${diff?.error || 'No staged changes'}`);
+        return;
+      }
+      
+      if (!diff.trim()) {
+        this.addMessage('assistant', 'No changes to commit.');
+        return;
+      }
+      
+      // Generate commit message
+      this.addMessage('assistant', '🤖 Generating commit message...');
+      const commitMsgResponse = await this.call['LiteLLM.get_commit_message'](diff);
+      const commitMsgResult = this.extractResponse(commitMsgResponse);
+      
+      if (commitMsgResult && commitMsgResult.error) {
+        this.addMessage('assistant', `Error generating commit message: ${commitMsgResult.error}`);
+        return;
+      }
+      
+      const commitMessage = commitMsgResult.message;
+      
+      // Show the generated message and ask for confirmation
+      this.addMessage('assistant', `📝 Generated commit message:\n\`\`\`\n${commitMessage}\n\`\`\`\n\nCommitting...`);
+      
+      // Perform the commit
+      const commitResponse = await this.call['Repo.commit'](commitMessage);
+      const commitResult = this.extractResponse(commitResponse);
+      
+      if (commitResult && commitResult.error) {
+        this.addMessage('assistant', `Error committing: ${commitResult.error}`);
+        return;
+      }
+      
+      this.addMessage('assistant', `✅ Committed successfully!\n\nCommit: \`${commitResult.short_hash}\`\nMessage: ${commitMessage.split('\n')[0]}`);
+      
+      // Refresh the file tree to update status indicators
+      await this.loadFileTree();
+      
+    } catch (e) {
+      console.error('Error during commit:', e);
+      this.addMessage('assistant', `Error during commit: ${e.message}`);
     }
   }
 

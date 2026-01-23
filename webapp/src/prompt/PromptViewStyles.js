@@ -85,6 +85,16 @@ export const promptViewStyles = css`
     color: white !important;
   }
 
+  .clear-btn.commit-btn {
+    border-color: #7ec699 !important;
+    color: #7ec699 !important;
+  }
+
+  .clear-btn.commit-btn:hover {
+    background: #7ec699 !important;
+    color: #1a1a2e !important;
+  }
+
   .main-content {
     display: flex;
     flex: 1;

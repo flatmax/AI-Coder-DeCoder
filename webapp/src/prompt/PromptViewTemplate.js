@@ -21,6 +21,9 @@ export function renderPromptView(component) {
             <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
               📊 Tokens
             </button>
+            <button class="clear-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
+              💾 Commit
+            </button>
             <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
               🗑️ Clear
             </button>
