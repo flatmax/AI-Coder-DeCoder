@@ -5,6 +5,7 @@ export const DragHandlerMixin = (superClass) => class extends superClass {
 
   initDragHandler() {
     this._isDragging = false;
+    this._didDrag = false;
     this._dragStartX = 0;
     this._dragStartY = 0;
     this._dialogStartX = 0;
@@ -22,6 +23,7 @@ export const DragHandlerMixin = (superClass) => class extends superClass {
     if (e.target.tagName === 'BUTTON') return;
     
     this._isDragging = true;
+    this._didDrag = false;
     this._dragStartX = e.clientX;
     this._dragStartY = e.clientY;
     this._dialogStartX = this.dialogX;
@@ -39,14 +41,29 @@ export const DragHandlerMixin = (superClass) => class extends superClass {
     const deltaX = e.clientX - this._dragStartX;
     const deltaY = e.clientY - this._dragStartY;
     
-    this.dialogX = this._dialogStartX + deltaX;
-    this.dialogY = this._dialogStartY + deltaY;
+    // Only count as drag if moved more than 5 pixels
+    if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+      this._didDrag = true;
+    }
+    
+    if (this._didDrag) {
+      this.dialogX = this._dialogStartX + deltaX;
+      this.dialogY = this._dialogStartY + deltaY;
+    }
   }
 
   _handleMouseUp() {
+    const wasDragging = this._isDragging;
+    const didDrag = this._didDrag;
+    
     this._isDragging = false;
     document.removeEventListener('mousemove', this._boundHandleMouseMove);
     document.removeEventListener('mouseup', this._boundHandleMouseUp);
+    
+    // If it was a click (no drag movement), toggle minimize
+    if (wasDragging && !didDrag) {
+      this.toggleMinimize();
+    }
   }
 
   destroyDragHandler() {
