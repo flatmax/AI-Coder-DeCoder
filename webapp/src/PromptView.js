@@ -296,6 +296,32 @@ export class PromptView extends MessageHandler {
 
   handleInput(e) {
     this.inputValue = e.target.value;
+    this._handleAtMention(e.target.value);
+  }
+
+  _handleAtMention(value) {
+    // Find the last @ symbol and extract filter text after it
+    const lastAtIndex = value.lastIndexOf('@');
+    
+    if (lastAtIndex !== -1) {
+      // Get text after @ until space or end of string
+      const afterAt = value.substring(lastAtIndex + 1);
+      const spaceIndex = afterAt.indexOf(' ');
+      const filterText = spaceIndex === -1 ? afterAt : afterAt.substring(0, spaceIndex);
+      
+      // Only activate if @ is recent (no space after the filter text yet)
+      if (spaceIndex === -1 && afterAt.length >= 0) {
+        this.showFilePicker = true;
+        this._setFilePickerFilter(filterText);
+      }
+    }
+  }
+
+  _setFilePickerFilter(filterText) {
+    const filePicker = this.shadowRoot?.querySelector('file-picker');
+    if (filePicker) {
+      filePicker.filter = filterText;
+    }
   }
 
   toggleMinimize() {
