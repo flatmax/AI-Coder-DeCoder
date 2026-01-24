@@ -67,6 +67,7 @@ export class PromptView extends MixedBase {
   connectedCallback() {
     super.connectedCallback();
     this.addClass(this);
+    this.initInputHandler();
     this.initImageHandler();
     this.initDragHandler();
     this.initResizeHandler();

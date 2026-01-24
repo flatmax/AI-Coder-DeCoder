@@ -3,6 +3,74 @@
  */
 export const InputHandlerMixin = (superClass) => class extends superClass {
 
+  initInputHandler() {
+    this._historyIndex = -1;  // -1 means we're at the draft/current input
+    this._inputDraft = '';     // Preserves unsent content when navigating history
+  }
+
+  _getUserMessageHistory() {
+    // Get all user messages from messageHistory
+    return this.messageHistory
+      .filter(msg => msg.role === 'user')
+      .map(msg => msg.content);
+  }
+
+  _navigateHistory(direction) {
+    const userMessages = this._getUserMessageHistory();
+    if (userMessages.length === 0) return false;
+
+    const textarea = this.shadowRoot?.querySelector('textarea');
+    if (!textarea) return false;
+
+    // direction: -1 = up (older), 1 = down (newer)
+    // _historyIndex: -1 = draft, 0 = most recent message, 1 = second most recent, etc.
+
+    // If we're at the draft and trying to go down, do nothing
+    if (direction === 1 && this._historyIndex === -1) {
+      return false;
+    }
+
+    // If we're at the oldest message and trying to go up, do nothing
+    if (direction === -1 && this._historyIndex === userMessages.length - 1) {
+      return false;
+    }
+
+    // Save current input as draft if we're just starting to navigate
+    if (this._historyIndex === -1 && direction === -1) {
+      this._inputDraft = this.inputValue;
+    }
+
+    // Navigate: up arrow increases index (older), down arrow decreases (newer)
+    this._historyIndex -= direction;
+
+    // Update input value
+    if (this._historyIndex === -1) {
+      // Back to draft
+      this.inputValue = this._inputDraft;
+    } else {
+      // Show historical message (index from the end)
+      const historyPosition = userMessages.length - 1 - this._historyIndex;
+      this.inputValue = userMessages[historyPosition];
+    }
+
+    // Update textarea and resize
+    this.updateComplete.then(() => {
+      if (textarea) {
+        textarea.value = this.inputValue;
+        this._autoResizeTextarea(textarea);
+        // Move cursor to end
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+      }
+    });
+
+    return true;
+  }
+
+  _resetHistoryNavigation() {
+    this._historyIndex = -1;
+    this._inputDraft = '';
+  }
+
   _autoResizeTextarea(textarea) {
     if (!textarea) return;
     
@@ -44,6 +112,31 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this.sendMessage();
+      this._resetHistoryNavigation();
+      return;
+    }
+
+    const textarea = e.target;
+    
+    // Up arrow - navigate to older messages
+    if (e.key === 'ArrowUp') {
+      // Only navigate if cursor is at the start of the textarea
+      if (textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+        if (this._navigateHistory(-1)) {
+          e.preventDefault();
+        }
+      }
+    }
+    
+    // Down arrow - navigate to newer messages
+    if (e.key === 'ArrowDown') {
+      // Only navigate if cursor is at the end of the textarea
+      if (textarea.selectionStart === textarea.value.length && 
+          textarea.selectionEnd === textarea.value.length) {
+        if (this._navigateHistory(1)) {
+          e.preventDefault();
+        }
+      }
     }
   }
 
