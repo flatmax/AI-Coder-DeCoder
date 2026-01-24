@@ -72,6 +72,10 @@ class EditApplierMixin:
                 content = ""
                 is_new_file = True
             
+            # Create parent directories if needed (before do_replace which may touch the file)
+            if is_new_file:
+                Path(filename).parent.mkdir(parents=True, exist_ok=True)
+            
             # Apply the replacement
             new_content = do_replace(filename, content, original, updated, self.fence)
             
@@ -80,8 +84,9 @@ class EditApplierMixin:
                 if not dry_run:
                     # Update in-memory content
                     self.files[filename] = new_content
-                    # Write to disk
-                    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+                    # Write to disk (parent dirs already created for new files)
+                    if not is_new_file:
+                        Path(filename).parent.mkdir(parents=True, exist_ok=True)
                     Path(filename).write_text(new_content)
                     # Track new files for git add
                     if is_new_file:
