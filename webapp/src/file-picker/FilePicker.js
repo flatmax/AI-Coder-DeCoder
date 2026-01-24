@@ -1,11 +1,14 @@
-import { LitElement } from 'lit';
+import { LitElement, html } from 'lit';
 import { filePickerStyles } from './FilePickerStyles.js';
 import { renderFilePicker } from './FilePickerTemplate.js';
 import { FileSelectionMixin } from './FileSelectionMixin.js';
 import { FileNodeRendererMixin } from './FileNodeRendererMixin.js';
+import { FileContextMenuMixin } from './FileContextMenuMixin.js';
 
-const MixedBase = FileNodeRendererMixin(
-  FileSelectionMixin(LitElement)
+const MixedBase = FileContextMenuMixin(
+  FileNodeRendererMixin(
+    FileSelectionMixin(LitElement)
+  )
 );
 
 export class FilePicker extends MixedBase {
@@ -79,7 +82,10 @@ export class FilePicker extends MixedBase {
   }
 
   render() {
-    return renderFilePicker(this);
+    return html`
+      ${renderFilePicker(this)}
+      ${this.renderContextMenu()}
+    `;
   }
 }
 

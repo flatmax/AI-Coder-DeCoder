@@ -86,4 +86,32 @@ export const filePickerStyles = css`
   button { padding: 4px 10px; border: none; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; }
   button:hover { background: #1a3a6e; }
   .count { margin-left: auto; color: #7ec699; font-size: 12px; }
+  
+  /* Context Menu */
+  .context-menu {
+    position: fixed;
+    background: #1e1e2e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 4px 0;
+    min-width: 160px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+  }
+  .context-menu-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    color: #ccc;
+  }
+  .context-menu-item:hover {
+    background: #0f3460;
+    color: #fff;
+  }
+  .context-menu-item.danger {
+    color: #e94560;
+  }
+  .context-menu-item.danger:hover {
+    background: #3d1a2a;
+    color: #ff6b8a;
+  }
 `;

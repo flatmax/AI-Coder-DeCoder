@@ -3,6 +3,55 @@
  */
 export const FileHandlerMixin = (superClass) => class extends superClass {
   
+  connectedCallback() {
+    super.connectedCallback();
+    this._boundHandleGitOperation = this.handleGitOperation.bind(this);
+    this.addEventListener('git-operation', this._boundHandleGitOperation);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.removeEventListener('git-operation', this._boundHandleGitOperation);
+  }
+
+  async handleGitOperation(e) {
+    const { operation, paths } = e.detail;
+    
+    try {
+      switch (operation) {
+        case 'stage':
+          await this.call['Repo.stage_files'](paths);
+          break;
+        case 'stage-dir':
+          await this.call['Repo.stage_files'](paths);
+          break;
+        case 'unstage':
+          await this.call['Repo.unstage_files'](paths);
+          break;
+        case 'discard':
+          await this.call['Repo.discard_changes'](paths);
+          break;
+        case 'delete':
+          await this.call['Repo.delete_file'](paths[0]);
+          break;
+        case 'create-file':
+          await this.call['Repo.create_file'](paths[0], '');
+          break;
+        case 'create-dir':
+          await this.call['Repo.create_directory'](paths[0]);
+          break;
+        default:
+          console.warn('Unknown git operation:', operation);
+          return;
+      }
+      
+      // Reload the file tree to reflect changes
+      await this.loadFileTree();
+    } catch (err) {
+      console.error(`Git operation "${operation}" failed:`, err);
+    }
+  }
+
   async loadFileTree() {
     try {
       const response = await this.call['Repo.get_file_tree']();

@@ -71,7 +71,7 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     
     return html`
       <div class="node">
-        <div class="row">
+        <div class="row" @contextmenu=${(e) => this.handleContextMenu(e, currentPath, 'dir', node)}>
           <input 
             type="checkbox" 
             .checked=${isFullySelected}
@@ -103,7 +103,7 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
 
     return html`
       <div class="node">
-        <div class="row">
+        <div class="row" @contextmenu=${(e) => this.handleContextMenu(e, filePath, 'file')}>
           <span class="line-count ${lineCountClass}">${lineCount}</span>
           <input 
             type="checkbox" 
