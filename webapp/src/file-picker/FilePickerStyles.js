@@ -62,6 +62,12 @@ export const filePickerStyles = css`
     margin-left: -40px;
     flex-shrink: 0;
   }
+  .line-count.warning {
+    color: #f0a500;
+  }
+  .line-count.danger {
+    color: #e94560;
+  }
   .diff-stats {
     display: flex;
     gap: 4px;

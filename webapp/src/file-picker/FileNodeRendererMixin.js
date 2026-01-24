@@ -88,16 +88,23 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     `;
   }
 
+  getLineCountClass(lineCount) {
+    if (lineCount > 170) return 'danger';
+    if (lineCount > 130) return 'warning';
+    return '';
+  }
+
   renderFileNode(node) {
     const filePath = node.path;
     const { statusClass, statusIndicator } = this.getFileStatus(filePath);
     const lineCount = node.lines || 0;
+    const lineCountClass = this.getLineCountClass(lineCount);
     const stats = this.diffStats?.[filePath];
 
     return html`
       <div class="node">
         <div class="row">
-          <span class="line-count">${lineCount}</span>
+          <span class="line-count ${lineCountClass}">${lineCount}</span>
           <input 
             type="checkbox" 
             .checked=${!!this.selected[filePath]} 
