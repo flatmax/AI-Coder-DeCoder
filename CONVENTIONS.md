@@ -54,3 +54,21 @@ updated(changedProperties): Invoked after every completed component update.
 updateComplete: A promise that resolves when the element has finished its current update cycle.
 
 The reactive update cycle is asynchronous, batching property changes before the browser's next paint, ensuring efficient rendering.
+
+JRPC-OO Class Registration                                                                                                                                                                                          
+                                                                                                                                                                                                                      
+  When using @flatmax/jrpc-oo to expose JavaScript classes to the Python backend, always pass the class name as a string to addClass():                                                                               
+                                                                                                                                                                                                                      
+  // CORRECT - survives minification                                                                                                                                                                                  
+  this.addClass(this, 'PromptView');                                                                                                                                                                                  
+                                                                                                                                                                                                                      
+  // WRONG - breaks in production builds                                                                                                                                                                              
+  this.addClass(this);                                                                                                                                                                                                
+                                                                                                                                                                                                                      
+  Why: Production bundlers (Vite/Rollup) minify class names (e.g., PromptView → vi). The JRPC library uses constructor.name to register methods like PromptView.streamChunk. When the server calls back to            
+  PromptView.streamChunk, it won't find it because the method was registered as vi.streamChunk.                                                                                                                       
+                                                                                                                                                                                                                      
+  Applies to: Any class that:                                                                                                                                                                                         
+  1. Extends JRPCClient (or uses JRPC mixins)                                                                                                                                                                         
+  2. Has methods the Python backend calls via callbacks                                                                                                                                                               
+  3. Will be included in production builds
