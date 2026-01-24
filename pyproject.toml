@@ -18,6 +18,9 @@ dependencies = [
     "aider-chat @ git+https://github.com/Aider-AI/aider.git@59250e070e6472967b9c83069baa33eb32d69faf",
 ]
 
+[project.scripts]
+ac-dc = "ac.dc:main"
+
 [project.optional-dependencies]
 dev = [
     "playwright",

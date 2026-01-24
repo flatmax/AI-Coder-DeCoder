@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from port_utils import is_port_in_use
+from ac.port_utils import is_port_in_use
 
 
 class WebappProcessManager:

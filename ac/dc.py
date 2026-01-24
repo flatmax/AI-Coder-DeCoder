@@ -5,10 +5,10 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
 from jrpc_oo import JRPCServer
-from llm import LiteLLM
-from repo import Repo
-from port_utils import find_available_port
-from webapp_server import start_npm_dev_server
+from ac.llm import LiteLLM
+from ac.repo import Repo
+from ac.port_utils import find_available_port
+from ac.webapp_server import start_npm_dev_server
 
 
 def parse_args():
@@ -74,6 +74,10 @@ async def main_starter_async(args):
     await server.server.serve_forever()
 
 
-if __name__ == '__main__':
+def main():
     args = parse_args()
     asyncio.run(main_starter_async(args))
+
+
+if __name__ == '__main__':
+    main()

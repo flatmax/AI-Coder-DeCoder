@@ -78,7 +78,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin):
     def get_aider_chat(self):
         """Get or create the AiderChat instance for edit operations."""
         if self._aider_chat is None:
-            from aider_integration.chat_integration import AiderChat
+            from ac.aider_integration.chat_integration import AiderChat
             self._aider_chat = AiderChat(model=self.model, repo=self.repo, token_tracker=self)
         return self._aider_chat
     
