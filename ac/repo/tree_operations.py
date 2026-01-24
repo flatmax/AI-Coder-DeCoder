@@ -31,9 +31,13 @@ class TreeOperationsMixin:
             status = self.get_status()
             diff_stats = self.get_diff_stats()
             
+            # Combine tracked and untracked files
+            untracked = status.get('untracked_files', [])
+            all_files = set(tracked) | set(untracked)
+            
             root = {'name': self.get_repo_name(), 'children': []}
             
-            for file_path in sorted(tracked):
+            for file_path in sorted(all_files):
                 parts = file_path.split('/')
                 current = root
                 

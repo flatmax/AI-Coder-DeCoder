@@ -56,7 +56,6 @@ dist/
 .DS_Store
 *.local
 *.log
-webapp/package-lock.json
 
 # IDE
 .idea/
