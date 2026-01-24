@@ -16,22 +16,27 @@ def parse_args():
     parser.add_argument('--server-port', type=int, default=18080,
                         help='JRPC server port (default: 18080)')
     parser.add_argument('--webapp-port', type=int, default=18999,
-                        help='Webapp port (default: 18999)')
+                        help='Webapp port for local dev server (default: 18999, only used with --dev)')
     parser.add_argument('--no-browser', action='store_true',
                         help='Do not open browser automatically')
     parser.add_argument('--repo-path', type=str, default=None,
                         help='Path to git repository (default: current directory)')
     parser.add_argument('--dev', action='store_true',
-                        help='Use build+preview mode for debugging (runs npm build && npm preview)')
+                        help='Run local Vite dev server instead of using hosted webapp')
+    parser.add_argument('--preview', action='store_true',
+                        help='Build and run local preview server (for testing production builds)')
     return parser.parse_args()
 
 
-def get_browser_url(webapp_port, server_port):
-    return f"http://localhost:{webapp_port}/?port={server_port}"
+def get_browser_url(server_port, webapp_port=None, dev_mode=False):
+    if dev_mode:
+        return f"http://localhost:{webapp_port}/?port={server_port}"
+    else:
+        return f"https://flatmax.github.io/AI-Coder-DeCoder/?port={server_port}"
 
 
-def open_browser(webapp_port, server_port):
-    url = get_browser_url(webapp_port, server_port)
+def open_browser(server_port, webapp_port=None, dev_mode=False):
+    url = get_browser_url(server_port, webapp_port, dev_mode)
     webbrowser.open(url)
 
 
@@ -46,14 +51,26 @@ async def find_ports_async(server_start_port, webapp_start_port):
 
 
 async def main_starter_async(args):
-    actual_server_port, actual_webapp_port = await find_ports_async(args.server_port, args.webapp_port)
+    local_mode = args.dev or args.preview
+    
+    # Only need webapp port if running locally
+    if local_mode:
+        actual_server_port, actual_webapp_port = await find_ports_async(args.server_port, args.webapp_port)
+    else:
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            actual_server_port = await loop.run_in_executor(executor, find_available_port, args.server_port)
+        actual_webapp_port = None
 
     print(f"Server port: {actual_server_port}")
-    print(f"Webapp port: {actual_webapp_port}")
     print(f"WebSocket URI: ws://localhost:{actual_server_port}")
-    print(f"Browser URL: {get_browser_url(actual_webapp_port, actual_server_port)}")
+    print(f"Browser URL: {get_browser_url(actual_server_port, actual_webapp_port, local_mode)}")
     if args.dev:
-        print("Dev mode: using build+preview (for debugging)")
+        print(f"Webapp port: {actual_webapp_port}")
+        print("Dev mode: running local Vite dev server")
+    elif args.preview:
+        print(f"Webapp port: {actual_webapp_port}")
+        print("Preview mode: building and running local preview server")
 
     repo = Repo(args.repo_path)
     
@@ -63,13 +80,14 @@ async def main_starter_async(args):
     llm.server = server  # Give LiteLLM access to server for callbacks
     server.add_class(llm)
 
-    webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
-
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port, args.dev)
+    if local_mode:
+        webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
+        loop = asyncio.get_event_loop()
+        # preview mode builds first, dev mode just runs start
+        await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port, args.preview)
 
     if not args.no_browser:
-        open_browser(actual_webapp_port, actual_server_port)
+        open_browser(actual_server_port, actual_webapp_port, local_mode)
 
     print('starting server...')
     await server.start()

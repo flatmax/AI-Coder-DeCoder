@@ -87,9 +87,32 @@ For AWS Bedrock:
 python ac/dc.py
 ```
 
-Options:
+This starts the backend server and opens the hosted webapp in your browser. The webapp connects to your local server via WebSocket.
+
+### Run Modes
+
+**Standard mode** (default):
+```bash
+python ac/dc.py
+```
+Uses the hosted webapp at `https://flatmax.github.io/AI-Coder-DeCoder/`. No local webapp build required - just install the Python package and go.
+
+**Dev mode** (for webapp development):
+```bash
+python ac/dc.py --dev
+```
+Runs a local Vite dev server with hot module reloading. Use this when developing the webapp frontend.
+
+**Preview mode** (for testing production builds):
+```bash
+python ac/dc.py --preview
+```
+Builds the webapp and serves the production bundle locally. Use this to test that production builds work correctly before deploying.
+
+### Options
+
 - `--server-port PORT` - JRPC WebSocket server port (default: 18080)
-- `--webapp-port PORT` - Webapp dev server port (default: 18999)
+- `--webapp-port PORT` - Local webapp port (default: 18999, only used with `--dev` or `--preview`)
 - `--no-browser` - Don't auto-open browser
 - `--repo-path PATH` - Path to git repository (default: current directory)
 

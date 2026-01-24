@@ -53,7 +53,7 @@ var crypto = self.crypto;`
 export default defineConfig({
   plugins: [jrpcFixes()],
   // Use repo name as base path for GitHub Pages, or '/' for local dev
-  base: process.env.GITHUB_ACTIONS ? '/ac-dc/' : '/',
+  base: process.env.GITHUB_ACTIONS ? '/AI-Coder-DeCoder/' : '/',
   optimizeDeps: {
     exclude: ['@flatmax/jrpc-oo']
   },
