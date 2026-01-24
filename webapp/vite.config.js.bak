@@ -1,14 +1,13 @@
 import { defineConfig } from 'vite';
 
-// Fix @flatmax/jrpc-oo and jrpc for modern bundlers
-// The library uses Window globals and browser/node detection that doesn't work with ESM bundlers
-function jrpcFixes() {
+// Plugin to fix jrpc-oo for modern bundlers
+function jrpcOoFix() {
   return {
-    name: 'jrpc-fixes',
+    name: 'jrpc-oo-fix',
     transform(code, id) {
-      if (!id.includes('@flatmax/jrpc-oo') && !id.includes('jrpc/jrpc.js')) return null;
+      if (!id.includes('@flatmax/jrpc-oo')) return;
 
-      // JRPCCommon.js: Replace browser/node detection with direct requires
+      // JRPCCommon.js: Use direct requires instead of Window globals
       if (id.endsWith('JRPCCommon.js')) {
         code = code.replace(
           /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\{[\s\S]*?\} else \{[\s\S]*?var LitElement = Window\.LitElement;[\s\S]*?\}/,
@@ -24,7 +23,7 @@ var crypto = self.crypto;`
         );
       }
 
-      // jrpc-client.js: Import JRPCCommon directly instead of Window global
+      // jrpc-client.js: Import JRPCCommon directly
       if (id.endsWith('jrpc-client.js')) {
         code = code.replace(
           /let JRPCCommon = Window\.JRPCCommon;/,
@@ -32,16 +31,19 @@ var crypto = self.crypto;`
         );
       }
 
-      // JRPCExport.js: Fix side-effect import to proper default import
-      if (id.endsWith('JRPCExport.js')) {
-        code = code.replace(/import 'jrpc\/jrpc\.min\.js';/, `import JRPC from 'jrpc';`);
+      // ExposeClass.js: Force module.exports
+      if (id.endsWith('ExposeClass.js')) {
+        code = code.replace(
+          /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\s*\n?\s*module\.exports = ExposeClass;\s*\n?\s*else\s*\n?\s*Window\.ExposeClass = ExposeClass;/,
+          'module.exports = ExposeClass;'
+        );
       }
 
-      // jrpc: Polyfill setImmediate (timers module not available in browser)
-      if (id.includes('jrpc/jrpc.js')) {
+      // JRPCExport.js: Import JRPC properly
+      if (id.endsWith('JRPCExport.js')) {
         code = code.replace(
-          /global\.setImmediate = require\('timers'\)\.setImmediate;/,
-          `global.setImmediate = typeof setImmediate !== 'undefined' ? setImmediate : (fn, ...args) => setTimeout(() => fn(...args), 0);`
+          /import 'jrpc\/jrpc\.min\.js';\s*\n?\s*Window\.JRPC = JRPC;/,
+          `import JRPC from 'jrpc';\nWindow.JRPC = JRPC;`
         );
       }
 
@@ -50,8 +52,25 @@ var crypto = self.crypto;`
   };
 }
 
+// Plugin to polyfill setImmediate for jrpc
+function setImmediatePolyfill() {
+  return {
+    name: 'setimmediate-polyfill',
+    transform(code, id) {
+      if (id.includes('jrpc/jrpc.js')) {
+        // Replace the timers require with inline polyfill
+        code = code.replace(
+          /global\.setImmediate = require\('timers'\)\.setImmediate;/,
+          `global.setImmediate = typeof setImmediate !== 'undefined' ? setImmediate : (fn, ...args) => setTimeout(() => fn(...args), 0);`
+        );
+      }
+      return code;
+    }
+  };
+}
+
 export default defineConfig({
-  plugins: [jrpcFixes()],
+  plugins: [jrpcOoFix(), setImmediatePolyfill()],
   optimizeDeps: {
     exclude: ['@flatmax/jrpc-oo']
   },
