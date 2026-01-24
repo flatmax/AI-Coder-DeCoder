@@ -10,6 +10,7 @@ import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
 import { ResizeHandlerMixin } from './prompt/ResizeHandlerMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import './file-picker/FilePicker.js';
+import './history-browser/HistoryBrowser.js';
 
 const MixedBase = StreamingMixin(
   ResizeHandlerMixin(
@@ -39,7 +40,8 @@ export class PromptView extends MixedBase {
     showFilePicker: { type: Boolean },
     pastedImages: { type: Array },
     dialogX: { type: Number },
-    dialogY: { type: Number }
+    dialogY: { type: Number },
+    showHistoryBrowser: { type: Boolean }
   };
 
   static styles = promptViewStyles;
@@ -59,9 +61,36 @@ export class PromptView extends MixedBase {
     this.pastedImages = [];
     this.dialogX = null;
     this.dialogY = null;
+    this.showHistoryBrowser = false;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
+  }
+
+  toggleHistoryBrowser() {
+    this.showHistoryBrowser = !this.showHistoryBrowser;
+    if (this.showHistoryBrowser) {
+      this.updateComplete.then(() => {
+        const historyBrowser = this.shadowRoot?.querySelector('history-browser');
+        if (historyBrowser) {
+          historyBrowser.rpcCall = this.call;
+          historyBrowser.show();
+        }
+      });
+    }
+  }
+
+  handleHistoryCopyToPrompt(e) {
+    const { content } = e.detail;
+    this.inputValue = content;
+    this.showHistoryBrowser = false;
+    
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.focus();
+      }
+    });
   }
 
   connectedCallback() {

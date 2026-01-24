@@ -27,6 +27,11 @@ export function renderPromptView(component) {
   const dialogStyle = [positionStyle, resizeStyle].filter(Boolean).join('; ');
   
   return html`
+    ${component.showHistoryBrowser ? html`
+      <history-browser
+        @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}
+      ></history-browser>
+    ` : ''}
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''} ${isDragged ? 'dragged' : ''}"
          style=${dialogStyle}>
       ${renderResizeHandles(component)}
@@ -46,6 +51,9 @@ export function renderPromptView(component) {
         </div>
         <div class="header-right">
           ${!component.minimized ? html`
+            <button class="clear-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
+              📜 History
+            </button>
             <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
               📊 Tokens
             </button>

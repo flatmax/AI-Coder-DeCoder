@@ -59,6 +59,13 @@ class StreamingMixin:
         Returns:
             Dict with status: "started" or error
         """
+        # Store user message in history immediately
+        self.store_user_message(
+            content=user_prompt,
+            images=images,
+            files=file_paths
+        )
+        
         # Start streaming in background task
         asyncio.create_task(self._stream_chat(
             request_id, user_prompt, file_paths, images,
@@ -115,6 +122,12 @@ class StreamingMixin:
             
             # If cancelled, send completion with cancelled flag and return early
             if was_cancelled:
+                # Still store the partial assistant message
+                self.store_assistant_message(
+                    content=full_content + "\n\n*[stopped]*",
+                    files_modified=None
+                )
+                
                 await self._send_stream_complete(request_id, {
                     "response": full_content,
                     "cancelled": True,
@@ -157,6 +170,13 @@ class StreamingMixin:
                 result["passed"] = []
                 result["failed"] = []
                 result["content"] = {}
+            
+            # Store assistant message in history
+            files_modified = [edit[0] for edit in result.get("passed", [])]
+            self.store_assistant_message(
+                content=full_content,
+                files_modified=files_modified if files_modified else None
+            )
             
             await self._send_stream_complete(request_id, result)
             

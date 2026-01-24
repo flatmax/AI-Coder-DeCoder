@@ -16,6 +16,7 @@ class Repo(FileOperationsMixin, TreeOperationsMixin, CommitOperationsMixin, Sear
         self.path = path or os.getcwd()
         self._repo = None
         self._init_repo()
+        self._ensure_aicoder_gitignore()
     
     def _init_repo(self):
         """Initialize the GitPython Repo object."""
@@ -48,3 +49,32 @@ class Repo(FileOperationsMixin, TreeOperationsMixin, CommitOperationsMixin, Sear
     def _create_error_response(self, message):
         """Create a standardized error response."""
         return {'error': message}
+    
+    def _ensure_aicoder_gitignore(self):
+        """Ensure .aicoder/history.jsonl is in .gitignore."""
+        gitignore_path = os.path.join(self.get_repo_root(), '.gitignore')
+        entry = '.aicoder/history.jsonl'
+        
+        # Check if entry already exists
+        if os.path.exists(gitignore_path):
+            try:
+                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if entry in content:
+                        return  # Already present
+            except Exception:
+                pass
+        
+        # Append entry to .gitignore
+        try:
+            with open(gitignore_path, 'a', encoding='utf-8') as f:
+                # Add newline if file doesn't end with one
+                if os.path.exists(gitignore_path):
+                    with open(gitignore_path, 'r', encoding='utf-8') as rf:
+                        content = rf.read()
+                        if content and not content.endswith('\n'):
+                            f.write('\n')
+                f.write(f'{entry}\n')
+            print(f"📝 Added {entry} to .gitignore")
+        except Exception as e:
+            print(f"Warning: Could not update .gitignore: {e}")

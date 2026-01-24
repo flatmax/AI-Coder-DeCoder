@@ -41,6 +41,10 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       const response = await this.call['LiteLLM.clear_history']();
       this.extractResponse(response);
       this.messageHistory = [];
+      // Close history browser if open
+      if (this.showHistoryBrowser) {
+        this.showHistoryBrowser = false;
+      }
       this.addMessage('assistant', 'Context cleared. Starting fresh conversation.');
     } catch (e) {
       console.error('Error clearing context:', e);

@@ -2,9 +2,10 @@ from .config import ConfigMixin
 from .file_context import FileContextMixin
 from .chat import ChatMixin
 from .streaming import StreamingMixin
+from .history_mixin import HistoryMixin
 
 
-class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin):
+class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
     """LiteLLM wrapper for AI completions with file context support."""
     
     def __init__(self, repo=None, config_path=None):
@@ -17,6 +18,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin):
         """
         self.repo = repo
         self.conversation_history = []
+        
+        # Initialize history store
+        self._init_history_store()
         
         # Token usage tracking
         self._total_prompt_tokens = 0
@@ -69,10 +73,14 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin):
         return "pong"
     
     def clear_history(self):
-        """Clear the conversation history."""
+        """Clear the conversation history and start a new history session."""
         self.conversation_history = []
         if self._aider_chat:
             self._aider_chat.clear_history()
+        # Start a new history session
+        if self._history_store:
+            new_session = self._history_store.new_session()
+            print(f"📜 New history session: {new_session}")
         return "Conversation history cleared"
     
     def get_aider_chat(self):

@@ -64,3 +64,4 @@ webapp/package-lock.json
 *.swp
 *.swo
 *~
+.aicoder/history.jsonl
