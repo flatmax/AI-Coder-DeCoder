@@ -68,6 +68,7 @@ export function renderPromptView(component) {
                 .diffStats=${component.diffStats}
                 @selection-change=${component.handleSelectionChange}
                 @file-view=${component.handleFileView}
+                @copy-path-to-prompt=${component.handleCopyPathToPrompt}
               ></file-picker>
             </div>
           ` : ''}

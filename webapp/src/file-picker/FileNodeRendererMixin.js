@@ -26,6 +26,16 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     }));
   }
 
+  copyPathToPrompt(filePath, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    this.dispatchEvent(new CustomEvent('copy-path-to-prompt', {
+      detail: { path: filePath },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
   getFileStatus(filePath) {
     const isModified = this.modified.includes(filePath);
     const isStaged = this.staged.includes(filePath);
@@ -114,7 +124,11 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
             ? html`<span class="status-indicator ${statusClass}">${statusIndicator}</span>` 
             : html`<span class="status-indicator"></span>`
           }
-          <span class="name ${statusClass}" @click=${(e) => this.viewFile(filePath, e)}>${node.name}</span>
+          <span class="name ${statusClass}" 
+                @click=${(e) => this.viewFile(filePath, e)}
+                @auxclick=${(e) => { if (e.button === 1) { e.preventDefault(); this.copyPathToPrompt(filePath, e); } }}
+                @mousedown=${(e) => { if (e.button === 1) e.preventDefault(); }}
+                @mouseup=${(e) => { if (e.button === 1) e.preventDefault(); }}>${node.name}</span>
           ${stats ? html`
             <span class="diff-stats">
               ${stats.additions > 0 ? html`<span class="additions">+${stats.additions}</span>` : ''}

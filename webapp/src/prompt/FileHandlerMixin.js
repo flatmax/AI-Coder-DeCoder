@@ -79,6 +79,25 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
     this.selectedFiles = e.detail;
   }
 
+  handleCopyPathToPrompt(e) {
+    const { path } = e.detail;
+    if (!path) return;
+    
+    // Append the path to the current input value
+    const separator = this.inputValue && !this.inputValue.endsWith(' ') ? ' ' : '';
+    this.inputValue = this.inputValue + separator + path;
+    
+    // Focus the textarea
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.focus();
+        // Move cursor to end
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+      }
+    });
+  }
+
   async handleFileView(e) {
     const { path } = e.detail;
     try {
