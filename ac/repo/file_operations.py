@@ -201,3 +201,28 @@ class FileOperationsMixin:
                 return b'\x00' in chunk
         except Exception:
             return False
+    
+    def write_file(self, file_path, content):
+        """
+        Write content to a file in the repository.
+        
+        Args:
+            file_path: Path to file relative to repo root
+            content: File content to write
+            
+        Returns:
+            Dict with success status or error
+        """
+        try:
+            full_path = os.path.join(self.get_repo_root(), file_path)
+            
+            # Create parent directories if needed
+            parent_dir = os.path.dirname(full_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return {"success": True, "path": file_path}
+        except Exception as e:
+            return self._create_error_response(str(e))

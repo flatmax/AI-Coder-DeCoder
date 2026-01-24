@@ -22,6 +22,46 @@ export const diffViewerStyles = css`
     min-height: 35px;
   }
 
+  .tabs-left {
+    display: flex;
+    flex: 1;
+    overflow-x: auto;
+  }
+
+  .tabs-right {
+    display: flex;
+    align-items: center;
+    padding-right: 8px;
+  }
+
+  .save-btn {
+    background: #0f3460;
+    color: #eee;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .save-btn:hover:not(:disabled) {
+    background: #1a3a6e;
+  }
+
+  .save-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .save-btn.dirty {
+    background: #e94560;
+    color: #fff;
+  }
+
+  .save-btn.dirty:hover {
+    background: #ff5a7a;
+  }
+
   .file-tab {
     padding: 8px 16px;
     background: transparent;

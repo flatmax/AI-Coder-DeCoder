@@ -12,7 +12,8 @@ export class DiffViewer extends MixedBase {
   static properties = {
     files: { type: Array },
     selectedFile: { type: String },
-    visible: { type: Boolean }
+    visible: { type: Boolean },
+    isDirty: { type: Boolean }
   };
 
   static styles = diffViewerStyles;
@@ -22,6 +23,7 @@ export class DiffViewer extends MixedBase {
     this.files = [];
     this.selectedFile = null;
     this.visible = false;
+    this.isDirty = false;
     this.initDiffEditor();
   }
 
@@ -46,6 +48,14 @@ export class DiffViewer extends MixedBase {
     
     if (changedProperties.has('selectedFile') && this.selectedFile && this._editor) {
       this.showDiff(this.selectedFile);
+    }
+
+    if (changedProperties.has('isDirty')) {
+      this.dispatchEvent(new CustomEvent('isDirty-changed', {
+        detail: { isDirty: this.isDirty },
+        bubbles: true,
+        composed: true
+      }));
     }
   }
 

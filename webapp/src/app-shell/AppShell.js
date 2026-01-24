@@ -5,7 +5,7 @@ import '../PromptView.js';
 export class AppShell extends LitElement {
   static properties = {
     diffFiles: { type: Array },
-    showDiff: { type: Boolean }
+    showDiff: { type: Boolean },
   };
 
   static styles = css`
@@ -117,6 +117,32 @@ export class AppShell extends LitElement {
     }
   }
 
+  async handleFileSave(e) {
+    const { path, content } = e.detail;
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (promptView && promptView.call) {
+      try {
+        await promptView.call['Repo.write_file'](path, content);
+      } catch (err) {
+        console.error('Failed to save file:', err);
+      }
+    }
+  }
+
+  async handleFilesSave(e) {
+    const { files } = e.detail;
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (promptView && promptView.call) {
+      for (const file of files) {
+        try {
+          await promptView.call['Repo.write_file'](file.path, file.content);
+        } catch (err) {
+          console.error('Failed to save file:', file.path, err);
+        }
+      }
+    }
+  }
+
   render() {
     return html`
       <div class="app-container">
@@ -136,6 +162,8 @@ export class AppShell extends LitElement {
             <diff-viewer
               .files=${this.diffFiles}
               .visible=${true}
+              @file-save=${this.handleFileSave}
+              @files-save=${this.handleFilesSave}
             ></diff-viewer>
           </div>
         </div>
