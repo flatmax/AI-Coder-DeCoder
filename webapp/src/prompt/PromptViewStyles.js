@@ -132,6 +132,14 @@ export const promptViewStyles = css`
     overflow: hidden;
   }
 
+  .messages-wrapper {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
   .messages {
     flex: 1;
     overflow-y: auto;
@@ -139,6 +147,31 @@ export const promptViewStyles = css`
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .scroll-to-bottom-btn {
+    position: absolute;
+    bottom: 12px;
+    right: 20px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #e94560;
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, transform 0.2s;
+  }
+
+  .scroll-to-bottom-btn:hover {
+    background: #ff6b6b;
+    transform: scale(1.1);
   }
 
   .image-preview-area {

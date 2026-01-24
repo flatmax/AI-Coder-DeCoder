@@ -3,19 +3,51 @@ import { JRPCClient } from '@flatmax/jrpc-oo';
 export class MessageHandler extends JRPCClient {
   static properties = {
     serverURI: { type: String },
-    messageHistory: { type: Array }
+    messageHistory: { type: Array },
+    _showScrollButton: { type: Boolean, state: true }
   };
 
   constructor() {
     super();
     this.messageHistory = [];
     this._messageId = 0;
+    this._autoScrollPaused = false;
+    this._showScrollButton = false;
+    this._boundHandleScroll = this._handleScroll.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     if (this.port) {
       this.serverURI = `ws://localhost:${this.port}`;
+    }
+  }
+
+  firstUpdated() {
+    super.firstUpdated?.();
+    const container = this.shadowRoot?.querySelector('#messages-container');
+    if (container) {
+      container.addEventListener('scroll', this._boundHandleScroll);
+    }
+  }
+
+  _handleScroll() {
+    const container = this.shadowRoot?.querySelector('#messages-container');
+    if (!container) return;
+    
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const isAtBottom = distanceFromBottom < 50; // 50px threshold
+    
+    this._autoScrollPaused = !isAtBottom;
+    this._showScrollButton = !isAtBottom;
+  }
+
+  scrollToBottomNow() {
+    this._autoScrollPaused = false;
+    this._showScrollButton = false;
+    const container = this.shadowRoot?.querySelector('#messages-container');
+    if (container) {
+      container.scrollTop = container.scrollHeight;
     }
   }
 
@@ -49,6 +81,8 @@ export class MessageHandler extends JRPCClient {
   }
 
   _scrollToBottom() {
+    if (this._autoScrollPaused) return;
+    
     this.updateComplete.then(() => {
       const container = this.shadowRoot?.querySelector('#messages-container');
       if (container) {
