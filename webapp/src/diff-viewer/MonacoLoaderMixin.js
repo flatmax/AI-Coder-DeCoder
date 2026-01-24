@@ -2,47 +2,59 @@
  * Mixin for Monaco editor loading and initialization.
  */
 
-let monacoLoading = false;
-let monacoLoaded = false;
+// Use CDN in production, node_modules in dev
+const MONACO_VERSION = '0.45.0';
+const MONACO_CDN = `https://cdn.jsdelivr.net/npm/monaco-editor@${MONACO_VERSION}/min/vs`;
+const MONACO_LOCAL = '/node_modules/monaco-editor/min/vs';
+const MONACO_BASE = import.meta.env.DEV ? MONACO_LOCAL : MONACO_CDN;
+
+let monacoLoadStarted = false;
+const monacoReadyCallbacks = [];
 
 export function loadMonaco() {
-  if (monacoLoaded || monacoLoading) return;
-  monacoLoading = true;
-  
+  if (monacoLoadStarted) return;
+  if (window.monaco?.editor) {
+    monacoReadyCallbacks.forEach(cb => cb());
+    monacoReadyCallbacks.length = 0;
+    return;
+  }
+  monacoLoadStarted = true;
+
   const loaderScript = document.createElement('script');
-  loaderScript.src = '/node_modules/monaco-editor/min/vs/loader.js';
+  loaderScript.src = `${MONACO_BASE}/loader.js`;
+  loaderScript.onerror = () => {
+    monacoLoadStarted = false;
+  };
   loaderScript.onload = () => {
-    window.require.config({ 
-      paths: { 'vs': '/node_modules/monaco-editor/min/vs' }
+    window.require.config({
+      paths: { 'vs': MONACO_BASE }
     });
     window.require(['vs/editor/editor.main'], () => {
-      monacoLoaded = true;
+      monacoReadyCallbacks.forEach(cb => cb());
+      monacoReadyCallbacks.length = 0;
+    }, () => {
+      monacoLoadStarted = false;
     });
   };
   document.head.appendChild(loaderScript);
 }
 
-export function isMonacoLoaded() {
-  return monacoLoaded && window.monaco;
+export function onMonacoReady(callback) {
+  if (window.monaco?.editor) {
+    callback();
+  } else {
+    monacoReadyCallbacks.push(callback);
+  }
 }
 
 export const MonacoLoaderMixin = (superClass) => class extends superClass {
-
   initMonaco() {
     loadMonaco();
   }
 
   injectMonacoStyles() {
     const styleElement = document.createElement('style');
-    styleElement.textContent = `@import url('/node_modules/monaco-editor/min/vs/editor/editor.main.css');`;
+    styleElement.textContent = `@import url('${MONACO_BASE}/editor/editor.main.css');`;
     this.shadowRoot.appendChild(styleElement);
-  }
-
-  waitForMonaco(callback) {
-    if (isMonacoLoaded()) {
-      callback();
-    } else {
-      setTimeout(() => this.waitForMonaco(callback), 100);
-    }
   }
 };

@@ -21,6 +21,8 @@ def parse_args():
                         help='Do not open browser automatically')
     parser.add_argument('--repo-path', type=str, default=None,
                         help='Path to git repository (default: current directory)')
+    parser.add_argument('--dev', action='store_true',
+                        help='Use build+preview mode for debugging (runs npm build && npm preview)')
     return parser.parse_args()
 
 
@@ -50,6 +52,8 @@ async def main_starter_async(args):
     print(f"Webapp port: {actual_webapp_port}")
     print(f"WebSocket URI: ws://localhost:{actual_server_port}")
     print(f"Browser URL: {get_browser_url(actual_webapp_port, actual_server_port)}")
+    if args.dev:
+        print("Dev mode: using build+preview (for debugging)")
 
     repo = Repo(args.repo_path)
     
@@ -62,7 +66,7 @@ async def main_starter_async(args):
     webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
 
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port)
+    await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port, args.dev)
 
     if not args.no_browser:
         open_browser(actual_webapp_port, actual_server_port)

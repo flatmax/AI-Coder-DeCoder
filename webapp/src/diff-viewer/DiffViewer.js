@@ -1,7 +1,7 @@
 import { LitElement } from 'lit';
 import { diffViewerStyles } from './DiffViewerStyles.js';
 import { renderDiffViewer } from './DiffViewerTemplate.js';
-import { MonacoLoaderMixin } from './MonacoLoaderMixin.js';
+import { MonacoLoaderMixin, onMonacoReady } from './MonacoLoaderMixin.js';
 import { DiffEditorMixin } from './DiffEditorMixin.js';
 
 const MixedBase = DiffEditorMixin(
@@ -34,7 +34,7 @@ export class DiffViewer extends MixedBase {
 
   firstUpdated() {
     this.injectMonacoStyles();
-    this.waitForMonaco(() => this.createDiffEditor());
+    onMonacoReady(() => this.createDiffEditor());
   }
 
   updated(changedProperties) {
