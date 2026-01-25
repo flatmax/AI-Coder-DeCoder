@@ -100,6 +100,9 @@ class JavaScriptExtractor(BaseExtractor):
                 elif child.type == 'member_expression':
                     bases.append(self._get_node_text(child, content))
         
+        # Get instance variables (this.x assignments)
+        instance_vars = self._extract_instance_vars(node, content)
+        
         return Symbol(
             name=name,
             kind='class',
@@ -108,6 +111,7 @@ class JavaScriptExtractor(BaseExtractor):
             selection_range=self._make_range(name_node),
             parent=parent,
             bases=bases,
+            instance_vars=instance_vars,
         )
     
     def _extract_function(
@@ -121,6 +125,7 @@ class JavaScriptExtractor(BaseExtractor):
         name = self._get_node_text(name_node, content)
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
+        calls = self._extract_calls(node, content)
         
         return Symbol(
             name=name,
@@ -131,6 +136,7 @@ class JavaScriptExtractor(BaseExtractor):
             parent=parent,
             parameters=parameters,
             return_type=return_type,
+            calls=calls,
         )
     
     def _extract_method(
@@ -144,6 +150,7 @@ class JavaScriptExtractor(BaseExtractor):
         name = self._get_node_text(name_node, content)
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
+        calls = self._extract_calls(node, content)
         
         # Determine if it's a getter/setter/static
         kind = 'method'
@@ -164,6 +171,7 @@ class JavaScriptExtractor(BaseExtractor):
             parent=parent,
             parameters=parameters,
             return_type=return_type,
+            calls=calls,
         )
     
     def _extract_field(
@@ -205,6 +213,7 @@ class JavaScriptExtractor(BaseExtractor):
         if value:
             parameters = self._extract_parameters(value, content)
             return_type = self._get_return_type(value, content)
+            calls = self._extract_calls(value, content)
             return Symbol(
                 name=name,
                 kind='function',
@@ -214,6 +223,7 @@ class JavaScriptExtractor(BaseExtractor):
                 parent=parent,
                 parameters=parameters,
                 return_type=return_type,
+                calls=calls,
             )
         else:
             return Symbol(
@@ -290,6 +300,71 @@ class JavaScriptExtractor(BaseExtractor):
                     parameters.append(Parameter(name='...' + self._get_node_text(name_node, content)))
         
         return parameters
+    
+    def _extract_instance_vars(self, class_node, content: bytes) -> List[str]:
+        """Extract instance variables (this.x = ...) from a class."""
+        instance_vars = []
+        seen = set()
+        
+        def walk(node):
+            for child in node.children:
+                # Look for this.x = ... assignments
+                if child.type == 'assignment_expression':
+                    left = child.children[0] if child.children else None
+                    if left and left.type == 'member_expression':
+                        obj = self._find_child(left, 'this')
+                        if obj:
+                            # Get property name
+                            prop = self._find_child(left, 'property_identifier')
+                            if prop:
+                                var_name = self._get_node_text(prop, content)
+                                if var_name not in seen:
+                                    seen.add(var_name)
+                                    instance_vars.append(var_name)
+                walk(child)
+        
+        walk(class_node)
+        return instance_vars
+    
+    def _extract_calls(self, func_node, content: bytes) -> List[str]:
+        """Extract function/method calls from a function body."""
+        calls = []
+        seen = set()
+        
+        def walk(node):
+            for child in node.children:
+                if child.type == 'call_expression':
+                    func = child.children[0] if child.children else None
+                    if func:
+                        call_name = self._get_call_name(func, content)
+                        if call_name and call_name not in seen:
+                            # Filter out common globals
+                            if call_name not in ('console.log', 'console.error', 
+                                                 'console.warn', 'JSON.stringify',
+                                                 'JSON.parse', 'Object.keys',
+                                                 'Object.values', 'Array.isArray'):
+                                seen.add(call_name)
+                                calls.append(call_name)
+                walk(child)
+        
+        walk(func_node)
+        return calls
+    
+    def _get_call_name(self, node, content: bytes) -> Optional[str]:
+        """Get the name of a called function/method."""
+        if node.type == 'identifier':
+            return self._get_node_text(node, content)
+        elif node.type == 'member_expression':
+            text = self._get_node_text(node, content)
+            # Simplify this.x to just x
+            if text.startswith('this.'):
+                return text[5:]
+            # Keep short forms
+            parts = text.split('.')
+            if len(parts) <= 2:
+                return text
+            return '.'.join(parts[-2:])
+        return None
     
     def _get_return_type(self, node, content: bytes) -> Optional[str]:
         """Get return type annotation if present."""

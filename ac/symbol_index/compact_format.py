@@ -19,6 +19,8 @@ def to_compact(
     symbols_by_file: Dict[str, List[Symbol]],
     references: Optional[Dict[str, Dict[str, List]]] = None,
     file_refs: Optional[Dict[str, Set[str]]] = None,
+    include_instance_vars: bool = True,
+    include_calls: bool = False,
 ) -> str:
     """Generate compact format suitable for LLM context.
     
@@ -75,7 +77,11 @@ def to_compact(
         # Output other symbols
         for symbol in other_symbols:
             symbol_refs = file_references.get(symbol.name, [])
-            lines.extend(_format_symbol(symbol, indent=0, refs=symbol_refs))
+            lines.extend(_format_symbol(
+                symbol, indent=0, refs=symbol_refs,
+                include_instance_vars=include_instance_vars,
+                include_calls=include_calls,
+            ))
         
         # Add file-level reference summary if available
         if file_refs and file_path in file_refs:
@@ -121,6 +127,8 @@ def _format_symbol(
     indent: int = 0, 
     refs: List = None,
     parent_refs: Dict = None,
+    include_instance_vars: bool = True,
+    include_calls: bool = False,
 ) -> List[str]:
     """Format a single symbol and its children.
     
@@ -129,6 +137,8 @@ def _format_symbol(
         indent: Current indentation level
         refs: List of locations referencing this symbol
         parent_refs: Dict of child_name -> [locations] for children
+        include_instance_vars: Whether to include instance variables
+        include_calls: Whether to include call information
     """
     lines = []
     prefix = KIND_PREFIX.get(symbol.kind, '?')
@@ -163,6 +173,13 @@ def _format_symbol(
     # Add line number
     line_parts.append(f":{symbol.range.start_line}")
     
+    # Add call annotations if enabled
+    if include_calls and symbol.calls:
+        call_str = ','.join(symbol.calls[:5])
+        if len(symbol.calls) > 5:
+            call_str += f",+{len(symbol.calls)-5}"
+        line_parts.append(f" →{call_str}")
+    
     # Add reference annotations if available
     if refs:
         ref_annotations = _format_refs(refs)
@@ -171,11 +188,21 @@ def _format_symbol(
     
     lines.append(''.join(line_parts))
     
+    # Add instance variables for classes
+    if include_instance_vars and symbol.kind == 'class' and symbol.instance_vars:
+        var_indent = "│" + "  " * (indent + 1)
+        for var in symbol.instance_vars:
+            lines.append(f"{var_indent}v {var}")
+    
     # Format children (methods, nested classes)
     for child in symbol.children:
         # Get child refs if available
         child_refs = parent_refs.get(child.name, []) if parent_refs else []
-        lines.extend(_format_symbol(child, indent + 1, refs=child_refs))
+        lines.extend(_format_symbol(
+            child, indent + 1, refs=child_refs,
+            include_instance_vars=include_instance_vars,
+            include_calls=include_calls,
+        ))
     
     return lines
 

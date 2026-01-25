@@ -93,6 +93,9 @@ class PythonExtractor(BaseExtractor):
         # Get docstring
         docstring = self._get_class_docstring(node, content)
         
+        # Get instance variables
+        instance_vars = self._extract_instance_vars(node, content)
+        
         return Symbol(
             name=name,
             kind='class',
@@ -102,6 +105,7 @@ class PythonExtractor(BaseExtractor):
             parent=parent,
             bases=bases,
             docstring=docstring,
+            instance_vars=instance_vars,
         )
     
     def _extract_function(
@@ -130,6 +134,9 @@ class PythonExtractor(BaseExtractor):
         # Get docstring
         docstring = self._get_function_docstring(node, content)
         
+        # Get calls made by this function
+        calls = self._extract_calls(node, content)
+        
         return Symbol(
             name=name,
             kind=kind,
@@ -140,6 +147,7 @@ class PythonExtractor(BaseExtractor):
             parameters=parameters,
             return_type=return_type,
             docstring=docstring,
+            calls=calls,
         )
     
     def _extract_parameters(self, params_node, content: bytes) -> List[Parameter]:
@@ -264,6 +272,86 @@ class PythonExtractor(BaseExtractor):
                         return docstring[1:-1].strip()
                 break  # Only check first statement
         
+        return None
+    
+    def _extract_instance_vars(self, class_node, content: bytes) -> List[str]:
+        """Extract instance variables (self.x = ...) from a class."""
+        instance_vars = []
+        seen = set()
+        
+        # Walk all nodes in the class looking for self.x assignments
+        def walk(node):
+            for child in node.children:
+                if child.type == 'assignment':
+                    left = child.children[0] if child.children else None
+                    if left and left.type == 'attribute':
+                        # Check for self.x pattern
+                        obj = self._find_child(left, 'identifier')
+                        attr = self._find_attr_name(left)
+                        if obj and attr:
+                            obj_name = self._get_node_text(obj, content)
+                            if obj_name == 'self' and attr not in seen:
+                                seen.add(attr)
+                                instance_vars.append(attr)
+                walk(child)
+        
+        walk(class_node)
+        return instance_vars
+    
+    def _find_attr_name(self, attr_node) -> Optional[str]:
+        """Get the attribute name from an attribute node (self.x -> x)."""
+        for child in attr_node.children:
+            if child.type == 'identifier':
+                # Skip 'self', get the attribute name
+                continue
+            if child.type == 'identifier':
+                return None
+        # The attribute name is the last identifier after the dot
+        identifiers = [c for c in attr_node.children if c.type == 'identifier']
+        if len(identifiers) >= 2:
+            return identifiers[-1].text.decode('utf-8') if identifiers[-1].text else None
+        return None
+    
+    def _extract_calls(self, func_node, content: bytes) -> List[str]:
+        """Extract function/method calls from a function body."""
+        calls = []
+        seen = set()
+        
+        def walk(node):
+            for child in node.children:
+                if child.type == 'call':
+                    func = child.children[0] if child.children else None
+                    if func:
+                        call_name = self._get_call_name(func, content)
+                        if call_name and call_name not in seen:
+                            # Filter out common builtins to reduce noise
+                            if call_name not in ('print', 'len', 'str', 'int', 'list', 
+                                                 'dict', 'set', 'tuple', 'bool', 'range',
+                                                 'enumerate', 'zip', 'map', 'filter',
+                                                 'isinstance', 'hasattr', 'getattr', 'setattr'):
+                                seen.add(call_name)
+                                calls.append(call_name)
+                walk(child)
+        
+        walk(func_node)
+        return calls
+    
+    def _get_call_name(self, node, content: bytes) -> Optional[str]:
+        """Get the name of a called function/method."""
+        if node.type == 'identifier':
+            return self._get_node_text(node, content)
+        elif node.type == 'attribute':
+            # Get the full attribute chain (e.g., self.foo, obj.method)
+            text = self._get_node_text(node, content)
+            # Simplify self.x to just x
+            if text.startswith('self.'):
+                return text[5:]
+            # For other objects, keep short form (last part)
+            parts = text.split('.')
+            if len(parts) <= 2:
+                return text
+            # For long chains, keep last 2 parts
+            return '.'.join(parts[-2:])
         return None
     
     def _find_child(self, node, type_name: str):

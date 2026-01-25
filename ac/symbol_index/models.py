@@ -49,6 +49,12 @@ class Symbol:
     return_type: Optional[str] = None
     bases: List[str] = field(default_factory=list)  # for classes
     docstring: Optional[str] = None
+    # Instance variables (self.x assignments for classes)
+    instance_vars: List[str] = field(default_factory=list)
+    # Function/method calls made within this symbol
+    calls: List[str] = field(default_factory=list)
+    # For inherited methods, which parent class it comes from
+    inherited_from: Optional[str] = None
     
     def to_dict(self) -> dict:
         result = {
@@ -69,4 +75,10 @@ class Symbol:
             result['bases'] = self.bases
         if self.docstring:
             result['docstring'] = self.docstring
+        if self.instance_vars:
+            result['instanceVars'] = self.instance_vars
+        if self.calls:
+            result['calls'] = self.calls
+        if self.inherited_from:
+            result['inheritedFrom'] = self.inherited_from
         return result
