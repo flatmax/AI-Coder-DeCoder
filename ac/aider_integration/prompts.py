@@ -5,6 +5,16 @@ Provides additional prompt templates that can be used alongside
 or instead of aider's built-in prompts.
 """
 
+from pathlib import Path
+
+
+def _load_extra_prompt():
+    """Load extra system prompt from sys_prompt_extra.md if it exists."""
+    extra_path = Path(__file__).parent.parent.parent / "sys_prompt_extra.md"
+    if extra_path.exists():
+        return extra_path.read_text().strip()
+    return ""
+
 
 SEARCH_REPLACE_INSTRUCTIONS = """
 To make changes to files, use SEARCH/REPLACE blocks.
@@ -52,4 +62,9 @@ def build_edit_system_prompt(include_instructions=True):
     prompt = "You are an expert software developer. Make changes to code using SEARCH/REPLACE blocks."
     if include_instructions:
         prompt += "\n\n" + SEARCH_REPLACE_INSTRUCTIONS
+    
+    extra = _load_extra_prompt()
+    if extra:
+        prompt += "\n\n" + extra
+    
     return prompt

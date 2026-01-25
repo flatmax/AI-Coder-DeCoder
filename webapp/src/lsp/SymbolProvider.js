@@ -37,7 +37,7 @@ function registerHoverProvider(rpcCall, language) {
         const filePath = getFilePath(model);
         if (!filePath) return null;
 
-        const result = await rpcCall['LiteLLM.lsp_get_hover'](
+        const result = await rpcCall.LiteLLM.lsp_get_hover(
           filePath,
           position.lineNumber,
           position.column
@@ -66,7 +66,7 @@ function registerDefinitionProvider(rpcCall, language) {
         const filePath = getFilePath(model);
         if (!filePath) return null;
 
-        const result = await rpcCall['LiteLLM.lsp_get_definition'](
+        const result = await rpcCall.LiteLLM.lsp_get_definition(
           filePath,
           position.lineNumber,
           position.column
@@ -101,7 +101,7 @@ function registerReferencesProvider(rpcCall, language) {
         const filePath = getFilePath(model);
         if (!filePath) return [];
 
-        const result = await rpcCall['LiteLLM.lsp_get_references'](
+        const result = await rpcCall.LiteLLM.lsp_get_references(
           filePath,
           position.lineNumber,
           position.column
@@ -142,7 +142,7 @@ function registerCompletionProvider(rpcCall, language) {
         const word = model.getWordUntilPosition(position);
         const prefix = word ? word.word : '';
 
-        const result = await rpcCall['LiteLLM.lsp_get_completions'](
+        const result = await rpcCall.LiteLLM.lsp_get_completions(
           filePath,
           position.lineNumber,
           position.column,
