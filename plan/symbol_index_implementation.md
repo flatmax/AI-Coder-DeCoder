@@ -506,50 +506,8 @@ Dependencies to eventually remove:
 
 Keep (still useful from aider):
 - Edit parsing/applying (search/replace blocks)
+- Prompts and system instructions
 - Git integration helpers
-
----
-
-## Next Steps: Monaco Integration
-
-### 4.3 JSON-RPC Endpoints (Priority)
-
-Expose these methods via JSON-RPC server:
-
-```python
-# In ac/llm/llm.py or new ac/lsp_server.py
-class LspMixin:
-    def lsp_get_hover(self, file: str, line: int, col: int) -> dict:
-        """Get hover information at position."""
-        
-    def lsp_get_definition(self, file: str, line: int, col: int) -> dict:
-        """Get definition location for symbol at position."""
-        
-    def lsp_get_references(self, file: str, line: int, col: int) -> list:
-        """Get all references to symbol at position."""
-        
-    def lsp_get_document_symbols(self, file: str) -> list:
-        """Get all symbols in a file (for outline view)."""
-        
-    def lsp_get_completions(self, file: str, line: int, col: int, prefix: str) -> list:
-        """Get completion suggestions at position."""
-```
-
-### 5.1 Monaco Provider Bridge
-
-Create `webapp/src/lsp/SymbolProvider.js`:
-- Register hover provider
-- Register definition provider  
-- Register references provider
-- Register document symbol provider
-- Wire up to JSON-RPC client
-
-### 5.2 DiffViewer Integration
-
-Update `webapp/src/diff-viewer/DiffViewer.js`:
-- Call `registerSymbolProviders()` when Monaco ready
-- Add F12 keyboard shortcut for go-to-definition
-- Show hover tooltips with docstrings
 
 ---
 
