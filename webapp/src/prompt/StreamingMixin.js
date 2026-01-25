@@ -55,10 +55,13 @@ export const StreamingMixin = (superClass) => class extends superClass {
     this._streamingRequests.delete(requestId);
     this.isStreaming = false;
     
-    // Mark the message as final, append [stopped] if cancelled
+    // Mark the message as final
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     if (lastMessage && lastMessage.role === 'assistant') {
-      if (result.cancelled) {
+      // Handle error case
+      if (result.error) {
+        lastMessage.content = `⚠️ **Error:** ${result.error}`;
+      } else if (result.cancelled) {
         lastMessage.content = lastMessage.content + '\n\n*[stopped]*';
       }
       lastMessage.final = true;
