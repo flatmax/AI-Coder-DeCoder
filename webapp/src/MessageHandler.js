@@ -27,13 +27,15 @@ export class MessageHandler extends JRPCClient {
     super.firstUpdated?.();
     const container = this.shadowRoot?.querySelector('#messages-container');
     if (container) {
-      container.addEventListener('scroll', this._boundHandleScroll);
+      // Use capture: false to only handle scroll events from the container itself
+      container.addEventListener('scroll', this._boundHandleScroll, { passive: true });
     }
   }
 
-  _handleScroll() {
+  _handleScroll(event) {
+    // Ignore scroll events from child elements (like code blocks)
     const container = this.shadowRoot?.querySelector('#messages-container');
-    if (!container) return;
+    if (!container || event.target !== container) return;
     
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const isAtBottom = distanceFromBottom < 50; // 50px threshold
