@@ -66,3 +66,41 @@ class AiderContextManager(
     def count_tokens(self, content) -> int:
         """Count tokens in content."""
         return self.token_counter.token_count(content)
+    
+    def save_repo_map(self, output_path: str = None, chat_files: list = None, use_cached: bool = True) -> str:
+        """
+        Save the repository map to a file.
+        
+        Args:
+            output_path: Path to save the map. If None, saves to .aicoder/repo_map.txt
+            chat_files: Optional list of files to exclude (as they would be in chat context)
+            use_cached: If True and a recent repo map exists, use it instead of regenerating
+            
+        Returns:
+            Path to the saved file
+        """
+        if output_path is None:
+            output_path = str(self.repo_root / '.aicoder' / 'repo_map.txt')
+        
+        # Ensure directory exists
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        # Use cached repo map if available and requested
+        if use_cached and hasattr(self, '_last_repo_map') and self._last_repo_map:
+            repo_map = self._last_repo_map
+        else:
+            # Generate the repo map
+            repo_map = self.get_repo_map(
+                chat_files=chat_files or [],
+                mentioned_fnames=set(),
+                mentioned_idents=set()
+            )
+        
+        if repo_map:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(repo_map)
+            print(f"📄 Repo map saved to: {output_path}")
+        else:
+            print("⚠️ No repo map generated (no files to map)")
+        
+        return output_path

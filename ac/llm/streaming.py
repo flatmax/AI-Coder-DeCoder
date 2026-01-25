@@ -148,9 +148,10 @@ class StreamingMixin:
             if aider_chat._context_manager:
                 aider_chat._context_manager.add_exchange(user_text, full_content)
             
-            # Print HUD after streaming completes
+            # Print HUD after streaming completes and save repo map
             if aider_chat._context_manager:
                 aider_chat._context_manager.print_hud(messages)
+                aider_chat._context_manager.save_repo_map(use_cached=True)
             
             # Parse and apply edits
             file_edits, shell_commands = aider_chat.editor.parse_response(full_content)

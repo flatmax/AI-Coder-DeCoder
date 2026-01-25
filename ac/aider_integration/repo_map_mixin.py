@@ -36,4 +36,7 @@ class RepoMapMixin:
         self._last_repo_map_tokens = self.count_tokens(result) if result else 0
         self._last_chat_files_count = len(chat_files)
         
+        # Cache the last generated repo map
+        self._last_repo_map = result
+        
         return result
