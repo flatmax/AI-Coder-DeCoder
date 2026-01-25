@@ -466,6 +466,121 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         except Exception as e:
             return {"error": str(e)}
     
+    # ========== LSP Position-Based Methods for Monaco ==========
+    
+    def lsp_get_hover(self, file_path, line, col):
+        """
+        Get hover information at a position.
+        
+        Args:
+            file_path: Path to the file
+            line: 1-based line number
+            col: 1-based column number
+            
+        Returns:
+            Dict with 'contents' for Monaco hover, or None
+        """
+        try:
+            from .lsp_helpers import find_symbol_at_position, get_hover_info
+            indexer = self._get_indexer()
+            symbols = indexer.index_file(file_path)
+            symbol = find_symbol_at_position(symbols, line, col)
+            if symbol:
+                return get_hover_info(symbol)
+            return None
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def lsp_get_definition(self, file_path, line, col):
+        """
+        Get definition location for symbol at position.
+        
+        Args:
+            file_path: Path to the file
+            line: 1-based line number
+            col: 1-based column number
+            
+        Returns:
+            Dict with file, range for go-to-definition, or None
+        """
+        try:
+            from .lsp_helpers import find_identifier_at_position, find_symbol_definition
+            indexer = self._get_indexer()
+            
+            # Get the identifier at cursor position
+            identifier = find_identifier_at_position(file_path, line, col, self.repo)
+            if not identifier:
+                return None
+            
+            # Search for definition in all indexed files
+            all_files = self._get_all_trackable_files()
+            symbols_by_file = indexer.index_files(all_files)
+            
+            definition = find_symbol_definition(identifier, symbols_by_file)
+            if definition:
+                return {
+                    'file': definition.file_path,
+                    'range': definition.range.to_dict(),
+                    'selectionRange': definition.selection_range.to_dict()
+                }
+            return None
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def lsp_get_references(self, file_path, line, col):
+        """
+        Get all references to symbol at position.
+        
+        Args:
+            file_path: Path to the file
+            line: 1-based line number
+            col: 1-based column number
+            
+        Returns:
+            List of location dicts, or empty list
+        """
+        try:
+            from .lsp_helpers import find_symbol_at_position
+            indexer = self._get_indexer()
+            symbols = indexer.index_file(file_path)
+            symbol = find_symbol_at_position(symbols, line, col)
+            
+            if not symbol:
+                return []
+            
+            # Build references if not already done
+            all_files = self._get_all_trackable_files()
+            indexer.build_references(all_files)
+            
+            return indexer.get_references_to_symbol(file_path, symbol.name)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def lsp_get_completions(self, file_path, line, col, prefix):
+        """
+        Get completion suggestions at position.
+        
+        Args:
+            file_path: Path to the file
+            line: 1-based line number
+            col: 1-based column number
+            prefix: Text prefix to filter completions
+            
+        Returns:
+            List of completion items
+        """
+        try:
+            from .lsp_helpers import get_completions
+            indexer = self._get_indexer()
+            
+            # Get symbols from current file and all tracked files
+            all_files = self._get_all_trackable_files()
+            symbols_by_file = indexer.index_files(all_files)
+            
+            return get_completions(prefix, symbols_by_file, file_path)
+        except Exception as e:
+            return {"error": str(e)}
+    
     def parse_edits(self, response_text, file_paths=None):
         """
         Parse a response for search/replace blocks without applying them.

@@ -1,4 +1,5 @@
 import { html } from 'lit';
+import { setModelFilePath } from '../lsp/SymbolProvider.js';
 
 /**
  * Mixin for diff editor operations.
@@ -10,6 +11,7 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     this._models = new Map();
     this._dirtyFiles = new Set();
     this._contentListeners = new Map();
+    this._lspProvidersRegistered = false;
   }
 
   createDiffEditor() {
@@ -54,6 +56,11 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
       const lang = this.getLanguage(file.path);
       const original = window.monaco.editor.createModel(file.original || '', lang);
       const modified = window.monaco.editor.createModel(file.modified || '', lang);
+      
+      // Associate file paths with models for LSP features
+      setModelFilePath(original, file.path);
+      setModelFilePath(modified, file.path);
+      
       this._models.set(file.path, { original, modified, savedContent: file.modified || '' });
       
       // Listen for changes to track dirty state
