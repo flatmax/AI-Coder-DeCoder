@@ -1,7 +1,7 @@
 """
 Context-aware message building mixin.
 
-Builds messages using the context manager for repo map support.
+Builds messages using symbol index for repository context.
 """
 
 import os
@@ -9,8 +9,16 @@ import os
 from .message_utils import filter_empty_messages, build_user_content
 
 
+REPO_MAP_HEADER = """# Repository Structure
+
+Below is a map of the repository showing classes, functions, and their relationships.
+Use this to understand the codebase structure and find relevant code.
+
+"""
+
+
 class MessageContextMixin:
-    """Mixin for building messages with context manager."""
+    """Mixin for building messages with symbol index context."""
     
     def _get_system_prompt(self):
         """Get combined system prompt from editor."""
@@ -42,21 +50,26 @@ class MessageContextMixin:
             example_messages = filter_empty_messages(example_messages)
             messages.extend(example_messages)
     
+    def _get_symbol_map(self, chat_files):
+        """Get symbol map using the token tracker's indexer."""
+        if not self.token_tracker or not hasattr(self.token_tracker, 'get_context_map'):
+            return None
+        return self.token_tracker.get_context_map(
+            chat_files=chat_files,
+            include_references=True
+        )
+    
     def _build_messages_with_context(self, user_request, images=None, include_examples=True):
-        """Build messages using the context manager for repo map."""
+        """Build messages using symbol index for repository context."""
         system_content = self._get_system_prompt()
         chat_files = self._get_chat_files_absolute()
         
         messages = [{"role": "system", "content": system_content}]
         
-        # Add repo map if available
-        repo_map = self._context_manager.get_repo_map(
-            chat_files=chat_files,
-            mentioned_fnames=set(),
-            mentioned_idents=set()
-        )
-        if repo_map:
-            messages.append({"role": "user", "content": f"Repository map:\n{repo_map}"})
+        # Add symbol map if available
+        symbol_map = self._get_symbol_map(chat_files)
+        if symbol_map:
+            messages.append({"role": "user", "content": REPO_MAP_HEADER + symbol_map})
             messages.append({"role": "assistant", "content": "Ok."})
         
         self._add_examples_if_needed(messages, include_examples)

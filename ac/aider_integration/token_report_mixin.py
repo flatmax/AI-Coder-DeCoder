@@ -40,11 +40,11 @@ class TokenReportMixin:
             hist_tokens = self.count_tokens(self.done_messages)
             results.append((hist_tokens, "chat history", "use clear() to clear"))
 
-        # Repo map
-        repo_content = self.get_repo_map(chat_files)
-        if repo_content:
-            repo_tokens = self.count_tokens(repo_content)
-            results.append((repo_tokens, "repository map", "use map_tokens to resize"))
+        # Symbol map (replaces aider's repo map)
+        symbol_map = self._get_symbol_map_for_report(chat_files)
+        if symbol_map:
+            map_tokens = self.count_tokens(symbol_map)
+            results.append((map_tokens, "symbol map", ""))
 
         # Chat files (sorted by token count)
         file_results = self._collect_file_tokens(chat_files, read_only=False)
@@ -81,6 +81,16 @@ class TokenReportMixin:
                 label = f"{rel} (read-only)" if read_only else rel
                 results.append((tokens, label, "drop to remove"))
         return results
+
+    def _get_symbol_map_for_report(self, chat_files):
+        """Get symbol map for token reporting."""
+        if hasattr(self, 'token_tracker') and self.token_tracker:
+            if hasattr(self.token_tracker, 'get_context_map'):
+                return self.token_tracker.get_context_map(
+                    chat_files=chat_files,
+                    include_references=True
+                )
+        return None
 
     def _format_token_report(self, results):
         """Format the token report output."""

@@ -176,40 +176,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         return aider.get_token_report(read_only_files=read_only_files)
     
-    def save_repo_map(self, output_path=None, exclude_files=None):
-        """
-        Save the repository map to a file.
-        
-        Args:
-            output_path: Path to save the map. If None, saves to .aicoder/repo_map.txt
-            exclude_files: Optional list of files to exclude (simulating chat context)
-            
-        Returns:
-            Dict with path to saved file or error
-        """
-        aider = self.get_aider_chat()
-        if not aider._context_manager:
-            return {"error": "No repository configured"}
-        
-        try:
-            # Convert exclude_files to absolute paths if provided
-            abs_exclude = []
-            if exclude_files and self.repo:
-                repo_root = self.repo.get_repo_root()
-                for fpath in exclude_files:
-                    if os.path.isabs(fpath):
-                        abs_exclude.append(fpath)
-                    else:
-                        abs_exclude.append(os.path.join(repo_root, fpath))
-            
-            saved_path = aider._context_manager.save_repo_map(
-                output_path=output_path,
-                chat_files=abs_exclude
-            )
-            return {"path": saved_path}
-        except Exception as e:
-            return {"error": str(e)}
-    
     def _get_indexer(self):
         """Get or create the Indexer instance."""
         if self._indexer is None:
@@ -271,6 +237,15 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         for child in node.get('children', []):
             paths.extend(self._collect_file_paths(child, current_path))
         return paths
+    
+    def save_repo_map(self, output_path=None, exclude_files=None):
+        """
+        DEPRECATED: Use save_symbol_map() instead.
+        
+        This method is kept for backwards compatibility but now delegates
+        to the symbol index.
+        """
+        return self.save_symbol_map(file_paths=exclude_files, output_path=output_path)
     
     def save_symbol_map(self, file_paths=None, output_path=None):
         """

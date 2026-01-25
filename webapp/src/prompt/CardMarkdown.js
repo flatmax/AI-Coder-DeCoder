@@ -107,6 +107,7 @@ export class CardMarkdown extends LitElement {
     this.content = '';
     this.role = 'assistant';
     this.mentionedFiles = [];
+    this._codeScrollPositions = new Map();
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -235,6 +236,33 @@ export class CardMarkdown extends LitElement {
           bubbles: true,
           composed: true
         }));
+      }
+    }
+  }
+
+  willUpdate() {
+    // Save horizontal scroll positions of all code blocks before re-render
+    this._codeScrollPositions.clear();
+    const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
+    if (codeBlocks) {
+      codeBlocks.forEach((pre, index) => {
+        if (pre.scrollLeft > 0) {
+          this._codeScrollPositions.set(index, pre.scrollLeft);
+        }
+      });
+    }
+  }
+
+  updated() {
+    // Restore horizontal scroll positions after re-render
+    if (this._codeScrollPositions.size > 0) {
+      const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
+      if (codeBlocks) {
+        this._codeScrollPositions.forEach((scrollLeft, index) => {
+          if (codeBlocks[index]) {
+            codeBlocks[index].scrollLeft = scrollLeft;
+          }
+        });
       }
     }
   }
