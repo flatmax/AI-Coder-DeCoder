@@ -33,11 +33,10 @@ export class DiffViewer extends MixedBase {
     super.connectedCallback();
     this.addClass(this, 'DiffViewer');
     this.initMonaco();
-    console.log('DiffViewer: connectedCallback, serverURI =', this.serverURI);
-    console.log('DiffViewer: prototype chain:', Object.getPrototypeOf(this).constructor.name);
-    console.log('DiffViewer: has open?', typeof this.open);
-    console.log('DiffViewer: has isOpen?', typeof this.isOpen, this.isOpen);
-    console.log('DiffViewer: has addClass?', typeof this.addClass);
+    
+    // Listen for LSP navigation events
+    this._handleLspNavigate = this._handleLspNavigate.bind(this);
+    window.addEventListener('lsp-navigate-to-file', this._handleLspNavigate);
   }
 
   firstUpdated() {
@@ -49,36 +48,24 @@ export class DiffViewer extends MixedBase {
 
   _tryRegisterLspProviders() {
     if (this._lspProvidersRegistered) return;
-    if (!this._editor) {
-      console.log('DiffViewer: Editor not ready for LSP');
-      return;
-    }
-    if (!this._remoteIsUp) {
-      console.log('DiffViewer: Remote not up for LSP');
-      return;
-    }
+    if (!this._editor || !this._remoteIsUp) return;
     
     try {
       registerSymbolProviders(this);
       this._lspProvidersRegistered = true;
-      console.log('LSP providers registered successfully');
     } catch (e) {
       console.error('Failed to register LSP providers:', e);
     }
   }
 
   remoteIsUp() {
-    console.log('DiffViewer: remoteIsUp called, serverURI =', this.serverURI);
     this._remoteIsUp = true;
     this._tryRegisterLspProviders();
   }
 
-  setupDone() {
-    console.log('DiffViewer: setupDone called, serverURI =', this.serverURI);
-  }
+  setupDone() {}
 
   remoteDisconnected(uuid) {
-    console.log('DiffViewer: remoteDisconnected called, uuid =', uuid);
     this._remoteIsUp = false;
     this._lspProvidersRegistered = false;
   }
@@ -113,6 +100,62 @@ export class DiffViewer extends MixedBase {
   disconnectedCallback() {
     super.disconnectedCallback();
     this.disposeDiffEditor();
+    window.removeEventListener('lsp-navigate-to-file', this._handleLspNavigate);
+  }
+
+  async _handleLspNavigate(event) {
+    const { file, line, column } = event.detail;
+    
+    // Check if file is already loaded
+    const existingFile = this.files.find(f => f.path === file);
+    if (existingFile) {
+      this.selectedFile = file;
+      this._revealPosition(line, column);
+      return;
+    }
+    
+    // Load the file content from server
+    try {
+      const response = await this.call['Repo.get_file_content'](file);
+      const result = response ? Object.values(response)[0] : null;
+      
+      // Check if we got content - it might be result.content or just result as a string
+      const content = typeof result === 'string' ? result : (result?.content ?? null);
+      
+      if (content !== null) {
+        // Add as a read-only file (same content for original and modified)
+        const newFile = {
+          path: file,
+          original: content,
+          modified: content,
+          isNew: false,
+          isReadOnly: true
+        };
+        
+        this.files = [...this.files, newFile];
+        this.selectedFile = file;
+        
+        // Wait for update to complete, then reveal position
+        await this.updateComplete;
+        this._revealPosition(line, column);
+      } else {
+        console.error('Failed to load file for navigation:', file);
+      }
+    } catch (e) {
+      console.error('Error loading file for navigation:', e);
+    }
+  }
+
+  _revealPosition(line, column) {
+    if (!this._editor || !line) return;
+    
+    // Use the modified editor for navigation
+    const editor = this._editor.getModifiedEditor();
+    if (editor) {
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: column || 1 });
+      editor.focus();
+    }
   }
 
   render() {

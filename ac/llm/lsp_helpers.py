@@ -57,15 +57,36 @@ def find_identifier_at_position(file_path: str, line: int, col: int, repo) -> Op
     Returns:
         Identifier string at position, or None
     """
+    import os
+    
     if not repo:
         return None
     
     try:
+        # Try to read file content - handle both relative and absolute paths
         content_result = repo.get_file_content(file_path)
         if 'error' in content_result:
+            # Try as absolute path by joining with repo root
+            repo_root = repo.get_repo_root()
+            if repo_root and not os.path.isabs(file_path):
+                abs_path = os.path.join(repo_root, file_path)
+                content_result = repo.get_file_content(abs_path)
+                if 'error' in content_result:
+                    # Try reading directly from filesystem
+                    if os.path.exists(abs_path):
+                        with open(abs_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                    else:
+                        return None
+                else:
+                    content = content_result.get('content', '')
+            else:
+                return None
+        else:
+            content = content_result.get('content', '')
+        if not content:
             return None
-        
-        content = content_result.get('content', '')
+            
         lines = content.split('\n')
         
         if line < 1 or line > len(lines):
@@ -73,11 +94,25 @@ def find_identifier_at_position(file_path: str, line: int, col: int, repo) -> Op
         
         line_text = lines[line - 1]  # Convert to 0-based
         
-        if col < 1 or col > len(line_text) + 1:
+        if col < 1:
             return None
         
-        # Find word boundaries around cursor (0-based column)
+        # Convert to 0-based column index
         col_idx = col - 1
+        
+        # If col is past end of line, try the character just before
+        if col_idx >= len(line_text):
+            col_idx = len(line_text) - 1
+            if col_idx < 0:
+                return None
+        
+        # Check if cursor is on an identifier character
+        # If not, try one position back (cursor might be just after the word)
+        if not _is_identifier_char(line_text[col_idx]):
+            if col_idx > 0 and _is_identifier_char(line_text[col_idx - 1]):
+                col_idx -= 1
+            else:
+                return None
         
         # Find start of identifier
         start = col_idx
@@ -86,13 +121,11 @@ def find_identifier_at_position(file_path: str, line: int, col: int, repo) -> Op
         
         # Find end of identifier
         end = col_idx
-        while end < len(line_text) and _is_identifier_char(line_text[end]):
+        while end < len(line_text) - 1 and _is_identifier_char(line_text[end + 1]):
             end += 1
         
-        if start == end:
-            return None
-        
-        return line_text[start:end]
+        identifier = line_text[start:end + 1]
+        return identifier if identifier else None
     except Exception:
         return None
 
@@ -104,7 +137,8 @@ def _is_identifier_char(char: str) -> bool:
 
 def find_symbol_definition(
     identifier: str, 
-    symbols_by_file: Dict[str, List[Symbol]]
+    symbols_by_file: Dict[str, List[Symbol]],
+    exclude_file: str = None
 ) -> Optional[Symbol]:
     """
     Find the definition of a symbol by name.
@@ -112,15 +146,27 @@ def find_symbol_definition(
     Args:
         identifier: Name to search for
         symbols_by_file: Dict mapping file paths to their symbols
+        exclude_file: Optional file to exclude from search (e.g., current file for imports)
         
     Returns:
         Symbol definition, or None
     """
+    import os
+    
+    # Normalize exclude_file for comparison
+    exclude_basename = os.path.basename(exclude_file) if exclude_file else None
+    
     # Search all files for a matching symbol definition
     for file_path, symbols in symbols_by_file.items():
+        # Compare by basename to handle path variations
+        if exclude_file:
+            if file_path == exclude_file or os.path.basename(file_path) == exclude_basename:
+                continue
+        
         match = _find_symbol_by_name(identifier, symbols)
         if match:
             return match
+    
     return None
 
 

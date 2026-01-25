@@ -512,11 +512,15 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             if not identifier:
                 return None
             
+            # Skip keywords
+            if identifier in ('import', 'from', 'export', 'const', 'let', 'var', 'function', 'class', 'def', 'return', 'if', 'else', 'for', 'while'):
+                return None
+            
             # Search for definition in all indexed files
             all_files = self._get_all_trackable_files()
             symbols_by_file = indexer.index_files(all_files)
             
-            definition = find_symbol_definition(identifier, symbols_by_file)
+            definition = find_symbol_definition(identifier, symbols_by_file, exclude_file=file_path)
             if definition:
                 return {
                     'file': definition.file_path,

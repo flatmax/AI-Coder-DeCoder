@@ -23,8 +23,6 @@ export function registerSymbolProviders(rpcClient, languages = ['python', 'javas
     registerReferencesProvider(rpcClient, language);
     registerCompletionProvider(rpcClient, language);
   }
-  
-  console.log(`Registered LSP providers for: ${languages.join(', ')}`);
 }
 
 /**
@@ -75,14 +73,31 @@ function registerDefinitionProvider(rpcClient, language) {
         const result = response ? Object.values(response)[0] : null;
 
         if (result && result.file && result.range) {
+          const targetUri = window.monaco.Uri.file(result.file);
+          const startLine = result.range.start_line ?? result.range.start?.line;
+          const startCol = result.range.start_col ?? result.range.start?.col ?? 0;
+          const endLine = result.range.end_line ?? result.range.end?.line ?? startLine;
+          const endCol = result.range.end_col ?? result.range.end?.col ?? startCol;
+          
+          const targetRange = new window.monaco.Range(
+            startLine,
+            startCol + 1,
+            endLine,
+            endCol + 1
+          );
+          
+          // Dispatch event to request file navigation
+          window.dispatchEvent(new CustomEvent('lsp-navigate-to-file', {
+            detail: {
+              file: result.file,
+              line: startLine,
+              column: startCol + 1
+            }
+          }));
+          
           return {
-            uri: window.monaco.Uri.file(result.file),
-            range: new window.monaco.Range(
-              result.range.start_line,
-              result.range.start_col + 1,  // Monaco is 1-based for columns
-              result.range.end_line,
-              result.range.end_col + 1
-            )
+            uri: targetUri,
+            range: targetRange
           };
         }
       } catch (e) {
