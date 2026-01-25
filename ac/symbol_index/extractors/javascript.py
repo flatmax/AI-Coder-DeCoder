@@ -1,18 +1,28 @@
 """JavaScript/TypeScript symbol extractor using tree-sitter."""
 
-from typing import List, Optional
-from ..models import Symbol, Range, Parameter
+from typing import List, Optional, Set
+from ..models import Symbol, Range, Parameter, Import, CallSite
 from .base import BaseExtractor
 
 
 class JavaScriptExtractor(BaseExtractor):
     """Extracts symbols from JavaScript/TypeScript source code."""
     
+    def __init__(self):
+        self._imports: List[Import] = []
+        self._import_map: dict = {}  # name -> module for resolution
+    
     def extract_symbols(self, tree, file_path: str, content: bytes) -> List[Symbol]:
         """Extract all symbols from a JS/TS file."""
         symbols = []
+        self._imports = []
+        self._import_map = {}
         self._extract_from_node(tree.root_node, file_path, content, symbols, parent=None)
         return symbols
+    
+    def get_imports(self) -> List[Import]:
+        """Get structured imports from last extraction."""
+        return self._imports
     
     def _extract_from_node(
         self, 
@@ -65,9 +75,12 @@ class JavaScriptExtractor(BaseExtractor):
         
         # Import statements
         elif node.type == 'import_statement':
-            symbol = self._extract_import(node, file_path, content)
+            symbol, imp = self._extract_import(node, file_path, content)
             if symbol:
                 symbols.append(symbol)
+            if imp:
+                self._imports.append(imp)
+                self._update_import_map(imp)
         
         # Export statements - extract the inner declaration
         elif node.type == 'export_statement':
@@ -125,7 +138,7 @@ class JavaScriptExtractor(BaseExtractor):
         name = self._get_node_text(name_node, content)
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
-        calls = self._extract_calls(node, content)
+        calls, call_sites = self._extract_calls_with_context(node, content)
         
         return Symbol(
             name=name,
@@ -137,6 +150,7 @@ class JavaScriptExtractor(BaseExtractor):
             parameters=parameters,
             return_type=return_type,
             calls=calls,
+            call_sites=call_sites,
         )
     
     def _extract_method(
@@ -150,7 +164,7 @@ class JavaScriptExtractor(BaseExtractor):
         name = self._get_node_text(name_node, content)
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
-        calls = self._extract_calls(node, content)
+        calls, call_sites = self._extract_calls_with_context(node, content)
         
         # Determine if it's a getter/setter/static
         kind = 'method'
@@ -172,6 +186,7 @@ class JavaScriptExtractor(BaseExtractor):
             parameters=parameters,
             return_type=return_type,
             calls=calls,
+            call_sites=call_sites,
         )
     
     def _extract_field(
@@ -213,7 +228,7 @@ class JavaScriptExtractor(BaseExtractor):
         if value:
             parameters = self._extract_parameters(value, content)
             return_type = self._get_return_type(value, content)
-            calls = self._extract_calls(value, content)
+            calls, call_sites = self._extract_calls_with_context(value, content)
             return Symbol(
                 name=name,
                 kind='function',
@@ -224,6 +239,7 @@ class JavaScriptExtractor(BaseExtractor):
                 parameters=parameters,
                 return_type=return_type,
                 calls=calls,
+                call_sites=call_sites,
             )
         else:
             return Symbol(
@@ -235,17 +251,79 @@ class JavaScriptExtractor(BaseExtractor):
                 parent=parent,
             )
     
-    def _extract_import(self, node, file_path: str, content: bytes) -> Optional[Symbol]:
-        """Extract an import statement."""
+    def _extract_import(self, node, file_path: str, content: bytes) -> tuple:
+        """Extract an import statement with structured info."""
         import_text = self._get_node_text(node, content)
         
-        return Symbol(
+        symbol = Symbol(
             name=import_text,
             kind='import',
             file_path=file_path,
             range=self._make_range(node),
             selection_range=self._make_range(node),
         )
+        
+        # Parse import structure
+        module = None
+        names = []
+        aliases = {}
+        
+        for child in node.children:
+            if child.type == 'string':
+                # Remove quotes
+                module = self._get_node_text(child, content).strip('"\'')
+            elif child.type == 'import_clause':
+                self._parse_import_clause(child, content, names, aliases)
+        
+        imp = None
+        if module:
+            imp = Import(
+                module=module,
+                names=names,
+                aliases=aliases,
+                line=node.start_point[0] + 1
+            )
+        
+        return symbol, imp
+    
+    def _parse_import_clause(self, node, content: bytes, names: list, aliases: dict):
+        """Parse import clause to extract names and aliases."""
+        for child in node.children:
+            if child.type == 'identifier':
+                # Default import
+                names.append(self._get_node_text(child, content))
+            elif child.type == 'named_imports':
+                for spec in child.children:
+                    if spec.type == 'import_specifier':
+                        name = None
+                        alias = None
+                        for part in spec.children:
+                            if part.type == 'identifier':
+                                if name is None:
+                                    name = self._get_node_text(part, content)
+                                else:
+                                    alias = self._get_node_text(part, content)
+                        if name:
+                            names.append(name)
+                            if alias:
+                                aliases[name] = alias
+            elif child.type == 'namespace_import':
+                # import * as foo
+                for part in child.children:
+                    if part.type == 'identifier':
+                        alias = self._get_node_text(part, content)
+                        names.append('*')
+                        aliases['*'] = alias
+    
+    def _update_import_map(self, imp: Import):
+        """Update the import map for call resolution."""
+        for name in imp.names:
+            alias = imp.aliases.get(name, name)
+            if name == '*':
+                # Namespace import: alias maps to module
+                self._import_map[alias] = imp.module
+            else:
+                self._import_map[alias] = f"{imp.module}:{name}"
     
     def _extract_parameters(self, node, content: bytes) -> List[Parameter]:
         """Extract parameters from a function/method node."""
@@ -327,28 +405,83 @@ class JavaScriptExtractor(BaseExtractor):
         return instance_vars
     
     def _extract_calls(self, func_node, content: bytes) -> List[str]:
-        """Extract function/method calls from a function body."""
-        calls = []
-        seen = set()
+        """Extract function/method calls (simple list, for backward compat)."""
+        calls, _ = self._extract_calls_with_context(func_node, content)
+        return calls
+    
+    def _extract_calls_with_context(self, func_node, content: bytes) -> tuple:
+        """Extract function/method calls with conditional context.
         
-        def walk(node):
+        Returns:
+            Tuple of (calls: List[str], call_sites: List[CallSite])
+        """
+        calls = []
+        call_sites = []
+        seen: Set[str] = set()
+        
+        # Track conditional depth
+        conditional_types = {
+            'if_statement', 'else_clause',
+            'try_statement', 'catch_clause', 'finally_clause',
+            'for_statement', 'for_in_statement', 'for_of_statement',
+            'while_statement', 'do_statement',
+            'switch_statement', 'switch_case',
+            'ternary_expression', 'conditional_expression',
+        }
+        
+        globals_to_skip = {
+            'console.log', 'console.error', 'console.warn', 'console.info',
+            'JSON.stringify', 'JSON.parse',
+            'Object.keys', 'Object.values', 'Object.entries', 'Object.assign',
+            'Array.isArray', 'Array.from',
+            'Promise.resolve', 'Promise.reject', 'Promise.all',
+            'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+            'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+        }
+        
+        def walk(node, in_conditional: bool = False):
+            is_conditional = node.type in conditional_types
+            current_conditional = in_conditional or is_conditional
+            
             for child in node.children:
                 if child.type == 'call_expression':
                     func = child.children[0] if child.children else None
                     if func:
                         call_name = self._get_call_name(func, content)
-                        if call_name and call_name not in seen:
-                            # Filter out common globals
-                            if call_name not in ('console.log', 'console.error', 
-                                                 'console.warn', 'JSON.stringify',
-                                                 'JSON.parse', 'Object.keys',
-                                                 'Object.values', 'Array.isArray'):
+                        if call_name and call_name not in globals_to_skip:
+                            # Add to simple calls list (deduped)
+                            if call_name not in seen:
                                 seen.add(call_name)
                                 calls.append(call_name)
-                walk(child)
+                            
+                            # Create CallSite with context
+                            call_site = CallSite(
+                                name=call_name,
+                                line=child.start_point[0] + 1,
+                                is_conditional=current_conditional,
+                            )
+                            
+                            # Try to resolve target
+                            self._resolve_call_target(call_name, call_site)
+                            call_sites.append(call_site)
+                
+                walk(child, current_conditional)
         
         walk(func_node)
-        return calls
+        return calls, call_sites
+    
+    def _resolve_call_target(self, call_name: str, call_site: CallSite):
+        """Try to resolve a call to its target module/symbol."""
+        base = call_name.split('.')[0]
+        
+        if base in self._import_map:
+            target = self._import_map[base]
+            if '.' in call_name:
+                # foo.bar() where foo is imported
+                rest = call_name[len(base)+1:]
+                call_site.target_symbol = f"{target}.{rest}"
+            else:
+                call_site.target_symbol = target
     
     def _get_call_name(self, node, content: bytes) -> Optional[str]:
         """Get the name of a called function/method."""

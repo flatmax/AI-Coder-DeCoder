@@ -5,6 +5,47 @@ from typing import Optional, List
 
 
 @dataclass
+class Import:
+    """Resolved import information."""
+    module: str                              # "foo.bar" or "os"
+    names: List[str] = field(default_factory=list)  # ["baz", "qux"] for 'from' imports
+    aliases: dict = field(default_factory=dict)     # {"qux": "q"} for 'as' aliases
+    resolved_file: Optional[str] = None      # Relative path if in-repo
+    line: int = 0
+    level: int = 0                           # Relative import level (1 = ., 2 = .., etc)
+    
+    def to_dict(self) -> dict:
+        result = {'module': self.module, 'line': self.line}
+        if self.names:
+            result['names'] = self.names
+        if self.aliases:
+            result['aliases'] = self.aliases
+        if self.resolved_file:
+            result['resolvedFile'] = self.resolved_file
+        return result
+
+
+@dataclass
+class CallSite:
+    """A function/method call with resolution info."""
+    name: str                                # Called name as written
+    target_file: Optional[str] = None        # Resolved target file (if in-repo)
+    target_symbol: Optional[str] = None      # Resolved symbol name
+    line: int = 0
+    is_conditional: bool = False             # Inside if/try/loop
+    
+    def to_dict(self) -> dict:
+        result = {'name': self.name, 'line': self.line}
+        if self.target_file:
+            result['targetFile'] = self.target_file
+        if self.target_symbol:
+            result['targetSymbol'] = self.target_symbol
+        if self.is_conditional:
+            result['conditional'] = True
+        return result
+
+
+@dataclass
 class Range:
     """Source code range with line and column positions."""
     start_line: int
@@ -51,8 +92,10 @@ class Symbol:
     docstring: Optional[str] = None
     # Instance variables (self.x assignments for classes)
     instance_vars: List[str] = field(default_factory=list)
-    # Function/method calls made within this symbol
+    # Function/method calls made within this symbol (simple names for backward compat)
     calls: List[str] = field(default_factory=list)
+    # Rich call information with resolution
+    call_sites: List[CallSite] = field(default_factory=list)
     # For inherited methods, which parent class it comes from
     inherited_from: Optional[str] = None
     
@@ -79,6 +122,8 @@ class Symbol:
             result['instanceVars'] = self.instance_vars
         if self.calls:
             result['calls'] = self.calls
+        if self.call_sites:
+            result['callSites'] = [c.to_dict() for c in self.call_sites]
         if self.inherited_from:
             result['inheritedFrom'] = self.inherited_from
         return result

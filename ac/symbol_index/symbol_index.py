@@ -1,7 +1,7 @@
 """Main SymbolIndex class for extracting and querying symbols."""
 
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
 
 from .models import Symbol
@@ -9,6 +9,7 @@ from .parser import get_parser
 from .extractors import get_extractor
 from .cache import SymbolCache
 from .references import ReferenceIndex
+from .import_resolver import ImportResolver
 
 
 class SymbolIndex:
@@ -32,6 +33,9 @@ class SymbolIndex:
         self._cache = SymbolCache(str(self.repo_root))
         self._reference_index: Optional[ReferenceIndex] = None
         self._references_built = False
+        self._import_resolver = ImportResolver(str(self.repo_root))
+        # Cache of file -> set of in-repo imports
+        self._file_imports: Dict[str, set] = {}
     
     def index_file(self, file_path: str, content: Optional[str] = None, use_cache: bool = True) -> List[Symbol]:
         """Index a single file and return its symbols.
@@ -59,6 +63,9 @@ class SymbolIndex:
         if use_cache and content is None:
             cached = self._cache.get(rel_path)
             if cached is not None:
+                # Still need to resolve imports if not already done
+                if rel_path not in self._file_imports:
+                    self._resolve_cached_file_imports(rel_path, cached)
                 return cached
         
         # Parse file
@@ -76,6 +83,9 @@ class SymbolIndex:
         # Get extractor for this language and extract symbols
         extractor = get_extractor(lang_name)
         symbols = extractor.extract_symbols(tree, rel_path, content_bytes)
+        
+        # Resolve in-repo imports
+        self._resolve_file_imports(rel_path, extractor, lang_name)
         
         # Cache (only if reading from disk)
         if content is None:
@@ -109,6 +119,61 @@ class SymbolIndex:
                 traceback.print_exc()
         return result
     
+    def _resolve_cached_file_imports(self, file_path: str, symbols: List[Symbol]):
+        """Resolve imports from cached symbols (re-parse needed for import details)."""
+        # Determine language from file extension
+        path = Path(file_path)
+        lang_name = self._parser.get_language_for_file(str(self.repo_root / path))
+        if not lang_name:
+            return
+        
+        # Need to re-parse to get import details (symbols don't store full import info)
+        abs_path = self.repo_root / path
+        if not abs_path.exists():
+            return
+        
+        tree, _ = self._parser.parse_file(str(abs_path))
+        if not tree:
+            return
+        
+        with open(abs_path, 'rb') as f:
+            content_bytes = f.read()
+        
+        extractor = get_extractor(lang_name)
+        # Re-extract just to get imports (symbols already cached)
+        extractor.extract_symbols(tree, file_path, content_bytes)
+        self._resolve_file_imports(file_path, extractor, lang_name)
+    
+    def _resolve_file_imports(self, file_path: str, extractor, lang_name: str):
+        """Resolve imports to in-repo file paths."""
+        imports = extractor.get_imports()
+        resolved = set()
+        
+        for imp in imports:
+            if lang_name == 'python':
+                # Use level from Import object (set by extractor for relative imports)
+                is_relative = imp.level > 0
+                
+                resolved_path = self._import_resolver.resolve_python_import(
+                    module=imp.module,
+                    from_file=file_path,
+                    is_relative=is_relative,
+                    level=imp.level,
+                )
+                if resolved_path:
+                    resolved.add(resolved_path)
+            
+            elif lang_name in ('javascript', 'typescript', 'tsx'):
+                resolved_path = self._import_resolver.resolve_js_import(
+                    import_path=imp.module,
+                    from_file=file_path
+                )
+                if resolved_path:
+                    resolved.add(resolved_path)
+        
+        if resolved:
+            self._file_imports[file_path] = resolved
+    
     def get_symbols(self, file_path: str) -> List[Symbol]:
         """Get cached symbols for a file, or index it if not cached."""
         cached = self._cache.get(file_path)
@@ -119,6 +184,8 @@ class SymbolIndex:
     def clear_cache(self):
         """Clear the symbol cache."""
         self._cache.clear()
+        self._file_imports.clear()
+        self._import_resolver.clear_cache()
     
     def invalidate_file(self, file_path: str):
         """Invalidate cache for a specific file (e.g., after it's modified)."""
@@ -229,7 +296,18 @@ class SymbolIndex:
                 if refs_set:
                     file_refs[file_path] = refs_set
         
-        return to_compact(symbols_by_file, references=references, file_refs=file_refs)
+        # Collect file imports for files we're outputting
+        file_imports = {}
+        for file_path in symbols_by_file.keys():
+            if file_path in self._file_imports:
+                file_imports[file_path] = self._file_imports[file_path]
+        
+        return to_compact(
+            symbols_by_file, 
+            references=references, 
+            file_refs=file_refs,
+            file_imports=file_imports
+        )
     
     def save_compact(self, output_path: str = None, file_paths: List[str] = None) -> str:
         """Save compact format to disk.

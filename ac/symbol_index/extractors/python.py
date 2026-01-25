@@ -1,18 +1,28 @@
 """Python symbol extractor using tree-sitter."""
 
-from typing import List, Optional
-from ..models import Symbol, Range, Parameter
+from typing import List, Optional, Set
+from ..models import Symbol, Range, Parameter, Import, CallSite
 from .base import BaseExtractor
 
 
 class PythonExtractor(BaseExtractor):
     """Extracts symbols from Python source code."""
     
+    def __init__(self):
+        self._imports: List[Import] = []
+        self._import_map: dict = {}  # name -> module for resolution
+    
     def extract_symbols(self, tree, file_path: str, content: bytes) -> List[Symbol]:
         """Extract all symbols from a Python file."""
         symbols = []
+        self._imports = []
+        self._import_map = {}
         self._extract_from_node(tree.root_node, file_path, content, symbols, parent=None)
         return symbols
+    
+    def get_imports(self) -> List[Import]:
+        """Get structured imports from last extraction."""
+        return self._imports
     
     def _extract_from_node(
         self, 
@@ -42,10 +52,21 @@ class PythonExtractor(BaseExtractor):
             if symbol:
                 symbols.append(symbol)
         
-        elif node.type == 'import_statement' or node.type == 'import_from_statement':
-            symbol = self._extract_import(node, file_path, content)
+        elif node.type == 'import_statement':
+            symbol, imp = self._extract_import_statement(node, file_path, content)
             if symbol:
                 symbols.append(symbol)
+            if imp:
+                self._imports.append(imp)
+                self._update_import_map(imp)
+        
+        elif node.type == 'import_from_statement':
+            symbol, imp = self._extract_import_from_statement(node, file_path, content)
+            if symbol:
+                symbols.append(symbol)
+            if imp:
+                self._imports.append(imp)
+                self._update_import_map(imp)
         
         elif node.type == 'expression_statement':
             # Check for module-level assignments (variables/constants)
@@ -135,7 +156,7 @@ class PythonExtractor(BaseExtractor):
         docstring = self._get_function_docstring(node, content)
         
         # Get calls made by this function
-        calls = self._extract_calls(node, content)
+        calls, call_sites = self._extract_calls_with_context(node, content)
         
         return Symbol(
             name=name,
@@ -148,6 +169,7 @@ class PythonExtractor(BaseExtractor):
             return_type=return_type,
             docstring=docstring,
             calls=calls,
+            call_sites=call_sites,
         )
     
     def _extract_parameters(self, params_node, content: bytes) -> List[Parameter]:
@@ -211,17 +233,119 @@ class PythonExtractor(BaseExtractor):
         
         return parameters
     
-    def _extract_import(self, node, file_path: str, content: bytes) -> Optional[Symbol]:
-        """Extract an import statement."""
+    def _extract_import_statement(self, node, file_path: str, content: bytes) -> tuple:
+        """Extract 'import x' or 'import x as y' statement."""
         import_text = self._get_node_text(node, content)
         
-        return Symbol(
+        symbol = Symbol(
             name=import_text,
             kind='import',
             file_path=file_path,
             range=self._make_range(node),
             selection_range=self._make_range(node),
         )
+        
+        # Parse the import
+        modules = []
+        aliases = {}
+        
+        for child in node.children:
+            if child.type == 'dotted_name':
+                modules.append(self._get_node_text(child, content))
+            elif child.type == 'aliased_import':
+                name_node = self._find_child(child, 'dotted_name')
+                alias_node = self._find_child(child, 'identifier')
+                if name_node:
+                    mod_name = self._get_node_text(name_node, content)
+                    modules.append(mod_name)
+                    if alias_node:
+                        aliases[mod_name] = self._get_node_text(alias_node, content)
+        
+        # Create Import for each module
+        imp = None
+        if modules:
+            imp = Import(
+                module=modules[0],
+                aliases=aliases,
+                line=node.start_point[0] + 1
+            )
+        
+        return symbol, imp
+    
+    def _extract_import_from_statement(self, node, file_path: str, content: bytes) -> tuple:
+        """Extract 'from x import y' statement."""
+        import_text = self._get_node_text(node, content)
+        
+        symbol = Symbol(
+            name=import_text,
+            kind='import',
+            file_path=file_path,
+            range=self._make_range(node),
+            selection_range=self._make_range(node),
+        )
+        
+        # Parse the from import
+        module = None
+        names = []
+        aliases = {}
+        level = 0  # For relative imports
+        
+        # Track whether we've seen 'import' keyword to know if identifiers are names
+        seen_import_keyword = False
+        
+        for child in node.children:
+            if child.type == 'dotted_name' and not seen_import_keyword:
+                # Module name before 'import' keyword
+                module = self._get_node_text(child, content)
+            elif child.type == 'relative_import':
+                # Handle relative imports like "from ..foo import bar"
+                for sub in child.children:
+                    if sub.type == 'import_prefix':
+                        prefix = self._get_node_text(sub, content)
+                        level = len(prefix)
+                    elif sub.type == 'dotted_name':
+                        module = self._get_node_text(sub, content)
+            elif child.type == 'import':
+                # The 'import' keyword - names come after this
+                seen_import_keyword = True
+            elif seen_import_keyword and child.type == 'dotted_name':
+                # Handle imported name like 'foo.bar' after 'import' keyword
+                names.append(self._get_node_text(child, content))
+            elif child.type == 'identifier' and seen_import_keyword:
+                # Imported name (after 'import' keyword)
+                names.append(self._get_node_text(child, content))
+            elif child.type == 'aliased_import':
+                name_node = self._find_child(child, 'identifier')
+                if name_node:
+                    name = self._get_node_text(name_node, content)
+                    names.append(name)
+                    # Find alias (second identifier)
+                    idents = [c for c in child.children if c.type == 'identifier']
+                    if len(idents) >= 2:
+                        aliases[name] = self._get_node_text(idents[1], content)
+        
+        imp = Import(
+            module=module or '',
+            names=names,
+            aliases=aliases,
+            line=node.start_point[0] + 1,
+            level=level,
+        )
+        
+        return symbol, imp
+    
+    def _update_import_map(self, imp: Import):
+        """Update the import map for call resolution."""
+        if imp.names:
+            # from foo import bar -> bar maps to foo.bar
+            for name in imp.names:
+                alias = imp.aliases.get(name, name)
+                self._import_map[alias] = f"{imp.module}.{name}" if imp.module else name
+        else:
+            # import foo or import foo as bar
+            module_name = imp.module.split('.')[0]
+            alias = imp.aliases.get(imp.module, module_name)
+            self._import_map[alias] = imp.module
     
     def _extract_assignment(
         self, node, file_path: str, content: bytes, parent: Optional[str]
@@ -312,29 +436,84 @@ class PythonExtractor(BaseExtractor):
             return identifiers[-1].text.decode('utf-8') if identifiers[-1].text else None
         return None
     
-    def _extract_calls(self, func_node, content: bytes) -> List[str]:
-        """Extract function/method calls from a function body."""
-        calls = []
-        seen = set()
+    def _extract_calls_with_context(self, func_node, content: bytes) -> tuple:
+        """Extract function/method calls with conditional context.
         
-        def walk(node):
+        Returns:
+            Tuple of (calls: List[str], call_sites: List[CallSite])
+        """
+        calls = []
+        call_sites = []
+        seen: Set[str] = set()
+        
+        # Track conditional depth
+        conditional_types = {
+            'if_statement', 'elif_clause', 'else_clause',
+            'try_statement', 'except_clause', 'finally_clause',
+            'for_statement', 'while_statement',
+            'with_statement',
+            'conditional_expression',  # ternary
+        }
+        
+        builtins = {
+            'print', 'len', 'str', 'int', 'list', 'dict', 'set', 
+            'tuple', 'bool', 'range', 'enumerate', 'zip', 'map', 
+            'filter', 'isinstance', 'hasattr', 'getattr', 'setattr',
+            'open', 'type', 'super', 'sorted', 'reversed', 'any', 'all',
+            'min', 'max', 'sum', 'abs', 'round', 'format', 'repr',
+        }
+        
+        def walk(node, in_conditional: bool = False):
+            # Check if entering a conditional context
+            is_conditional = node.type in conditional_types
+            current_conditional = in_conditional or is_conditional
+            
             for child in node.children:
                 if child.type == 'call':
                     func = child.children[0] if child.children else None
                     if func:
                         call_name = self._get_call_name(func, content)
-                        if call_name and call_name not in seen:
-                            # Filter out common builtins to reduce noise
-                            if call_name not in ('print', 'len', 'str', 'int', 'list', 
-                                                 'dict', 'set', 'tuple', 'bool', 'range',
-                                                 'enumerate', 'zip', 'map', 'filter',
-                                                 'isinstance', 'hasattr', 'getattr', 'setattr'):
+                        if call_name and call_name not in builtins:
+                            # Add to simple calls list (deduped)
+                            if call_name not in seen:
                                 seen.add(call_name)
                                 calls.append(call_name)
-                walk(child)
+                            
+                            # Create CallSite with context
+                            call_site = CallSite(
+                                name=call_name,
+                                line=child.start_point[0] + 1,
+                                is_conditional=current_conditional,
+                            )
+                            
+                            # Try to resolve target
+                            self._resolve_call_target(call_name, call_site)
+                            call_sites.append(call_site)
+                
+                walk(child, current_conditional)
         
         walk(func_node)
-        return calls
+        return calls, call_sites
+    
+    def _resolve_call_target(self, call_name: str, call_site: CallSite):
+        """Try to resolve a call to its target module/symbol."""
+        # Check if it's an imported name
+        if call_name in self._import_map:
+            full_path = self._import_map[call_name]
+            parts = full_path.rsplit('.', 1)
+            if len(parts) == 2:
+                call_site.target_symbol = parts[1]
+                # Module path would need resolver to get file
+            else:
+                call_site.target_symbol = parts[0]
+        
+        # Handle attribute access like foo.bar()
+        elif '.' in call_name:
+            parts = call_name.split('.')
+            base = parts[0]
+            if base in self._import_map:
+                full_path = self._import_map[base]
+                call_site.target_symbol = '.'.join([full_path] + parts[1:])
     
     def _get_call_name(self, node, content: bytes) -> Optional[str]:
         """Get the name of a called function/method."""

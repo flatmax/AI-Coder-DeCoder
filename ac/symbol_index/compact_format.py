@@ -1,7 +1,7 @@
 """Compact format for LLM context."""
 
 from typing import List, Dict, Optional, Set
-from .models import Symbol
+from .models import Symbol, CallSite
 
 
 # Single-letter kind prefixes
@@ -14,11 +14,15 @@ KIND_PREFIX = {
     'property': 'p',
 }
 
+# Conditional marker
+CONDITIONAL_MARKER = '?'
+
 
 def to_compact(
     symbols_by_file: Dict[str, List[Symbol]],
     references: Optional[Dict[str, Dict[str, List]]] = None,
     file_refs: Optional[Dict[str, Set[str]]] = None,
+    file_imports: Optional[Dict[str, Set[str]]] = None,
     include_instance_vars: bool = True,
     include_calls: bool = False,
 ) -> str:
@@ -48,6 +52,7 @@ def to_compact(
         symbols_by_file: Dict mapping file paths to their symbols
         references: Optional dict of file -> symbol -> [locations]
         file_refs: Optional dict of file -> set of files that reference it
+        file_imports: Optional dict of file -> set of in-repo files it imports
         
     Returns:
         Compact string representation
@@ -73,6 +78,12 @@ def to_compact(
             import_names = _extract_import_names(imports)
             if import_names:
                 lines.append(f"│i {','.join(import_names)}")
+        
+        # Output in-repo file imports (outgoing dependencies)
+        if file_imports and file_path in file_imports:
+            in_repo_imports = sorted(file_imports[file_path])
+            if in_repo_imports:
+                lines.append(f"│i→ {','.join(in_repo_imports)}")
         
         # Output other symbols
         for symbol in other_symbols:
@@ -173,12 +184,11 @@ def _format_symbol(
     # Add line number
     line_parts.append(f":{symbol.range.start_line}")
     
-    # Add call annotations if enabled
-    if include_calls and symbol.calls:
-        call_str = ','.join(symbol.calls[:5])
-        if len(symbol.calls) > 5:
-            call_str += f",+{len(symbol.calls)-5}"
-        line_parts.append(f" →{call_str}")
+    # Add call annotations if enabled (now with conditional markers)
+    if include_calls:
+        call_str = _format_calls(symbol)
+        if call_str:
+            line_parts.append(f" →{call_str}")
     
     # Add reference annotations if available
     if refs:
@@ -205,6 +215,43 @@ def _format_symbol(
         ))
     
     return lines
+
+
+def _format_calls(symbol: Symbol) -> str:
+    """Format calls with conditional markers.
+    
+    Uses call_sites if available for richer info, falls back to calls.
+    
+    Format: "foo,bar?,baz" where ? indicates conditional call
+    """
+    if symbol.call_sites:
+        # Use rich call sites
+        parts = []
+        seen = set()
+        for site in symbol.call_sites[:7]:  # Limit to 7 calls
+            name = site.name
+            if name in seen:
+                continue
+            seen.add(name)
+            
+            if site.is_conditional:
+                parts.append(f"{name}{CONDITIONAL_MARKER}")
+            else:
+                parts.append(name)
+        
+        if len(symbol.call_sites) > 7:
+            parts.append(f"+{len(symbol.call_sites)-7}")
+        
+        return ','.join(parts)
+    
+    elif symbol.calls:
+        # Fall back to simple calls list
+        if len(symbol.calls) <= 5:
+            return ','.join(symbol.calls)
+        else:
+            return ','.join(symbol.calls[:5]) + f",+{len(symbol.calls)-5}"
+    
+    return ''
 
 
 def _format_refs(locations: List) -> str:
