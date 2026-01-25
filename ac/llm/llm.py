@@ -218,21 +218,22 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         return self._indexer
     
     def _auto_save_symbol_map(self):
-        """Auto-save symbol map for all tracked files."""
+        """Auto-save symbol map for all tracked files.
+        
+        Returns:
+            dict with symbol map info for HUD display, or None on failure.
+        """
         if not self.repo:
-            print("📊 Symbol map skipped: no repo")
-            return
+            return None
         
         try:
             # Get all trackable files from repo
             tree_result = self.repo.get_file_tree()
             if not tree_result or 'error' in tree_result:
-                print(f"📊 Symbol map skipped: no file tree ({tree_result})")
-                return
+                return None
             tree = tree_result.get('tree')
             if not tree:
-                print("📊 Symbol map skipped: empty tree")
-                return
+                return None
             
             # Collect all file paths
             file_paths = self._collect_file_paths(tree)
@@ -241,24 +242,25 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             supported_extensions = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
             file_paths = [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
             
-            if file_paths:
-                indexer = self._get_indexer()
-                # Debug: check what we're indexing
-                py_files = [f for f in file_paths if f.endswith('.py')]
-                print(f"📊 Symbol map: {len(file_paths)} files ({len(py_files)} .py)")
-                symbols_by_file = indexer.index_files(file_paths)
-                print(f"📊 Symbol map: {len(symbols_by_file)} files with symbols")
-                if symbols_by_file:
-                    first_file = list(symbols_by_file.keys())[0]
-                    print(f"📊 First file: {first_file} has {len(symbols_by_file[first_file])} symbols")
-                saved_path = indexer.save_symbol_map(file_paths=file_paths)
-                print(f"📊 Symbol map saved -> {saved_path}")
-            else:
-                print("📊 Symbol map skipped: no supported files found")
+            if not file_paths:
+                return None
+            
+            indexer = self._get_indexer()
+            py_files = [f for f in file_paths if f.endswith('.py')]
+            symbols_by_file = indexer.index_files(file_paths)
+            saved_path = indexer.save_symbol_map(file_paths=file_paths)
+            
+            return {
+                'total_files': len(file_paths),
+                'py_files': len(py_files),
+                'files_with_symbols': len(symbols_by_file),
+                'saved_path': saved_path
+            }
         except Exception as e:
             import traceback
             print(f"⚠️ Failed to auto-save symbol map: {e}")
             traceback.print_exc()
+            return None
     
     def _collect_file_paths(self, node, current_path=''):
         """Recursively collect file paths from tree structure."""

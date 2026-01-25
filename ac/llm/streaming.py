@@ -153,11 +153,11 @@ class StreamingMixin:
             self.conversation_history.append({"role": "user", "content": user_text})
             self.conversation_history.append({"role": "assistant", "content": full_content})
             
-            # Print token usage HUD
-            self._print_streaming_hud(messages, file_paths, context_map_tokens)
-            
             # Update symbol map with current context files
-            self._auto_save_symbol_map()
+            symbol_map_info = self._auto_save_symbol_map()
+            
+            # Print token usage HUD
+            self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
             
             # Parse and apply edits
             file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
@@ -344,33 +344,70 @@ class StreamingMixin:
         except Exception as e:
             print(f"Error firing stream chunk: {e}")
     
-    def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0):
+    def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0, symbol_map_info=None):
         """Print HUD after streaming completes."""
         try:
             aider_chat = self.get_aider_chat()
+            ctx = aider_chat._context_manager
             
-            # Print the full HUD from context manager
-            if aider_chat._context_manager:
-                aider_chat._context_manager.print_hud(messages, file_paths or [])
+            if not ctx:
+                return
             
-            # Print additional streaming-specific info
-            last_req = self._last_request_tokens or {}
-            prompt_tokens = last_req.get('prompt', 0)
-            completion_tokens = last_req.get('completion', 0)
-            cache_hit = last_req.get('cache_hit', 0)
-            cache_write = last_req.get('cache_write', 0)
+            # Count tokens in different parts
+            total_tokens = 0
+            system_tokens = 0
+            history_tokens = 0
+            file_tokens = 0
             
-            # Print actual usage from this request
-            usage_parts = [f"prompt={prompt_tokens:,}", f"completion={completion_tokens:,}"]
-            if cache_hit:
-                usage_parts.append(f"cache_hit={cache_hit:,}")
-            if cache_write:
-                usage_parts.append(f"cache_write={cache_write:,}")
-            print(f"📊 Request tokens: {', '.join(usage_parts)}")
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Handle image messages - just count text parts
+                    text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                    content = " ".join(text_parts)
+                tokens = ctx.count_tokens(content)
+                total_tokens += tokens
+                
+                role = msg.get("role", "")
+                if role == "system":
+                    system_tokens += tokens
+                elif role == "user" and content.startswith("Here are the files:"):
+                    file_tokens += tokens
+                elif role in ("user", "assistant") and not content.startswith("# Repository Structure"):
+                    # Skip the symbol map exchange, count as history
+                    if content != "Ok.":
+                        history_tokens += tokens
             
-            # Print repo map tokens if available
-            if context_map_tokens:
-                print(f"🗺️  Repo map: {context_map_tokens:,} tokens")
+            # Get model info
+            model_name = aider_chat.model if hasattr(aider_chat, 'model') else 'unknown'
+            
+            # Get token limit
+            try:
+                import litellm
+                model_info = litellm.get_model_info(model_name)
+                max_tokens = model_info.get('max_input_tokens', 128000)
+            except Exception:
+                max_tokens = 128000
+            
+            # Print compact HUD
+            print(f"\n{'─' * 50}")
+            print(f"📊 {model_name}")
+            print(f"{'─' * 50}")
+            print(f"  System:          {system_tokens:,}")
+            print(f"  Symbol Map:      {context_map_tokens:,}")
+            print(f"  Files:           {file_tokens:,}")
+            print(f"  History:         {history_tokens:,}")
+            print(f"{'─' * 50}")
+            print(f"  Total:           {total_tokens:,} / {max_tokens:,}")
+            
+            # Show last request token usage if available
+            if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
+                req = self._last_request_tokens
+                cache_info = ""
+                if req.get('cache_hit', 0) > 0:
+                    cache_info = f" (cache hit: {req['cache_hit']:,})"
+                print(f"  Last request:    {req.get('prompt', 0):,} in, {req.get('completion', 0):,} out{cache_info}")
+            print(f"{'─' * 50}\n")
                 
         except Exception as e:
             import traceback
