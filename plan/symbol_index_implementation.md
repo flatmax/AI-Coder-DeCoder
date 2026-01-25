@@ -496,13 +496,18 @@ Once symbol index with references is complete:
 
 1. **Phase A**: Add feature flag to choose between aider RepoMap and symbol index ✅ Done
 2. **Phase B**: Default to symbol index, keep aider as fallback ✅ Done
-3. **Phase C**: Remove aider RepoMap dependency entirely 🔲 Planned
-4. **Phase D**: Remove unused aider_integration modules 🔲 Planned
+3. **Phase C**: Remove aider RepoMap dependency entirely ✅ Done
+4. **Phase D**: Remove unused aider_integration modules ✅ Done
 
-Dependencies to eventually remove:
-- `AiderContextManager.repo_map` (RepoMap instance)
-- `AiderContextManager.get_repo_map()` method
-- `AiderContextManager.save_repo_map()` method
+**Phase C completed:**
+- Removed `ac/aider_integration/repo_map_mixin.py` (was dead code)
+- `AiderContextManager` no longer has RepoMap references
+- `LiteLLM.get_context_map()` uses symbol index exclusively
+- `LiteLLM.save_repo_map()` deprecated, delegates to `save_symbol_map()`
+
+**Phase D completed:**
+- Removed `ac/aider_integration/context_builder_mixin.py` (dead code, referenced old RepoMap)
+- All remaining modules are actively used for edit parsing, message building, token counting
 
 Keep (still useful from aider):
 - Edit parsing/applying (search/replace blocks)
