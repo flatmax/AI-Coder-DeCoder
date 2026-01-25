@@ -1,5 +1,5 @@
 be lean where possible, but not too lean if it needs to be understandable.
-If files you need to edit aren't in the context, request them and they may have changed since last time you saw them.
+Don't modify existing files unless they are provided in the context - request them first as they may have changed since you last saw them.
 ```code```
 JRPC-OO lifecycle:
 in javascript :
