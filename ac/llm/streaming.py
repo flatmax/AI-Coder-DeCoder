@@ -6,6 +6,9 @@ import asyncio
 import threading
 import litellm as _litellm
 
+from ..aider_integration.prompts import build_edit_system_prompt
+from .chat import REPO_MAP_HEADER
+
 
 class StreamingMixin:
     """Mixin for streaming chat operations."""
@@ -79,7 +82,8 @@ class StreamingMixin:
         """Background task that streams the chat response."""
         try:
             aider_chat = self.get_aider_chat()
-            aider_chat.model = self.smaller_model if use_smaller_model else self.model
+            model = self.smaller_model if use_smaller_model else self.model
+            aider_chat.model = model
             aider_chat.clear_files()
             
             # Check/handle summarization
@@ -89,7 +93,7 @@ class StreamingMixin:
                 if summary_result.get("status") == "summarized":
                     summarized = True
             
-            # Load files into context
+            # Load files into aider context (for edit parsing)
             if file_paths:
                 for path in file_paths:
                     try:
@@ -102,9 +106,9 @@ class StreamingMixin:
                         })
                         return
             
-            # Build messages
-            messages, user_text = aider_chat._build_messages(
-                user_prompt, images, include_examples=True, use_repo_map=use_repo_map
+            # Build messages using symbol map for context
+            messages, user_text, context_map_tokens = self._build_streaming_messages(
+                user_prompt, file_paths, images, use_repo_map
             )
             
             # Capture the event loop BEFORE running in executor
@@ -115,7 +119,7 @@ class StreamingMixin:
                 None,
                 self._run_streaming_completion,
                 request_id,
-                aider_chat.model,
+                model,
                 messages,
                 loop  # Pass the loop to the thread
             )
@@ -141,17 +145,19 @@ class StreamingMixin:
                 })
                 return
             
-            # Store in conversation history
+            # Store in conversation history (for aider's edit context)
             aider_chat.messages.append({"role": "user", "content": user_text})
             aider_chat.messages.append({"role": "assistant", "content": full_content})
             
-            if aider_chat._context_manager:
-                aider_chat._context_manager.add_exchange(user_text, full_content)
+            # Also store in our conversation history for persistence
+            self.conversation_history.append({"role": "user", "content": user_text})
+            self.conversation_history.append({"role": "assistant", "content": full_content})
             
-            # Print HUD after streaming completes and save repo map
-            if aider_chat._context_manager:
-                aider_chat._context_manager.print_hud(messages)
-                aider_chat._context_manager.save_repo_map(use_cached=True)
+            # Print token usage HUD
+            self._print_streaming_hud(messages, file_paths, context_map_tokens)
+            
+            # Update symbol map with current context files
+            self._auto_save_symbol_map()
             
             # Parse and apply edits
             file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
@@ -240,6 +246,84 @@ class StreamingMixin:
         
         return full_content, was_cancelled
     
+    def _build_streaming_messages(self, user_prompt, file_paths, images, use_repo_map):
+        """
+        Build messages for streaming using symbol map for context.
+        
+        Args:
+            user_prompt: The user's message
+            file_paths: List of file paths to include as context
+            images: Optional list of base64 encoded images
+            use_repo_map: Whether to include the symbol map
+            
+        Returns:
+            Tuple of (messages, user_text, context_map_tokens)
+        """
+        messages = []
+        context_map_tokens = 0
+        
+        # System prompt with search/replace instructions
+        messages.append({"role": "system", "content": build_edit_system_prompt()})
+        
+        # Add symbol map context if requested
+        if use_repo_map and self.repo:
+            context_map = self.get_context_map(chat_files=file_paths, include_references=True)
+            if context_map:
+                map_content = REPO_MAP_HEADER + context_map
+                messages.append({
+                    "role": "user",
+                    "content": map_content
+                })
+                messages.append({
+                    "role": "assistant", 
+                    "content": "Ok."
+                })
+                # Count tokens in the map
+                try:
+                    aider_chat = self.get_aider_chat()
+                    if aider_chat._context_manager:
+                        context_map_tokens = aider_chat._context_manager.count_tokens(map_content)
+                except Exception:
+                    pass
+        
+        # Add file contents
+        if file_paths:
+            file_content_parts = []
+            for path in file_paths:
+                try:
+                    content = self.repo.get_file_content(path, version='working')
+                    if content:
+                        file_content_parts.append(f"{path}\n```\n{content}\n```")
+                except Exception as e:
+                    print(f"⚠️ Could not read {path}: {e}")
+            
+            if file_content_parts:
+                files_message = "Here are the files:\n\n" + "\n\n".join(file_content_parts)
+                messages.append({"role": "user", "content": files_message})
+                messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Add conversation history
+        for msg in self.conversation_history:
+            messages.append(msg)
+        
+        # Build user message with images if provided
+        if images:
+            content = [{"type": "text", "text": user_prompt}]
+            for img in images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{img.get('mime_type', 'image/png')};base64,{img['data']}"
+                    }
+                })
+            user_message = {"role": "user", "content": content}
+        else:
+            user_message = {"role": "user", "content": user_prompt}
+        
+        messages.append(user_message)
+        
+        return messages, user_prompt, context_map_tokens
+    
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire-and-forget stream chunk send.
         
@@ -259,6 +343,39 @@ class StreamingMixin:
                     )
         except Exception as e:
             print(f"Error firing stream chunk: {e}")
+    
+    def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0):
+        """Print HUD after streaming completes."""
+        try:
+            aider_chat = self.get_aider_chat()
+            
+            # Print the full HUD from context manager
+            if aider_chat._context_manager:
+                aider_chat._context_manager.print_hud(messages, file_paths or [])
+            
+            # Print additional streaming-specific info
+            last_req = self._last_request_tokens or {}
+            prompt_tokens = last_req.get('prompt', 0)
+            completion_tokens = last_req.get('completion', 0)
+            cache_hit = last_req.get('cache_hit', 0)
+            cache_write = last_req.get('cache_write', 0)
+            
+            # Print actual usage from this request
+            usage_parts = [f"prompt={prompt_tokens:,}", f"completion={completion_tokens:,}"]
+            if cache_hit:
+                usage_parts.append(f"cache_hit={cache_hit:,}")
+            if cache_write:
+                usage_parts.append(f"cache_write={cache_write:,}")
+            print(f"📊 Request tokens: {', '.join(usage_parts)}")
+            
+            # Print repo map tokens if available
+            if context_map_tokens:
+                print(f"🗺️  Repo map: {context_map_tokens:,} tokens")
+                
+        except Exception as e:
+            import traceback
+            print(f"⚠️ HUD error: {e}")
+            traceback.print_exc()
     
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""

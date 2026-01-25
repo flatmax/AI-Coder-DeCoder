@@ -1,5 +1,11 @@
 import litellm as _litellm
 
+REPO_MAP_HEADER = """# Repository Structure
+
+Below is a map of the repository showing classes, functions, and their relationships.
+Use this to understand the codebase structure and find relevant code.
+
+"""
 
 COMMIT_SYSTEM_PROMPT = """You are an expert software engineer that generates Git commit messages based on the provided diffs.
 
@@ -24,7 +30,7 @@ class ChatMixin:
     
     def chat(self, user_prompt, file_paths=None, images=None, system_prompt=None, 
              file_version='working', stream=False, use_smaller_model=False,
-             dry_run=False, auto_apply=True, use_repo_map=True,
+             dry_run=False, auto_apply=True, use_repo_map=True, use_aider=False,
              auto_add_files=False, max_rounds=3):
         """
         Send a chat message using aider's search/replace format.
@@ -155,6 +161,82 @@ class ChatMixin:
                 continue
         
         return {"error": "Failed to generate commit message with all models"}
+    
+    def _build_messages_with_symbol_map(self, user_prompt, file_paths=None, images=None, 
+                                         system_prompt=None, include_repo_map=True):
+        """
+        Build messages for LLM using symbol map for context.
+        
+        Args:
+            user_prompt: The user's message
+            file_paths: List of file paths to include as context
+            images: Optional list of base64 encoded images
+            system_prompt: Optional custom system prompt
+            include_repo_map: Whether to include the symbol map
+            
+        Returns:
+            Tuple of (messages, user_text) where messages is the list for LLM
+        """
+        from ..aider_integration.prompts import build_edit_system_prompt
+        
+        messages = []
+        
+        # System prompt
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        else:
+            messages.append({"role": "system", "content": build_edit_system_prompt()})
+        
+        # Add repo map context if requested
+        if include_repo_map and self.repo:
+            context_map = self.get_context_map(chat_files=file_paths, include_references=True)
+            if context_map:
+                messages.append({
+                    "role": "user",
+                    "content": REPO_MAP_HEADER + context_map
+                })
+                messages.append({
+                    "role": "assistant", 
+                    "content": "Ok."
+                })
+        
+        # Add file contents
+        if file_paths:
+            file_content_parts = []
+            for path in file_paths:
+                try:
+                    content = self.repo.get_file_content(path, version='working')
+                    if content:
+                        file_content_parts.append(f"{path}\n```\n{content}\n```")
+                except Exception as e:
+                    print(f"⚠️ Could not read {path}: {e}")
+            
+            if file_content_parts:
+                files_message = "Here are the files:\n\n" + "\n\n".join(file_content_parts)
+                messages.append({"role": "user", "content": files_message})
+                messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Add conversation history
+        for msg in self.conversation_history:
+            messages.append(msg)
+        
+        # Build user message with images if provided
+        if images:
+            content = [{"type": "text", "text": user_prompt}]
+            for img in images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{img.get('mime_type', 'image/png')};base64,{img['data']}"
+                    }
+                })
+            user_message = {"role": "user", "content": content}
+        else:
+            user_message = {"role": "user", "content": user_prompt}
+        
+        messages.append(user_message)
+        
+        return messages, user_prompt
     
     def get_token_budget(self):
         """Get current token budget information."""

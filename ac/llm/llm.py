@@ -5,6 +5,7 @@ from .file_context import FileContextMixin
 from .chat import ChatMixin
 from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
+from ..indexer import Indexer
 
 
 class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
@@ -45,6 +46,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Lazy-loaded aider integration
         self._aider_chat = None
+        
+        # Lazy-loaded indexer
+        self._indexer = None
+        
+        # Auto-save symbol map on startup
+        self._auto_save_symbol_map()
     
     def set_model(self, model):
         """Set the LLM model to use."""
@@ -200,6 +207,260 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 chat_files=abs_exclude
             )
             return {"path": saved_path}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def _get_indexer(self):
+        """Get or create the Indexer instance."""
+        if self._indexer is None:
+            repo_root = self.repo.get_repo_root() if self.repo else None
+            self._indexer = Indexer(repo_root)
+        return self._indexer
+    
+    def _auto_save_symbol_map(self):
+        """Auto-save symbol map for all tracked files."""
+        if not self.repo:
+            print("📊 Symbol map skipped: no repo")
+            return
+        
+        try:
+            # Get all trackable files from repo
+            tree_result = self.repo.get_file_tree()
+            if not tree_result or 'error' in tree_result:
+                print(f"📊 Symbol map skipped: no file tree ({tree_result})")
+                return
+            tree = tree_result.get('tree')
+            if not tree:
+                print("📊 Symbol map skipped: empty tree")
+                return
+            
+            # Collect all file paths
+            file_paths = self._collect_file_paths(tree)
+            
+            # Filter to supported extensions
+            supported_extensions = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
+            file_paths = [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
+            
+            if file_paths:
+                indexer = self._get_indexer()
+                # Debug: check what we're indexing
+                py_files = [f for f in file_paths if f.endswith('.py')]
+                print(f"📊 Symbol map: {len(file_paths)} files ({len(py_files)} .py)")
+                symbols_by_file = indexer.index_files(file_paths)
+                print(f"📊 Symbol map: {len(symbols_by_file)} files with symbols")
+                if symbols_by_file:
+                    first_file = list(symbols_by_file.keys())[0]
+                    print(f"📊 First file: {first_file} has {len(symbols_by_file[first_file])} symbols")
+                saved_path = indexer.save_symbol_map(file_paths=file_paths)
+                print(f"📊 Symbol map saved -> {saved_path}")
+            else:
+                print("📊 Symbol map skipped: no supported files found")
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Failed to auto-save symbol map: {e}")
+            traceback.print_exc()
+    
+    def _collect_file_paths(self, node, current_path=''):
+        """Recursively collect file paths from tree structure."""
+        paths = []
+        # Files have 'path' but no 'children'
+        if 'path' in node and 'children' not in node:
+            paths.append(node.get('path'))
+        for child in node.get('children', []):
+            paths.extend(self._collect_file_paths(child, current_path))
+        return paths
+    
+    def save_symbol_map(self, file_paths=None, output_path=None):
+        """
+        Generate and save the symbol map.
+        
+        Args:
+            file_paths: List of files to index. If None, uses cached files.
+            output_path: Custom output path. If None, uses default.
+            
+        Returns:
+            Dict with path to saved file.
+        """
+        try:
+            indexer = self._get_indexer()
+            saved_path = indexer.save_symbol_map(file_paths=file_paths, output_path=output_path)
+            return {"path": saved_path}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def get_symbol_map(self, file_paths=None):
+        """
+        Get symbol map content without saving.
+        
+        Args:
+            file_paths: List of files to index.
+            
+        Returns:
+            Symbol map as string.
+        """
+        try:
+            indexer = self._get_indexer()
+            return indexer.get_symbol_map(file_paths)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def get_document_symbols(self, file_path):
+        """
+        Get LSP-format document symbols for a file.
+        
+        Args:
+            file_path: Path to the file.
+            
+        Returns:
+            List of LSP DocumentSymbol dicts.
+        """
+        try:
+            indexer = self._get_indexer()
+            return indexer.get_document_symbols(file_path)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def get_lsp_symbols(self, file_path=None):
+        """
+        Get LSP-format data for Monaco editor.
+        
+        Args:
+            file_path: Specific file, or None for all cached files.
+            
+        Returns:
+            LSP-compatible dict structure.
+        """
+        try:
+            indexer = self._get_indexer()
+            return indexer.get_lsp_data(file_path)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def save_symbol_map_with_refs(self, file_paths=None, output_path=None):
+        """
+        Generate and save the symbol map with cross-file references.
+        
+        This is the hybrid format that can replace aider's repo map.
+        
+        Args:
+            file_paths: List of files to index. If None, uses all tracked files.
+            output_path: Custom output path. If None, uses default.
+            
+        Returns:
+            Dict with path to saved file.
+        """
+        try:
+            # If no file paths provided, get all trackable files
+            if file_paths is None and self.repo:
+                file_paths = self._get_all_trackable_files()
+            
+            indexer = self._get_indexer()
+            saved_path = indexer.get_symbol_map_with_refs(
+                file_paths=file_paths,
+                output_path=output_path
+            )
+            return {"path": saved_path}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
+    
+    def _get_all_trackable_files(self):
+        """Get all trackable files from the repo."""
+        if not self.repo:
+            return []
+        
+        tree_result = self.repo.get_file_tree()
+        if not tree_result or 'tree' not in tree_result:
+            return []
+        
+        file_paths = self._collect_file_paths(tree_result['tree'])
+        
+        # Filter to supported extensions
+        supported_extensions = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
+        return [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
+    
+    def get_context_map(self, chat_files=None, include_references=True):
+        """
+        Get repository context map for LLM.
+        
+        Uses tree-sitter symbol index as the primary context source.
+        Chat files are excluded since they're included verbatim in the prompt.
+        
+        Args:
+            chat_files: List of files included in chat (to exclude from map)
+            include_references: Whether to include cross-file references
+            
+        Returns:
+            String containing the symbol map
+        """
+        if not self.repo:
+            return ""
+        
+        try:
+            # Get all trackable files
+            all_files = self._get_all_trackable_files()
+            
+            if not all_files:
+                return ""
+            
+            # Exclude chat files (they're included verbatim)
+            chat_files_set = set(chat_files or [])
+            map_files = [f for f in all_files if f not in chat_files_set]
+            
+            if not map_files:
+                return ""
+            
+            indexer = self._get_indexer()
+            
+            # Build references if requested
+            if include_references:
+                indexer.build_references(map_files)
+            
+            # Get symbol index
+            symbol_index = indexer._get_symbol_index()
+            
+            # Generate compact format with or without references
+            return symbol_index.to_compact(
+                file_paths=map_files,
+                include_references=include_references
+            )
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Failed to get context map: {e}")
+            traceback.print_exc()
+            return ""
+    
+    def get_references_to_symbol(self, file_path, symbol_name):
+        """
+        Get all locations that reference a symbol.
+        
+        Args:
+            file_path: File where symbol is defined
+            symbol_name: Name of the symbol
+            
+        Returns:
+            List of location dicts or error.
+        """
+        try:
+            indexer = self._get_indexer()
+            return indexer.get_references_to_symbol(file_path, symbol_name)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def get_files_referencing(self, file_path):
+        """
+        Get all files that reference symbols in this file.
+        
+        Args:
+            file_path: File to check
+            
+        Returns:
+            Sorted list of file paths or error.
+        """
+        try:
+            indexer = self._get_indexer()
+            return indexer.get_files_referencing(file_path)
         except Exception as e:
             return {"error": str(e)}
     
