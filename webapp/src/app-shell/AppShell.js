@@ -6,6 +6,7 @@ export class AppShell extends LitElement {
   static properties = {
     diffFiles: { type: Array },
     showDiff: { type: Boolean },
+    serverURI: { type: String },
   };
 
   static styles = css`
@@ -98,6 +99,10 @@ export class AppShell extends LitElement {
     super();
     this.diffFiles = [];
     this.showDiff = false;
+    // Get server port from URL params or default
+    const urlParams = new URLSearchParams(window.location.search);
+    const port = urlParams.get('port') || '8765';
+    this.serverURI = `ws://localhost:${port}`;
   }
 
   handleEditsApplied(e) {
@@ -162,6 +167,7 @@ export class AppShell extends LitElement {
             <diff-viewer
               .files=${this.diffFiles}
               .visible=${true}
+              .serverURI=${this.serverURI}
               @file-save=${this.handleFileSave}
               @files-save=${this.handleFilesSave}
             ></diff-viewer>

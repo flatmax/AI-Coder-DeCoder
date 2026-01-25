@@ -26,47 +26,79 @@ export class DiffViewer extends MixedBase {
     this.selectedFile = null;
     this.visible = false;
     this.isDirty = false;
-    this.serverURI = null;
     this.initDiffEditor();
   }
 
   connectedCallback() {
     super.connectedCallback();
+    this.addClass(this, 'DiffViewer');
     this.initMonaco();
-    this._connectToServer();
-  }
-
-  _connectToServer() {
-    if (this.serverURI && !this.isOpen) {
-      this.open(this.serverURI);
-    }
+    console.log('DiffViewer: connectedCallback, serverURI =', this.serverURI);
+    console.log('DiffViewer: prototype chain:', Object.getPrototypeOf(this).constructor.name);
+    console.log('DiffViewer: has open?', typeof this.open);
+    console.log('DiffViewer: has isOpen?', typeof this.isOpen, this.isOpen);
+    console.log('DiffViewer: has addClass?', typeof this.addClass);
   }
 
   firstUpdated() {
     this.injectMonacoStyles();
     onMonacoReady(() => {
       this.createDiffEditor();
-      this._registerLspProviders();
+      this._tryRegisterLspProviders();
     });
   }
 
-  _registerLspProviders() {
+  _tryRegisterLspProviders() {
     if (this._lspProvidersRegistered) return;
+    if (!this._editor) {
+      console.log('DiffViewer: Editor not ready for LSP');
+      return;
+    }
+    if (!this.isOpen) {
+      console.log('DiffViewer: RPC not connected for LSP');
+      return;
+    }
+    
+    // Create RPC caller that works with JRPCClient's proxy pattern
+    const self = this;
+    const rpcCall = new Proxy({}, {
+      get: (target, methodPath) => {
+        return async (...args) => {
+          // methodPath is like "LiteLLM.lsp_get_hover"
+          const [className, methodName] = methodPath.split('.');
+          // JRPCClient proxies method calls directly
+          return self[className][methodName](...args);
+        };
+      }
+    });
     
     try {
-      registerSymbolProviders(this.call);
+      registerSymbolProviders(rpcCall);
       this._lspProvidersRegistered = true;
+      console.log('LSP providers registered successfully');
     } catch (e) {
       console.error('Failed to register LSP providers:', e);
     }
   }
 
   remoteIsUp() {
-    // Called when JSON-RPC connection is established
-    console.log('DiffViewer: JSON-RPC connection established');
+    console.log('DiffViewer: remoteIsUp called, serverURI =', this.serverURI, 'isOpen =', this.isOpen);
+  }
+
+  setupDone() {
+    console.log('DiffViewer: setupDone called, serverURI =', this.serverURI, 'isOpen =', this.isOpen);
+    this._tryRegisterLspProviders();
   }
 
   updated(changedProperties) {
+    super.updated(changedProperties);
+    if (changedProperties.has('serverURI') && this.serverURI) {
+      console.log('DiffViewer: serverURI changed to', this.serverURI);
+      // Pass to JRPCClient parent - typically done via open() or setting directly
+      if (!this.isOpen) {
+        this.open(this.serverURI);
+      }
+    }
     if (changedProperties.has('files') && this.files.length > 0 && this._editor) {
       this.updateModels();
       if (!this.selectedFile || !this.files.find(f => f.path === this.selectedFile)) {
