@@ -159,19 +159,21 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
     const { path } = e.detail;
     if (!path) return;
     
-    // Toggle the file selection in the file picker
+    // Add the file to selection (don't toggle - only add)
     const filePicker = this.shadowRoot?.querySelector('file-picker');
     if (filePicker) {
-      // Toggle the selection
       const newSelected = { ...filePicker.selected };
-      newSelected[path] = !newSelected[path];
-      filePicker.selected = newSelected;
-      
-      // Update our selectedFiles to match
-      this.selectedFiles = Object.keys(newSelected).filter(k => newSelected[k]);
-      
-      // Dispatch the selection change event
-      filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+      // Only add, don't toggle off
+      if (!newSelected[path]) {
+        newSelected[path] = true;
+        filePicker.selected = newSelected;
+        
+        // Update our selectedFiles to match
+        this.selectedFiles = Object.keys(newSelected).filter(k => newSelected[k]);
+        
+        // Dispatch the selection change event
+        filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+      }
     }
   }
 
