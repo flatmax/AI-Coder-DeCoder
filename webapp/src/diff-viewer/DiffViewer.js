@@ -44,7 +44,6 @@ export class DiffViewer extends MixedBase {
     this.injectMonacoStyles();
     onMonacoReady(() => {
       this.createDiffEditor();
-      this._tryRegisterLspProviders();
     });
   }
 
@@ -54,26 +53,13 @@ export class DiffViewer extends MixedBase {
       console.log('DiffViewer: Editor not ready for LSP');
       return;
     }
-    if (!this.isOpen) {
-      console.log('DiffViewer: RPC not connected for LSP');
+    if (!this._remoteIsUp) {
+      console.log('DiffViewer: Remote not up for LSP');
       return;
     }
     
-    // Create RPC caller that works with JRPCClient's proxy pattern
-    const self = this;
-    const rpcCall = new Proxy({}, {
-      get: (target, methodPath) => {
-        return async (...args) => {
-          // methodPath is like "LiteLLM.lsp_get_hover"
-          const [className, methodName] = methodPath.split('.');
-          // JRPCClient proxies method calls directly
-          return self[className][methodName](...args);
-        };
-      }
-    });
-    
     try {
-      registerSymbolProviders(rpcCall);
+      registerSymbolProviders(this);
       this._lspProvidersRegistered = true;
       console.log('LSP providers registered successfully');
     } catch (e) {
@@ -82,23 +68,23 @@ export class DiffViewer extends MixedBase {
   }
 
   remoteIsUp() {
-    console.log('DiffViewer: remoteIsUp called, serverURI =', this.serverURI, 'isOpen =', this.isOpen);
+    console.log('DiffViewer: remoteIsUp called, serverURI =', this.serverURI);
+    this._remoteIsUp = true;
+    this._tryRegisterLspProviders();
   }
 
   setupDone() {
-    console.log('DiffViewer: setupDone called, serverURI =', this.serverURI, 'isOpen =', this.isOpen);
-    this._tryRegisterLspProviders();
+    console.log('DiffViewer: setupDone called, serverURI =', this.serverURI);
+  }
+
+  remoteDisconnected(uuid) {
+    console.log('DiffViewer: remoteDisconnected called, uuid =', uuid);
+    this._remoteIsUp = false;
+    this._lspProvidersRegistered = false;
   }
 
   updated(changedProperties) {
     super.updated(changedProperties);
-    if (changedProperties.has('serverURI') && this.serverURI) {
-      console.log('DiffViewer: serverURI changed to', this.serverURI);
-      // Pass to JRPCClient parent - typically done via open() or setting directly
-      if (!this.isOpen) {
-        this.open(this.serverURI);
-      }
-    }
     if (changedProperties.has('files') && this.files.length > 0 && this._editor) {
       this.updateModels();
       if (!this.selectedFile || !this.files.find(f => f.path === this.selectedFile)) {
@@ -127,9 +113,6 @@ export class DiffViewer extends MixedBase {
   disconnectedCallback() {
     super.disconnectedCallback();
     this.disposeDiffEditor();
-    if (this.isOpen) {
-      this.close();
-    }
   }
 
   render() {

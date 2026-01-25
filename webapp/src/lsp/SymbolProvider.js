@@ -11,17 +11,17 @@
  * @param {Function} rpcCall - Function to make JSON-RPC calls (e.g., this.call from JRPCClient)
  * @param {string[]} languages - Languages to register providers for
  */
-export function registerSymbolProviders(rpcCall, languages = ['python', 'javascript', 'typescript']) {
+export function registerSymbolProviders(rpcClient, languages = ['python', 'javascript', 'typescript']) {
   if (!window.monaco) {
     console.warn('Monaco not loaded, cannot register symbol providers');
     return;
   }
 
   for (const language of languages) {
-    registerHoverProvider(rpcCall, language);
-    registerDefinitionProvider(rpcCall, language);
-    registerReferencesProvider(rpcCall, language);
-    registerCompletionProvider(rpcCall, language);
+    registerHoverProvider(rpcClient, language);
+    registerDefinitionProvider(rpcClient, language);
+    registerReferencesProvider(rpcClient, language);
+    registerCompletionProvider(rpcClient, language);
   }
   
   console.log(`Registered LSP providers for: ${languages.join(', ')}`);
@@ -30,18 +30,19 @@ export function registerSymbolProviders(rpcCall, languages = ['python', 'javascr
 /**
  * Register hover provider for a language.
  */
-function registerHoverProvider(rpcCall, language) {
+function registerHoverProvider(rpcClient, language) {
   window.monaco.languages.registerHoverProvider(language, {
     async provideHover(model, position) {
       try {
         const filePath = getFilePath(model);
         if (!filePath) return null;
 
-        const result = await rpcCall['LiteLLM.lsp_get_hover'](
+        const response = await rpcClient.call['LiteLLM.lsp_get_hover'](
           filePath,
           position.lineNumber,
           position.column
         );
+        const result = response ? Object.values(response)[0] : null;
 
         if (result && result.contents) {
           return {
@@ -59,18 +60,19 @@ function registerHoverProvider(rpcCall, language) {
 /**
  * Register definition provider for a language.
  */
-function registerDefinitionProvider(rpcCall, language) {
+function registerDefinitionProvider(rpcClient, language) {
   window.monaco.languages.registerDefinitionProvider(language, {
     async provideDefinition(model, position) {
       try {
         const filePath = getFilePath(model);
         if (!filePath) return null;
 
-        const result = await rpcCall['LiteLLM.lsp_get_definition'](
+        const response = await rpcClient.call['LiteLLM.lsp_get_definition'](
           filePath,
           position.lineNumber,
           position.column
         );
+        const result = response ? Object.values(response)[0] : null;
 
         if (result && result.file && result.range) {
           return {
@@ -94,18 +96,19 @@ function registerDefinitionProvider(rpcCall, language) {
 /**
  * Register references provider for a language.
  */
-function registerReferencesProvider(rpcCall, language) {
+function registerReferencesProvider(rpcClient, language) {
   window.monaco.languages.registerReferenceProvider(language, {
     async provideReferences(model, position, context) {
       try {
         const filePath = getFilePath(model);
         if (!filePath) return [];
 
-        const result = await rpcCall['LiteLLM.lsp_get_references'](
+        const response = await rpcClient.call['LiteLLM.lsp_get_references'](
           filePath,
           position.lineNumber,
           position.column
         );
+        const result = response ? Object.values(response)[0] : null;
 
         if (Array.isArray(result)) {
           return result.map(loc => ({
@@ -129,7 +132,7 @@ function registerReferencesProvider(rpcCall, language) {
 /**
  * Register completion provider for a language.
  */
-function registerCompletionProvider(rpcCall, language) {
+function registerCompletionProvider(rpcClient, language) {
   window.monaco.languages.registerCompletionItemProvider(language, {
     triggerCharacters: ['.', '_'],
     
@@ -142,12 +145,13 @@ function registerCompletionProvider(rpcCall, language) {
         const word = model.getWordUntilPosition(position);
         const prefix = word ? word.word : '';
 
-        const result = await rpcCall['LiteLLM.lsp_get_completions'](
+        const response = await rpcClient.call['LiteLLM.lsp_get_completions'](
           filePath,
           position.lineNumber,
           position.column,
           prefix
         );
+        const result = response ? Object.values(response)[0] : null;
 
         if (Array.isArray(result)) {
           const suggestions = result.map(item => ({

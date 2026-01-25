@@ -37,6 +37,11 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
       this.updateModels();
       this.showDiff(this.selectedFile || this.files[0].path);
     }
+    
+    // Try to register LSP providers now that editor is ready
+    if (typeof this._tryRegisterLspProviders === 'function') {
+      this._tryRegisterLspProviders();
+    }
   }
 
   updateModels() {
