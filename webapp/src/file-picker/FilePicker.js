@@ -46,7 +46,21 @@ export class FilePicker extends MixedBase {
         (this.modified.length > 0 || this.staged.length > 0 || this.untracked.length > 0)) {
       this._expandedInitialized = true;
       this._expandChangedFileDirs();
+      this._autoSelectChangedFiles();
     }
+  }
+
+  _autoSelectChangedFiles() {
+    // Auto-select modified, staged, and untracked files
+    const changedFiles = [...this.modified, ...this.staged, ...this.untracked];
+    if (changedFiles.length === 0) return;
+    
+    const newSelected = { ...this.selected };
+    for (const filePath of changedFiles) {
+      newSelected[filePath] = true;
+    }
+    this.selected = newSelected;
+    this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
   }
 
   _expandChangedFileDirs() {

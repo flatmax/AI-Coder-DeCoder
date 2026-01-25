@@ -63,4 +63,5 @@ dist/
 *.swp
 *.swo
 *~
+.aicoder/*
 .aicoder/history.jsonl
