@@ -83,9 +83,9 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
     const { path } = e.detail;
     if (!path) return;
     
-    // Append the path to the current input value
+    // Append the path to the current input value with a trailing space
     const separator = this.inputValue && !this.inputValue.endsWith(' ') ? ' ' : '';
-    this.inputValue = this.inputValue + separator + path;
+    this.inputValue = this.inputValue + separator + path + ' ';
     
     // Focus the textarea
     this.updateComplete.then(() => {
