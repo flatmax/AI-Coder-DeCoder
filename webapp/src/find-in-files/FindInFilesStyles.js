@@ -136,7 +136,7 @@ export const findInFilesStyles = css`
 
   .match-item {
     display: flex;
-    gap: 8px;
+    flex-direction: column;
     padding: 3px 6px;
     border-radius: 4px;
     cursor: pointer;
@@ -144,8 +144,19 @@ export const findInFilesStyles = css`
     font-size: 12px;
   }
 
-  .match-item:hover {
+  .match-item:hover,
+  .match-item.focused {
     background: #0f3460;
+  }
+
+  .match-item.focused {
+    outline: 1px solid #e94560;
+    outline-offset: -1px;
+  }
+
+  .match-row {
+    display: flex;
+    gap: 8px;
   }
 
   .line-num {
@@ -167,6 +178,42 @@ export const findInFilesStyles = css`
     color: #e94560;
     border-radius: 2px;
     padding: 0 2px;
+  }
+
+  /* Context lines - only shown when item is active */
+  .context-lines {
+    display: none;
+    flex-direction: column;
+    margin-top: 2px;
+    padding-top: 2px;
+    border-top: 1px solid #0f3460;
+  }
+
+  .match-item.show-context .context-lines {
+    display: flex;
+  }
+
+  .context-line {
+    display: flex;
+    gap: 8px;
+    opacity: 0.6;
+  }
+
+  .context-line .line-num {
+    color: #555;
+  }
+
+  .context-line .match-content {
+    color: #888;
+  }
+
+  .match-line {
+    display: flex;
+    gap: 8px;
+  }
+
+  .match-line .line-num {
+    color: #e94560;
   }
 
   /* Empty states */

@@ -13,7 +13,9 @@ export class FindInFiles extends LitElement {
     useRegex: { type: Boolean },
     wholeWord: { type: Boolean },
     expandedFiles: { type: Object },
-    rpcCall: { type: Object }
+    rpcCall: { type: Object },
+    focusedIndex: { type: Number },
+    hoveredIndex: { type: Number }
   };
 
   static styles = findInFilesStyles;
@@ -30,11 +32,25 @@ export class FindInFiles extends LitElement {
     this.wholeWord = false;
     this.expandedFiles = {};
     this._searchDebounceTimer = null;
+    this.focusedIndex = -1;
+    this.hoveredIndex = -1;
+  }
+
+  // Build flat list of all matches for keyboard navigation
+  _getFlatMatches() {
+    const flat = [];
+    for (const fileResult of this.results) {
+      for (const match of fileResult.matches) {
+        flat.push({ file: fileResult.file, match });
+      }
+    }
+    return flat;
   }
 
   handleSearchInput(e) {
     this.query = e.target.value;
     this.error = null;
+    this.focusedIndex = -1;
     
     if (this._searchDebounceTimer) {
       clearTimeout(this._searchDebounceTimer);
@@ -50,23 +66,60 @@ export class FindInFiles extends LitElement {
   }
 
   handleKeydown(e) {
+    const flatMatches = this._getFlatMatches();
+    
     if (e.key === 'Escape') {
       if (this.query) {
         this.query = '';
         this.results = [];
         this.searchPerformed = false;
+        this.focusedIndex = -1;
       } else {
         this.dispatchEvent(new CustomEvent('close-search', {
           bubbles: true,
           composed: true
         }));
       }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (flatMatches.length > 0) {
+        this.focusedIndex = Math.min(this.focusedIndex + 1, flatMatches.length - 1);
+        this._scrollToFocused();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (flatMatches.length > 0) {
+        this.focusedIndex = Math.max(this.focusedIndex - 1, 0);
+        this._scrollToFocused();
+      }
     } else if (e.key === 'Enter') {
-      // Navigate to first result
-      if (this.results.length > 0 && this.results[0].matches.length > 0) {
-        this.selectResult(this.results[0].file, this.results[0].matches[0].line_num);
+      e.preventDefault();
+      if (this.focusedIndex >= 0 && this.focusedIndex < flatMatches.length) {
+        const { file, match } = flatMatches[this.focusedIndex];
+        this.selectResult(file, match.line_num);
+      } else if (flatMatches.length > 0) {
+        // If nothing focused, select first result
+        const { file, match } = flatMatches[0];
+        this.selectResult(file, match.line_num);
       }
     }
+  }
+
+  _scrollToFocused() {
+    this.updateComplete.then(() => {
+      const focused = this.shadowRoot?.querySelector('.match-item.focused');
+      if (focused) {
+        focused.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
+  }
+
+  setHoveredIndex(index) {
+    this.hoveredIndex = index;
+  }
+
+  clearHoveredIndex() {
+    this.hoveredIndex = -1;
   }
 
   async performSearch() {
@@ -78,6 +131,7 @@ export class FindInFiles extends LitElement {
 
     this.isSearching = true;
     this.error = null;
+    this.focusedIndex = -1;
 
     try {
       const response = await this._call(
@@ -85,7 +139,8 @@ export class FindInFiles extends LitElement {
         this.query,
         this.wholeWord,
         this.useRegex,
-        this.ignoreCase
+        this.ignoreCase,
+        4  // context_lines
       );
       
       const results = this._extractResponse(response);
