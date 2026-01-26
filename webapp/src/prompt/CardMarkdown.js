@@ -138,55 +138,8 @@ export class CardMarkdown extends LitElement {
   }
 
   protectSearchReplaceBlocks(content) {
-    // Find code blocks and ensure search/replace markers inside them are preserved
-    // The issue is that >>>>>>> can be interpreted as nested blockquotes
-    // We need to ensure code fences are properly closed before markers appear outside
-    
-    // Also protect standalone markers that might appear during streaming
-    // before the full code block is received
-    const lines = content.split('\n');
-    const result = [];
-    let inCodeBlock = false;
-    let codeBlockLang = '';
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-      
-      // Check for code fence start/end
-      if (trimmed.startsWith('```')) {
-        if (!inCodeBlock) {
-          inCodeBlock = true;
-          codeBlockLang = trimmed.slice(3);
-        } else {
-          inCodeBlock = false;
-          codeBlockLang = '';
-        }
-        result.push(line);
-        continue;
-      }
-      
-      // If we're outside a code block and see SEARCH/REPLACE markers,
-      // they're likely part of an incomplete streaming response
-      // Wrap them to prevent markdown interpretation
-      if (!inCodeBlock) {
-        if (trimmed === '<<<<<<< SEARCH' || 
-            trimmed === '=======' || 
-            trimmed === '>>>>>>> REPLACE') {
-          result.push('`' + line + '`');
-          continue;
-        }
-        // Also catch lines starting with >>>>>>> which markdown treats as blockquotes
-        if (trimmed.startsWith('>>>>>>>')) {
-          result.push('`' + line + '`');
-          continue;
-        }
-      }
-      
-      result.push(line);
-    }
-    
-    return result.join('\n');
+    // Pass through content unchanged - let markdown handle it naturally
+    return content;
   }
 
   escapeHtml(text) {
