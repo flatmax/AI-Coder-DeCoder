@@ -854,3 +854,347 @@ To remove it:
         assert parser._find_line_number(content, 0) == 1
         assert parser._find_line_number(content, 6) == 2
         assert parser._find_line_number(content, 12) == 3
+    def test_find_line_number(self):
+        """Line number calculation."""
+        parser = EditParser()
+        content = "line1\nline2\nline3\n"
+        
+        assert parser._find_line_number(content, 0) == 1
+        assert parser._find_line_number(content, 6) == 2
+        assert parser._find_line_number(content, 12) == 3
+
+
+class TestEditParserAdditional:
+    """Additional tests for edge cases and coverage gaps."""
+    
+    def test_parse_with_actual_unicode_markers(self):
+        """Verify parsing works with actual unicode marker characters."""
+        parser = EditParser()
+        # Using the actual unicode characters from the format
+        response = "src/test.py\n\u00ab\u00ab\u00ab EDIT\ndef foo():\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    old\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n    new\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u00bb\u00bb\u00bb"
+        blocks = parser.parse_response(response)
+        assert len(blocks) == 1
+        assert blocks[0].file_path == "src/test.py"
+        assert blocks[0].old_lines == "    old"
+        assert blocks[0].new_lines == "    new"
+
+    def test_multiline_leading_anchor(self):
+        """Multi-line leading anchor parsed correctly."""
+        parser = EditParser()
+        lines = [
+            "src/test.py",
+            "\u00ab\u00ab\u00ab EDIT",
+            "def foo():",
+            "    '''Docstring.'''",
+            "    x = 1",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "    y = 2",
+            "\u2550\u2550\u2550\u2550\u2550\u2550\u2550",
+            "    y = 3",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "\u00bb\u00bb\u00bb",
+        ]
+        response = "\n".join(lines)
+        blocks = parser.parse_response(response)
+        assert len(blocks) == 1
+        assert "x = 1" in blocks[0].leading_anchor
+        assert blocks[0].leading_anchor.count('\n') == 2
+
+    def test_multiline_sections_boundary(self):
+        """Verify newline boundaries between multi-line sections."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="def foo():\n    x = 1",
+            old_lines="    y = 2\n    z = 3",
+            new_lines="    y = 20",
+            trailing_anchor="    return x",
+            raw_block="",
+            line_number=1
+        )
+        content = "def foo():\n    x = 1\n    y = 2\n    z = 3\n    return x\n"
+        
+        error, line = parser.validate_block(block, content)
+        assert error is None
+
+    def test_ambiguous_includes_both_line_numbers(self):
+        """Ambiguous error message includes both matching line numbers."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="x = 1",
+            old_lines="y = 2",
+            new_lines="y = 20",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        content = "x = 1\ny = 2\nz = 3\nx = 1\ny = 2\n"
+        
+        error, line = parser.validate_block(block, content)
+        assert error is not None
+        assert "ambiguous" in error.lower()
+        # Should mention both line numbers
+        assert "1" in error and "4" in error
+
+    def test_old_lines_not_found_no_anchor(self):
+        """Error when old lines not found (no leading anchor)."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="",
+            old_lines="nonexistent line",
+            new_lines="new",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        content = "some other content\n"
+        
+        error, line = parser.validate_block(block, content)
+        assert error is not None
+        assert "not found" in error.lower()
+
+    def test_trailing_anchor_only_not_found(self):
+        """Error when only trailing anchor specified and not found."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="",
+            old_lines="",
+            new_lines="inserted",
+            trailing_anchor="nonexistent",
+            raw_block="",
+            line_number=1
+        )
+        content = "some content\n"
+        
+        error, line = parser.validate_block(block, content)
+        assert error is not None
+        assert "not found" in error.lower()
+
+    def test_apply_edits_repo_returns_error_dict(self):
+        """Handle repo.get_file_content returning error dict."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="missing.py",
+            leading_anchor="def foo():",
+            old_lines="    pass",
+            new_lines="    return 1",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        
+        class MockRepo:
+            def get_file_content(self, path):
+                return {'error': 'File not found'}
+            
+            def is_binary_file(self, path):
+                return False
+        
+        result = parser.apply_edits([block], MockRepo())
+        assert result.results[0].status == EditStatus.FAILED
+        assert "not found" in result.results[0].reason.lower()
+
+    def test_apply_edits_no_repo_existing_file(self):
+        """apply_edits with repo=None for non-new-file fails gracefully."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="def foo():",
+            old_lines="    pass",
+            new_lines="    return 1",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        
+        result = parser.apply_edits([block], repo=None)
+        assert result.results[0].status == EditStatus.FAILED
+        assert "not found" in result.results[0].reason.lower() or "repo" in result.results[0].reason.lower()
+
+    def test_apply_edits_new_file_creation(self):
+        """New file creation through apply_edits with file not existing."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="brand_new.py",
+            leading_anchor="",
+            old_lines="",
+            new_lines="print('hello')",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        
+        class MockRepo:
+            def __init__(self):
+                self.written = {}
+                self.staged = []
+            
+            def get_file_content(self, path):
+                return {'error': 'File not found'}
+            
+            def write_file(self, path, content):
+                self.written[path] = content
+            
+            def stage_files(self, paths):
+                self.staged.extend(paths)
+            
+            def is_binary_file(self, path):
+                return False
+        
+        repo = MockRepo()
+        result = parser.apply_edits([block], repo, dry_run=False)
+        
+        assert result.results[0].status == EditStatus.APPLIED
+        assert "brand_new.py" in repo.written
+        assert "print('hello')" in repo.written["brand_new.py"]
+
+    def test_apply_edits_new_file_no_repo(self):
+        """New file creation works even without repo (content cached)."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="new.py",
+            leading_anchor="",
+            old_lines="",
+            new_lines="x = 1",
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        
+        # No repo, but new file creation should still work for validation
+        result = parser.apply_edits([block], repo=None, dry_run=True)
+        assert result.results[0].status == EditStatus.APPLIED
+
+    def test_apply_multiline_modification(self):
+        """Apply edit with multi-line old and new content."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="class Foo:",
+            old_lines="    def __init__(self):\n        self.x = 1\n        self.y = 2",
+            new_lines="    def __init__(self, x, y):\n        self.x = x\n        self.y = y",
+            trailing_anchor="\n    def method(self):",
+            raw_block="",
+            line_number=1
+        )
+        content = "class Foo:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n\n    def method(self):\n        pass\n"
+        
+        new_content, result = parser.apply_block(block, content)
+        assert result.status == EditStatus.APPLIED
+        assert "def __init__(self, x, y):" in new_content
+        assert "self.x = x" in new_content
+        assert "def method(self):" in new_content
+
+    def test_parse_block_with_code_containing_separator_chars(self):
+        """Parse block where code content contains separator-like characters."""
+        parser = EditParser()
+        lines = [
+            "src/test.py",
+            "\u00ab\u00ab\u00ab EDIT",
+            "def draw():",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            '    print("------- header -------")',
+            "\u2550\u2550\u2550\u2550\u2550\u2550\u2550",
+            '    print("======= header =======")',
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "\u00bb\u00bb\u00bb",
+        ]
+        response = "\n".join(lines)
+        blocks = parser.parse_response(response)
+        assert len(blocks) == 1
+        # ASCII dashes in content should NOT be confused with markers
+        assert '-------' in blocks[0].old_lines
+        assert '=======' in blocks[0].new_lines
+
+    def test_consecutive_edits_different_files(self):
+        """Multiple edits to different files all succeed."""
+        parser = EditParser()
+        blocks = [
+            EditBlock(
+                file_path="a.py",
+                leading_anchor="",
+                old_lines="x = 1",
+                new_lines="x = 10",
+                trailing_anchor="",
+                raw_block="",
+                line_number=1
+            ),
+            EditBlock(
+                file_path="b.py",
+                leading_anchor="",
+                old_lines="y = 2",
+                new_lines="y = 20",
+                trailing_anchor="",
+                raw_block="",
+                line_number=1
+            ),
+        ]
+        
+        class MockRepo:
+            def __init__(self):
+                self.files = {"a.py": "x = 1\n", "b.py": "y = 2\n"}
+                self.written = {}
+                self.staged = []
+            
+            def get_file_content(self, path):
+                return self.files.get(path, {'error': 'not found'})
+            
+            def write_file(self, path, content):
+                self.written[path] = content
+            
+            def stage_files(self, paths):
+                self.staged.extend(paths)
+            
+            def is_binary_file(self, path):
+                return False
+        
+        repo = MockRepo()
+        result = parser.apply_edits(blocks, repo)
+        
+        assert len(result.results) == 2
+        assert all(r.status == EditStatus.APPLIED for r in result.results)
+        assert "a.py" in result.files_modified
+        assert "b.py" in result.files_modified
+        assert "x = 10" in repo.written["a.py"]
+        assert "y = 20" in repo.written["b.py"]
+
+    def test_diagnose_trailing_without_old(self):
+        """Diagnose failure when trailing anchor follows leading directly."""
+        parser = EditParser()
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor="def foo():",
+            old_lines="",
+            new_lines="    # inserted",
+            trailing_anchor="wrong_trailing",
+            raw_block="",
+            line_number=1
+        )
+        content = "def foo():\n    pass\n"
+        
+        error, line = parser.validate_block(block, content)
+        assert error is not None
+        assert "trailing" in error.lower() or "not found" in error.lower()
+
+    def test_result_previews_truncated(self):
+        """EditResult preview fields are truncated to 50 chars."""
+        parser = EditParser()
+        long_line = "x" * 100
+        block = EditBlock(
+            file_path="test.py",
+            leading_anchor=long_line,
+            old_lines=long_line,
+            new_lines=long_line,
+            trailing_anchor="",
+            raw_block="",
+            line_number=1
+        )
+        content = long_line + "\n" + long_line + "\n"
+        
+        new_content, result = parser.apply_block(block, content)
+        assert len(result.anchor_preview) == 50
+        assert len(result.old_preview) == 50
+        assert len(result.new_preview) == 50

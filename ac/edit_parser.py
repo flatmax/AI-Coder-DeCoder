@@ -429,6 +429,36 @@ class EditParser:
                         ))
                         failed_files.add(file_path)
                         continue
+                    try:
+                        if repo:
+                            content = repo.get_file_content(file_path)
+                            # Handle error dict from repo
+                            if isinstance(content, dict) and 'error' in content:
+                                raise FileNotFoundError(content['error'])
+                        else:
+                            raise FileNotFoundError(f"No repo provided and file not cached: {file_path}")
+                    except FileNotFoundError:
+                        # Only fail if this isn't a new file creation
+                        is_new_file = (not block.leading_anchor and
+                                       not block.old_lines and
+                                       not block.trailing_anchor)
+                        if is_new_file:
+                            content = ""
+                            file_contents[file_path] = content
+                        else:
+                            results.append(EditResult(
+                                file_path=file_path,
+                                status=EditStatus.FAILED,
+                                reason=f"File not found: {file_path}",
+                                anchor_preview=(block.leading_anchor.split('\n')[0][:50] 
+                                              if block.leading_anchor else ""),
+                                old_preview="",
+                                new_preview="",
+                                block=block,
+                                estimated_line=None
+                            ))
+                            failed_files.add(file_path)
+                            continue
             
             # Apply the edit
             new_content, result = self.apply_block(block, content)
