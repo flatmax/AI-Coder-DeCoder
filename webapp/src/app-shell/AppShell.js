@@ -189,50 +189,60 @@ export class AppShell extends LitElement {
     }
   }
 
-  handleSearchResultSelected(e) {
+  async _loadFileIntoDiff(file) {
+    if (this.diffFiles.find(f => f.path === file)) {
+      return true; // Already loaded
+    }
+    
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) {
+      return false;
+    }
+    
+    try {
+      const response = await promptView.call['Repo.get_file_content'](file);
+      const result = response ? Object.values(response)[0] : null;
+      const content = typeof result === 'string' ? result : (result?.content ?? null);
+      
+      if (content !== null) {
+        this.diffFiles = [...this.diffFiles, {
+          path: file,
+          original: content,
+          modified: content,
+          isNew: false,
+          isReadOnly: true
+        }];
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to load file:', err);
+    }
+    return false;
+  }
+
+  async handleSearchResultSelected(e) {
     const { file, line } = e.detail;
     this.viewingFile = file;
+    this.activeLeftTab = 'files';
     
-    // Wait for DiffViewer to update, then scroll to line
-    this.updateComplete.then(() => {
-      const diffViewer = this.shadowRoot.querySelector('diff-viewer');
-      if (diffViewer && diffViewer._revealPosition) {
-        // Small delay to ensure file is loaded
+    await this._loadFileIntoDiff(file);
+    await this.updateComplete;
+    
+    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+    if (diffViewer) {
+      setTimeout(() => {
+        diffViewer.selectFile(file);
         setTimeout(() => {
-          diffViewer._revealPosition(line, 0);
-        }, 100);
-      }
-    });
+          diffViewer._revealPosition(line, 1);
+        }, 150);
+      }, 100);
+    }
   }
 
   async handleSearchFileSelected(e) {
     const { file } = e.detail;
     this.viewingFile = file;
-    
-    // Check if file already in diffFiles
-    if (!this.diffFiles.find(f => f.path === file)) {
-      // Load file content and add to diffFiles
-      const promptView = this.shadowRoot.querySelector('prompt-view');
-      if (promptView && promptView.call) {
-        try {
-          const response = await promptView.call['Repo.get_file_content'](file);
-          const result = response ? Object.values(response)[0] : null;
-          const content = typeof result === 'string' ? result : (result?.content ?? null);
-          
-          if (content !== null) {
-            this.diffFiles = [...this.diffFiles, {
-              path: file,
-              original: content,
-              modified: content,
-              isNew: false,
-              isReadOnly: true
-            }];
-          }
-        } catch (err) {
-          console.error('Failed to load file:', err);
-        }
-      }
-    }
+    await this._loadFileIntoDiff(file);
   }
 
   handleCloseSearch() {
