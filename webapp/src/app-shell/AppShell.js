@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
+import '../find-in-files/FindInFiles.js';
 
 export class AppShell extends LitElement {
   static properties = {
@@ -8,6 +9,7 @@ export class AppShell extends LitElement {
     showDiff: { type: Boolean },
     serverURI: { type: String },
     viewingFile: { type: String },
+    activeLeftTab: { type: String },
   };
 
   static styles = css`
@@ -52,6 +54,7 @@ export class AppShell extends LitElement {
       padding: 0 16px;
       z-index: 100;
       border-bottom: 1px solid #0f3460;
+      gap: 16px;
     }
 
     .header h1 {
@@ -64,7 +67,40 @@ export class AppShell extends LitElement {
     .header .subtitle {
       color: #666;
       font-size: 12px;
-      margin-left: 12px;
+    }
+
+    .header-tabs {
+      display: flex;
+      gap: 4px;
+      margin-left: 16px;
+    }
+
+    .header-tab {
+      padding: 6px 12px;
+      background: transparent;
+      border: none;
+      border-radius: 4px;
+      color: #888;
+      cursor: pointer;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+
+    .header-tab:hover {
+      color: #ccc;
+      background: #0f3460;
+    }
+
+    .header-tab.active {
+      color: #e94560;
+      background: #0f3460;
+    }
+
+    .header-tab .icon {
+      font-size: 12px;
     }
 
     .main-content {
@@ -94,6 +130,7 @@ export class AppShell extends LitElement {
       opacity: 0.5;
       cursor: not-allowed;
     }
+
   `;
 
   constructor() {
@@ -101,10 +138,75 @@ export class AppShell extends LitElement {
     this.diffFiles = [];
     this.showDiff = false;
     this.viewingFile = null;
+    this.activeLeftTab = 'files';
     // Get server port from URL params or default
     const urlParams = new URLSearchParams(window.location.search);
     const port = urlParams.get('port') || '8765';
     this.serverURI = `ws://localhost:${port}`;
+    
+    // Bind keyboard handler
+    this._handleKeydown = this._handleKeydown.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener('keydown', this._handleKeydown);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('keydown', this._handleKeydown);
+  }
+
+  _handleKeydown(e) {
+    // Ctrl+Shift+F to open search
+    if (e.ctrlKey && e.shiftKey && e.key === 'F') {
+      e.preventDefault();
+      this.activeLeftTab = 'search';
+      this.updateComplete.then(() => {
+        const findInFiles = this.shadowRoot.querySelector('find-in-files');
+        if (findInFiles) {
+          findInFiles.focusInput();
+        }
+      });
+    }
+    // Ctrl+B to toggle back to files
+    if (e.ctrlKey && e.key === 'b') {
+      e.preventDefault();
+      this.activeLeftTab = 'files';
+    }
+  }
+
+  switchTab(tab) {
+    this.activeLeftTab = tab;
+    if (tab === 'search') {
+      this.updateComplete.then(() => {
+        const findInFiles = this.shadowRoot.querySelector('find-in-files');
+        if (findInFiles) {
+          findInFiles.focusInput();
+        }
+      });
+    }
+  }
+
+  handleSearchResultSelected(e) {
+    const { file, line } = e.detail;
+    this.viewingFile = file;
+    
+    // Wait for DiffViewer to update, then scroll to line
+    this.updateComplete.then(() => {
+      const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+      if (diffViewer && diffViewer._revealPosition) {
+        // Small delay to ensure file is loaded
+        setTimeout(() => {
+          diffViewer._revealPosition(line, 0);
+        }, 100);
+      }
+    });
+  }
+
+  handleCloseSearch() {
+    this.activeLeftTab = 'files';
   }
 
   handleFileSelected(e) {
@@ -154,11 +256,30 @@ export class AppShell extends LitElement {
     }
   }
 
+  _getPromptViewRpcCall() {
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    return promptView?.call || null;
+  }
+
   render() {
     return html`
       <div class="app-container">
         <div class="header">
           <h1>AI Coder / DeCoder</h1>
+          <div class="header-tabs">
+            <button 
+              class="header-tab ${this.activeLeftTab === 'files' ? 'active' : ''}"
+              @click=${() => this.switchTab('files')}
+            >
+              <span class="icon">📁</span> Files
+            </button>
+            <button 
+              class="header-tab ${this.activeLeftTab === 'search' ? 'active' : ''}"
+              @click=${() => this.switchTab('search')}
+            >
+              <span class="icon">🔍</span> Search
+            </button>
+          </div>
           <span class="subtitle">Code changes will appear here</span>
           <button 
             class="clear-btn" 
@@ -184,7 +305,15 @@ export class AppShell extends LitElement {
           <prompt-view 
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
+            style="${this.activeLeftTab === 'search' ? 'display: none;' : ''}"
           ></prompt-view>
+          ${this.activeLeftTab === 'search' ? html`
+            <find-in-files
+              .rpcCall=${this._getPromptViewRpcCall()}
+              @result-selected=${this.handleSearchResultSelected}
+              @close-search=${this.handleCloseSearch}
+            ></find-in-files>
+          ` : ''}
         </div>
       </div>
     `;

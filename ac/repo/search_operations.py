@@ -18,16 +18,17 @@ class SearchOperationsMixin:
             List of dicts with file paths and matching lines
         """
         try:
-            args = ['grep', '-n']
+            grep_args = ['-n']
             if ignore_case:
-                args.append('-i')
+                grep_args.append('-i')
             if word:
-                args.append('-w')
+                grep_args.append('-w')
             if regex:
-                args.append('-E')
-            args.append(query)
+                grep_args.append('-E')
+            grep_args.extend(['--', query])
             
-            result = self._repo.git.execute(args)
+            result = self._repo.git.grep(*grep_args)
+            
             matches = []
             current_file = None
             current_matches = []
@@ -37,7 +38,7 @@ class SearchOperationsMixin:
                     continue
                 parts = line.split(':', 2)
                 if len(parts) >= 3:
-                    file_path, line_num, content = parts[0], parts[1], parts[2]
+                    file_path, line_num, content = parts
                     if current_file != file_path:
                         if current_file:
                             matches.append({'file': current_file, 'matches': current_matches})
@@ -50,6 +51,6 @@ class SearchOperationsMixin:
             
             return matches
         except GitCommandError:
-            return []  # No matches found
+            return []
         except Exception as e:
             return self._create_error_response(str(e))
