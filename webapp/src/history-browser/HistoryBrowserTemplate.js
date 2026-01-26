@@ -1,4 +1,5 @@
 import { html } from 'lit';
+import '../prompt/CardMarkdown.js';
 
 function renderSessionsList(component) {
   if (component.isSearching && component.searchResults.length > 0) {
@@ -72,7 +73,11 @@ function renderMessages(component) {
         <span class="message-role">${msg.role}</span>
         <span class="message-time">${component.formatTimestamp(msg.timestamp)}</span>
       </div>
-      <div class="message-content">${msg.content}</div>
+      <div class="message-content">
+        ${msg.role === 'assistant' 
+          ? html`<card-markdown .content=${msg.content} role="assistant"></card-markdown>`
+          : msg.content}
+      </div>
       ${msg.files && msg.files.length > 0 ? html`
         <div class="files-list">
           <div class="files-label">Files in context:</div>
