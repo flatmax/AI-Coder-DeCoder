@@ -15,7 +15,8 @@ export class DiffViewer extends MixedBase {
     selectedFile: { type: String },
     visible: { type: Boolean },
     isDirty: { type: Boolean },
-    serverURI: { type: String }
+    serverURI: { type: String },
+    viewingFile: { type: String }
   };
 
   static styles = diffViewerStyles;
@@ -93,6 +94,11 @@ export class DiffViewer extends MixedBase {
         composed: true
       }));
     }
+
+    // Handle external file open requests (e.g., from find-in-files)
+    if (changedProperties.has('viewingFile') && this.viewingFile) {
+      this._openExternalFile(this.viewingFile);
+    }
   }
 
   selectFile(filePath) {
@@ -169,6 +175,17 @@ export class DiffViewer extends MixedBase {
       editor.setPosition({ lineNumber: line, column: column || 1 });
       editor.focus();
     }
+  }
+
+  _openExternalFile(filePath) {
+    if (!filePath) return;
+    
+    // Check if file is already loaded - just select it
+    const existingFile = this.files.find(f => f.path === filePath);
+    if (existingFile) {
+      this.selectedFile = filePath;
+    }
+    // File loading is now handled by AppShell
   }
 
   render() {

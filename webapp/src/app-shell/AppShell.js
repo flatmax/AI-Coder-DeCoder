@@ -205,6 +205,36 @@ export class AppShell extends LitElement {
     });
   }
 
+  async handleSearchFileSelected(e) {
+    const { file } = e.detail;
+    this.viewingFile = file;
+    
+    // Check if file already in diffFiles
+    if (!this.diffFiles.find(f => f.path === file)) {
+      // Load file content and add to diffFiles
+      const promptView = this.shadowRoot.querySelector('prompt-view');
+      if (promptView && promptView.call) {
+        try {
+          const response = await promptView.call['Repo.get_file_content'](file);
+          const result = response ? Object.values(response)[0] : null;
+          const content = typeof result === 'string' ? result : (result?.content ?? null);
+          
+          if (content !== null) {
+            this.diffFiles = [...this.diffFiles, {
+              path: file,
+              original: content,
+              modified: content,
+              isNew: false,
+              isReadOnly: true
+            }];
+          }
+        } catch (err) {
+          console.error('Failed to load file:', err);
+        }
+      }
+    }
+  }
+
   handleCloseSearch() {
     this.activeLeftTab = 'files';
   }
@@ -295,6 +325,7 @@ export class AppShell extends LitElement {
               .files=${this.diffFiles}
               .visible=${true}
               .serverURI=${this.serverURI}
+              .viewingFile=${this.viewingFile}
               @file-save=${this.handleFileSave}
               @files-save=${this.handleFilesSave}
               @file-selected=${this.handleFileSelected}
@@ -307,13 +338,13 @@ export class AppShell extends LitElement {
             @edits-applied=${this.handleEditsApplied}
             style="${this.activeLeftTab === 'search' ? 'display: none;' : ''}"
           ></prompt-view>
-          ${this.activeLeftTab === 'search' ? html`
-            <find-in-files
-              .rpcCall=${this._getPromptViewRpcCall()}
-              @result-selected=${this.handleSearchResultSelected}
-              @close-search=${this.handleCloseSearch}
-            ></find-in-files>
-          ` : ''}
+          <find-in-files
+            .rpcCall=${this._getPromptViewRpcCall()}
+            @result-selected=${this.handleSearchResultSelected}
+            @file-selected=${this.handleSearchFileSelected}
+            @close-search=${this.handleCloseSearch}
+            style="${this.activeLeftTab === 'search' ? '' : 'display: none;'}"
+          ></find-in-files>
         </div>
       </div>
     `;

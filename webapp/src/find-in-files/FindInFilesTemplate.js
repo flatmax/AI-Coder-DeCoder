@@ -142,12 +142,15 @@ function renderResults(component) {
       
       return html`
         <div class="file-group">
-          <div 
-            class="file-header"
-            @click=${() => component.toggleFileExpanded(fileResult.file)}
-          >
-            <span class="icon ${component.expandedFiles[fileResult.file] !== false ? 'expanded' : ''}">▶</span>
-            <span class="file-name">${fileResult.file}</span>
+          <div class="file-header">
+            <span 
+              class="icon ${component.expandedFiles[fileResult.file] !== false ? 'expanded' : ''}"
+              @click=${(e) => { e.stopPropagation(); component.toggleFileExpanded(fileResult.file); }}
+            >▶</span>
+            <span 
+              class="file-name"
+              @click=${() => component.openFile(fileResult.file)}
+            >${fileResult.file}</span>
             <span class="match-count">(${fileResult.matches.length})</span>
           </div>
           ${component.expandedFiles[fileResult.file] !== false ? html`

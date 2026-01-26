@@ -27,13 +27,29 @@ export class FindInFiles extends LitElement {
     this.isSearching = false;
     this.searchPerformed = false;
     this.error = null;
-    this.ignoreCase = true;
-    this.useRegex = false;
-    this.wholeWord = false;
     this.expandedFiles = {};
     this._searchDebounceTimer = null;
     this.focusedIndex = -1;
     this.hoveredIndex = -1;
+    
+    // Load saved options from localStorage
+    const saved = localStorage.getItem('findInFiles.options');
+    if (saved) {
+      try {
+        const options = JSON.parse(saved);
+        this.ignoreCase = options.ignoreCase ?? true;
+        this.useRegex = options.useRegex ?? false;
+        this.wholeWord = options.wholeWord ?? false;
+      } catch (e) {
+        this.ignoreCase = true;
+        this.useRegex = false;
+        this.wholeWord = false;
+      }
+    } else {
+      this.ignoreCase = true;
+      this.useRegex = false;
+      this.wholeWord = false;
+    }
   }
 
   // Build flat list of all matches for keyboard navigation
@@ -171,6 +187,13 @@ export class FindInFiles extends LitElement {
       this.wholeWord = !this.wholeWord;
     }
     
+    // Save options to localStorage
+    localStorage.setItem('findInFiles.options', JSON.stringify({
+      ignoreCase: this.ignoreCase,
+      useRegex: this.useRegex,
+      wholeWord: this.wholeWord
+    }));
+    
     // Re-search with new options
     if (this.query.trim()) {
       this.performSearch();
@@ -187,6 +210,14 @@ export class FindInFiles extends LitElement {
   selectResult(filePath, lineNum) {
     this.dispatchEvent(new CustomEvent('result-selected', {
       detail: { file: filePath, line: lineNum },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  openFile(filePath) {
+    this.dispatchEvent(new CustomEvent('file-selected', {
+      detail: { file: filePath },
       bubbles: true,
       composed: true
     }));
