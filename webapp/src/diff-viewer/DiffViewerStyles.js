@@ -1,6 +1,14 @@
 import { css } from 'lit';
 
 export const diffViewerStyles = css`
+  @keyframes line-highlight {
+    0% { background-color: rgba(233, 69, 96, 0.4); }
+    100% { background-color: transparent; }
+  }
+
+  .line-highlight-decoration {
+    animation: line-highlight 1.5s ease-out;
+  }
   :host {
     display: block;
     width: 100%;

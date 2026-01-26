@@ -174,7 +174,36 @@ export class DiffViewer extends MixedBase {
       editor.revealLineInCenter(line);
       editor.setPosition({ lineNumber: line, column: column || 1 });
       editor.focus();
+      
+      // Add highlight decoration that fades out
+      this._highlightLine(editor, line);
     }
+  }
+
+  _highlightLine(editor, line) {
+    // Remove any existing highlight
+    if (this._highlightDecorations) {
+      editor.deltaDecorations(this._highlightDecorations, []);
+    }
+    
+    // Add new highlight decoration
+    this._highlightDecorations = editor.deltaDecorations([], [
+      {
+        range: new monaco.Range(line, 1, line, 1),
+        options: {
+          isWholeLine: true,
+          className: 'line-highlight-decoration'
+        }
+      }
+    ]);
+    
+    // Remove highlight after animation completes
+    setTimeout(() => {
+      if (this._highlightDecorations) {
+        editor.deltaDecorations(this._highlightDecorations, []);
+        this._highlightDecorations = null;
+      }
+    }, 1500);
   }
 
   _openExternalFile(filePath) {

@@ -45,22 +45,27 @@ Implement a "Find in Files" (grep-like) functionality that allows users to searc
 - [x] `result-selected` event handling
 - [x] Navigation to file and line in DiffViewer
 
-### 🔲 Pending Features
+### ✅ Completed Features (Recently Added)
 
 #### File Header Click Navigation
-- [ ] Clicking file name in search results opens file in DiffViewer
-- [ ] Focus switches to DiffViewer when file is opened
-- [ ] File opens at beginning (line 1) rather than a specific match
+- [x] Clicking file name in search results opens file in DiffViewer
+- [x] File opens at beginning (line 1) rather than a specific match
+- [x] Clicking specific match opens file AND jumps to that line
+
+#### Result Selection Behavior
+- [x] Clicking a match line switches to Files tab
+- [x] Editor receives focus after navigation
+- [x] Line is revealed and cursor positioned correctly
 
 #### State Persistence
-- [ ] Search tab retains state when switching away
-- [ ] Query, results, scroll position preserved
-- [ ] User can `Ctrl+Shift+F` back to see previous search results
-- [ ] Expanded/collapsed file states preserved
+- [x] Search tab retains state when switching away
+- [x] Query, results, scroll position preserved
+- [x] User can `Ctrl+Shift+F` back to see previous search results
+- [x] Expanded/collapsed file states preserved
 
 #### Polish Items
-- [ ] Persist search options in localStorage
-- [ ] Brief highlight animation on navigated line in DiffViewer
+- [x] Persist search options in localStorage
+- [ ] Brief highlight animation on navigated line in DiffViewer (optional)
 
 ## Detailed Implementation Plan for Pending Features
 
@@ -214,23 +219,28 @@ Implement a "Find in Files" (grep-like) functionality that allows users to searc
 
 ## Implementation Order for Remaining Work
 
-### Step 1: File Header Click Navigation
-- [ ] Separate click zones in FindInFilesTemplate.js (arrow vs file name)
-- [ ] Add `openFile(filePath)` method to FindInFiles.js
-- [ ] Emit `file-selected` event (without line number)
-- [ ] Handle event in AppShell.js to open file
+### Step 1: File Header Click Navigation ✅
+- [x] Separate click zones in FindInFilesTemplate.js (arrow vs file name)
+- [x] Add `openFile(filePath)` method to FindInFiles.js
+- [x] Emit `file-selected` event (without line number)
+- [x] Handle event in AppShell.js to open file
+- [x] File loading managed by AppShell._loadFileIntoDiff()
 
-### Step 2: State Persistence
-- [ ] Modify AppShell to render both FilePicker and FindInFiles
-- [ ] Add `.hidden` CSS class for inactive component
-- [ ] Ensure FindInFiles focuses input when becoming visible
-- [ ] Test round-trip: search → view file → return to search
+### Step 2: State Persistence ✅
+- [x] Modify AppShell to render both FilePicker and FindInFiles
+- [x] Use CSS display:none for inactive component (preserves state)
+- [x] FindInFiles focuses input when becoming visible
+- [x] Round-trip works: search → view file → return to search
 
-### Step 3: localStorage Persistence
-- [ ] Save search options to localStorage on change
-- [ ] Load search options from localStorage on init
+### Step 3: localStorage Persistence ✅
+- [x] Save search options to localStorage on change
+- [x] Load search options from localStorage on init
 
-### Step 4: Polish
-- [ ] Add visual feedback when file opens (brief highlight?)
-- [ ] Ensure scroll position in results list is preserved
-- [ ] Test keyboard navigation after tab switch
+### Step 4: Polish ✅
+- [x] Clicking search result switches to Files tab and focuses editor
+- [x] Line navigation works (jumps to correct line in file)
+- [x] Scroll position in results list is preserved across tab switches
+
+### Remaining Polish (Optional)
+- [ ] Add brief highlight animation on navigated line in DiffViewer
+- [ ] Keyboard navigation after tab switch (needs testing)
