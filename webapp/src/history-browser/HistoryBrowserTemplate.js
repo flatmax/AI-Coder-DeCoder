@@ -119,6 +119,15 @@ export function renderHistoryBrowser(component) {
             .value=${component.searchQuery}
             @input=${(e) => component.handleSearchInput(e)}
           >
+          ${component.selectedSessionId && component.selectedSession.length > 0 ? html`
+            <button 
+              class="load-session-btn" 
+              @click=${() => component.loadSessionToChat()}
+              title="Replace current chat with this session"
+            >
+              📥 Load Session
+            </button>
+          ` : ''}
           <button class="close-btn" @click=${() => component.hide()}>×</button>
         </div>
         <div class="content">

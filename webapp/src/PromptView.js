@@ -95,6 +95,21 @@ export class PromptView extends MixedBase {
     });
   }
 
+  handleLoadSession(e) {
+    const { messages } = e.detail;
+    
+    // Clear current history
+    this.clearHistory();
+    
+    // Load all messages from the session
+    for (const msg of messages) {
+      this.addMessage(msg.role, msg.content, msg.images || null);
+    }
+    
+    this.showHistoryBrowser = false;
+    console.log(`📜 Loaded ${messages.length} messages from session`);
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this.addClass(this, 'PromptView');

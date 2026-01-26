@@ -60,6 +60,22 @@ export const historyBrowserStyles = css`
     border-color: #e94560;
   }
 
+  .load-session-btn {
+    background: #e94560;
+    border: none;
+    border-radius: 6px;
+    color: white;
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.2s;
+  }
+
+  .load-session-btn:hover {
+    background: #d63850;
+  }
+
   .close-btn {
     background: none;
     border: none;

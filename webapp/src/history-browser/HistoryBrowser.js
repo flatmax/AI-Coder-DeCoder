@@ -117,6 +117,18 @@ export class HistoryBrowser extends LitElement {
     }));
   }
 
+  loadSessionToChat() {
+    if (!this.selectedSession || this.selectedSession.length === 0) {
+      return;
+    }
+    this.dispatchEvent(new CustomEvent('load-session', {
+      detail: { messages: this.selectedSession },
+      bubbles: true,
+      composed: true
+    }));
+    this.hide();
+  }
+
   formatTimestamp(isoString) {
     if (!isoString) return '';
     const date = new Date(isoString);
