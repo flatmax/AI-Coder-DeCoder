@@ -117,6 +117,39 @@ export class PromptView extends MixedBase {
   async setupDone() {
     this.isConnected = true;
     await this.loadFileTree();
+    await this.loadLastSession();
+  }
+
+  async loadLastSession() {
+    try {
+      // Get list of sessions (most recent first)
+      const sessionsResponse = await this.call['LiteLLM.history_list_sessions'](1);
+      console.log('📜 Sessions response:', sessionsResponse);
+      const sessions = this.extractResponse(sessionsResponse);
+      console.log('📜 Extracted sessions:', sessions);
+      
+      if (sessions && sessions.length > 0) {
+        const lastSessionId = sessions[0].session_id;
+        console.log('📜 Loading session:', lastSessionId);
+        
+        // Load the session messages
+        const messagesResponse = await this.call['LiteLLM.history_get_session'](lastSessionId);
+        console.log('📜 Messages response:', messagesResponse);
+        const messages = this.extractResponse(messagesResponse);
+        console.log('📜 Extracted messages:', messages);
+        
+        if (messages && messages.length > 0) {
+          // Load messages into chat history
+          for (const msg of messages) {
+            this.addMessage(msg.role, msg.content, msg.images || null);
+          }
+          console.log(`📜 Loaded ${messages.length} messages from last session`);
+        }
+      }
+    } catch (e) {
+      console.warn('Could not load last session:', e);
+      console.error(e);
+    }
   }
 
   remoteDisconnected(uuid) {
