@@ -50,12 +50,14 @@ class PromptMixin:
         Initialize the prompts.
         
         Raises:
-            FileNotFoundError: If sys_prompt.md is missing
+            FileNotFoundError: If neither sys_prompt_v2.md nor sys_prompt.md exists
         """
         self.prompts = EditBlockPrompts()
         
-        # Load required system prompt
-        main_prompt = _load_prompt_file("sys_prompt.md", required=True)
+        # Try v2 first (new EDIT format), fall back to v1 (SEARCH/REPLACE)
+        main_prompt = _load_prompt_file("sys_prompt_v2.md", required=False)
+        if not main_prompt:
+            main_prompt = _load_prompt_file("sys_prompt.md", required=True)
         self._system_prompt = main_prompt
         
         # Append optional extra prompt

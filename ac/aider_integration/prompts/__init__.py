@@ -87,8 +87,8 @@ Only show the blocks needed for the changes, not the entire file.
 
 def build_edit_system_prompt(include_instructions=True):
     """Build a system prompt for edit mode."""
-    # Check for custom main prompt first
-    main_prompt = _load_prompt_file("sys_prompt.md")
+    # Check for v2 prompt first (new EDIT format), then fall back to v1 (SEARCH/REPLACE)
+    main_prompt = _load_prompt_file("sys_prompt_v2.md") or _load_prompt_file("sys_prompt.md")
     if main_prompt:
         prompt = main_prompt
     else:
