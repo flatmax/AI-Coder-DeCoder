@@ -18,6 +18,10 @@ KIND_PREFIX = {
 CONDITIONAL_MARKER = '?'
 
 
+# Legend for compact format
+LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line ->T=returns ?=optional ←=refs →=calls +N=more"
+
+
 def to_compact(
     symbols_by_file: Dict[str, List[Symbol]],
     references: Optional[Dict[str, Dict[str, List]]] = None,
@@ -25,6 +29,7 @@ def to_compact(
     file_imports: Optional[Dict[str, Set[str]]] = None,
     include_instance_vars: bool = True,
     include_calls: bool = False,
+    include_legend: bool = True,
 ) -> str:
     """Generate compact format suitable for LLM context.
     
@@ -53,11 +58,16 @@ def to_compact(
         references: Optional dict of file -> symbol -> [locations]
         file_refs: Optional dict of file -> set of files that reference it
         file_imports: Optional dict of file -> set of in-repo files it imports
+        include_legend: Whether to include the legend at the top
         
     Returns:
         Compact string representation
     """
     lines = []
+    
+    if include_legend:
+        lines.append(LEGEND)
+        lines.append("")
     
     for file_path in sorted(symbols_by_file.keys()):
         symbols = symbols_by_file[file_path]
