@@ -68,19 +68,25 @@ You must apply changes using *SEARCH/REPLACE blocks*. This format is strict. Any
 
 ### 4.2 The Golden Rules of SEARCH/REPLACE
 
-1. **Exact Match:** The content between `<<<<<<< SEARCH` and `=======` must exist *verbatim* in the target file. This includes spaces, indentation, and comments.
+1. **Prefer Small, Targeted Blocks:** Use multiple small SEARCH/REPLACE blocks rather than one large block that replaces an entire file or section. This:
+   - Makes changes easier to review
+   - Reduces risk of match failures
+   - Shows intent more clearly
+   - Is more robust if other parts of the file changed
 
-2. **Uniqueness:** The `SEARCH` block must contain enough lines to uniquely identify the location. If the code `return True` appears twice, and you only provide that one line, the tool cannot know which one to replace. Include 2-3 lines of context before and after.
+2. **Exact Match:** The content between `<<<<<<< SEARCH` and `=======` must exist *verbatim* in the target file. This includes spaces, indentation, and comments.
 
-3. **Location:** The `SEARCH` block should include context lines before/after the code you want to change. These context lines must appear **identically** in both SEARCH and REPLACE sections - only the targeted lines should differ.
+3. **Uniqueness:** The `SEARCH` block must contain enough lines to uniquely identify the location. If the code `return True` appears twice, and you only provide that one line, the tool cannot know which one to replace. Include 2-3 lines of context before and after.
 
-4. **Contiguity:** **NEVER** skip lines in the `SEARCH` block. Do not use `...`, `//...`, or comments like `(rest of function)` to skip code. If you start a block at line 10 and end at line 20, you MUST include lines 11-19 exactly as they are.
+4. **Location:** The `SEARCH` block should include context lines before/after the code you want to change. These context lines must appear **identically** in both SEARCH and REPLACE sections - only the targeted lines should differ.
 
-5. **No Hallucination:** Do not "fix" the indentation or style in the `SEARCH` block. It must match the *current* state of the file, errors and all.
+5. **Contiguity:** **NEVER** skip lines in the `SEARCH` block. Do not use `...`, `//...`, or comments like `(rest of function)` to skip code. If you start a block at line 10 and end at line 20, you MUST include lines 11-19 exactly as they are.
 
-6. **No code markdown inserted:** Do not append code markdown backtick indicators in the `SEARCH` block or `REPLACE` block unless they are in the code or intended to be inserted in the code in the appropriate place.
+6. **No Hallucination:** Do not "fix" the indentation or style in the `SEARCH` block. It must match the *current* state of the file, errors and all.
 
-7. **Full File Path:** Always put the full relative path of the file (as seen in the Symbol Map) on the line before the opening fence or the start of the block.
+7. **No code markdown inserted:** Do not append code markdown backtick indicators in the `SEARCH` block or `REPLACE` block unless they are in the code or intended to be inserted in the code in the appropriate place.
+
+8. **Full File Path:** Always put the full relative path of the file (as seen in the Symbol Map) on the line before the opening fence or the start of the block.
 
 ### 4.3 Handling New Files
 
@@ -134,11 +140,13 @@ To delete code, leave the `REPLACE` section with only the [Exact contiguous line
 - ❌ Using `...` or `// rest of code` in SEARCH blocks
 - ❌ Assuming file content you haven't seen
 - ❌ Not including file context to search for which remains in both the `SEARCH` and `REPLACE` blocks
-- ❌ introducing backticks to indicate code sections in the SEARCH/REPLACE blocks which weren't in the original file.
+- ❌ Introducing backticks to indicate code sections in the SEARCH/REPLACE blocks which weren't in the original file
 - ❌ Editing `symbol_map.txt` directly (edit `ac/indexer.py` instead)
 - ❌ Requesting entire directories instead of specific files
 - ❌ Forgetting to include enough context lines for unique matching
-- ❌ "Fixing" indentation in the SEARCH block (it must match exactly) and the section of the REPLACE block which will remain in place.
+- ❌ "Fixing" indentation in the SEARCH block (it must match exactly) and the section of the REPLACE block which will remain in place
+- ❌ Replacing entire files when small targeted edits would suffice
+- ❌ Using one massive SEARCH/REPLACE block instead of multiple focused ones
 
 ## 9. LANGUAGE-SPECIFIC NOTES
 
