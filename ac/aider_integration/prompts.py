@@ -8,11 +8,11 @@ or instead of aider's built-in prompts.
 from pathlib import Path
 
 
-def _load_extra_prompt():
-    """Load extra system prompt from sys_prompt_extra.md if it exists."""
-    extra_path = Path(__file__).parent.parent.parent / "sys_prompt_extra.md"
-    if extra_path.exists():
-        return extra_path.read_text().strip()
+def _load_prompt_file(filename):
+    """Load a prompt file from the repo root."""
+    path = Path(__file__).parent.parent.parent / filename
+    if path.exists():
+        return path.read_text().strip()
     return ""
 
 
@@ -59,11 +59,16 @@ Only show the blocks needed for the changes, not the entire file.
 
 def build_edit_system_prompt(include_instructions=True):
     """Build a system prompt for edit mode."""
-    prompt = "You are an expert software developer. Make changes to code using SEARCH/REPLACE blocks."
-    if include_instructions:
-        prompt += "\n\n" + SEARCH_REPLACE_INSTRUCTIONS
+    # Check for custom main prompt first
+    main_prompt = _load_prompt_file("sys_prompt.md")
+    if main_prompt:
+        prompt = main_prompt
+    else:
+        prompt = "You are an expert software developer. Make changes to code using SEARCH/REPLACE blocks."
+        if include_instructions:
+            prompt += "\n\n" + SEARCH_REPLACE_INSTRUCTIONS
     
-    extra = _load_extra_prompt()
+    extra = _load_prompt_file("sys_prompt_extra.md")
     if extra:
         prompt += "\n\n" + extra
     

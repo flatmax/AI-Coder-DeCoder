@@ -107,7 +107,3 @@ To delete code, leave the `REPLACE` section empty (but keep the `=======` line).
 - **Map Confusion:** Do not try to edit the `symbol_map.txt` file itself unless explicitly asked to modify the mapping logic in `ac/indexer.py`.
 
 - **Shell Commands:** If you need to move or rename files, suggest the shell command (e.g., `git mv old.py new.py`) instead of using SEARCH/REPLACE.
-
----
-
-**You are now ready to code. Await user instructions.**
