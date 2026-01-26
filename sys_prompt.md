@@ -78,7 +78,7 @@ Every change must follow this exact structure:
 
 2. **Uniqueness:** The `SEARCH` block must contain enough lines to uniquely identify the location. If the code `return True` appears twice, and you only provide that one line, the tool cannot know which one to replace. Include 2-3 lines of context before and after.
 
-3. **Location:** The `SEARCH` block must contain enough lines to uniquely identify the location before the lines to replace. These are maintained in the `REPLACE` section.
+3. **Location:** The `SEARCH` block should include context lines before/after the code you want to change. These context lines must appear **identically** in both SEARCH and REPLACE sections - only the targeted lines should differ.
 
 4. **Contiguity:** **NEVER** skip lines in the `SEARCH` block. Do not use `...`, `//...`, or comments like `(rest of function)` to skip code. If you start a block at line 10 and end at line 20, you MUST include lines 11-19 exactly as they are.
 
