@@ -605,14 +605,116 @@ def detect_shell_suggestions(self, response_text: str) -> list[str]:
 
 These can be displayed in the UI for the user to manually execute.
 
-## Migration Steps
+## Migration Strategy
 
+### The Atomic Switchover Problem
+
+During transition, two components must change simultaneously:
+1. **The parser (backend)** - switches from SEARCH/REPLACE to EDIT format
+2. **The prompt (LLM instructions)** - tells LLM to use EDIT format
+
+If these are out of sync:
+- New parser + old prompt = LLM outputs SEARCH/REPLACE, parser expects EDIT → **all edits fail**
+- Old parser + new prompt = LLM outputs EDIT, parser expects SEARCH/REPLACE → **all edits fail**
+
+### Dual-Format Detection (Transition Period)
+
+During the transition period, the new parser should detect both formats:
+
+```python
+def detect_format(self, response_text: str) -> str:
+    """Detect which edit format the response uses."""
+    if "««« EDIT" in response_text:
+        return "edit_v2"
+    elif "<<<<<<< SEARCH" in response_text:
+        return "search_replace"
+    return "none"
+
+def parse_response(self, response_text: str) -> list[EditBlock]:
+    """Parse response, handling both formats during transition."""
+    format_type = self.detect_format(response_text)
+    if format_type == "edit_v2":
+        return self._parse_edit_v2(response_text)
+    elif format_type == "search_replace":
+        # Delegate to old parser or convert
+        return self._parse_search_replace_legacy(response_text)
+    return []
+```
+
+This allows:
+- Testing new format while old prompt is still active
+- Graceful handling if LLM occasionally reverts to old format
+- Safe rollback by just reverting the prompt
+
+### Files That Must Change Together
+
+When switching to the new format, these files form an atomic unit:
+
+| File | Change |
+|------|--------|
+| `ac/edit_parser.py` | New file - the v2 parser |
+| `ac/aider_integration/prompts/sys_prompt.md` | Update instructions to EDIT format |
+| `ac/aider_integration/prompts/__init__.py` | Update any format-specific constants |
+| `ac/aider_integration/prompts/example_messages.py` | Update examples to use EDIT format |
+| `ac/llm/chat.py` | Switch to new parser |
+| `ac/llm/streaming.py` | Switch to new parser |
+
+### Rollback Procedure
+
+If issues arise after deployment:
+
+1. **Quick rollback**: Revert `sys_prompt.md` to SEARCH/REPLACE instructions
+   - Dual-format parser will handle old format
+   - No code changes needed
+
+2. **Full rollback**: `git revert` the entire changeset
+   - Returns to aider edit applier
+   - All files revert together
+
+### Phased Migration Steps
+
+**Phase 1: Core Parser (No User Impact)**
 1. Create `ac/edit_parser.py` with new parser
-2. Update system prompt with new format
-3. Update `ac/llm/chat.py` and `ac/llm/streaming.py` to use new parser
-4. Update frontend to recognize and display new format
-5. Test thoroughly
-6. Remove old aider edit applier code
+2. Create `tests/test_edit_parser.py` with comprehensive unit tests
+3. Implement dual-format detection
+4. **Acceptance**: All unit tests pass, parser handles both formats
+
+**Phase 2: Backend Integration (No User Impact)**
+1. Add new parser alongside existing aider integration
+2. Wire up new parser in `chat.py` and `streaming.py` behind feature detection
+3. Create integration tests that mock LLM responses
+4. **Acceptance**: Integration tests pass, existing functionality unchanged
+
+**Phase 3: Prompt Update (User Impact - Requires LLM Testing)**
+1. Update `sys_prompt.md` with new EDIT format instructions
+2. Update `example_messages.py` with new format examples
+3. **Manual testing required**: Run real prompts against LLM, verify edits apply
+4. **Acceptance**: 10+ real edit operations succeed with new format
+
+**Phase 4: Frontend Updates**
+1. Update `CardMarkdown.js` to recognize new format markers
+2. Update `PromptView.js` to display edit results
+3. Update `DiffViewer.js` for line highlighting on errors
+4. **Acceptance**: UI displays edit blocks correctly, shows success/failure status
+
+**Phase 5: Cleanup (After Stability Period)**
+1. Remove dual-format detection (after 1-2 weeks of stable operation)
+2. Remove old aider edit applier code from `ac/aider_integration/edit_applier_mixin.py`
+3. Remove legacy parser code path
+4. Update documentation
+5. **Acceptance**: Codebase clean, only new format supported
+
+### Integration Testing Requirements
+
+Unit tests cannot verify the prompt-to-LLM-to-parser loop. Required integration tests:
+
+1. **Format compliance test**: Send coding request to LLM, verify response contains valid EDIT blocks
+2. **Round-trip test**: Request edit → parse → apply → verify file content
+3. **Multi-edit test**: Request requiring multiple edits to same file
+4. **Error recovery test**: Verify graceful handling when LLM produces malformed blocks
+5. **Regression test**: Verify complex edits that worked with old format still work
+
+These tests should run against a real LLM (can use smaller/cheaper model for CI).
 
 ## Testing
 
