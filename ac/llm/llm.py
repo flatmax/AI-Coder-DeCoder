@@ -562,38 +562,93 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
     
     def parse_edits(self, response_text, file_paths=None):
         """
-        Parse a response for search/replace blocks without applying them.
+        Parse a response for edit blocks without applying them.
+        
+        Supports both new anchored EDIT format and legacy SEARCH/REPLACE format.
         
         Args:
             response_text: LLM response containing edit blocks
             file_paths: Optional list of valid file paths
             
         Returns:
-            Dict with file_edits and shell_commands
+            Dict with file_edits, shell_commands, edit_format, and edit_blocks (for v2)
         """
-        aider = self.get_aider_chat()
+        from ..edit_parser import EditParser
         
-        if file_paths:
-            aider.clear_files()
-            for path in file_paths:
-                aider.add_file(path)
+        edit_parser = EditParser()
+        format_type = edit_parser.detect_format(response_text)
         
-        file_edits, shell_commands = aider.editor.parse_response(response_text)
-        return {
-            "file_edits": file_edits,
-            "shell_commands": shell_commands
+        result = {
+            "edit_format": format_type,
+            "shell_commands": edit_parser.detect_shell_suggestions(response_text)
         }
+        
+        if format_type == "edit_v2":
+            blocks = edit_parser.parse_response(response_text)
+            result["edit_blocks"] = blocks
+            result["file_edits"] = []  # Legacy format empty for v2
+        elif format_type == "search_replace":
+            aider = self.get_aider_chat()
+            if file_paths:
+                aider.clear_files()
+                for path in file_paths:
+                    aider.add_file(path)
+            file_edits, shell_commands = aider.editor.parse_response(response_text)
+            result["file_edits"] = file_edits
+            result["shell_commands"] = shell_commands
+            result["edit_blocks"] = []
+        else:
+            result["file_edits"] = []
+            result["edit_blocks"] = []
+        
+        return result
     
     def apply_edits(self, edits, dry_run=False):
         """
         Apply previously parsed edits to files.
         
+        Supports both new EditBlock objects and legacy (filename, original, updated) tuples.
+        
         Args:
-            edits: List of (filename, original, updated) tuples
+            edits: List of EditBlock objects or (filename, original, updated) tuples
             dry_run: If True, don't write changes to disk
             
         Returns:
             Dict with passed, failed, and content
         """
-        aider = self.get_aider_chat()
-        return aider.editor.apply_edits(edits, dry_run=dry_run)
+        from ..edit_parser import EditParser, EditBlock, EditStatus
+        
+        if not edits:
+            return {"passed": [], "failed": [], "content": {}}
+        
+        # Check if we have new EditBlock objects or legacy tuples
+        if isinstance(edits[0], EditBlock):
+            # New format
+            edit_parser = EditParser()
+            apply_result = edit_parser.apply_edits(edits, self.repo, dry_run=dry_run)
+            
+            return {
+                "passed": [
+                    (r.file_path, r.old_preview, r.new_preview)
+                    for r in apply_result.results if r.status == EditStatus.APPLIED
+                ],
+                "failed": [
+                    (r.file_path, r.reason, "")
+                    for r in apply_result.results if r.status == EditStatus.FAILED
+                ],
+                "content": {},
+                "files_modified": apply_result.files_modified,
+                "edit_results": [
+                    {
+                        "file_path": r.file_path,
+                        "status": r.status.value,
+                        "reason": r.reason,
+                        "estimated_line": r.estimated_line,
+                    }
+                    for r in apply_result.results
+                ]
+            }
+        else:
+            # Legacy format - use aider
+            aider = self.get_aider_chat()
+            return aider.editor.apply_edits(edits, dry_run=dry_run)

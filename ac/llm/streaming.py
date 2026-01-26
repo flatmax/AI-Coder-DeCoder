@@ -7,6 +7,7 @@ import threading
 import litellm as _litellm
 
 from ..aider_integration.prompts import build_edit_system_prompt
+from ..edit_parser import EditParser, EditStatus
 from .chat import REPO_MAP_HEADER
 
 
@@ -159,27 +160,99 @@ class StreamingMixin:
             # Print token usage HUD
             self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
             
-            # Parse and apply edits
-            file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
+            # Parse and apply edits using dual-format detection
+            edit_parser = EditParser()
+            format_type = edit_parser.detect_format(full_content)
             
             result = {
-                "file_edits": file_edits,
-                "shell_commands": shell_commands,
                 "response": full_content,
                 "summarized": summarized,
-                "token_usage": self.get_token_usage()
+                "token_usage": self.get_token_usage(),
+                "edit_format": format_type
             }
             
-            if file_edits and not dry_run:
-                apply_result = aider_chat.editor.apply_edits(file_edits, dry_run=dry_run)
-                result.update(apply_result)
+            if format_type == "edit_v2":
+                # Use new anchored edit format
+                blocks = edit_parser.parse_response(full_content)
+                shell_commands = edit_parser.detect_shell_suggestions(full_content)
+                
+                result["shell_commands"] = shell_commands
+                result["file_edits"] = []  # Legacy format for compatibility
+                result["edit_blocks"] = [
+                    {
+                        "file_path": b.file_path,
+                        "leading_anchor": b.leading_anchor[:100] if b.leading_anchor else "",
+                        "old_lines": b.old_lines[:200] if b.old_lines else "",
+                        "new_lines": b.new_lines[:200] if b.new_lines else "",
+                    }
+                    for b in blocks
+                ]
+                
+                if blocks and not dry_run:
+                    apply_result = edit_parser.apply_edits(blocks, self.repo, dry_run=dry_run)
+                    
+                    # Convert to legacy format for compatibility
+                    result["passed"] = [
+                        (r.file_path, r.old_preview, r.new_preview)
+                        for r in apply_result.results if r.status == EditStatus.APPLIED
+                    ]
+                    result["failed"] = [
+                        (r.file_path, r.reason, "")
+                        for r in apply_result.results if r.status == EditStatus.FAILED
+                    ]
+                    result["skipped"] = [
+                        (r.file_path, r.reason, "")
+                        for r in apply_result.results if r.status == EditStatus.SKIPPED
+                    ]
+                    result["content"] = {}  # New parser writes directly
+                    result["files_modified"] = apply_result.files_modified
+                    
+                    # Detailed results for UI
+                    result["edit_results"] = [
+                        {
+                            "file_path": r.file_path,
+                            "status": r.status.value,
+                            "reason": r.reason,
+                            "estimated_line": r.estimated_line,
+                            "anchor_preview": r.anchor_preview,
+                            "old_preview": r.old_preview,
+                            "new_preview": r.new_preview,
+                        }
+                        for r in apply_result.results
+                    ]
+                else:
+                    result["passed"] = []
+                    result["failed"] = []
+                    result["skipped"] = []
+                    result["content"] = {}
+                    result["files_modified"] = []
+                    result["edit_results"] = []
+                    
+            elif format_type == "search_replace":
+                # Use legacy aider format
+                file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
+                
+                result["file_edits"] = file_edits
+                result["shell_commands"] = shell_commands
+                
+                if file_edits and not dry_run:
+                    apply_result = aider_chat.editor.apply_edits(file_edits, dry_run=dry_run)
+                    result.update(apply_result)
+                else:
+                    result["passed"] = []
+                    result["failed"] = []
+                    result["content"] = {}
             else:
+                # No edits in response
+                result["file_edits"] = []
+                result["shell_commands"] = []
                 result["passed"] = []
                 result["failed"] = []
                 result["content"] = {}
             
             # Store assistant message in history
-            files_modified = [edit[0] for edit in result.get("passed", [])]
+            # Handle both new format (files_modified list) and legacy format (passed tuples)
+            files_modified = result.get("files_modified") or [edit[0] for edit in result.get("passed", [])]
             self.store_assistant_message(
                 content=full_content,
                 files_modified=files_modified if files_modified else None
