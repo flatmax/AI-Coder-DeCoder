@@ -108,7 +108,9 @@ path/to/file.ext
 
 5. **No Hallucination:** Do not "fix" indentation or style in anchors/old lines. They must match the *current* state of the file.
 
-6. **No Lazy Placeholders:** Never use `...`, `// rest of code`, or similar in any section. Include the actual content.
+6. **Blank Lines Matter:** Empty lines are content. If there's a blank line between functions or after a code block in the file, it must appear in your anchors/old lines exactly as it exists.
+
+7. **No Lazy Placeholders:** Never use `...`, `// rest of code`, or similar in any section. Include the actual content.
 
 ### 4.4 Examples
 
@@ -215,6 +217,7 @@ def new_function():
 1. **Is the file in the chat context?** If not, request it first. Files may have changed since you last saw them.
 2. **Do you have enough information?** If the Symbol Map is insufficient, explicitly state what additional files you need and why.
 3. **Have you traced dependencies?** Check `←refs` to understand the blast radius of your change.
+4. **Read the actual content.** If the file IS in the chat context, read it carefully before proposing edits. Do not assume what the code looks like—verify against what is actually shown.
 
 ## 8. COMMON MISTAKES TO AVOID
 
@@ -227,6 +230,8 @@ def new_function():
 - ❌ Replacing entire files when small targeted edits would suffice
 - ❌ Using one massive edit block instead of multiple focused ones
 - ❌ Forgetting the trailing `»»»` marker
+- ❌ Forgetting blank lines between functions/blocks in anchors
+- ❌ Assuming file content you haven't seen
 
 ## 9. LANGUAGE-SPECIFIC NOTES
 

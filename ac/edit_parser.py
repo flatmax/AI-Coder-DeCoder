@@ -407,8 +407,16 @@ class EditParser:
                                 raise FileNotFoundError(content['error'])
                         else:
                             raise FileNotFoundError(f"No repo provided and file not cached: {file_path}")
-                    except FileNotFoundError:
-                        results.append(EditResult(
+                    except FileNotFoundError as e:
+                        # Only fail if this isn't a new file creation
+                        is_new_file = (not block.leading_anchor and
+                        not block.old_lines and
+                        not block.trailing_anchor)
+                        if is_new_file:
+                            content = ""
+                            file_contents[file_path] = content
+                        else:
+                            results.append(EditResult(
                             file_path=file_path,
                             status=EditStatus.FAILED,
                             reason=f"File not found: {file_path}",
