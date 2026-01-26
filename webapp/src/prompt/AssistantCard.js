@@ -60,6 +60,15 @@ export class AssistantCard extends LitElement {
       background: #1a3a6e;
       color: #e94560;
     }
+
+    .footer-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #0f3460;
+    }
   `;
 
   copyToClipboard() {
@@ -85,6 +94,10 @@ export class AssistantCard extends LitElement {
           </div>
         </div>
         <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []}></card-markdown>
+        <div class="footer-actions">
+          <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
+          <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
+        </div>
       </div>
     `;
   }

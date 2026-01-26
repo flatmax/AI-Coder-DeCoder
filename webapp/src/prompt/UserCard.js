@@ -111,6 +111,15 @@ export class UserCard extends LitElement {
       max-height: calc(90vh - 32px);
       object-fit: contain;
     }
+
+    .footer-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #1a1a2e;
+    }
   `;
 
   copyToClipboard() {
@@ -168,6 +177,10 @@ export class UserCard extends LitElement {
             `)}
           </div>
         ` : ''}
+        <div class="footer-actions">
+          <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
+          <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
+        </div>
       </div>
       <dialog @click=${(e) => this.handleDialogClick(e)}>
         <img src="" alt="Full size image" @click=${(e) => e.stopPropagation()}>
