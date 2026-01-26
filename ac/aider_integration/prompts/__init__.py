@@ -1,16 +1,44 @@
 """
-Custom prompts for aider-style editing.
+Prompt templates for SEARCH/REPLACE code editing.
 
-Provides additional prompt templates that can be used alongside
-or instead of aider's built-in prompts.
+Replaces aider's EditBlockPrompts with our own implementation.
 """
 
 from pathlib import Path
 
+from .system_reminder import SYSTEM_REMINDER
+from .example_messages import EXAMPLE_MESSAGES
+
+
+class EditBlockPrompts:
+    """
+    Drop-in replacement for aider's EditBlockPrompts.
+    
+    Provides templates for the SEARCH/REPLACE edit format.
+    The main system prompt comes from sys_prompt.md (loaded by PromptMixin).
+    """
+    
+    def __init__(self):
+        # Not used - sys_prompt.md is loaded directly by PromptMixin
+        self.main_system = ""
+        
+        # SEARCH/REPLACE format rules with {fence}, {go_ahead_tip} placeholders
+        self.system_reminder = SYSTEM_REMINDER
+        
+        # Few-shot examples for the edit format
+        self.example_messages = EXAMPLE_MESSAGES
+        
+        # Tip shown after examples (not needed with our prompts)
+        self.go_ahead_tip = ""
+
+
+# --- Moved from prompts.py to avoid module/package naming conflict ---
 
 def _load_prompt_file(filename):
     """Load a prompt file from the repo root."""
-    path = Path(__file__).parent.parent.parent / filename
+    # __file__ is ac/aider_integration/prompts/__init__.py
+    # Go up 3 levels: prompts -> aider_integration -> ac -> repo_root
+    path = Path(__file__).parent.parent.parent.parent / filename
     if path.exists():
         return path.read_text().strip()
     return ""
@@ -73,3 +101,13 @@ def build_edit_system_prompt(include_instructions=True):
         prompt += "\n\n" + extra
     
     return prompt
+
+
+__all__ = [
+    'EditBlockPrompts',
+    'SYSTEM_REMINDER',
+    'EXAMPLE_MESSAGES',
+    'SEARCH_REPLACE_INSTRUCTIONS',
+    'CONCISE_EDIT_PROMPT',
+    'build_edit_system_prompt',
+]
