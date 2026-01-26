@@ -151,10 +151,7 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       this._streamingRequests.set(requestId, { message });
       this.isStreaming = true;
       
-      // Add empty assistant message that will be filled by streaming
-      this.addMessage('assistant', '');
-      
-      // Start streaming request
+      // Start streaming request - streamChunk will create the assistant message
       const response = await this.call['LiteLLM.chat_streaming'](
         requestId,
         message,
