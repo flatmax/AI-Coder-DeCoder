@@ -65,7 +65,7 @@ Implement a "Find in Files" (grep-like) functionality that allows users to searc
 
 #### Polish Items
 - [x] Persist search options in localStorage
-- [ ] Brief highlight animation on navigated line in DiffViewer (optional)
+- [x] Brief highlight animation on navigated line in DiffViewer
 
 ## Detailed Implementation Plan for Pending Features
 
@@ -242,5 +242,5 @@ Implement a "Find in Files" (grep-like) functionality that allows users to searc
 - [x] Scroll position in results list is preserved across tab switches
 
 ### Remaining Polish (Optional)
-- [ ] Add brief highlight animation on navigated line in DiffViewer
-- [ ] Keyboard navigation after tab switch (needs testing)
+- [x] Add brief highlight animation on navigated line in DiffViewer
+- [x] Keyboard navigation after tab switch (tested, works)
