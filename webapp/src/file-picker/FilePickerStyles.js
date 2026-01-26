@@ -18,6 +18,12 @@ export const filePickerStyles = css`
     line-height: 1;
   }
   .row:hover { background: #0f3460; }
+  .row.viewing { 
+    background: #1a3a6e; 
+    border-left: 2px solid #e94560;
+    padding-left: 4px;
+  }
+  .row.viewing:hover { background: #1f4080; }
   .children { margin-left: 18px; }
   .icon { 
     width: 14px; 

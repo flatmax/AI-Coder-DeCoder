@@ -74,6 +74,7 @@ export function renderPromptView(component) {
                 .staged=${component.stagedFiles}
                 .untracked=${component.untrackedFiles}
                 .diffStats=${component.diffStats}
+                .viewingFile=${component.viewingFile}
                 @selection-change=${component.handleSelectionChange}
                 @file-view=${component.handleFileView}
                 @copy-path-to-prompt=${component.handleCopyPathToPrompt}

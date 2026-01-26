@@ -20,7 +20,8 @@ export class FilePicker extends MixedBase {
     diffStats: { type: Object },
     selected: { type: Object },
     expanded: { type: Object },
-    filter: { type: String }
+    filter: { type: String },
+    viewingFile: { type: String }
   };
 
   static styles = filePickerStyles;
@@ -35,6 +36,7 @@ export class FilePicker extends MixedBase {
     this.selected = {};
     this.expanded = {};
     this.filter = '';
+    this.viewingFile = null;
     this._expandedInitialized = false;
   }
 

@@ -110,10 +110,11 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     const lineCount = node.lines || 0;
     const lineCountClass = this.getLineCountClass(lineCount);
     const stats = this.diffStats?.[filePath];
+    const isViewing = this.viewingFile === filePath;
 
     return html`
       <div class="node">
-        <div class="row" @contextmenu=${(e) => this.handleContextMenu(e, filePath, 'file')}>
+        <div class="row ${isViewing ? 'viewing' : ''}" @contextmenu=${(e) => this.handleContextMenu(e, filePath, 'file')}>
           <span class="line-count ${lineCountClass}">${lineCount}</span>
           <input 
             type="checkbox" 

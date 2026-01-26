@@ -41,7 +41,8 @@ export class PromptView extends MixedBase {
     pastedImages: { type: Array },
     dialogX: { type: Number },
     dialogY: { type: Number },
-    showHistoryBrowser: { type: Boolean }
+    showHistoryBrowser: { type: Boolean },
+    viewingFile: { type: String }
   };
 
   static styles = promptViewStyles;
@@ -62,6 +63,7 @@ export class PromptView extends MixedBase {
     this.dialogX = null;
     this.dialogY = null;
     this.showHistoryBrowser = false;
+    this.viewingFile = null;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');

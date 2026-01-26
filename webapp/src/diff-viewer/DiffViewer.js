@@ -78,10 +78,12 @@ export class DiffViewer extends MixedBase {
         this.selectedFile = this.files[0].path;
       }
       this.showDiff(this.selectedFile);
+      this._emitFileSelected(this.selectedFile);
     }
     
     if (changedProperties.has('selectedFile') && this.selectedFile && this._editor) {
       this.showDiff(this.selectedFile);
+      this._emitFileSelected(this.selectedFile);
     }
 
     if (changedProperties.has('isDirty')) {
@@ -95,6 +97,17 @@ export class DiffViewer extends MixedBase {
 
   selectFile(filePath) {
     this.selectedFile = filePath;
+    this._emitFileSelected(filePath);
+  }
+
+  _emitFileSelected(filePath) {
+    if (filePath) {
+      this.dispatchEvent(new CustomEvent('file-selected', {
+        detail: { path: filePath },
+        bubbles: true,
+        composed: true
+      }));
+    }
   }
 
   disconnectedCallback() {

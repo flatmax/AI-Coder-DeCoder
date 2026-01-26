@@ -7,6 +7,7 @@ export class AppShell extends LitElement {
     diffFiles: { type: Array },
     showDiff: { type: Boolean },
     serverURI: { type: String },
+    viewingFile: { type: String },
   };
 
   static styles = css`
@@ -99,10 +100,15 @@ export class AppShell extends LitElement {
     super();
     this.diffFiles = [];
     this.showDiff = false;
+    this.viewingFile = null;
     // Get server port from URL params or default
     const urlParams = new URLSearchParams(window.location.search);
     const port = urlParams.get('port') || '8765';
     this.serverURI = `ws://localhost:${port}`;
+  }
+
+  handleFileSelected(e) {
+    this.viewingFile = e.detail.path;
   }
 
   handleEditsApplied(e) {
@@ -170,11 +176,15 @@ export class AppShell extends LitElement {
               .serverURI=${this.serverURI}
               @file-save=${this.handleFileSave}
               @files-save=${this.handleFilesSave}
+              @file-selected=${this.handleFileSelected}
             ></diff-viewer>
           </div>
         </div>
         <div class="prompt-overlay">
-          <prompt-view @edits-applied=${this.handleEditsApplied}></prompt-view>
+          <prompt-view 
+            .viewingFile=${this.viewingFile}
+            @edits-applied=${this.handleEditsApplied}
+          ></prompt-view>
         </div>
       </div>
     `;
