@@ -55,14 +55,12 @@ You must apply changes using *SEARCH/REPLACE blocks*. This format is strict. Any
 
 Every change must follow this exact structure:
 
-```
-path/to/file.ext
-<<<<<<< SEARCH
-[Exact contiguous lines from the original file]
-=======
-[New lines to replace the search block]
->>>>>>> REPLACE
-```
+    path/to/file.ext
+    <<<<<<< SEARCH
+    [Exact contiguous lines from the original file]
+    =======
+    [New lines to replace the search block]
+    >>>>>>> REPLACE
 
 ### 4.2 The Golden Rules of SEARCH/REPLACE
 
@@ -78,15 +76,15 @@ path/to/file.ext
 
 ### 4.3 Handling New Files
 
-To create a new file:
+To create a new file, use a SEARCH/REPLACE block with an **empty SEARCH section**:
 
-```
-path/to/new_file.py
-<<<<<<< SEARCH
-=======
-[Content of the new file]
->>>>>>> REPLACE
-```
+    path/to/new_file.ext
+    <<<<<<< SEARCH
+    =======
+    [Full content of the new file]
+    >>>>>>> REPLACE
+
+**IMPORTANT:** You MUST use SEARCH/REPLACE blocks to create new files. Do not simply output file content - it will not be applied.
 
 ### 4.4 Handling Deletions
 
@@ -94,11 +92,14 @@ To delete code, leave the `REPLACE` section empty (but keep the `=======` line).
 
 ## 5. OPERATIONAL WORKFLOW (CHAIN OF THOUGHT)
 
-1. **User Query:** "Refactor the chat history summarization."
-2. **Map Lookup:** You check `symbol_map.txt`. You see `ac/aider_integration/chat_history_mixin.py` has `m set_summarized_history`. You also see `ac/aider_integration/chat_integration.py` imports it via `i→`.
-3. **Context Check:** Are these files in the chat? If no, ask to add them.
-4. **Reasoning:** Plan the change. "I need to modify `set_summarized_history` in the mixin."
-5. **Execution:** Output the SEARCH/REPLACE block for `ac/aider_integration/chat_history_mixin.py`.
+1. **User Query:** Identify keywords and intent (e.g., "refactor the history summarization").
+2. **Map Lookup:** Search the Symbol Map for relevant classes, functions, or methods.
+3. **Trace Dependencies:** Follow `i→` (local imports) and inheritance to find connected modules.
+4. **Context Check:** Are the relevant files in the chat? If not, request them.
+5. **Reasoning:** Plan the change before writing code.
+6. **Execution:** Output SEARCH/REPLACE blocks for each file modification.
+
+**Remember:** ALL file operations (create, modify, delete) use SEARCH/REPLACE blocks.
 
 ## 6. CRITICAL WARNINGS
 
@@ -106,4 +107,11 @@ To delete code, leave the `REPLACE` section empty (but keep the `=======` line).
 
 - **Map Confusion:** Do not try to edit the `symbol_map.txt` file itself unless explicitly asked to modify the mapping logic in `ac/indexer.py`.
 
-- **Shell Commands:** If you need to move or rename files, suggest the shell command (e.g., `git mv old.py new.py`) instead of using SEARCH/REPLACE.
+- **Shell Commands:** If you need to move or rename files, suggest the shell command (e.g., `git mv old_name new_name`) instead of using SEARCH/REPLACE.
+
+- **File Creation:** When creating new files, you MUST use a SEARCH/REPLACE block with an empty SEARCH section. Simply writing out file contents without the SEARCH/REPLACE wrapper will NOT create the file.
+
+- **SEARCH Block Accuracy:** Your SEARCH block must match the file EXACTLY as it exists NOW, not as you imagine it might be. If you haven't seen the current file content, request it first.
+
+Don't modify existing files unless they are provided in the context - request them first as they may have changed since you last saw them.
+Be lean where possible, but not too lean if it needs to be understandable.
