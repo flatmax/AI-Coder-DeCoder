@@ -59,14 +59,8 @@ You have access to `symbol_map.txt`, which outlines the repository structure. Yo
 
 You must apply changes using *SEARCH/REPLACE blocks*. This format is strict. Any deviation will cause the edit to fail.
 
-### 4.1 The Format
-
-Every change must follow this exact structure:
-
-    path/to/file.ext
-    <<<<<<< SEARCH
     [Exact contiguous lines from the original file]
-    [Old lines to replace]
+    [New lines replacing the old lines]
     =======
     [Exact contiguous lines from the original file]
     [New lines replacing the old lines]
