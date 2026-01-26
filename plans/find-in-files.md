@@ -6,149 +6,133 @@ Implement a "Find in Files" (grep-like) functionality that allows users to searc
 
 ## Current State Analysis
 
-### Backend (Already Exists)
-- `ac/repo/search_operations.py` already has `SearchOperationsMixin.search_files(query, word, regex, ignore_case)`
-- This is mixed into `Repo` class in `ac/repo/repo.py`
-- Uses `git grep` under the hood (based on the `git` import)
+### Backend (Implemented)
+- `ac/repo/search_operations.py` has `SearchOperationsMixin.search_files(query, word, regex, ignore_case, context_lines)`
+- Mixed into `Repo` class in `ac/repo/repo.py`
+- Uses `git grep` under the hood
+- Returns structured data with context lines support
 
-### Frontend Patterns to Follow
-- `HistoryBrowser` - good template for a searchable results panel
-- `FilePicker` - tree/list rendering patterns
-- `DiffViewer` - file content display with Monaco editor
+### Frontend (Implemented)
+- `webapp/src/find-in-files/FindInFiles.js` - Main component with search functionality
+- `webapp/src/find-in-files/FindInFilesStyles.js` - CSS styles
+- `webapp/src/find-in-files/FindInFilesTemplate.js` - Lit template with results rendering
+- Integrated into AppShell with tab switching
 
-## Implementation Plan
+## Implementation Status
 
-### Phase 1: Backend Verification & Enhancement
+### ✅ Completed Features
 
-**File: `ac/repo/search_operations.py`**
+#### Backend
+- [x] `search_files` method with options (word, regex, ignore_case, context_lines)
+- [x] Context lines support (before/after match)
+- [x] Structured response format with file grouping
 
-1. Verify the existing `search_files` method returns structured data:
-   ```python
-   {
-     "success": True,
-     "results": [
-       {
-         "file": "path/to/file.py",
-         "line": 42,
-         "column": 10,  # if available
-         "content": "the matching line content",
-         "match": "the matched text"
-       }
-     ],
-     "query": "original query",
-     "total_matches": 150
-   }
-   ```
+#### Frontend Component
+- [x] Search input with 300ms debounce
+- [x] Toggle buttons for options (case sensitivity, regex, whole word)
+- [x] Results grouped by file with match counts
+- [x] Collapsible file sections
+- [x] Line numbers and content display
+- [x] Query highlighting in results
+- [x] Context lines (shown on hover/focus)
+- [x] Keyboard navigation (↑↓ arrows, Enter to select)
+- [x] Empty/loading/error states
+- [x] Results summary count
 
-2. Add pagination support if not present (large repos can have thousands of matches)
+#### AppShell Integration
+- [x] Tab system (Files | Search)
+- [x] `Ctrl+Shift+F` keyboard shortcut to switch to search tab
+- [x] `result-selected` event handling
+- [x] Navigation to file and line in DiffViewer
 
-3. Add context lines option (show N lines before/after match)
+### 🔲 Pending Features
 
-**Estimated effort**: Review existing code, potentially minor enhancements
+#### File Header Click Navigation
+- [ ] Clicking file name in search results opens file in DiffViewer
+- [ ] Focus switches to DiffViewer when file is opened
+- [ ] File opens at beginning (line 1) rather than a specific match
 
-### Phase 2: Frontend Component Structure
+#### State Persistence
+- [ ] Search tab retains state when switching away
+- [ ] Query, results, scroll position preserved
+- [ ] User can `Ctrl+Shift+F` back to see previous search results
+- [ ] Expanded/collapsed file states preserved
 
-Create new component: `webapp/src/find-in-files/`
+#### Polish Items
+- [ ] Persist search options in localStorage
+- [ ] Brief highlight animation on navigated line in DiffViewer
 
-```
-webapp/src/find-in-files/
-├── FindInFiles.js          # Main component (extends JRPCClient)
-├── FindInFilesStyles.js    # CSS styles
-├── FindInFilesTemplate.js  # Lit template
-├── SearchInputMixin.js     # Search input handling, debounce
-└── ResultsRendererMixin.js # Results list rendering
-```
+## Detailed Implementation Plan for Pending Features
 
-**Entry point**: `webapp/find-in-files.js`
+### Feature 1: File Header Click Navigation
 
-### Phase 3: Component Implementation
+**Goal**: When user clicks on a file name (not a specific match), open that file in DiffViewer and switch focus to it.
 
-#### 3.1 FindInFiles.js - Main Component
+**Files to modify**:
+- `webapp/src/find-in-files/FindInFilesTemplate.js`
+- `webapp/src/find-in-files/FindInFiles.js`
+- `webapp/src/app-shell/AppShell.js`
 
-```javascript
-// Properties
-- query: String (search text)
-- results: Array (search results)
-- isSearching: Boolean (loading state)
-- selectedResult: Object (currently selected match)
-- options: Object { word: false, regex: false, ignoreCase: true }
-- visible: Boolean
+**Implementation**:
 
-// Methods
-- performSearch() - calls backend search_files
-- selectResult(result) - emits event to navigate to file/line
-- toggleOption(option) - toggle search options
-```
+1. **FindInFilesTemplate.js** - Separate click zones in file header:
+   - Arrow icon: toggle expand/collapse
+   - File name: open file in DiffViewer
 
-#### 3.2 Integration with AppShell
+2. **FindInFiles.js** - Add `openFile(filePath)` method that emits `file-selected` event
 
-- Add keyboard shortcut: `Ctrl+Shift+F` to open/focus find panel
-- Add UI button/icon in toolbar
-- Wire up `file-selected` event to DiffViewer with line navigation
+3. **AppShell.js** - Handle `file-selected` event:
+   - Set `viewingFile` to the selected file path
+   - Keep Search tab active (don't switch to Files)
+   - DiffViewer receives focus
 
-#### 3.3 Results Display
+**User flow**:
+1. User searches for "TODO"
+2. Results show: `src/app.js (5)`, `src/utils.js (2)`
+3. User clicks "src/app.js" file name
+4. DiffViewer opens `src/app.js` at line 1
+5. Left panel still shows Search tab with results
+6. User can click another file or a specific match
 
-Each result shows:
-- File path (clickable → opens in DiffViewer)
-- Line number
-- Matched line with query highlighted
-- Context lines (collapsible)
+### Feature 2: State Persistence Across Tab Switches
 
-### Phase 4: DiffViewer Enhancement
+**Goal**: Search state (query, results, options, scroll position) persists when switching between Files and Search tabs.
 
-**File: `webapp/src/diff-viewer/DiffViewer.js`**
+**Files to modify**:
+- `webapp/src/app-shell/AppShell.js`
+- `webapp/src/find-in-files/FindInFiles.js`
 
-Add method to navigate to specific line:
-- `_revealPosition(line, column)` - **already exists!** (line 162)
-- Ensure it's callable from external events
+**Implementation**:
 
-### Phase 5: Wire Everything Together
+1. **AppShell.js** - Keep FindInFiles mounted but hidden:
+   - Render both FilePicker and FindInFiles
+   - Use CSS `.hidden` class to hide inactive component
+   - Component state preserved because it's not unmounted
 
-#### 5.1 AppShell Integration
+2. **FindInFiles.js** - Focus input when becoming visible:
+   - Check visibility in `updated()` lifecycle
+   - Call `focusInput()` when component becomes visible
 
-**File: `webapp/src/app-shell/AppShell.js`**
+**User flow**:
+1. User switches to Search tab, searches for "config"
+2. Results show 15 matches across 4 files
+3. User clicks a match, DiffViewer opens file
+4. User clicks Files tab to check something
+5. User presses `Ctrl+Shift+F`
+6. Search tab shows same results, same query, same scroll position
 
-1. Import and register `<find-in-files>` component
-2. Add state: `showFindInFiles`, `findQuery`
-3. Add keyboard listener for `Ctrl+Shift+F`
-4. Handle `result-selected` event → open file in DiffViewer at line
+### Feature 3: Search Options Persistence
 
-#### 5.2 Event Flow
+**Goal**: Remember user's preferred search options across sessions.
 
-```
-User types query
-    ↓
-FindInFiles.performSearch()
-    ↓
-RPC call: repo.search_files(query, options)
-    ↓
-Backend returns results
-    ↓
-User clicks result
-    ↓
-FindInFiles emits 'result-selected' event
-    ↓
-AppShell catches event
-    ↓
-AppShell sets viewingFile + calls DiffViewer._revealPosition()
-```
+**Files to modify**:
+- `webapp/src/find-in-files/FindInFiles.js`
 
-## File Changes Summary
+**Implementation**:
+- Load options from localStorage in constructor
+- Save options to localStorage in `toggleOption()`
 
-### New Files
-1. `webapp/find-in-files.js` - entry point
-2. `webapp/src/find-in-files/FindInFiles.js` - main component
-3. `webapp/src/find-in-files/FindInFilesStyles.js` - styles
-4. `webapp/src/find-in-files/FindInFilesTemplate.js` - template
-5. `webapp/src/find-in-files/SearchInputMixin.js` - input handling
-6. `webapp/src/find-in-files/ResultsRendererMixin.js` - results rendering
-
-### Modified Files
-1. `ac/repo/search_operations.py` - enhance response format (if needed)
-2. `webapp/src/app-shell/AppShell.js` - integrate FindInFiles component
-3. `webapp/index.html` - add script import (if not auto-discovered)
-
-## UI Design: Integrated Tab (Option C)
+## UI Design
 
 ### Layout
 
@@ -164,8 +148,8 @@ AppShell sets viewingFile + calls DiffViewer._revealPosition()
 │ 47 results in 12   │         (file content here)                     │
 │ files              │                                                 │
 │ ──────────────────│                                                 │
-│ search_ops.py      │                                                 │
-│   7: def search_   │                                                 │
+│ search_ops.py ←────┼── Click file name = open file                   │
+│   7: def search_ ←─┼── Click match = open file at line              │
 │   15: git.grep     │                                                 │
 │ chat.py            │                                                 │
 │   42: # search     │                                                 │
@@ -174,97 +158,50 @@ AppShell sets viewingFile + calls DiffViewer._revealPosition()
 └────────────────────┴─────────────────────────────────────────────────┘
 ```
 
-### Tab Behavior
-
-- **Files tab**: Shows existing FilePicker (file tree, modified files, etc.)
-- **Search tab**: Shows FindInFiles component (search input + results)
-- Tabs sit at top of left panel, toggle between views
-- Active tab highlighted
-
-### Search Results Detail
+### Click Zones
 
 ```
-┌────────────────────┐
-│ [Files] [🔍Search] │  ← tab bar
-├────────────────────┤
-│ 🔍 [query here___] │  ← auto-focus on tab switch
-│ [Aa] [.*] [W]      │  ← toggle buttons (case, regex, word)
-├────────────────────┤
-│ 47 results         │  ← summary
-├────────────────────┤
-│ ▾ search_ops.py (3)│  ← file header (collapsible)
-│   7  │def search_fi│  ← line num │ content (truncated)
-│   15 │git.grep(quer│     highlighted match
-│   28 │return {"quer│
-│ ▸ chat.py (2)      │  ← collapsed by default if many files
-│ ▸ test_search.py(5)│
-└────────────────────┘
+┌────────────────────────────────────┐
+│ ▶ search_ops.py           (3)     │
+│ ↑   ↑                      ↑      │
+│ │   │                      │      │
+│ │   └─ Click: open file    │      │
+│ │      in DiffViewer       │      │
+│ │                          │      │
+│ └─ Click: expand/collapse  └─ (info only, no action)
+│    matches list
+├────────────────────────────────────┤
+│   7  │def search_files(self, ...  │
+│   ↑     ↑                         │
+│   │     └─ Click: open file at    │
+│   │        line 7 in DiffViewer   │
+│   └─ (line number, part of click zone)
+└────────────────────────────────────┘
 ```
 
-### Interaction Flow
+### Interaction Summary
 
-1. `Ctrl+Shift+F` → switches to Search tab, focuses input
-2. User types → debounced search (300ms delay)
-3. Results stream in, grouped by file
-4. Click file header → expand/collapse matches
-5. Click match → DiffViewer opens file, scrolls to line, highlights
-6. `Escape` → clears search (or closes if empty)
-7. `Ctrl+B` or click Files tab → back to file tree
-
-### Visual States
-
-**Empty state (no query):**
-```
-┌────────────────────┐
-│ 🔍 [____________ ] │
-│ [Aa] [.*] [W]      │
-│                    │
-│   Type to search   │
-│   across all files │
-│                    │
-│   Ctrl+Shift+F     │
-└────────────────────┘
-```
-
-**Loading state:**
-```
-┌────────────────────┐
-│ 🔍 [query here___] │
-│ [Aa] [.*] [W]      │
-│                    │
-│   ◌ Searching...   │
-│                    │
-└────────────────────┘
-```
-
-**No results:**
-```
-┌────────────────────┐
-│ 🔍 [asdfghjkl___] │
-│ [Aa] [.*] [W]      │
-│                    │
-│   No results found │
-│   for "asdfghjkl"  │
-│                    │
-└────────────────────┘
-```
-
-**Error state:**
-```
-┌────────────────────┐
-│ 🔍 [(?broken___] │
-│ [Aa] [✓.*] [W]     │
-│                    │
-│   ⚠ Invalid regex  │
-│                    │
-└────────────────────┘
-```
+| Action | Result |
+|--------|--------|
+| `Ctrl+Shift+F` | Switch to Search tab, focus input |
+| Type in search box | Debounced search (300ms) |
+| Click ▶ arrow | Expand/collapse file's matches |
+| Click file name | Open file in DiffViewer (line 1) |
+| Click match line | Open file in DiffViewer at that line |
+| `↑` / `↓` keys | Navigate through matches |
+| `Enter` | Open focused match in DiffViewer |
+| `Escape` (with query) | Clear search |
+| `Escape` (empty) | Close search / switch to Files |
+| Switch to Files tab | Search state preserved |
+| `Ctrl+Shift+F` again | Return to preserved search state |
 
 ## Testing Plan
 
 1. **Backend tests**: Verify search_files returns expected format
-2. **Frontend unit**: Test SearchInputMixin debouncing
+2. **Frontend unit**: Test debouncing behavior
 3. **Integration**: Test full flow from search → click → navigate
+4. **State persistence**: Verify search state survives tab switches
+5. **File navigation**: Test file header click vs match click behavior
 
 ## Future Enhancements (Out of Scope)
 
@@ -273,54 +210,27 @@ AppShell sets viewingFile + calls DiffViewer._revealPosition()
 - Search history / saved searches
 - Live results as you type (streaming)
 - Symbol search (classes, functions) vs text search
+- Multi-select matches for batch operations
 
-## Implementation Order
+## Implementation Order for Remaining Work
 
-### Step 1: Backend Review
-- [ ] Review `ac/repo/search_operations.py` - understand current output format
-- [ ] Verify response structure matches our needs
-- [ ] Add enhancements if needed (pagination, context lines)
+### Step 1: File Header Click Navigation
+- [ ] Separate click zones in FindInFilesTemplate.js (arrow vs file name)
+- [ ] Add `openFile(filePath)` method to FindInFiles.js
+- [ ] Emit `file-selected` event (without line number)
+- [ ] Handle event in AppShell.js to open file
 
-### Step 2: Component Scaffolding
-- [ ] Create `webapp/find-in-files.js` entry point
-- [ ] Create `webapp/src/find-in-files/FindInFiles.js` - basic component shell
-- [ ] Create `webapp/src/find-in-files/FindInFilesStyles.js` - initial styles
-- [ ] Create `webapp/src/find-in-files/FindInFilesTemplate.js` - basic template
+### Step 2: State Persistence
+- [ ] Modify AppShell to render both FilePicker and FindInFiles
+- [ ] Add `.hidden` CSS class for inactive component
+- [ ] Ensure FindInFiles focuses input when becoming visible
+- [ ] Test round-trip: search → view file → return to search
 
-### Step 3: Tab System
-- [ ] Modify `webapp/src/app-shell/AppShell.js` to add tab bar
-- [ ] Add state for active tab (`files` | `search`)
-- [ ] Conditionally render FilePicker or FindInFiles based on tab
-- [ ] Style tab bar to match existing UI
+### Step 3: localStorage Persistence
+- [ ] Save search options to localStorage on change
+- [ ] Load search options from localStorage on init
 
-### Step 4: Search Input
-- [ ] Add search input with debounce (300ms)
-- [ ] Add toggle buttons for options (case, regex, word)
-- [ ] Wire up RPC call to `repo.search_files()`
-- [ ] Handle loading state
-
-### Step 5: Results Rendering
-- [ ] Display results grouped by file
-- [ ] Show line numbers and content
-- [ ] Highlight matched text in results
-- [ ] Add collapsible file sections
-
-### Step 6: Navigation Integration
-- [ ] Handle click on result → emit event
-- [ ] AppShell catches event → opens file in DiffViewer
-- [ ] DiffViewer scrolls to line using `_revealPosition()`
-- [ ] Highlight the matched line briefly
-
-### Step 7: Keyboard Shortcuts
-- [ ] `Ctrl+Shift+F` → switch to Search tab, focus input
-- [ ] `Escape` → clear search or switch back to Files
-- [ ] `Enter` on result → navigate to that match
-- [ ] Arrow keys → navigate through results
-
-### Step 8: Polish
-- [ ] Empty state UI
-- [ ] No results state UI
-- [ ] Error state UI (invalid regex, etc.)
-- [ ] Loading spinner
-- [ ] Result count summary
-- [ ] Persist search options in localStorage
+### Step 4: Polish
+- [ ] Add visual feedback when file opens (brief highlight?)
+- [ ] Ensure scroll position in results list is preserved
+- [ ] Test keyboard navigation after tab switch
