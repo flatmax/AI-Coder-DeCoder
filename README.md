@@ -1,6 +1,6 @@
 # AI Coder / DeCoder (AC⚡DC)
 
-AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, proposing precise changes using a search/replace workflow.
+AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
 ## Philosophy: Speed Over Agency
 
@@ -10,7 +10,7 @@ AC⚡DC intentionally avoids agentic behavior. No automatic tool use, no shell c
 
 1. **Sprint with AC⚡DC** — Use AC⚡DC for rapid iteration: writing features, refactoring, adding tests. The streamlined UI and non-agentic approach means fast responses and low cost.
 
-2. **Hit a bug wall** — Eventually you'll encounter a stubborn bug, complex integration issue, or something requiring deeper tool enabled debugging.
+2. **Hit a wall** — Eventually you'll encounter a stubborn bug, complex integration issue, or something requiring deeper debugging with tool access.
 
 3. **Punch through with an agent** — Switch to an agentic AI coder (Claude Code, Aider, Cursor Agent, etc.) that can run commands, inspect outputs, and iterate autonomously to solve the hard problem.
 
@@ -20,45 +20,75 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 
 ## Features
 
-- **Natural Language Code Editing** - Describe changes in plain English and get precise code modifications
-- **Visual Diff Viewer** - Monaco-based side-by-side diff editor to review and edit AI-proposed changes before saving
-- **Intelligent Context Management** - Automatic repo map generation to help the AI understand your codebase structure
-- **File Selection** - Pick specific files to include in context, with git status indicators (modified/staged/untracked)
-- **Image Support** - Paste screenshots or diagrams directly into the chat for visual context
-- **Streaming Responses** - Real-time streaming of AI responses with stop capability
-- **Token Usage Tracking** - Monitor context window usage with detailed token breakdowns
-- **Git Integration** - Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
-- **Conversation History** - Automatic summarization when history gets too large
+- **Natural Language Code Editing** — Describe changes in plain English and get precise code modifications
+- **Visual Diff Viewer** — Monaco-based side-by-side diff editor to review and edit AI-proposed changes before saving
+- **Symbol Map Navigation** — Tree-sitter based code indexing generates a compact symbol map showing classes, functions, imports, and cross-file references
+- **File Selection** — Pick specific files to include in context, with git status indicators (modified/staged/untracked)
+- **Image Support** — Paste screenshots or diagrams directly into the chat for visual context
+- **Streaming Responses** — Real-time streaming of AI responses with stop capability
+- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns
+- **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
+- **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
+- **Find in Files** — Search across the codebase with regex support and context preview
 
 ## Tech Stack
 
 ### Backend (Python)
 
-- **[LiteLLM](https://github.com/BerriAI/litellm)** - Universal LLM API that supports 100+ models (OpenAI, Anthropic, AWS Bedrock, etc.)
-- **[Aider](https://github.com/Aider-AI/aider)** - Side-loaded for battle-tested search/replace parsing, repo map generation, and token counting (not used as a CLI, just the core libraries)
-- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** - WebSocket-based JSON-RPC for real-time client-server communication
-- **[GitPython](https://github.com/gitpython-developers/GitPython)** - Git repository operations
+- **[LiteLLM](https://github.com/BerriAI/litellm)** — Universal LLM API supporting 100+ models (OpenAI, Anthropic, AWS Bedrock, etc.)
+- **[Tree-sitter](https://tree-sitter.github.io/tree-sitter/)** — Fast, accurate parsing for symbol extraction across Python, JavaScript, and TypeScript
+- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket-based JSON-RPC for real-time client-server communication
+- **[GitPython](https://github.com/gitpython-developers/GitPython)** — Git repository operations
 
 ### Frontend (JavaScript)
 
-- **[Lit](https://lit.dev/)** - Fast, lightweight web components
-- **[Monaco Editor](https://microsoft.github.io/monaco-editor/)** - VS Code's editor for diff viewing
-- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** - WebSocket client matching the Python server
-- **[Marked](https://marked.js.org/)** - Markdown parsing for chat messages
-- **[Prism.js](https://prismjs.com/)** - Syntax highlighting in code blocks
+- **[Lit](https://lit.dev/)** — Fast, lightweight web components
+- **[Monaco Editor](https://microsoft.github.io/monaco-editor/)** — VS Code's editor for diff viewing with LSP-like features
+- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket client matching the Python server
+- **[Marked](https://marked.js.org/)** — Markdown parsing for chat messages
+- **[Prism.js](https://prismjs.com/)** — Syntax highlighting in code blocks
 
-## Install
+## Installation
+
+### Prerequisites
+
+- Python 3.12+
+
+### Setup
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -e .
-cd webapp && npm i
+# Clone the repository
+git clone https://github.com/flatmax/AI-Coder-DeCoder.git
+cd AI-Coder-DeCoder
+
+# Install directly with pip
+pip install -e .
+
+# Or use a virtual environment (recommended)
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
 ```
+
+That's it! The webapp is hosted on GitHub Pages and loads automatically.
+
+### Developer Setup
+
+If you want to modify the webapp frontend:
+
+```bash
+# Additional prerequisites: Node.js 18+
+
+# Install webapp dependencies
+cd webapp && npm install
+```
+
+Then run with `--dev` for hot-reloading during development.
 
 ## Configuration
 
 Create or edit `ac/llm.json` to configure your LLM provider:
 
+**OpenAI:**
 ```json
 {
   "env": {
@@ -69,7 +99,18 @@ Create or edit `ac/llm.json` to configure your LLM provider:
 }
 ```
 
-For AWS Bedrock:
+**Anthropic:**
+```json
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-..."
+  },
+  "model": "claude-sonnet-4-20250514",
+  "smallerModel": "claude-haiku-4-5-20251001"
+}
+```
+
+**AWS Bedrock:**
 ```json
 {
   "env": {
@@ -81,7 +122,9 @@ For AWS Bedrock:
 }
 ```
 
-## Run
+See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
+
+## Usage
 
 ```bash
 python ac/dc.py
@@ -91,35 +134,65 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 
 ### Run Modes
 
-**Standard mode** (default):
-```bash
-python ac/dc.py
+| Mode | Command | Description |
+|------|---------|-------------|
+| **Standard** | `python ac/dc.py` | Uses hosted webapp at GitHub Pages. No build required. |
+| **Dev** | `python ac/dc.py --dev` | Local Vite dev server with HMR. For webapp development. |
+| **Preview** | `python ac/dc.py --preview` | Builds and serves production bundle locally. For testing. |
+
+### Command Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--server-port` | 18080 | JRPC WebSocket server port |
+| `--webapp-port` | 18999 | Local webapp port (dev/preview modes only) |
+| `--no-browser` | false | Don't auto-open browser |
+| `--repo-path` | cwd | Path to git repository |
+
+## Workflow
+
+1. **Describe Your Task** — Type your request in natural language (e.g., "add error handling to the save function")
+2. **AI Navigates the Codebase** — The AI uses the symbol map to find relevant files and may ask you to add specific files to the context
+3. **Add Requested Files** — Click on file references in the AI's response or use the file picker to add them
+4. **Review Diffs** — AI responses with code changes appear in the diff viewer for review
+5. **Edit & Save** — Modify the proposed changes if needed, then save to disk
+6. **Commit** — Use the 💾 Commit button to stage all changes and auto-generate a commit message
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | New line in input |
+| `↑` / `↓` | Navigate message history (when cursor at start/end) |
+| `Ctrl+Shift+F` | Open Find in Files |
+| `Ctrl+B` | Toggle back to file picker |
+| `Ctrl+S` | Save current file (in diff viewer) |
+
+## Project Structure
+
 ```
-Uses the hosted webapp at `https://flatmax.github.io/AI-Coder-DeCoder/`. No local webapp build required - just install the Python package and go.
+ac/                     # Python backend
+├── dc.py              # Main entry point
+├── llm/               # LLM integration (LiteLLM wrapper, streaming, chat)
+├── repo/              # Git operations (file tree, commits, diffs)
+├── context/           # Context management (tokens, files, history)
+├── symbol_index/      # Tree-sitter based code indexing
+├── edit_parser.py     # EDIT/REPL block parsing and application
+├── history/           # Persistent conversation history
+└── prompts/           # System prompt loading
 
-**Dev mode** (for webapp development):
-```bash
-python ac/dc.py --dev
+webapp/                 # JavaScript frontend (Lit web components)
+├── src/
+│   ├── app-shell/     # Main application shell
+│   ├── prompt/        # Chat interface components
+│   ├── diff-viewer/   # Monaco diff editor
+│   ├── file-picker/   # File selection tree
+│   ├── find-in-files/ # Search interface
+│   └── history-browser/ # Conversation history UI
+└── vite.config.js     # Build configuration
 ```
-Runs a local Vite dev server with hot module reloading. Use this when developing the webapp frontend.
 
-**Preview mode** (for testing production builds):
-```bash
-python ac/dc.py --preview
-```
-Builds the webapp and serves the production bundle locally. Use this to test that production builds work correctly before deploying.
+## License
 
-### Options
-
-- `--server-port PORT` - JRPC WebSocket server port (default: 18080)
-- `--webapp-port PORT` - Local webapp port (default: 18999, only used with `--dev` or `--preview`)
-- `--no-browser` - Don't auto-open browser
-- `--repo-path PATH` - Path to git repository (default: current directory)
-
-## How It Works
-
-1. **Select Files** - Use the file picker to choose which files to include in the AI's context
-2. **Describe Changes** - Type your request in natural language (e.g., "add error handling to the save function")
-3. **Review Diffs** - AI responses with code changes appear in the diff viewer for review
-4. **Edit & Save** - Modify the proposed changes if needed, then save to disk
-5. **Commit** - Use the built-in commit button to stage all changes and generate a commit message
+MIT
