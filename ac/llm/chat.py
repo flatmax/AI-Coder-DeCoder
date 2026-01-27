@@ -135,14 +135,13 @@ class ChatMixin:
             
             summary = response.choices[0].message.content
             
-            # Update history with summary
+            # Update history with summary (context manager is single source of truth)
             new_history = [
                 {"role": "user", "content": f"Summary of previous conversation:\n{summary}"},
                 {"role": "assistant", "content": "Ok, I understand the context."}
             ] + tail
             
             self._context_manager.set_history(new_history)
-            self.conversation_history = new_history
             
             new_budget = self._context_manager.get_token_budget()
             print(f"✓ History reduced to {new_budget.get('history_tokens', 0)} tokens")

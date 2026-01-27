@@ -157,11 +157,7 @@ class StreamingMixin:
                 })
                 return
             
-            # Store in conversation history
-            self.conversation_history.append({"role": "user", "content": user_text})
-            self.conversation_history.append({"role": "assistant", "content": full_content})
-            
-            # Also update new context manager history
+            # Store in conversation history (context manager is single source of truth)
             if self._context_manager:
                 self._context_manager.add_exchange(user_text, full_content)
             

@@ -21,7 +21,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             config_path: Path to llm.json config file. If None, looks in ac/ directory.
         """
         self.repo = repo
-        self.conversation_history = []
         
         # Initialize history store
         self._init_history_store()
@@ -51,6 +50,13 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             self._context_manager = ContextManager(
                 model_name=self.model,
                 repo_root=repo.get_repo_root(),
+                token_tracker=self
+            )
+        else:
+            # Create context manager without repo for basic history tracking
+            self._context_manager = ContextManager(
+                model_name=self.model,
+                repo_root=None,
                 token_tracker=self
             )
         
@@ -85,6 +91,19 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             'env': {k: v for k, v in self.config.get('env', {}).items()}
         }
     
+    @property
+    def conversation_history(self) -> list[dict]:
+        """Get conversation history from context manager."""
+        if self._context_manager:
+            return self._context_manager.get_history()
+        return []
+    
+    @conversation_history.setter
+    def conversation_history(self, value: list[dict]):
+        """Set conversation history in context manager."""
+        if self._context_manager:
+            self._context_manager.set_history(value)
+    
     def ping(self):
         """Simple ping to test connection."""
         print('ping returning pong')
@@ -92,7 +111,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
     
     def clear_history(self):
         """Clear the conversation history and start a new history session."""
-        self.conversation_history = []
         if self._context_manager:
             self._context_manager.clear_history()
         # Start a new history session

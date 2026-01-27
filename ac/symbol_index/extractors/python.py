@@ -1,7 +1,7 @@
 """Python symbol extractor using tree-sitter."""
 
 from typing import List, Optional, Set
-from ..models import Symbol, Range, Parameter, Import, CallSite
+from ..models import Symbol, Parameter, Import, CallSite
 from .base import BaseExtractor
 
 
@@ -9,7 +9,7 @@ class PythonExtractor(BaseExtractor):
     """Extracts symbols from Python source code."""
     
     def __init__(self):
-        self._imports: List[Import] = []
+        super().__init__()
         self._import_map: dict = {}  # name -> module for resolution
     
     def extract_symbols(self, tree, file_path: str, content: bytes) -> List[Symbol]:
@@ -19,10 +19,6 @@ class PythonExtractor(BaseExtractor):
         self._import_map = {}
         self._extract_from_node(tree.root_node, file_path, content, symbols, parent=None)
         return symbols
-    
-    def get_imports(self) -> List[Import]:
-        """Get structured imports from last extraction."""
-        return self._imports
     
     def _extract_from_node(
         self, 
@@ -533,18 +529,3 @@ class PythonExtractor(BaseExtractor):
             return '.'.join(parts[-2:])
         return None
     
-    def _find_child(self, node, type_name: str):
-        """Find the first child of a given type."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None
-    
-    def _make_range(self, node) -> Range:
-        """Create a Range from a tree-sitter node."""
-        return Range(
-            start_line=node.start_point[0] + 1,  # 1-indexed
-            start_col=node.start_point[1],
-            end_line=node.end_point[0] + 1,
-            end_col=node.end_point[1],
-        )
