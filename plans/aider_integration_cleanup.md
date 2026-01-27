@@ -1,6 +1,6 @@
 # Aider Integration Cleanup Plan
 
-**Status: IN PROGRESS - Phase 3 Pending**
+**Status: COMPLETED**
 
 ## Overview
 
@@ -147,7 +147,9 @@ Before proceeding, clarify:
 
 ---
 
-## Implementation Notes (Completed)
+## Implementation Notes
+
+**All phases completed.**
 
 ### Files Deleted
 - `ac/aider_integration/request_mixin.py` - Bypassed by streaming path
@@ -171,3 +173,13 @@ Before proceeding, clarify:
 - Non-streaming `LiteLLM.chat()` still exists but builds messages directly
 - Streaming path (`chat_streaming()`) is the primary code path
 - File mention detection was broken anyway - can be re-implemented cleanly if needed
+
+## Verification Checklist
+
+- [x] All dead code files deleted
+- [x] `__init__.py` exports updated
+- [x] `chat_integration.py` mixin inheritance cleaned up
+- [ ] Run `pytest tests/` to verify no regressions
+- [ ] Manual test: streaming chat flow
+- [ ] Manual test: token report (`📊 Tokens` button)
+- [ ] Manual test: history summarization

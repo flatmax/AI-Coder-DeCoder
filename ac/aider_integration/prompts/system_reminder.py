@@ -1,31 +1,29 @@
 """
-System reminder with SEARCH/REPLACE format rules.
+System reminder with EDIT/REPL format rules (v3).
 
 This contains the mechanical instructions for the edit format.
 Uses {fence} placeholder for code fence characters.
 """
 
 SYSTEM_REMINDER = '''
-# SEARCH/REPLACE Edit Format
+# EDIT/REPL Edit Format
 
-To make changes to files, use SEARCH/REPLACE blocks.
+To make changes to files, use EDIT/REPL blocks.
 
-Every *SEARCH/REPLACE block* must use this format:
+Every *EDIT block* must use this format:
 1. The file path alone on a line, verbatim. No bold asterisks, no quotes, no escaping.
-2. The opening fence and code language: {fence}
-3. The start marker: <<<<<<< SEARCH
-4. Exact contiguous lines to find in the existing file
-5. The divider: =======
-6. The replacement lines
-7. The end marker: >>>>>>> REPLACE
-8. The closing fence: {fence}
+2. The start marker: ««« EDIT
+3. Exact contiguous lines to find in the existing file
+4. The divider: ═══════ REPL
+5. The replacement lines
+6. The end marker: »»» EDIT END
 
 Rules:
-- The SEARCH section must EXACTLY match existing file content, including whitespace and indentation.
+- The EDIT section must EXACTLY match existing file content, including whitespace and indentation.
 - Include enough context lines to uniquely identify the location.
 - NEVER skip lines with "..." or similar. Include every line between the start and end.
-- To create a new file, use an empty SEARCH section.
-- To delete code, use an empty REPLACE section.
-- Multiple SEARCH/REPLACE blocks can appear in one response.
+- To create a new file, use an empty EDIT section.
+- To delete code, use an empty REPL section.
+- Multiple EDIT blocks can appear in one response.
 
 {go_ahead_tip}'''

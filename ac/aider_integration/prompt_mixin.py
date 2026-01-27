@@ -70,22 +70,13 @@ class PromptMixin:
         return self._system_prompt
     
     def get_system_reminder(self):
-        """Build the system reminder with SEARCH/REPLACE rules."""
-        fence = self.fence[0] if isinstance(self.fence, tuple) else self.fence
+        """Build the system reminder with EDIT/REPL rules."""
         reminder = self.prompts.system_reminder.format(
-            fence=fence,
             go_ahead_tip=self.prompts.go_ahead_tip,
         )
         return reminder
-    
+
     def get_example_messages(self):
         """Build the few-shot example messages."""
-        fence = self.fence[0] if isinstance(self.fence, tuple) else self.fence
-        examples = []
-        for msg in self.prompts.example_messages:
-            content = msg["content"].format(fence=fence)
-            examples.append({
-                "role": msg["role"],
-                "content": content
-            })
-        return examples
+        # v3 format doesn't use placeholders in examples
+        return list(self.prompts.example_messages)

@@ -1,5 +1,5 @@
 """
-Prompt templates for SEARCH/REPLACE code editing.
+Prompt templates for EDIT/REPL code editing (v3 format).
 
 Replaces aider's EditBlockPrompts with our own implementation.
 """
@@ -13,16 +13,16 @@ from .example_messages import EXAMPLE_MESSAGES
 class EditBlockPrompts:
     """
     Drop-in replacement for aider's EditBlockPrompts.
-    
-    Provides templates for the SEARCH/REPLACE edit format.
+
+    Provides templates for the EDIT/REPL edit format (v3).
     The main system prompt comes from sys_prompt.md (loaded by PromptMixin).
     """
-    
+
     def __init__(self):
         # Not used - sys_prompt.md is loaded directly by PromptMixin
         self.main_system = ""
-        
-        # SEARCH/REPLACE format rules with {fence}, {go_ahead_tip} placeholders
+
+        # EDIT/REPL format rules with {go_ahead_tip} placeholder
         self.system_reminder = SYSTEM_REMINDER
         
         # Few-shot examples for the edit format

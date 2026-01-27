@@ -22,18 +22,17 @@ class TestEditBlockPrompts:
         """Verify system_reminder has required format placeholders."""
         from ac.aider_integration.prompts import EditBlockPrompts
         prompts = EditBlockPrompts()
-        assert '{fence}' in prompts.system_reminder
+        # v3 format only uses {go_ahead_tip} placeholder (no {fence} needed)
         assert '{go_ahead_tip}' in prompts.system_reminder
     
     def test_system_reminder_formats_correctly(self):
         """Verify system_reminder can be formatted."""
         from ac.aider_integration.prompts import EditBlockPrompts
         prompts = EditBlockPrompts()
-        formatted = prompts.system_reminder.format(fence='```', go_ahead_tip='')
-        assert '```' in formatted
-        assert '{fence}' not in formatted
-        assert 'SEARCH' in formatted
-        assert 'REPLACE' in formatted
+        formatted = prompts.system_reminder.format(go_ahead_tip='')
+        assert '{go_ahead_tip}' not in formatted
+        assert 'EDIT' in formatted
+        assert 'REPL' in formatted
     
     def test_example_messages_format(self):
         """Verify example_messages have correct structure."""
@@ -46,39 +45,39 @@ class TestEditBlockPrompts:
             assert 'content' in msg
             assert msg['role'] in ('user', 'assistant')
     
-    def test_example_messages_contain_search_replace(self):
-        """Verify assistant examples contain SEARCH/REPLACE blocks."""
+    def test_example_messages_contain_edit_blocks(self):
+        """Verify assistant examples contain EDIT/REPL blocks (v3 format)."""
         from ac.aider_integration.prompts import EditBlockPrompts
         prompts = EditBlockPrompts()
         assistant_msgs = [m for m in prompts.example_messages if m['role'] == 'assistant']
         assert len(assistant_msgs) > 0
         for msg in assistant_msgs:
-            content = msg['content'].format(fence='```')
-            assert '<<<<<<< SEARCH' in content
-            assert '=======' in content
-            assert '>>>>>>> REPLACE' in content
+            content = msg['content']
+            assert '««« EDIT' in content
+            assert '═══════ REPL' in content
+            assert '»»» EDIT END' in content
     
-    def test_example_messages_format_correctly(self):
-        """Verify example_messages can be formatted without errors."""
+    def test_example_messages_have_no_placeholders(self):
+        """Verify example_messages have no format placeholders."""
         from ac.aider_integration.prompts import EditBlockPrompts
         prompts = EditBlockPrompts()
         for msg in prompts.example_messages:
-            # Should not raise KeyError
-            formatted = msg['content'].format(fence='```')
-            assert '{fence}' not in formatted
+            # v3 format doesn't use {fence} or {go_ahead_tip} placeholders
+            # Note: {name} etc. may appear as f-string examples in code
+            assert '{fence}' not in msg['content']
+            assert '{go_ahead_tip}' not in msg['content']
 
 
 class TestPromptMixin:
     """Tests for PromptMixin class."""
     
     def test_get_system_reminder_includes_rules(self):
-        """Verify get_system_reminder includes SEARCH/REPLACE rules."""
+        """Verify get_system_reminder includes EDIT/REPL rules."""
         from ac.aider_integration.editor import AiderEditor
         editor = AiderEditor()
         reminder = editor.get_system_reminder()
-        assert 'SEARCH' in reminder
-        assert 'REPLACE' in reminder
-        assert '```' in reminder  # fence should be substituted
+        assert 'EDIT' in reminder
+        assert 'REPL' in reminder
     
     def test_get_example_messages_returns_list(self):
         """Verify get_example_messages returns formatted list."""
@@ -90,8 +89,6 @@ class TestPromptMixin:
         for msg in examples:
             assert 'role' in msg
             assert 'content' in msg
-            # Fence should be substituted
-            assert '{fence}' not in msg['content']
     
     def test_get_system_prompt_returns_content(self):
         """Verify get_system_prompt returns sys_prompt.md content."""
@@ -100,7 +97,7 @@ class TestPromptMixin:
         prompt = editor.get_system_prompt()
         assert len(prompt) > 100  # Should have substantial content
         # Should contain something from sys_prompt.md
-        assert 'SEARCH/REPLACE' in prompt or 'Symbol Map' in prompt
+        assert 'EDIT' in prompt or 'Symbol Map' in prompt
 
 
 class TestMissingSysPrompt:

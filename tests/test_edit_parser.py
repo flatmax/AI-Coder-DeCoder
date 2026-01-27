@@ -661,10 +661,10 @@ class TestEditParserHelpers:
         assert parser.detect_format(response) == "edit_v3"
 
     def test_detect_format_search_replace(self):
-        """Detect old SEARCH/REPLACE format."""
+        """Old SEARCH/REPLACE format is no longer detected (returns none)."""
         parser = EditParser()
         response = "file.py\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"
-        assert parser.detect_format(response) == "search_replace"
+        assert parser.detect_format(response) == "none"
 
     def test_detect_format_none(self):
         """Detect no edit format."""
