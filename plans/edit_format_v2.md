@@ -1,49 +1,34 @@
 
-# Edit Format V2: Anchored Edit Blocks
+# Edit Format V3: Common Prefix Edit Blocks
 
 ## Overview
 
-Replace the current SEARCH/REPLACE edit format with a new anchored format that:
-1. Uses leading and trailing context anchors to verify location
-2. Requires exact matching (no fuzzy matching)
-3. Provides clear success/failure feedback per edit
-4. Uses a single unified format for all operations (create, modify, delete)
+This document tracks the implementation of the v3 edit format, which replaced both the original SEARCH/REPLACE format (from aider) and the planned v2 anchored format.
 
-## Format Syntax
+The v3 format uses a simpler approach: the anchor is **computed automatically** as the common prefix between the EDIT and REPL sections, eliminating the need for explicit anchor markers.
+
+## Current Status Summary
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Core Parser | ✅ COMPLETE | `ac/edit_parser.py` with full test coverage |
+| Phase 2: Backend Integration | ✅ COMPLETE | Used by `chat.py`, `llm.py`, `streaming.py` |
+| Phase 3: Prompt Update | ✅ COMPLETE | System prompt uses v3 format |
+| Phase 4: Frontend Updates | ❌ NOT STARTED | See detailed tasks below |
+| Phase 5: Cleanup | ❌ NOT STARTED | See detailed tasks below |
+
+## Format Syntax (V3 - Implemented)
 
 ```
 path/to/file.ext
 ««« EDIT
-[leading anchor - must match exactly, remains unchanged]
-───────
-[old lines - must match exactly, will be removed]
-═══════
-[new lines - will be inserted]
-───────
-[trailing anchor - must match exactly, remains unchanged]
-»»»
+[context lines - copied verbatim from file, appear in BOTH sections]
+[old lines to be replaced]
+═══════ REPL
+[context lines - same as above, repeated verbatim]
+[new lines replacing the old]
+»»» EDIT END
 ```
-
-### Rules
-
-1. **File path is mandatory** - Must appear on line immediately before `««« EDIT`
-2. **Leading anchor** - Lines between `««« EDIT` and first `───────`
-   - Must match file content exactly
-   - Remains in file unchanged
-   - Can be empty (for insert at file start)
-3. **Old lines** - Lines between first `───────` and `═══════`
-   - Must match file content exactly (immediately after leading anchor)
-   - Will be removed
-   - Can be empty (for pure insertion)
-4. **New lines** - Lines between `═══════` and second `───────`
-   - Will be inserted where old lines were
-   - Can be empty (for pure deletion)
-5. **Trailing anchor** - Lines between second `───────` and `»»»`
-   - Must match file content exactly (immediately after old lines)
-   - Remains in file unchanged
-   - Can be empty (for changes at file end)
-6. **Exact matching** - Only line ending normalization (CRLF → LF), everything else verbatim
-7. **Binary files** - Edits to binary files are rejected
 
 ## Parser State Machine
 

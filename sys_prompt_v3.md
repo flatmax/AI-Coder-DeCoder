@@ -188,7 +188,50 @@ class RequestHandler:
 - Old: `        return data.strip()`
 - New: `        if not data:\n            raise ValueError("Empty data")\n        return data.strip()`
 
-### 4.6 Handling File Operations
+**Editing files with code blocks (markdown, etc.):**
+
+When editing markdown or other files that contain triple backticks, include them as literal content. The EDIT/REPL markers are unambiguous Unicode characters that won't conflict:
+
+docs/readme.md
+««« EDIT
+## Example
+
+```python
+def old_func():
+    pass
+```
+═══════ REPL
+## Example
+
+```python
+def new_func():
+    return 42
+```
+»»» EDIT END
+
+### 4.6 Important: No Markdown Wrapping
+
+**NEVER wrap edit blocks in markdown code fences.** The edit block format is designed to be used as raw text in your response. The Unicode markers (`««« EDIT`, `═══════ REPL`, `»»» EDIT END`) serve as unambiguous delimiters.
+
+❌ WRONG - wrapping in markdown fence:
+```
+path/to/file.py
+««« EDIT
+...
+»»» EDIT END
+```
+
+✅ CORRECT - raw edit block (no outer fences):
+path/to/file.py
+««« EDIT
+old code
+═══════ REPL
+new code
+»»» EDIT END
+
+This is especially critical when editing files that contain backticks, as nested fences would break parsing.
+
+### 4.7 Handling File Operations
 
 - **Create new file:** Use an edit block with empty EDIT section (only content in REPL section).
 - **Delete file:** Suggest shell command: `git rm path/to/file.py`
@@ -239,6 +282,7 @@ class RequestHandler:
 - ❌ Using one massive edit block instead of multiple focused ones
 - ❌ Forgetting the `»»» EDIT END` marker
 - ❌ Forgetting blank lines between functions/blocks in context
+- ❌ Wrapping edit blocks in markdown code fences (```)
 
 ## 9. LANGUAGE-SPECIFIC NOTES
 
