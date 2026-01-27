@@ -62,21 +62,31 @@ export class MessageHandler extends JRPCClient {
     this._scrollToBottom();
   }
 
-  streamWrite(chunk, final = false, role = 'assistant') {
-    setTimeout(() => this._processStreamChunk(chunk, final, role), 0);
+  streamWrite(chunk, final = false, role = 'assistant', editResults = null) {
+    setTimeout(() => this._processStreamChunk(chunk, final, role, editResults), 0);
   }
 
-  _processStreamChunk(chunk, final, role) {
+  _processStreamChunk(chunk, final, role, editResults = null) {
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     
     if (lastMessage && lastMessage.role === role && !lastMessage.final) {
-      lastMessage.content = chunk;
+      // Only update content if chunk is non-empty (preserve existing content on final)
+      if (chunk) {
+        lastMessage.content = chunk;
+      }
       lastMessage.final = final;
+      if (editResults && editResults.length > 0) {
+        lastMessage.editResults = editResults;
+      }
       this.messageHistory = [...this.messageHistory];
     } else {
+      const newMessage = { id: this._messageId++, role, content: chunk, final };
+      if (editResults && editResults.length > 0) {
+        newMessage.editResults = editResults;
+      }
       this.messageHistory = [
         ...this.messageHistory,
-        { id: this._messageId++, role, content: chunk, final }
+        newMessage
       ];
     }
     this._scrollToBottom();

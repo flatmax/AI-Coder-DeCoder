@@ -351,9 +351,9 @@ export class CardMarkdown extends LitElement {
     // Parse edit and repl sections to identify context vs changes
     const { contextHtml, oldHtml, newHtml, contextLines } = this.formatEditSections(block.editLines, block.replLines);
     
-    // Use first context line or first old line as search context
-    const searchContext = contextLines.length > 0 ? contextLines[0] : 
-                          (block.editLines ? block.editLines.split('\n')[0] : '');
+    // Use first non-empty context line, or first non-empty old line as search context
+    const allLines = [...contextLines, ...(block.editLines ? block.editLines.split('\n') : [])];
+    const searchContext = allLines.find(line => line.trim().length > 0) || '';
     const encodedContext = this.escapeHtml(searchContext).replace(/"/g, '&quot;');
     
     return `
@@ -450,33 +450,6 @@ export class CardMarkdown extends LitElement {
     }
     
     return result;
-  }
-
-  /**
-   * Process content, replacing edit blocks with rendered versions.
-   * @deprecated Use processContentWithEditBlocks instead
-   */
-  processEditBlocks(content) {
-    const blocks = this.parseEditBlocks(content);
-    
-    if (blocks.length === 0) {
-      return content;
-    }
-    
-    // Replace edit blocks with rendered HTML, processing from end to start
-    // to preserve indices
-    const lines = content.split('\n');
-    let result = [...lines];
-    
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const block = blocks[i];
-      const renderedBlock = this.renderEditBlock(block);
-      // Replace lines from startIndex to endIndex with the rendered block
-      const numLinesToRemove = block.endIndex - block.startIndex + 1;
-      result.splice(block.startIndex, numLinesToRemove, renderedBlock);
-    }
-    
-    return result.join('\n');
   }
 
   escapeHtml(text) {
