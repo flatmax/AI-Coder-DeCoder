@@ -1,7 +1,7 @@
 """Standalone indexer for repo map and symbol map generation.
 
-This module provides indexing functionality independent of aider_integration,
-making it easier to remove that dependency in the future.
+This module provides indexing functionality for generating symbol maps
+using tree-sitter based code analysis.
 """
 
 import os

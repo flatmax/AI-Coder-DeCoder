@@ -1,5 +1,14 @@
 # Plan: Remove Aider Integration
 
+## Status: ✅ COMPLETE (Migration Finished)
+
+This plan has been fully executed. The `ac/aider_integration/` module has been removed and replaced with cleaner standalone modules:
+
+- `ac/context/` - Token counting, file context, history management
+- `ac/prompts/` - System prompt loading
+
+---
+
 ## Goal
 
 Remove the `ac/aider_integration/` module and replace it with cleaner, standalone modules that provide the same functionality without the aider-specific abstractions.
@@ -206,66 +215,40 @@ def build_system_prompt() -> str:
 
 ---
 
-### Phase 5: Update `ac/llm/` to use new modules
+### Phase 5: Update `ac/llm/` to use new modules ✅ COMPLETE
 
-Split into smaller steps:
+All sub-phases completed:
 
 #### Phase 5a: Switch prompt loading ✅ COMPLETE
-- Change `streaming.py` to use `ac/prompts.build_system_prompt()` instead of `ac/aider_integration/prompts.build_edit_system_prompt()`
+- `streaming.py` uses `ac/prompts.build_system_prompt()`
 
-#### Phase 5b: Add new ContextManager to LiteLLM
-- Add `self._new_context_manager` using `ac/context/ContextManager`
-- Keep `AiderChat` working in parallel for now
-- Wire up token tracking to new context manager
+#### Phase 5b: Add new ContextManager to LiteLLM ✅ COMPLETE
+- `self._context_manager` using `ac/context/ContextManager`
+- Token tracking wired up via `token_tracker=self`
 
-#### Phase 5c: Switch file context management
-- Replace `aider_chat.add_file()` → `self._new_context_manager.file_context.add_file()`
-- Replace `aider_chat.clear_files()` → `self._new_context_manager.file_context.clear()`
-- Update `streaming.py` to use new file context
+#### Phase 5c: Switch file context management ✅ COMPLETE
+- Uses `self._context_manager.file_context.add_file()`
+- Uses `self._context_manager.file_context.clear()`
 
-#### Phase 5d: Switch history management  
-- Replace `aider_chat.check_history_size()` → `self._new_context_manager.history_needs_summary()`
-- Replace `aider_chat.get_summarization_split()` → `self._new_context_manager.get_summarization_split()`
-- Update `chat.py` summarization to use new context manager
+#### Phase 5d: Switch history management ✅ COMPLETE
+- Uses `self._context_manager.history_needs_summary()`
+- Uses `self._context_manager.get_summarization_split()`
 
-#### Phase 5e: Switch token reporting
-- Replace `aider_chat.get_token_report()` → `self._new_context_manager.get_token_report()`
-- Update HUD printing to use new context manager
+#### Phase 5e: Switch token reporting ✅ COMPLETE
+- Uses `self._context_manager.get_token_report()`
+- HUD printing uses new context manager
 
-#### Phase 5f: Remove AiderChat dependency
-- Remove `get_aider_chat()` method
-- Remove `self._aider_chat`
-- Remove import of `AiderChat`
+#### Phase 5f: Remove AiderChat dependency ✅ COMPLETE
+- No `AiderChat` references remain
+- `ac/aider_integration/` directory deleted
 
 ---
 
-### Phase 6: Remove `ac/aider_integration/`
+### Phase 6: Remove `ac/aider_integration/` ✅ COMPLETE
 
-Once all functionality is migrated and tests pass:
-
-1. Delete `ac/aider_integration/` directory
-2. Update any remaining imports
-3. Run full test suite
-4. Update documentation
-
-**Files to delete:**
-- `ac/aider_integration/__init__.py`
-- `ac/aider_integration/chat_integration.py`
-- `ac/aider_integration/editor.py`
-- `ac/aider_integration/context_manager.py`
-- `ac/aider_integration/token_counter.py`
-- `ac/aider_integration/minimal_io.py`
-- `ac/aider_integration/prompt_mixin.py`
-- `ac/aider_integration/file_context_mixin.py`
-- `ac/aider_integration/file_format_mixin.py`
-- `ac/aider_integration/file_management_mixin.py`
-- `ac/aider_integration/chat_history_mixin.py`
-- `ac/aider_integration/history_mixin.py`
-- `ac/aider_integration/hud_mixin.py`
-- `ac/aider_integration/token_report_mixin.py`
-- `ac/aider_integration/prompts/__init__.py`
-- `ac/aider_integration/prompts/system_reminder.py`
-- `ac/aider_integration/prompts/example_messages.py`
+All files deleted:
+- `ac/aider_integration/` directory removed
+- No remaining imports from `ac/aider_integration/`
 
 ---
 
@@ -304,8 +287,8 @@ Features:
 2. **Phase 2**: File context (depends on phase 1 for token counting) ✅ COMPLETE
 3. **Phase 3**: Context manager (depends on phases 1-2) ✅ COMPLETE
 4. **Phase 4**: Prompts (independent, can be done in parallel) ✅ COMPLETE
-5. **Phase 5**: Update LLM module (depends on phases 1-4)
-6. **Phase 6**: Remove old code (after all tests pass)
+5. **Phase 5**: Update LLM module (depends on phases 1-4) ✅ COMPLETE
+6. **Phase 6**: Remove old code (after all tests pass) ✅ COMPLETE
 
 ## Risks
 
@@ -315,14 +298,14 @@ Features:
 
 ## Success Criteria
 
-- [ ] All existing tests pass
-- [ ] Token counting works for all supported models
-- [ ] History summarization triggers correctly
-- [ ] HUD displays accurate information
-- [ ] Token report matches expected format
-- [ ] No imports from `ac/aider_integration/` remain
-- [ ] Session token totals are tracked and displayed (kept in `LiteLLM` class)
-- [ ] Cache token info displayed when available
+- [x] All existing tests pass
+- [x] Token counting works for all supported models
+- [x] History summarization triggers correctly
+- [x] HUD displays accurate information
+- [x] Token report matches expected format
+- [x] No imports from `ac/aider_integration/` remain
+- [x] Session token totals are tracked and displayed (kept in `LiteLLM` class)
+- [x] Cache token info displayed when available
 
 ## Decisions Made
 

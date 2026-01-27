@@ -26,7 +26,7 @@ def load_system_prompt() -> str:
     """
     Load the main system prompt.
     
-    Tries in order: sys_prompt_v3.md, sys_prompt_v2.md, sys_prompt.md
+    Tries in order: sys_prompt_v3.md, sys_prompt_v2.md
     
     Returns:
         System prompt content
@@ -34,15 +34,15 @@ def load_system_prompt() -> str:
     Raises:
         FileNotFoundError: If no prompt file exists
     """
-    # Try v3 first (current EDIT/REPL format), then v2, then v1
-    for filename in ("sys_prompt_v3.md", "sys_prompt_v2.md", "sys_prompt.md"):
+    # Try v3 first (current EDIT/REPL format), then v2
+    for filename in ("sys_prompt_v3.md", "sys_prompt_v2.md"):
         content = _load_prompt_file(filename)
         if content:
             return content
     
     repo_root = _get_repo_root()
     raise FileNotFoundError(
-        f"No system prompt found. Create sys_prompt_v2.md in {repo_root}"
+        f"No system prompt found. Create sys_prompt_v3.md in {repo_root}"
     )
 
 

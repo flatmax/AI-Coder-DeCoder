@@ -205,13 +205,11 @@ class HistoryBrowserMixin:
         # Clear current history
         self.clear_history()
         
-        # Load messages into aider chat context
-        aider_chat = self.get_aider_chat()
-        
+        # Load messages into context manager and conversation history
         for msg in messages:
-            if aider_chat._context_manager:
-                aider_chat._context_manager.add_message(msg['role'], msg['content'])
-            aider_chat.messages.append(msg)
+            if self._context_manager:
+                self._context_manager.add_message(msg['role'], msg['content'])
+            self.conversation_history.append(msg)
         
         return {
             'status': 'loaded',
