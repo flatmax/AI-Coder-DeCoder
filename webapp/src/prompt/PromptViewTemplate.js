@@ -84,25 +84,18 @@ export function renderPromptView(component) {
           ` : ''}
           <div class="chat-panel">
             <div class="messages-wrapper">
-              <div class="messages-wrapper">
-                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
-                  ${repeat(
-                    component.messageHistory,
-                    (message) => message.id,
-                    message => {
-                      if (message.role === 'user') {
-                        return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
-                      } else if (message.role === 'assistant') {
-                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
-                      }
+              <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
+                ${repeat(
+                  component.messageHistory,
+                  (message) => message.id,
+                  message => {
+                    if (message.role === 'user') {
+                      return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
+                    } else if (message.role === 'assistant') {
+                      return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
                     }
-                  )}
-                </div>
-                ${component._showScrollButton ? html`
-                  <button class="scroll-to-bottom-btn" @click=${() => component.scrollToBottomNow()} title="Scroll to bottom">
-                    ↓
-                  </button>
-                ` : ''}
+                  }
+                )}
               </div>
               ${component._showScrollButton ? html`
                 <button class="scroll-to-bottom-btn" @click=${() => component.scrollToBottomNow()} title="Scroll to bottom">

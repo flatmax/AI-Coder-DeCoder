@@ -4,24 +4,6 @@ import os
 class FileOperationsMixin:
     """Mixin for file-related operations."""
     
-    def stage_files(self, file_paths):
-        """
-        Stage files to the index.
-        
-        Args:
-            file_paths: List of file paths to stage
-            
-        Returns:
-            Dict with success status or error
-        """
-        try:
-            if isinstance(file_paths, str):
-                file_paths = [file_paths]
-            self._repo.index.add(file_paths)
-            return {"success": True, "staged": file_paths}
-        except Exception as e:
-            return self._create_error_response(str(e))
-    
     def unstage_files(self, file_paths):
         """
         Unstage files from the index.
@@ -135,8 +117,6 @@ class FileOperationsMixin:
             return {"success": True, "created": dir_path}
         except Exception as e:
             return self._create_error_response(str(e))
-    
-    """Mixin for file-related operations."""
     
     def get_file_content(self, file_path, version='working'):
         """
