@@ -7,8 +7,15 @@ import threading
 import litellm as _litellm
 
 from ..aider_integration.prompts import build_edit_system_prompt
-from ..aider_integration.message_context import REPO_MAP_HEADER
 from ..edit_parser import EditParser, EditStatus
+
+
+REPO_MAP_HEADER = """# Repository Structure
+
+Below is a map of the repository showing classes, functions, and their relationships.
+Use this to understand the codebase structure and find relevant code.
+
+"""
 
 
 class StreamingMixin:
