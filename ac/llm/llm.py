@@ -583,7 +583,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             "shell_commands": edit_parser.detect_shell_suggestions(response_text)
         }
         
-        if format_type == "edit_v2":
+        if format_type in ("edit_v2", "edit_v3"):
             blocks = edit_parser.parse_response(response_text)
             result["edit_blocks"] = blocks
             result["file_edits"] = []  # Legacy format empty for v2

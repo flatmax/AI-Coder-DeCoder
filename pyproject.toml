@@ -30,4 +30,5 @@ ac-dc = "ac.dc:main"
 [project.optional-dependencies]
 dev = [
     "playwright",
+    "pytest",
 ]

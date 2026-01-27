@@ -1,79 +1,89 @@
 """
-Few-shot example messages for SEARCH/REPLACE format.
+Few-shot example messages for EDIT/REPL format (v3).
 
 These examples teach the model the correct edit format.
-Uses {fence} placeholder for code fence characters.
+The format uses context lines that appear in both sections,
+with the common prefix serving as the anchor.
 """
 
-# Build examples with fence placeholder
-# Using string concatenation to avoid issues with nested markers
+# Example 1: Basic edit - modify existing code
+_EXAMPLE_1_ASSISTANT = """I'll update the greeting message.
 
-_EXAMPLE_1_ASSISTANT = (
-    "I'll update the greeting message.\n\n"
-    "src/greeting.py\n"
-    "{fence}python\n"
-    "<<<<<<< SEARCH\n"
-    "def get_greeting(name):\n"
-    '    return f"Hi, {{name}}!"\n'
-    "=======\n"
-    "def get_greeting(name):\n"
-    '    return "Hello, World!"\n'
-    ">>>>>>> REPLACE\n"
-    "{fence}"
-)
+src/greeting.py
+««« EDIT
+def get_greeting(name):
+    return f"Hi, {name}!"
+═══════ REPL
+def get_greeting(name):
+    return "Hello, World!"
+»»» EDIT END
+"""
 
-_EXAMPLE_2_ASSISTANT = (
-    "I'll create the new file.\n\n"
-    "src/utils.py\n"
-    "{fence}python\n"
-    "<<<<<<< SEARCH\n"
-    "=======\n"
-    "def format_name(first, last):\n"
-    '    """Format a full name."""\n'
-    '    return f"{{first}} {{last}}"\n'
-    ">>>>>>> REPLACE\n"
-    "{fence}"
-)
+# Example 2: Create a new file (empty edit section)
+_EXAMPLE_2_ASSISTANT = """I'll create the new file.
 
-_EXAMPLE_3_ASSISTANT = (
-    "I'll remove the deprecated function.\n\n"
-    "src/main.py\n"
-    "{fence}python\n"
-    "<<<<<<< SEARCH\n"
-    "def legacy_function():\n"
-    '    """Deprecated: Do not use."""\n'
-    "    pass\n"
-    "\n"
-    "=======\n"
-    ">>>>>>> REPLACE\n"
-    "{fence}"
-)
+src/utils.py
+««« EDIT
+═══════ REPL
+def format_name(first, last):
+    \"\"\"Format a full name.\"\"\"
+    return f"{first} {last}"
+»»» EDIT END
+"""
 
-_EXAMPLE_4_ASSISTANT = (
-    "I'll rename the function in both files.\n\n"
-    "src/handler.py\n"
-    "{fence}python\n"
-    "<<<<<<< SEARCH\n"
-    "def process(data):\n"
-    "    return data.strip()\n"
-    "=======\n"
-    "def handle(data):\n"
-    "    return data.strip()\n"
-    ">>>>>>> REPLACE\n"
-    "{fence}\n\n"
-    "src/main.py\n"
-    "{fence}python\n"
-    "<<<<<<< SEARCH\n"
-    "from handler import process\n"
-    "\n"
-    "result = process(input_data)\n"
-    "=======\n"
-    "from handler import handle\n"
-    "\n"
-    "result = handle(input_data)\n"
-    ">>>>>>> REPLACE\n"
-    "{fence}"
-)
+# Example 3: Delete code (context + old in edit, only context in repl)
+_EXAMPLE_3_ASSISTANT = """I'll remove the deprecated function.
+
+src/main.py
+««« EDIT
+def legacy_function():
+    \"\"\"Deprecated: Do not use.\"\"\"
+    pass
+
+def active_function():
+═══════ REPL
+def active_function():
+»»» EDIT END
+"""
+
+# Example 4: Multiple edits in one response (rename function)
+_EXAMPLE_4_ASSISTANT = """I'll rename the function in both files.
+
+src/handler.py
+««« EDIT
+def process(data):
+    return data.strip()
+═══════ REPL
+def handle(data):
+    return data.strip()
+»»» EDIT END
+
+src/main.py
+««« EDIT
+from handler import process
+
+result = process(input_data)
+═══════ REPL
+from handler import handle
+
+result = handle(input_data)
+»»» EDIT END
+"""
+
+# Example 5: Insert code (same context, new lines added in repl)
+_EXAMPLE_5_ASSISTANT = """I'll add the validation check.
+
+src/validator.py
+««« EDIT
+def validate(data):
+    return data.strip()
+═══════ REPL
+def validate(data):
+    if not data:
+        raise ValueError("Empty data")
+    return data.strip()
+»»» EDIT END
+"""
 
 EXAMPLE_MESSAGES = [
     # Example 1: Basic edit - modify existing code
@@ -85,7 +95,7 @@ EXAMPLE_MESSAGES = [
         "role": "assistant",
         "content": _EXAMPLE_1_ASSISTANT
     },
-    
+
     # Example 2: Create a new file
     {
         "role": "user",
@@ -95,7 +105,7 @@ EXAMPLE_MESSAGES = [
         "role": "assistant",
         "content": _EXAMPLE_2_ASSISTANT
     },
-    
+
     # Example 3: Delete code
     {
         "role": "user",
@@ -105,7 +115,7 @@ EXAMPLE_MESSAGES = [
         "role": "assistant",
         "content": _EXAMPLE_3_ASSISTANT
     },
-    
+
     # Example 4: Multiple edits in one response
     {
         "role": "user",
@@ -114,5 +124,15 @@ EXAMPLE_MESSAGES = [
     {
         "role": "assistant",
         "content": _EXAMPLE_4_ASSISTANT
+    },
+
+    # Example 5: Insert code
+    {
+        "role": "user",
+        "content": "Add validation to check for empty data"
+    },
+    {
+        "role": "assistant",
+        "content": _EXAMPLE_5_ASSISTANT
     },
 ]

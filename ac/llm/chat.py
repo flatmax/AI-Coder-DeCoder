@@ -103,7 +103,7 @@ class ChatMixin:
         result["edit_format"] = format_type
         
         if auto_apply and response_text:
-            if format_type == "edit_v2":
+            if format_type in ("edit_v2", "edit_v3"):
                 # Use new anchored edit format
                 blocks = edit_parser.parse_response(response_text)
                 shell_commands = edit_parser.detect_shell_suggestions(response_text)
@@ -112,7 +112,7 @@ class ChatMixin:
                 result["edit_blocks"] = [
                     {
                         "file_path": b.file_path,
-                        "leading_anchor": b.leading_anchor[:100] if b.leading_anchor else "",
+                        "anchor": b.anchor[:100] if b.anchor else "",
                         "old_lines": b.old_lines[:200] if b.old_lines else "",
                         "new_lines": b.new_lines[:200] if b.new_lines else "",
                     }
