@@ -1,25 +1,22 @@
 """
 Integration of AiderEditor with LiteLLM chat.
 
-Provides a high-level interface for requesting code changes via LLM
-and applying them using aider's search/replace format.
+Provides a high-level interface for managing file context and conversation history
+for LLM-based code editing.
 """
 
 from .editor import AiderEditor
-from .message_builder import MessageBuilderMixin
 from .context_manager import AiderContextManager
 from .file_management_mixin import FileManagementMixin
 from .chat_history_mixin import ChatHistoryMixin
-from .request_mixin import RequestMixin
-from .file_mention_mixin import FileMentionMixin
 
 
-class AiderChat(MessageBuilderMixin, FileManagementMixin, ChatHistoryMixin, RequestMixin, FileMentionMixin):
+class AiderChat(FileManagementMixin, ChatHistoryMixin):
     """
-    High-level interface for LLM-based code editing using aider's format.
+    High-level interface for LLM-based code editing.
     
-    Combines LiteLLM for LLM calls with AiderEditor for parsing and applying edits.
-    Uses AiderContextManager for repo map and token management.
+    Manages file context via AiderEditor and token/history via AiderContextManager.
+    Actual LLM calls and edit parsing are handled by LiteLLM and EditParser.
     """
     
     def __init__(self, model="gpt-4", repo=None, token_tracker=None):

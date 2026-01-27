@@ -6,8 +6,6 @@ from .token_report_mixin import TokenReportMixin
 from .file_format_mixin import FileFormatMixin
 from .file_management_mixin import FileManagementMixin
 from .chat_history_mixin import ChatHistoryMixin
-from .request_mixin import RequestMixin
-from .file_mention_mixin import FileMentionMixin
 
 __all__ = [
     'AiderEditor',
@@ -18,6 +16,4 @@ __all__ = [
     'FileFormatMixin',
     'FileManagementMixin',
     'ChatHistoryMixin',
-    'RequestMixin',
-    'FileMentionMixin',
 ]

@@ -1,5 +1,7 @@
 # Aider Integration Cleanup Plan
 
+**Status: IN PROGRESS - Phase 3 Pending**
+
 ## Overview
 
 The `ac/aider_integration/` module has accumulated dead code and broken functionality as the codebase evolved. Edit parsing moved to `EditParser`, streaming bypasses message building mixins, and some methods reference non-existent attributes.
@@ -142,3 +144,30 @@ Before proceeding, clarify:
 1. Is non-streaming `chat()` still needed, or can we remove it?
 2. Is file mention detection (adding files LLM asks for) a desired feature?
 3. What's the appetite for risk vs. code cleanliness?
+
+---
+
+## Implementation Notes (Completed)
+
+### Files Deleted
+- `ac/aider_integration/request_mixin.py` - Bypassed by streaming path
+- `ac/aider_integration/file_mention_mixin.py` - Broken (referenced non-existent `git_repo`) and unused
+- `ac/aider_integration/message_builder.py` - Only used by deleted RequestMixin
+- `ac/aider_integration/message_context.py` - Only used by deleted MessageBuilderMixin
+- `ac/aider_integration/message_simple.py` - Only used by deleted MessageBuilderMixin
+- `ac/aider_integration/message_utils.py` - Only used by deleted mixins
+
+### Files Modified
+- `ac/aider_integration/chat_integration.py` - Removed unused mixin inheritance
+- `ac/aider_integration/__init__.py` - Removed deleted exports
+
+### Files Kept
+- `AiderEditor` - Still used for file context and prompt templates
+- `AiderContextManager` - Still used for token counting, history, HUD
+- `ChatHistoryMixin` - Still used for history/summarization operations
+- `FileManagementMixin` - Still used for file operations (delegates to editor)
+
+### Notes
+- Non-streaming `LiteLLM.chat()` still exists but builds messages directly
+- Streaming path (`chat_streaming()`) is the primary code path
+- File mention detection was broken anyway - can be re-implemented cleanly if needed

@@ -7,8 +7,8 @@ import threading
 import litellm as _litellm
 
 from ..aider_integration.prompts import build_edit_system_prompt
+from ..aider_integration.message_context import REPO_MAP_HEADER
 from ..edit_parser import EditParser, EditStatus
-from .chat import REPO_MAP_HEADER
 
 
 class StreamingMixin:
