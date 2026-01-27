@@ -6,7 +6,7 @@ import asyncio
 import threading
 import litellm as _litellm
 
-from ..aider_integration.prompts import build_edit_system_prompt
+from ..prompts import build_system_prompt
 from ..edit_parser import EditParser, EditStatus
 
 
@@ -318,8 +318,8 @@ class StreamingMixin:
         messages = []
         context_map_tokens = 0
         
-        # System prompt with search/replace instructions
-        messages.append({"role": "system", "content": build_edit_system_prompt()})
+        # System prompt with edit instructions
+        messages.append({"role": "system", "content": build_system_prompt()})
         
         # Add symbol map context if requested
         if use_repo_map and self.repo:

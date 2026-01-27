@@ -6,6 +6,7 @@ from .chat import ChatMixin
 from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
 from ..indexer import Indexer
+from ..context import ContextManager
 
 
 class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
@@ -44,8 +45,17 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         self.model = self.config.get('model', 'gpt-4o-mini')
         self.smaller_model = self.config.get('smallerModel', 'gpt-4o-mini')
         
-        # Lazy-loaded aider integration
+        # Lazy-loaded aider integration (deprecated, use _context_manager)
         self._aider_chat = None
+        
+        # New context manager
+        self._context_manager = None
+        if repo:
+            self._context_manager = ContextManager(
+                model_name=self.model,
+                repo_root=repo.get_repo_root(),
+                token_tracker=self
+            )
         
         # Lazy-loaded indexer
         self._indexer = None
@@ -58,6 +68,10 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         self.model = model
         if self._aider_chat:
             self._aider_chat.model = model
+        if self._context_manager:
+            self._context_manager.model_name = model
+            self._context_manager.token_counter.model_name = model
+            self._context_manager.token_counter._info = None  # Reset cached info
         return f"Model set to: {model}"
     
     def get_model(self):

@@ -208,34 +208,34 @@ def build_system_prompt() -> str:
 
 ### Phase 5: Update `ac/llm/` to use new modules
 
-Replace `AiderChat` usage with direct calls to new modules.
+Split into smaller steps:
 
-**Changes to `ac/llm/llm.py`:**
-```python
-# Before
-from ac.aider_integration.chat_integration import AiderChat
+#### Phase 5a: Switch prompt loading ✅ COMPLETE
+- Change `streaming.py` to use `ac/prompts.build_system_prompt()` instead of `ac/aider_integration/prompts.build_edit_system_prompt()`
 
-# After
-from ac.context import ContextManager, FileContext
-from ac.prompts import build_system_prompt, get_system_reminder, EXAMPLE_MESSAGES
-```
+#### Phase 5b: Add new ContextManager to LiteLLM
+- Add `self._new_context_manager` using `ac/context/ContextManager`
+- Keep `AiderChat` working in parallel for now
+- Wire up token tracking to new context manager
 
-**Replace:**
-- `self._aider_chat` → `self._context_manager` + `self._file_context`
-- `get_aider_chat()` → direct property access
-- `aider_chat.add_file()` → `self._file_context.add_file()`
-- `aider_chat._context_manager.count_tokens()` → `self._context_manager.count_tokens()`
+#### Phase 5c: Switch file context management
+- Replace `aider_chat.add_file()` → `self._new_context_manager.file_context.add_file()`
+- Replace `aider_chat.clear_files()` → `self._new_context_manager.file_context.clear()`
+- Update `streaming.py` to use new file context
 
-**Changes to `ac/llm/streaming.py`:**
-- Update `build_edit_system_prompt()` import
-- Update context manager access
+#### Phase 5d: Switch history management  
+- Replace `aider_chat.check_history_size()` → `self._new_context_manager.history_needs_summary()`
+- Replace `aider_chat.get_summarization_split()` → `self._new_context_manager.get_summarization_split()`
+- Update `chat.py` summarization to use new context manager
 
-**Changes to `ac/llm/chat.py`:**
-- Update summarization calls
+#### Phase 5e: Switch token reporting
+- Replace `aider_chat.get_token_report()` → `self._new_context_manager.get_token_report()`
+- Update HUD printing to use new context manager
 
-**Tests:**
-- Ensure all existing functionality works
-- Integration tests for streaming
+#### Phase 5f: Remove AiderChat dependency
+- Remove `get_aider_chat()` method
+- Remove `self._aider_chat`
+- Remove import of `AiderChat`
 
 ---
 
@@ -303,7 +303,7 @@ Features:
 1. **Phase 1**: Token counter (foundation, no dependencies) ✅ COMPLETE
 2. **Phase 2**: File context (depends on phase 1 for token counting) ✅ COMPLETE
 3. **Phase 3**: Context manager (depends on phases 1-2) ✅ COMPLETE
-4. **Phase 4**: Prompts (independent, can be done in parallel)
+4. **Phase 4**: Prompts (independent, can be done in parallel) ✅ COMPLETE
 5. **Phase 5**: Update LLM module (depends on phases 1-4)
 6. **Phase 6**: Remove old code (after all tests pass)
 
