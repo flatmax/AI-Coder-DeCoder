@@ -655,16 +655,10 @@ class TestEditParserHelpers:
     """Tests for helper methods."""
 
     def test_detect_format_edit_v3(self):
-        """Detect new v3 EDIT/REPL format."""
+        """Detect EDIT/REPL format."""
         parser = EditParser()
         response = "file.py\n««« EDIT\nold\n═══════ REPL\nnew\n»»» EDIT END"
         assert parser.detect_format(response) == "edit_v3"
-
-    def test_detect_format_edit_v2(self):
-        """Detect old v2 EDIT format with anchor separators."""
-        parser = EditParser()
-        response = "file.py\n««« EDIT\nanchor\n───────\nold\n═══════\nnew\n───────\n»»»"
-        assert parser.detect_format(response) == "edit_v2"
 
     def test_detect_format_search_replace(self):
         """Detect old SEARCH/REPLACE format."""
@@ -699,50 +693,6 @@ To remove it:
         assert parser._find_line_number(content, 0) == 1
         assert parser._find_line_number(content, 6) == 2
         assert parser._find_line_number(content, 12) == 3
-
-
-class TestEditParserV2Compatibility:
-    """Tests for backward compatibility with v2 format."""
-
-    def test_parse_v2_single_block(self):
-        """Parse v2 format block."""
-        parser = EditParser()
-        response = """src/test.py
-««« EDIT
-def foo():
-───────
-    return 1
-═══════
-    return 2
-───────
-trailing
-»»»
-"""
-        blocks = parser.parse_response(response)
-        assert len(blocks) == 1
-        block = blocks[0]
-        assert block.file_path == "src/test.py"
-        assert block.anchor == "def foo():"
-        assert block.old_lines == "    return 1"
-        assert block.new_lines == "    return 2"
-
-    def test_parse_v2_empty_sections(self):
-        """Parse v2 format with empty sections (new file)."""
-        parser = EditParser()
-        response = """src/newfile.py
-««« EDIT
-───────
-═══════
-def hello():
-    print("Hello!")
-───────
-»»»
-"""
-        blocks = parser.parse_response(response)
-        assert len(blocks) == 1
-        assert blocks[0].anchor == ""
-        assert blocks[0].old_lines == ""
-        assert blocks[0].new_lines == 'def hello():\n    print("Hello!")'
 
 
 class TestEditParserEdgeCases:

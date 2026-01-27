@@ -59,11 +59,6 @@ class EditParser:
     REPL_SEPARATOR = "═══════ REPL"
     EDIT_END = "»»» EDIT END"
 
-    # V2 format markers (for backward compatibility)
-    V2_ANCHOR_SEPARATOR = "───────"
-    V2_CONTENT_SEPARATOR = "═══════"
-    V2_EDIT_END = "»»»"
-
     def parse_response(self, response_text: str) -> list[EditBlock]:
         """
         Extract all edit blocks from LLM response.
@@ -77,13 +72,7 @@ class EditParser:
         Skips malformed blocks (missing markers, unclosed blocks) and continues
         parsing. Never raises exceptions for parse errors.
         """
-        # Detect format and parse accordingly
-        fmt = self.detect_format(response_text)
-        if fmt == "edit_v3":
-            return self._parse_v3(response_text)
-        elif fmt == "edit_v2":
-            return self._parse_v2(response_text)
-        return []
+        return self._parse_v3(response_text)
 
     def _parse_v3(self, response_text: str) -> list[EditBlock]:
         """Parse v3 format: EDIT ... ═══════ REPL ... »»» EDIT END"""
@@ -143,79 +132,6 @@ class EditParser:
                     repl_section_lines.append(line)
 
         # If we end in a non-IDLE state, the last block was malformed - discard it
-        return blocks
-
-    def _parse_v2(self, response_text: str) -> list[EditBlock]:
-        """Parse v2 format for backward compatibility."""
-        blocks = []
-        lines = response_text.split('\n')
-
-        state = 'IDLE'
-        potential_path = None
-        current_block_start_line = 0
-        leading_anchor_lines = []
-        old_lines_list = []
-        new_lines_list = []
-        trailing_anchor_lines = []
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-
-            if state == 'IDLE':
-                if stripped:
-                    potential_path = stripped
-                    state = 'EXPECT_START'
-
-            elif state == 'EXPECT_START':
-                if stripped == self.EDIT_START:
-                    if potential_path:
-                        state = 'LEADING_ANCHOR'
-                        current_block_start_line = i + 1
-                        leading_anchor_lines = []
-                    else:
-                        state = 'IDLE'
-                elif stripped:
-                    potential_path = stripped
-
-            elif state == 'LEADING_ANCHOR':
-                if stripped == self.V2_ANCHOR_SEPARATOR:
-                    state = 'OLD_LINES'
-                    old_lines_list = []
-                else:
-                    leading_anchor_lines.append(line)
-
-            elif state == 'OLD_LINES':
-                if stripped == self.V2_CONTENT_SEPARATOR:
-                    state = 'NEW_LINES'
-                    new_lines_list = []
-                else:
-                    old_lines_list.append(line)
-
-            elif state == 'NEW_LINES':
-                if stripped == self.V2_ANCHOR_SEPARATOR:
-                    state = 'TRAILING_ANCHOR'
-                    trailing_anchor_lines = []
-                else:
-                    new_lines_list.append(line)
-
-            elif state == 'TRAILING_ANCHOR':
-                if stripped == self.V2_EDIT_END:
-                    # Convert v2 format to v3 EditBlock structure
-                    # V2 had separate leading/trailing anchors; we merge leading into anchor
-                    # and ignore trailing (it was for validation, not needed with v3 model)
-                    blocks.append(EditBlock(
-                        file_path=potential_path,
-                        anchor='\n'.join(leading_anchor_lines),
-                        old_lines='\n'.join(old_lines_list),
-                        new_lines='\n'.join(new_lines_list),
-                        raw_block=self._extract_raw_block(lines, current_block_start_line, i),
-                        line_number=current_block_start_line
-                    ))
-                    state = 'IDLE'
-                    potential_path = None
-                else:
-                    trailing_anchor_lines.append(line)
-
         return blocks
 
     def _compute_common_prefix(
@@ -536,18 +452,11 @@ class EditParser:
         Detect which edit format the response uses.
 
         Returns:
-            'edit_v3' for new format with ═══════ REPL,
-            'edit_v2' for format with ───────,
+            'edit_v3' for EDIT/REPL format,
             'search_replace' for old format,
             'none' if no edits
         """
-        if self.EDIT_START in response_text:
-            # Check for v3 vs v2
-            if self.REPL_SEPARATOR in response_text:
-                return "edit_v3"
-            elif self.V2_ANCHOR_SEPARATOR in response_text:
-                return "edit_v2"
-            # Has EDIT_START but unclear format - assume v3
+        if self.EDIT_START in response_text and self.REPL_SEPARATOR in response_text:
             return "edit_v3"
         elif "<<<<<<< SEARCH" in response_text:
             return "search_replace"
