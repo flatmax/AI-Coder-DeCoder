@@ -174,52 +174,35 @@ class ContextManager:
 
 ### Phase 4: Create `ac/prompts/` module
 
-Consolidate prompt loading and templates.
+Simplified prompt loading - just loads the system prompt files.
 
-**From:**
-- `ac/aider_integration/prompt_mixin.py`
-- `ac/aider_integration/prompts/__init__.py`
-- `ac/aider_integration/prompts/system_reminder.py`
-- `ac/aider_integration/prompts/example_messages.py`
+**Note:** After investigation, `SYSTEM_REMINDER` and `EXAMPLE_MESSAGES` from the old
+aider integration were **not actually sent to the LLM**. They were only used for
+token counting/reporting. The actual prompt comes from `sys_prompt_v2.md` only.
 
 **New structure:**
 
 `ac/prompts/__init__.py`:
 ```python
-from .loader import load_system_prompt, load_extra_prompt
-from .system_reminder import SYSTEM_REMINDER, get_system_reminder
-from .examples import EXAMPLE_MESSAGES
-
-def build_system_prompt() -> str:
-    """Build complete system prompt from files and templates."""
+from .loader import load_system_prompt, load_extra_prompt, build_system_prompt
 ```
 
 `ac/prompts/loader.py`:
 ```python
 def load_system_prompt() -> str:
-    """Load sys_prompt_v2.md (or fallback to sys_prompt.md)."""
+    """Load sys_prompt_v3.md, sys_prompt_v2.md, or sys_prompt.md."""
 
 def load_extra_prompt() -> str:
     """Load optional sys_prompt_extra.md."""
-```
 
-`ac/prompts/system_reminder.py`:
-```python
-SYSTEM_REMINDER = '''...'''  # Edit format rules
-
-def get_system_reminder() -> str:
-    """Get the system reminder with any dynamic content."""
-```
-
-`ac/prompts/examples.py`:
-```python
-EXAMPLE_MESSAGES = [...]  # Few-shot examples
+def build_system_prompt() -> str:
+    """Build complete system prompt (main + extra)."""
 ```
 
 **Tests:**
 - Prompt loading from files
-- System reminder formatting
-- Example message structure
+- Missing file handling
+- build_system_prompt combines main + extra
 
 ---
 
