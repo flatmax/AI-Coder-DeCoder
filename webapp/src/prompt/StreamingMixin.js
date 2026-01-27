@@ -85,17 +85,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
       ];
     }
     
-    // Handle edits if any
+    // Refresh file tree if edits were applied (but don't auto-load diff viewer)
     if (result.passed && result.passed.length > 0) {
       await this.loadFileTree();
-      const diffFiles = await this._buildDiffFiles(result);
-      if (diffFiles.length > 0) {
-        this.dispatchEvent(new CustomEvent('edits-applied', {
-          detail: { files: diffFiles },
-          bubbles: true,
-          composed: true
-        }));
-      }
     }
   }
 

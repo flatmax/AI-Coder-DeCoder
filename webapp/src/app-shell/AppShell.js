@@ -265,8 +265,12 @@ export class AppShell extends LitElement {
     const { path, line, searchContext } = e.detail;
     this.viewingFile = path;
     
-    // Load file into diff viewer if not already there
-    await this._loadFileIntoDiff(path);
+    // Only navigate if file is already loaded in diff viewer (don't auto-load)
+    const alreadyLoaded = this.diffFiles.find(f => f.path === path);
+    if (!alreadyLoaded) {
+      return;
+    }
+    
     await this.updateComplete;
     
     // Navigate to the line in the diff viewer
