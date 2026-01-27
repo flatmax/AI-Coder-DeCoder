@@ -337,8 +337,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         """
         Generate and save the symbol map with cross-file references.
         
-        This is the hybrid format that can replace aider's repo map.
-        
         Args:
             file_paths: List of files to index. If None, uses all tracked files.
             output_path: Custom output path. If None, uses default.
