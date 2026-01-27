@@ -4,7 +4,8 @@ import './CardMarkdown.js';
 export class AssistantCard extends LitElement {
   static properties = {
     content: { type: String },
-    mentionedFiles: { type: Array }
+    mentionedFiles: { type: Array },
+    editResults: { type: Array }  // Results from edit operations
   };
 
   static styles = css`
@@ -93,7 +94,7 @@ export class AssistantCard extends LitElement {
             <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
           </div>
         </div>
-        <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []}></card-markdown>
+        <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []} .editResults=${this.editResults || []}></card-markdown>
         <div class="footer-actions">
           <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
           <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>

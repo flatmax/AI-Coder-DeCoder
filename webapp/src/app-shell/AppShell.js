@@ -261,6 +261,32 @@ export class AppShell extends LitElement {
     }
   }
 
+  async handleNavigateToEdit(e) {
+    const { path, line, searchContext } = e.detail;
+    this.viewingFile = path;
+    
+    // Load file into diff viewer if not already there
+    await this._loadFileIntoDiff(path);
+    await this.updateComplete;
+    
+    // Navigate to the line in the diff viewer
+    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+    if (diffViewer) {
+      setTimeout(() => {
+        diffViewer.selectFile(path);
+        setTimeout(() => {
+          // Try to find line by searching for context, fall back to line number
+          const targetLine = searchContext 
+            ? diffViewer._findLineByContent(searchContext) || line
+            : line;
+          if (targetLine) {
+            diffViewer._revealPosition(targetLine, 1);
+          }
+        }, 150);
+      }, 100);
+    }
+  }
+
   clearDiff() {
     this.diffFiles = [];
     this.showDiff = false;
@@ -346,6 +372,7 @@ export class AppShell extends LitElement {
           <prompt-view 
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
+            @navigate-to-edit=${this.handleNavigateToEdit}
             style="${this.activeLeftTab === 'search' ? 'display: none;' : ''}"
           ></prompt-view>
           <find-in-files

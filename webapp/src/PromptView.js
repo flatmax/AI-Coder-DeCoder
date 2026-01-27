@@ -118,6 +118,23 @@ export class PromptView extends MixedBase {
     this.initDragHandler();
     this.initResizeHandler();
     this.initStreaming();
+    
+    // Listen for edit block clicks
+    this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
+  }
+
+  /**
+   * Handle click on an edit block file path - navigate to diff viewer.
+   */
+  _handleEditBlockClick(e) {
+    const { path, line, status, searchContext } = e.detail;
+    
+    // Dispatch event to navigate to diff viewer with file and line
+    this.dispatchEvent(new CustomEvent('navigate-to-edit', {
+      detail: { path, line, status, searchContext },
+      bubbles: true,
+      composed: true
+    }));
   }
 
   disconnectedCallback() {
@@ -125,6 +142,7 @@ export class PromptView extends MixedBase {
     this.destroyImageHandler();
     this.destroyDragHandler();
     this.destroyResizeHandler();
+    this.removeEventListener('edit-block-click', this._handleEditBlockClick);
   }
 
   remoteIsUp() {}

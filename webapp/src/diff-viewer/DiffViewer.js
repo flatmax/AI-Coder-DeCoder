@@ -206,6 +206,34 @@ export class DiffViewer extends MixedBase {
     }, 1500);
   }
 
+  /**
+   * Find line number by searching for content in the current file.
+   * @param {string} searchText - Text to search for
+   * @returns {number|null} - Line number (1-based) or null if not found
+   */
+  _findLineByContent(searchText) {
+    if (!this._editor || !searchText) return null;
+    
+    const editor = this._editor.getModifiedEditor();
+    if (!editor) return null;
+    
+    const model = editor.getModel();
+    if (!model) return null;
+    
+    const content = model.getValue();
+    const lines = content.split('\n');
+    
+    // Search for the line containing the text
+    const searchTrimmed = searchText.trim();
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(searchTrimmed) || lines[i].trim() === searchTrimmed) {
+        return i + 1; // Convert to 1-based line number
+      }
+    }
+    
+    return null;
+  }
+
   _openExternalFile(filePath) {
     if (!filePath) return;
     

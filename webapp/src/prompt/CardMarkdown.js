@@ -7,7 +7,8 @@ export class CardMarkdown extends LitElement {
   static properties = {
     content: { type: String },
     role: { type: String },
-    mentionedFiles: { type: Array }
+    mentionedFiles: { type: Array },
+    editResults: { type: Array }  // Array of {file_path, status, reason, estimated_line}
   };
 
   static styles = css`
@@ -50,6 +51,110 @@ export class CardMarkdown extends LitElement {
     .file-mention:hover {
       color: #a3e4b8;
       text-decoration-style: solid;
+    }
+
+    /* Edit block styles */
+    .edit-block {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      margin: 12px 0;
+      overflow: hidden;
+      font-family: 'Fira Code', monospace;
+      font-size: 13px;
+    }
+
+    .edit-block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .edit-block-file {
+      color: #58a6ff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .edit-block-file:hover {
+      text-decoration: underline;
+    }
+
+    .edit-block-status {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    .edit-block-status.applied {
+      background: #238636;
+      color: #fff;
+    }
+
+    .edit-block-status.failed {
+      background: #da3633;
+      color: #fff;
+    }
+
+    .edit-block-status.pending {
+      background: #6e7681;
+      color: #fff;
+    }
+
+    .edit-block-content {
+      padding: 0;
+    }
+
+    .edit-section {
+      padding: 8px 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .edit-section-header {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: #6e7681;
+      padding: 4px 12px;
+      background: #0d1117;
+      border-top: 1px solid #30363d;
+    }
+
+    .edit-section-header:first-child {
+      border-top: none;
+    }
+
+    .edit-section.context {
+      background: #0d1117;
+      color: #8b949e;
+    }
+
+    .edit-section.old-lines {
+      background: #3d1f1f;
+      color: #ffa198;
+    }
+
+    .edit-section.new-lines {
+      background: #1f3d1f;
+      color: #7ee787;
+    }
+
+    .edit-block-error {
+      padding: 8px 12px;
+      background: #3d1f1f;
+      color: #ffa198;
+      font-size: 12px;
+      border-top: 1px solid #da3633;
+    }
+
+    .edit-block-line-info {
+      font-size: 11px;
+      color: #6e7681;
+      margin-left: 8px;
     }
 
     .code-wrapper {
@@ -107,6 +212,7 @@ export class CardMarkdown extends LitElement {
     this.content = '';
     this.role = 'assistant';
     this.mentionedFiles = [];
+    this.editResults = [];
     this._codeScrollPositions = new Map();
     
     marked.setOptions({
@@ -128,6 +234,17 @@ export class CardMarkdown extends LitElement {
       return this.escapeHtml(this.content).replace(/\n/g, '<br>');
     }
     
+    // Check if content contains edit blocks
+    const hasEditBlocks = this.content.includes('««« EDIT');
+    
+    if (hasEditBlocks) {
+      // Parse edit blocks and process markdown separately
+      let processed = this.processContentWithEditBlocks(this.content);
+      processed = this.wrapCodeBlocksWithCopyButton(processed);
+      processed = this.highlightFileMentions(processed);
+      return processed;
+    }
+    
     // Pre-process to protect search/replace markers from markdown parsing
     let content = this.protectSearchReplaceBlocks(this.content);
     
@@ -140,6 +257,226 @@ export class CardMarkdown extends LitElement {
   protectSearchReplaceBlocks(content) {
     // Pass through content unchanged - let markdown handle it naturally
     return content;
+  }
+
+  /**
+   * Parse edit blocks from content and return structured data.
+   * Format: file.py\n««« EDIT\n...\n═══════ REPL\n...\n»»» EDIT END
+   */
+  parseEditBlocks(content) {
+    const blocks = [];
+    const lines = content.split('\n');
+    
+    let state = 'IDLE';
+    let currentBlock = null;
+    let potentialPath = null;
+    let editLines = [];
+    let replLines = [];
+    let blockStartIndex = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      
+      if (state === 'IDLE') {
+        if (trimmed && !trimmed.startsWith('```') && !trimmed.startsWith('#')) {
+          potentialPath = trimmed;
+          state = 'EXPECT_START';
+        }
+      } else if (state === 'EXPECT_START') {
+        if (trimmed === '««« EDIT') {
+          blockStartIndex = i - 1; // Include the file path line
+          currentBlock = { filePath: potentialPath, startIndex: blockStartIndex };
+          editLines = [];
+          state = 'EDIT_SECTION';
+        } else if (trimmed) {
+          potentialPath = trimmed;
+        } else {
+          state = 'IDLE';
+          potentialPath = null;
+        }
+      } else if (state === 'EDIT_SECTION') {
+        if (trimmed === '═══════ REPL') {
+          currentBlock.editLines = editLines.join('\n');
+          replLines = [];
+          state = 'REPL_SECTION';
+        } else {
+          editLines.push(line);
+        }
+      } else if (state === 'REPL_SECTION') {
+        if (trimmed === '»»» EDIT END') {
+          currentBlock.replLines = replLines.join('\n');
+          currentBlock.endIndex = i;
+          blocks.push(currentBlock);
+          state = 'IDLE';
+          currentBlock = null;
+          potentialPath = null;
+        } else {
+          replLines.push(line);
+        }
+      }
+    }
+    
+    return blocks;
+  }
+
+  /**
+   * Get edit result for a specific file path.
+   */
+  getEditResultForFile(filePath) {
+    if (!this.editResults || this.editResults.length === 0) return null;
+    return this.editResults.find(r => r.file_path === filePath);
+  }
+
+  /**
+   * Render an edit block as HTML.
+   */
+  renderEditBlock(block) {
+    const result = this.getEditResultForFile(block.filePath);
+    const status = result ? result.status : 'pending';
+    const statusLabel = status === 'applied' ? '✓ Applied' : 
+                        status === 'failed' ? '✗ Failed' : 
+                        '○ Pending';
+    
+    let errorHtml = '';
+    if (result && result.status === 'failed' && result.reason) {
+      const lineInfo = result.estimated_line ? ` (near line ${result.estimated_line})` : '';
+      errorHtml = `<div class="edit-block-error">Error: ${this.escapeHtml(result.reason)}${lineInfo}</div>`;
+    }
+    
+    const lineInfo = result && result.estimated_line 
+      ? `<span class="edit-block-line-info">line ${result.estimated_line}</span>` 
+      : '';
+    
+    // Parse edit and repl sections to identify context vs changes
+    const { contextHtml, oldHtml, newHtml, contextLines } = this.formatEditSections(block.editLines, block.replLines);
+    
+    // Use first context line or first old line as search context
+    const searchContext = contextLines.length > 0 ? contextLines[0] : 
+                          (block.editLines ? block.editLines.split('\n')[0] : '');
+    const encodedContext = this.escapeHtml(searchContext).replace(/"/g, '&quot;');
+    
+    return `
+      <div class="edit-block">
+        <div class="edit-block-header">
+          <span class="edit-block-file" data-file="${this.escapeHtml(block.filePath)}" data-context="${encodedContext}">${this.escapeHtml(block.filePath)}</span>
+          <div>
+            ${lineInfo}
+            <span class="edit-block-status ${status}">${statusLabel}</span>
+          </div>
+        </div>
+        <div class="edit-block-content">
+          ${contextHtml ? `<div class="edit-section-header">Context</div><div class="edit-section context">${contextHtml}</div>` : ''}
+          ${oldHtml ? `<div class="edit-section-header">Remove</div><div class="edit-section old-lines">${oldHtml}</div>` : ''}
+          ${newHtml ? `<div class="edit-section-header">Add</div><div class="edit-section new-lines">${newHtml}</div>` : ''}
+        </div>
+        ${errorHtml}
+      </div>
+    `;
+  }
+
+  /**
+   * Format edit sections by computing the common prefix (context).
+   */
+  formatEditSections(editContent, replContent) {
+    const editLines = editContent ? editContent.split('\n') : [];
+    const replLines = replContent ? replContent.split('\n') : [];
+    
+    // Find common prefix (context lines)
+    let commonPrefixLength = 0;
+    const minLength = Math.min(editLines.length, replLines.length);
+    
+    for (let i = 0; i < minLength; i++) {
+      if (editLines[i] === replLines[i]) {
+        commonPrefixLength++;
+      } else {
+        break;
+      }
+    }
+    
+    const contextLines = editLines.slice(0, commonPrefixLength);
+    const oldLines = editLines.slice(commonPrefixLength);
+    const newLines = replLines.slice(commonPrefixLength);
+    
+    return {
+      contextHtml: contextLines.length > 0 ? this.escapeHtml(contextLines.join('\n')) : '',
+      oldHtml: oldLines.length > 0 ? this.escapeHtml(oldLines.join('\n')) : '',
+      newHtml: newLines.length > 0 ? this.escapeHtml(newLines.join('\n')) : '',
+      contextLines: contextLines
+    };
+  }
+
+  /**
+   * Process content with edit blocks by extracting them, processing markdown
+   * on the remaining text, then reinserting rendered edit blocks.
+   */
+  processContentWithEditBlocks(content) {
+    const blocks = this.parseEditBlocks(content);
+    
+    if (blocks.length === 0) {
+      return marked.parse(content);
+    }
+    
+    // Split content into segments: text and edit blocks
+    const lines = content.split('\n');
+    const segments = [];
+    let lastEnd = 0;
+    
+    for (const block of blocks) {
+      // Text before this edit block
+      if (block.startIndex > lastEnd) {
+        const textLines = lines.slice(lastEnd, block.startIndex);
+        segments.push({ type: 'text', content: textLines.join('\n') });
+      }
+      // The edit block itself
+      segments.push({ type: 'edit', block });
+      lastEnd = block.endIndex + 1;
+    }
+    
+    // Text after the last edit block
+    if (lastEnd < lines.length) {
+      const textLines = lines.slice(lastEnd);
+      segments.push({ type: 'text', content: textLines.join('\n') });
+    }
+    
+    // Process each segment appropriately
+    let result = '';
+    for (const segment of segments) {
+      if (segment.type === 'text') {
+        result += marked.parse(segment.content);
+      } else {
+        result += this.renderEditBlock(segment.block);
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process content, replacing edit blocks with rendered versions.
+   * @deprecated Use processContentWithEditBlocks instead
+   */
+  processEditBlocks(content) {
+    const blocks = this.parseEditBlocks(content);
+    
+    if (blocks.length === 0) {
+      return content;
+    }
+    
+    // Replace edit blocks with rendered HTML, processing from end to start
+    // to preserve indices
+    const lines = content.split('\n');
+    let result = [...lines];
+    
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const block = blocks[i];
+      const renderedBlock = this.renderEditBlock(block);
+      // Replace lines from startIndex to endIndex with the rendered block
+      const numLinesToRemove = block.endIndex - block.startIndex + 1;
+      result.splice(block.startIndex, numLinesToRemove, renderedBlock);
+    }
+    
+    return result.join('\n');
   }
 
   escapeHtml(text) {
@@ -186,6 +523,26 @@ export class CardMarkdown extends LitElement {
       if (filePath) {
         this.dispatchEvent(new CustomEvent('file-mention-click', {
           detail: { path: filePath },
+          bubbles: true,
+          composed: true
+        }));
+      }
+    }
+    
+    // Handle edit block file path clicks
+    const editBlockFile = e.target.closest('.edit-block-file');
+    if (editBlockFile) {
+      const filePath = editBlockFile.dataset.file;
+      const searchContext = editBlockFile.dataset.context;
+      if (filePath) {
+        const result = this.getEditResultForFile(filePath);
+        this.dispatchEvent(new CustomEvent('edit-block-click', {
+          detail: { 
+            path: filePath,
+            line: result?.estimated_line || 1,
+            status: result?.status || 'pending',
+            searchContext: searchContext || null
+          },
           bubbles: true,
           composed: true
         }));
