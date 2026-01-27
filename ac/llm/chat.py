@@ -1,6 +1,6 @@
 import litellm as _litellm
 
-from ..edit_parser import EditParser, EditStatus
+from ..edit_parser import EditParser, EditStatus, ApplyResult
 
 REPO_MAP_HEADER = """# Repository Structure
 
@@ -103,72 +103,60 @@ class ChatMixin:
         result["edit_format"] = format_type
         
         if auto_apply and response_text:
-            if format_type in ("edit_v2", "edit_v3"):
-                # Use new anchored edit format
-                blocks = edit_parser.parse_response(response_text)
-                shell_commands = edit_parser.detect_shell_suggestions(response_text)
+            # Use v3 anchored edit format
+            blocks = edit_parser.parse_response(response_text)
+            shell_commands = edit_parser.detect_shell_suggestions(response_text)
+            
+            result["shell_commands"] = shell_commands
+            result["edit_blocks"] = [
+                {
+                    "file_path": b.file_path,
+                    "anchor": b.anchor[:100] if b.anchor else "",
+                    "old_lines": b.old_lines[:200] if b.old_lines else "",
+                    "new_lines": b.new_lines[:200] if b.new_lines else "",
+                }
+                for b in blocks
+            ]
+            
+            if blocks and not dry_run:
+                apply_result = edit_parser.apply_edits(blocks, self.repo, dry_run=dry_run)
                 
-                result["shell_commands"] = shell_commands
-                result["edit_blocks"] = [
-                    {
-                        "file_path": b.file_path,
-                        "anchor": b.anchor[:100] if b.anchor else "",
-                        "old_lines": b.old_lines[:200] if b.old_lines else "",
-                        "new_lines": b.new_lines[:200] if b.new_lines else "",
-                    }
-                    for b in blocks
+                # Convert to legacy format for compatibility
+                result["passed"] = [
+                    (r.file_path, r.old_preview, r.new_preview)
+                    for r in apply_result.results if r.status == EditStatus.APPLIED
                 ]
+                result["failed"] = [
+                    (r.file_path, r.reason, "")
+                    for r in apply_result.results if r.status == EditStatus.FAILED
+                ]
+                result["skipped"] = [
+                    (r.file_path, r.reason, "")
+                    for r in apply_result.results if r.status == EditStatus.SKIPPED
+                ]
+                result["content"] = {}
+                result["files_modified"] = apply_result.files_modified
                 
-                if blocks and not dry_run:
-                    apply_result = edit_parser.apply_edits(blocks, self.repo, dry_run=dry_run)
-                    
-                    # Convert to legacy format for compatibility
-                    result["passed"] = [
-                        (r.file_path, r.old_preview, r.new_preview)
-                        for r in apply_result.results if r.status == EditStatus.APPLIED
-                    ]
-                    result["failed"] = [
-                        (r.file_path, r.reason, "")
-                        for r in apply_result.results if r.status == EditStatus.FAILED
-                    ]
-                    result["skipped"] = [
-                        (r.file_path, r.reason, "")
-                        for r in apply_result.results if r.status == EditStatus.SKIPPED
-                    ]
-                    result["content"] = {}
-                    result["files_modified"] = apply_result.files_modified
-                    
-                    # Detailed results for UI
-                    result["edit_results"] = [
-                        {
-                            "file_path": r.file_path,
-                            "status": r.status.value,
-                            "reason": r.reason,
-                            "estimated_line": r.estimated_line,
-                            "anchor_preview": r.anchor_preview,
-                            "old_preview": r.old_preview,
-                            "new_preview": r.new_preview,
-                        }
-                        for r in apply_result.results
-                    ]
-                else:
-                    result["passed"] = []
-                    result["failed"] = []
-                    result["skipped"] = []
-                    result["content"] = {}
-                    result["files_modified"] = []
-                    result["edit_results"] = []
-                    
-            elif format_type == "search_replace":
-                # Use legacy aider format - apply edits
-                file_edits = result.get("file_edits", [])
-                if file_edits and not dry_run:
-                    apply_result = aider_chat.apply_edits(file_edits, dry_run=dry_run)
-                    result.update(apply_result)
-                else:
-                    result["passed"] = []
-                    result["failed"] = []
-                    result["content"] = {}
+                # Detailed results for UI
+                result["edit_results"] = [
+                    {
+                        "file_path": r.file_path,
+                        "status": r.status.value,
+                        "reason": r.reason,
+                        "estimated_line": r.estimated_line,
+                        "anchor_preview": r.anchor_preview,
+                        "old_preview": r.old_preview,
+                        "new_preview": r.new_preview,
+                    }
+                    for r in apply_result.results
+                ]
+            else:
+                result["passed"] = []
+                result["failed"] = []
+                result["skipped"] = []
+                result["content"] = {}
+                result["files_modified"] = []
+                result["edit_results"] = []
         
         result["summarized"] = summarized
         result["token_usage"] = self.get_token_usage()

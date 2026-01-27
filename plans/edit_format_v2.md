@@ -12,18 +12,53 @@ The v3 format uses a simpler approach: the anchor is **computed automatically** 
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 1: Core Parser | ✅ COMPLETE | `ac/edit_parser.py` with full test coverage |
-| Phase 2: Backend Integration | ✅ COMPLETE | Used by `chat.py`, `llm.py`, `streaming.py` |
+| Phase 2: Backend Integration | ✅ COMPLETE | Used by `chat.py`, `streaming.py` |
 | Phase 3: Prompt Update | ✅ COMPLETE | System prompt uses v3 format |
-| Phase 4: Frontend Updates | ❌ NOT STARTED | See detailed tasks below |
-| Phase 5: Cleanup | ❌ NOT STARTED | See detailed tasks below |
+| Phase 4: Frontend Updates | 🔄 PARTIAL | `CardMarkdown.js` needs update for v3 markers |
+| Phase 5: Cleanup | ✅ COMPLETE | Old v2 anchor format removed |
 
-## Format Syntax (V3 - Implemented)
+## What's Done
 
-```
-path/to/file.ext
-««« EDIT
-[context lines - copied verbatim from file, appear in BOTH sections]
-[old lines to be replaced]
+### Core Parser (`ac/edit_parser.py`)
+- ✅ `EditParser` class with v3 format parsing
+- ✅ `_compute_common_prefix()` - derives anchor from matching lines
+- ✅ `validate_block()` - checks anchor+old exists in file
+- ✅ `apply_block()` / `apply_edits()` - applies changes to files
+- ✅ `detect_format()` - identifies v3 blocks
+- ✅ `detect_shell_suggestions()` - extracts git commands
+- ✅ Full test coverage in `tests/test_edit_parser.py`
+
+### Backend Integration
+- ✅ `ac/llm/chat.py` - `ChatMixin.chat()` uses `EditParser`
+- ✅ `ac/llm/streaming.py` - `StreamingMixin._stream_chat()` uses `EditParser`
+- ✅ Returns structured `EditResult` objects with status, line numbers
+- ✅ Legacy format compatibility (`passed`, `failed`, `skipped` tuples)
+
+### Prompt System
+- ✅ System prompt teaches v3 format (in `sys_prompt.md`)
+- ✅ Examples updated in `example_messages.py`
+
+## Remaining Work
+
+### Phase 4: Frontend Updates
+
+**`webapp/src/prompt/CardMarkdown.js`**
+- [ ] Update `parseEditBlocks()` to recognize v3 markers (`««« EDIT`, `═══════ REPL`, `»»» EDIT END`)
+- [ ] Update `protectSearchReplaceBlocks()` for v3 format
+- [ ] Display computed anchor vs old/new lines distinction
+- [ ] Show edit status indicators (applied/failed/skipped) inline
+
+**`webapp/src/PromptView.js`**
+- [ ] Handle `edit_results` array from streaming response
+- [ ] Display per-block status with estimated line numbers
+- [ ] Click-to-navigate to failed edit location in diff viewer
+
+**`webapp/src/diff-viewer/DiffViewer.js`**
+- [ ] `_revealPosition()` already exists - verify it works with edit results
+- [ ] Add highlight styling for failed edit regions
+
+[context lines - same as above, repeated verbatim]
+[new lines replacing the old]
 ═══════ REPL
 [context lines - same as above, repeated verbatim]
 [new lines replacing the old]
@@ -88,93 +123,21 @@ The parser uses a line-by-line state machine to handle the nested marker structu
 - A line containing `x ═══════ y` is NOT a marker - it's content
 - Empty lines within sections are preserved as content
 
-## Empty Section Handling
+## Section Handling in V3
 
-Each section (leading anchor, old lines, new lines, trailing anchor) can be empty. Empty means zero lines between the markers.
+In v3, there are only two explicit sections (EDIT and REPL). The anchor is derived from their common prefix.
 
-### Examples of Empty Sections
+### How Different Operations Work
 
-**Empty leading anchor** (insert at match location):
+**Modification** (anchor + old → anchor + new):
 ```
 file.py
 ««« EDIT
-───────
-old content to remove
-═══════
-new content
-───────
-trailing context
-»»»
-```
-Here, `───────` immediately follows `««« EDIT` with no lines between.
-
-**Empty old lines** (pure insertion):
-```
-file.py
-««« EDIT
-leading context
-───────
-═══════
-inserted content
-───────
-trailing context
-»»»
-```
-Here, `═══════` immediately follows the first `───────`.
-
-**Empty new lines** (pure deletion):
-```
-file.py
-««« EDIT
-leading context
-───────
-content to delete
-═══════
-───────
-trailing context
-»»»
-```
-
-**Empty trailing anchor** (change at end of file):
-```
-file.py
-««« EDIT
-leading context
-───────
-old ending
-═══════
-new ending
-───────
-»»»
-```
-Here, `»»»` immediately follows the second `───────`.
-
-**All empty except new lines** (new file creation):
-```
-newfile.py
-««« EDIT
-───────
-═══════
-file content here
-───────
-»»»
-```
-
-### Internal Representation
-
-In `EditBlock`, empty sections are stored as empty strings `""`, not `None`:
-
-```python
-@dataclass
-class EditBlock:
-    file_path: str
-    leading_anchor: str   # "" if empty, never None
-    old_lines: str        # "" if empty, never None  
-    new_lines: str        # "" if empty, never None
-    trailing_anchor: str  # "" if empty, never None
-    raw_block: str
-    line_number: int
-```
+def multiply(a, b):
+    return a + b  # BUG
+═══════ REPL
+def multiply(a, b):
+    return a * b
 
 ## Examples
 
@@ -184,597 +147,78 @@ class EditBlock:
 src/math.py
 ««« EDIT
 def multiply(a, b):
-───────
-    return a + b  # BUG: should multiply
-═══════
+    return a + b  # BUG
+═══════ REPL
+def multiply(a, b):
     return a * b
-───────
 
-def other_function():
-»»»
-```
+## Implementation Status
 
-**Explanation:**
-- Leading anchor: `def multiply(a, b):`
-- Old lines: `    return a + b  # BUG: should multiply`
-- New lines: `    return a * b`
-- Trailing anchor: (empty line) + `def other_function():`
+### ✅ Phase 1: Core Parser (COMPLETE)
 
-### Insert new code (empty old lines)
+**File:** `ac/edit_parser.py`
 
-```
-src/utils.py
-««« EDIT
-def existing():
-    pass
-───────
-═══════
+The parser is fully implemented with:
+- `EditParser` class with v3 format (common prefix computation)
+- `EditBlock` dataclass with `anchor`, `old_lines`, `new_lines` fields
+- `EditResult` and `ApplyResult` for structured results
+- `_compute_common_prefix()` derives anchor automatically
+- `validate_block()` checks anchor+old exists uniquely in file
+- `apply_block()` / `apply_edits()` applies changes
+- `detect_format()` identifies v3 blocks
+- `detect_shell_suggestions()` extracts git commands
+- Full test coverage in `tests/test_edit_parser.py`
 
-def new_function():
-    return 42
+### ✅ Phase 2: Backend Integration (COMPLETE)
 
-───────
-def another():
-»»»
-```
+**Files modified:**
+- `ac/llm/chat.py` - `ChatMixin.chat()` uses `EditParser`
+- `ac/llm/streaming.py` - `StreamingMixin._stream_chat()` uses `EditParser`
 
-### Delete code (empty new lines)
+Both return structured results:
+- `edit_results`: List of per-block status with line numbers
+- `passed`/`failed`/`skipped`: Legacy tuple format for compatibility
+- `files_modified`: List of changed file paths
 
-```
-src/utils.py
-««« EDIT
-def main():
-───────
-    deprecated_call()
-═══════
-───────
-    important_call()
-»»»
-```
+### ✅ Phase 3: Prompt Update (COMPLETE)
 
-### Create new file (all anchors empty)
+- System prompt (`sys_prompt.md`) teaches v3 format
+- Example messages updated to use v3 format
+- No dual-format detection needed - v3 only
 
-```
-src/newmodule.py
-««« EDIT
-───────
-═══════
-"""New module."""
+### 🔄 Phase 4: Frontend Updates (PARTIAL)
 
-def hello():
-    print("Hello!")
-───────
-»»»
-```
+**`webapp/src/prompt/CardMarkdown.js`** - needs update:
+- [ ] Update `parseEditBlocks()` to detect v3 markers
+- [ ] Update regex/parsing for `««« EDIT`, `═══════ REPL`, `»»» EDIT END`
+- [ ] Display edit status from `editResults` prop
 
-### Append to end of file (empty trailing anchor)
+**`webapp/src/PromptView.js`** - partially done:
+- [x] Receives `edit_results` from streaming response
+- [ ] Pass results to CardMarkdown for display
+- [ ] Click handler for navigating to edit location
 
-```
-src/utils.py
-««« EDIT
-    return final_value
-───────
-═══════
+**`webapp/src/diff-viewer/DiffViewer.js`** - mostly done:
+- [x] `_revealPosition()` exists for line navigation
+- [x] `_highlightLine()` for visual feedback
+- [ ] Wire up edit result click → diff viewer navigation
 
-def appended_function():
-    pass
-───────
-»»»
-```
+### ✅ Phase 5: Cleanup (COMPLETE)
 
-### Insert at start of file (empty leading anchor)
-
-```
-src/utils.py
-««« EDIT
-───────
-═══════
-"""Module docstring."""
-
-───────
-import os
-»»»
-```
-
-### Delete file
-
-Suggest shell command: `git rm path/to/file.py`
-
-## Implementation Plan
-
-### Phase 1: Core Parser
-
-**New file:** `ac/edit_parser.py`
-
-```python
-from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
-from pathlib import Path
-import re
-
-class EditStatus(Enum):
-    APPLIED = "applied"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-
-@dataclass
-class EditBlock:
-    file_path: str
-    leading_anchor: str   # "" if empty, never None
-    old_lines: str        # "" if empty, never None
-    new_lines: str        # "" if empty, never None
-    trailing_anchor: str  # "" if empty, never None
-    raw_block: str        # Original text for error reporting
-    line_number: int      # Line number in response where block started
-
-@dataclass  
-class EditResult:
-    file_path: str
-    status: EditStatus
-    reason: Optional[str]  # None if applied, error message if failed/skipped
-    anchor_preview: str    # First line of leading anchor for UI display
-    old_preview: str       # First line of old_lines for UI display
-    new_preview: str       # First line of new_lines for UI display
-    block: EditBlock       # Original block for reference
-    estimated_line: Optional[int]  # Approximate line number in file where edit was targeted
-
-@dataclass
-class ApplyResult:
-    results: list[EditResult]
-    files_modified: list[str]      # Paths of files that were changed
-    shell_suggestions: list[str]   # Detected shell command suggestions
-
-class EditParser:
-    """Parser for the anchored edit block format."""
-    
-    EDIT_START = "««« EDIT"
-    ANCHOR_SEPARATOR = "───────"
-    CONTENT_SEPARATOR = "═══════"
-    EDIT_END = "»»»"
-    
-    def parse_response(self, response_text: str) -> list[EditBlock]:
-        """
-        Extract all edit blocks from LLM response.
-        
-        Handles:
-        - Multiple blocks in one response
-        - Blocks surrounded by markdown/explanation text
-        - File paths with spaces (path is entire line before EDIT_START)
-        
-        Skips malformed blocks (missing markers, unclosed blocks) and continues
-        parsing. Never raises exceptions for parse errors.
-        """
-        blocks = []
-        lines = response_text.split('\n')
-        
-        state = 'IDLE'
-        potential_path = None
-        current_block_start_line = 0
-        leading_anchor_lines = []
-        old_lines_list = []
-        new_lines_list = []
-        trailing_anchor_lines = []
-        
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            
-            if state == 'IDLE':
-                if stripped:  # Non-empty line could be file path
-                    potential_path = stripped
-                    state = 'EXPECT_START'
-                    
-            elif state == 'EXPECT_START':
-                if stripped == self.EDIT_START:
-                    if potential_path:  # Valid file path stored
-                        state = 'LEADING_ANCHOR'
-                        current_block_start_line = i + 1  # 1-indexed
-                        leading_anchor_lines = []
-                    else:
-                        state = 'IDLE'  # No path, skip this block
-                elif stripped:
-                    potential_path = stripped  # Update potential path
-                # Empty line: keep waiting
-                    
-            elif state == 'LEADING_ANCHOR':
-                if stripped == self.ANCHOR_SEPARATOR:
-                    state = 'OLD_LINES'
-                    old_lines_list = []
-                else:
-                    leading_anchor_lines.append(line)  # Preserve original line
-                    
-            elif state == 'OLD_LINES':
-                if stripped == self.CONTENT_SEPARATOR:
-                    state = 'NEW_LINES'
-                    new_lines_list = []
-                else:
-                    old_lines_list.append(line)
-                    
-            elif state == 'NEW_LINES':
-                if stripped == self.ANCHOR_SEPARATOR:
-                    state = 'TRAILING_ANCHOR'
-                    trailing_anchor_lines = []
-                else:
-                    new_lines_list.append(line)
-                    
-            elif state == 'TRAILING_ANCHOR':
-                if stripped == self.EDIT_END:
-                    # Complete block - emit it
-                    blocks.append(EditBlock(
-                        file_path=potential_path,
-                        leading_anchor='\n'.join(leading_anchor_lines),
-                        old_lines='\n'.join(old_lines_list),
-                        new_lines='\n'.join(new_lines_list),
-                        trailing_anchor='\n'.join(trailing_anchor_lines),
-                        raw_block=self._extract_raw_block(lines, current_block_start_line, i),
-                        line_number=current_block_start_line
-                    ))
-                    state = 'IDLE'
-                    potential_path = None
-                else:
-                    trailing_anchor_lines.append(line)
-        
-        # If we end in a non-IDLE state, the last block was malformed - discard it
-        return blocks
-
-    def _extract_raw_block(self, lines: list[str], start: int, end: int) -> str:
-        """Extract raw block text for error reporting."""
-        # start is 1-indexed, end is 0-indexed current position
-        return '\n'.join(lines[start-1:end+1])
-        
-    def validate_block(self, block: EditBlock, file_content: str) -> tuple[Optional[str], Optional[int]]:
-        """
-        Validate block against file content.
-        
-        Returns:
-            (error_message, estimated_line) - error_message is None if valid,
-            estimated_line is approximate location in file (for error reporting)
-        """
-        content = self._normalize(file_content)
-        leading = self._normalize(block.leading_anchor)
-        old = self._normalize(block.old_lines)
-        trailing = self._normalize(block.trailing_anchor)
-        
-        # Handle new file creation: all sections empty
-        is_new_file = not leading and not old and not trailing
-        if is_new_file:
-            return (None, None)
-        
-        # Build expected sequence that must exist contiguously
-        expected_sequence = leading + old + trailing
-        
-        if not expected_sequence:
-            return (None, None)
-        
-        # Find the sequence in file
-        pos = content.find(expected_sequence)
-        
-        if pos == -1:
-            # Determine which part failed for better error message
-            if leading:
-                anchor_pos = content.find(leading)
-                if anchor_pos == -1:
-                    first_anchor_line = leading.split('\n')[0] if leading else ''
-                    hint_pos = content.find(first_anchor_line) if first_anchor_line else -1
-                    hint_line = self._find_line_number(content, hint_pos) if hint_pos != -1 else None
-                    return (f"Leading anchor not found in file", hint_line)
-                
-                after_anchor = content[anchor_pos + len(leading):]
-                line_after_anchor = self._find_line_number(content, anchor_pos + len(leading))
-                
-                if old and not after_anchor.startswith(old):
-                    return (f"Old lines don't match content after anchor", line_after_anchor)
-                
-                if old:
-                    after_old = after_anchor[len(old):]
-                    if trailing and not after_old.startswith(trailing):
-                        line_after_old = self._find_line_number(content, anchor_pos + len(leading) + len(old))
-                        return (f"Trailing anchor not found after old lines", line_after_old)
-            else:
-                if old:
-                    old_pos = content.find(old)
-                    if old_pos == -1:
-                        return (f"Old lines not found in file", None)
-                    line_at_old = self._find_line_number(content, old_pos)
-                    if trailing:
-                        after_old = content[old_pos + len(old):]
-                        if not after_old.startswith(trailing):
-                            return (f"Trailing anchor not found after old lines", line_at_old)
-            
-            return (f"Content sequence not found in file", None)
-        
-        # Check for multiple matches (ambiguous)
-        second_pos = content.find(expected_sequence, pos + 1)
-        if second_pos != -1:
-            line1 = self._find_line_number(content, pos)
-            line2 = self._find_line_number(content, second_pos)
-            return (f"Edit location is ambiguous (matches at lines {line1} and {line2})", line1)
-        
-        return (None, self._find_line_number(content, pos))
-        
-    def apply_block(self, block: EditBlock, file_content: str) -> tuple[str, EditResult]:
-        """
-        Apply single block to content.
-        
-        Returns:
-            (new_content, result) - new_content is unchanged if result.status != APPLIED
-        """
-        error, estimated_line = self.validate_block(block, file_content)
-        
-        def make_result(status: EditStatus, reason: Optional[str] = None) -> EditResult:
-            return EditResult(
-                file_path=block.file_path,
-                status=status,
-                reason=reason,
-                anchor_preview=(block.leading_anchor.split('\n')[0][:50] 
-                              if block.leading_anchor else ""),
-                old_preview=(block.old_lines.split('\n')[0][:50] 
-                            if block.old_lines else ""),
-                new_preview=(block.new_lines.split('\n')[0][:50] 
-                            if block.new_lines else ""),
-                block=block,
-                estimated_line=estimated_line
-            )
-        
-        if error:
-            return file_content, make_result(EditStatus.FAILED, error)
-        
-        # Normalize
-        content = self._normalize(file_content)
-        leading = self._normalize(block.leading_anchor)
-        old = self._normalize(block.old_lines)
-        new = self._normalize(block.new_lines)
-        trailing = self._normalize(block.trailing_anchor)
-        
-        # Construct old and new sequences
-        old_sequence = leading + old + trailing
-        new_sequence = leading + new + trailing
-        
-        if old_sequence:
-            new_content = content.replace(old_sequence, new_sequence, 1)
-        else:
-            # New file creation
-            new_content = new
-        
-        new_content = self._ensure_trailing_newline(new_content)
-        
-        return new_content, make_result(EditStatus.APPLIED)
-        
-    def apply_edits(
-        self, 
-        blocks: list[EditBlock], 
-        repo,
-        dry_run: bool = False,
-        auto_stage: bool = True
-    ) -> ApplyResult:
-        """
-        Apply all blocks to files.
-        
-        Args:
-            blocks: Edit blocks to apply
-            repo: Repository object for file access
-            dry_run: If True, validate but don't write to disk
-            auto_stage: If True, git add modified files after writing
-            
-        Returns:
-            ApplyResult with per-block results and summary
-        """
-        results: list[EditResult] = []
-        files_modified: list[str] = []
-        failed_files: set[str] = set()
-        
-        # Track file contents for sequential edits
-        file_contents: dict[str, str] = {}
-        
-        for block in blocks:
-            file_path = block.file_path
-            
-            # Skip if previous edit to this file failed
-            if file_path in failed_files:
-                results.append(EditResult(
-                    file_path=file_path,
-                    status=EditStatus.SKIPPED,
-                    reason="Previous edit to this file failed",
-                    anchor_preview=(block.leading_anchor.split('\n')[0][:50] 
-                                  if block.leading_anchor else ""),
-                    old_preview=(block.old_lines.split('\n')[0][:50] 
-                                if block.old_lines else ""),
-                    new_preview=(block.new_lines.split('\n')[0][:50] 
-                                if block.new_lines else ""),
-                    block=block,
-                    estimated_line=None
-                ))
-                continue
-            
-            # Check for binary file
-            if self.is_binary_file(file_path, repo):
-                results.append(EditResult(
-                    file_path=file_path,
-                    status=EditStatus.FAILED,
-                    reason="Cannot edit binary file",
-                    anchor_preview="",
-                    old_preview="",
-                    new_preview="",
-                    block=block,
-                    estimated_line=None
-                ))
-                failed_files.add(file_path)
-                continue
-            
-            # Get current content (from cache or disk)
-            if file_path in file_contents:
-                content = file_contents[file_path]
-            else:
-                is_new_file = (not block.leading_anchor and 
-                             not block.old_lines and 
-                             not block.trailing_anchor)
-                if is_new_file:
-                    content = ""
-                else:
-                    try:
-                        content = repo.get_file_content(file_path)
-                    except FileNotFoundError:
-                        results.append(EditResult(
-                            file_path=file_path,
-                            status=EditStatus.FAILED,
-                            reason=f"File not found: {file_path}",
-                            anchor_preview=(block.leading_anchor.split('\n')[0][:50] 
-                                          if block.leading_anchor else ""),
-                            old_preview="",
-                            new_preview="",
-                            block=block,
-                            estimated_line=None
-                        ))
-                        failed_files.add(file_path)
-                        continue
-            
-            # Apply the edit
-            new_content, result = self.apply_block(block, content)
-            results.append(result)
-            
-            if result.status == EditStatus.APPLIED:
-                file_contents[file_path] = new_content
-                if file_path not in files_modified:
-                    files_modified.append(file_path)
-            else:
-                failed_files.add(file_path)
-        
-        # Write files if not dry run
-        if not dry_run:
-            for file_path in files_modified:
-                content = file_contents[file_path]
-                repo.write_file(file_path, content)
-            
-            if auto_stage and files_modified:
-                repo.stage_files(files_modified)
-        
-        return ApplyResult(
-            results=results,
-            files_modified=files_modified,
-            shell_suggestions=[]  # Populated by caller from response text
-        )
-        
-    def is_binary_file(self, file_path: str, repo) -> bool:
-        """Check if file is binary using git's detection or heuristics."""
-        return repo.is_binary_file(file_path)
-        
-    def detect_shell_suggestions(self, response_text: str) -> list[str]:
-        """Extract shell command suggestions from response."""
-        patterns = [
-            r'`(git rm [^`]+)`',
-            r'`(git mv [^`]+)`',
-            r'`(mkdir -p [^`]+)`',
-            r'`(rm -rf [^`]+)`',
-        ]
-        suggestions = []
-        for pattern in patterns:
-            suggestions.extend(re.findall(pattern, response_text))
-        return suggestions
-    
-    def _normalize(self, text: str) -> str:
-        """Normalize line endings only. Preserves all other whitespace."""
-        return text.replace('\r\n', '\n')
-
-    def _ensure_trailing_newline(self, text: str) -> str:
-        """Ensure text ends with exactly one newline."""
-        text = text.rstrip('\n')
-        return text + '\n' if text else ''
-
-    def _find_line_number(self, content: str, position: int) -> int:
-        """Convert character position to line number (1-indexed)."""
-        return content[:position].count('\n') + 1
-```
-
-### Phase 2: Integration
-
-**Relationship to Existing Code:**
-
-The new `EditParser` replaces functionality currently in `ac/aider_integration/edit_applier_mixin.py`.
-
-```
-CURRENT FLOW:
-  LLM Response 
-    → AiderEditor.parse_response() [edit_applier_mixin.py]
-    → AiderEditor.apply_edits() [edit_applier_mixin.py]
-    → Files modified
-
-NEW FLOW:
-  LLM Response
-    → EditParser.parse_response() [edit_parser.py]
-    → EditParser.apply_edits() [edit_parser.py]
-    → Files modified
-```
-
-**Modify:** `ac/llm/llm.py`
-- Add method to use new `EditParser`
-- Replace calls to aider's edit applier
-- Import and instantiate `EditParser`
-
-**Modify:** `ac/llm/streaming.py`
-- Update `_stream_chat` to use new parser
-- Return structured `EditResult` list
-- Replace aider edit parsing with `EditParser`
-
-**Modify:** `ac/llm/chat.py`  
-- Update `chat()` method to use new parser
-- `ChatMixin.chat()` currently calls `self.get_aider_chat().apply_edits()`
-- Change to: `EditParser().apply_edits()`
-
-**Modify:** `ac/aider_integration/request_mixin.py`
-- `RequestMixin.apply_edits()` delegates to `self.editor.apply_edits()`
-- Redirect to new `EditParser` or keep as thin wrapper
-
-**Keep during transition:** `ac/aider_integration/edit_applier_mixin.py`
-- Retained for dual-format support during migration
-- Remove in Phase 5 cleanup
-
-### Phase 3: Prompt Update
-
-**Update:** `ac/aider_integration/prompts/sys_prompt.md`
-- Replace SEARCH/REPLACE instructions with new EDIT format
-- Add examples for each operation type
-- Emphasize exact matching requirement
-- Document shell command suggestions for file operations
-
-The system prompt is loaded from `ac/aider_integration/prompts/sys_prompt.md` via:
-1. `PromptMixin._init_prompts()` calls `_load_prompt_file("sys_prompt.md")`
-2. This populates `EditBlockPrompts.main_system`
-3. Used in `_get_system_prompt()` method
-
-**Modify:** `ac/aider_integration/prompts/__init__.py`
-- Update any format-specific constants (e.g., `SEARCH_REPLACE_INSTRUCTIONS`)
-- No code changes needed for prompt loading - it's already dynamic
-
-**Modify:** `ac/aider_integration/prompts/example_messages.py`
-- Update all examples to use new EDIT format
-- Ensure examples cover: modify, insert, delete, create new file
-
-### Phase 4: Frontend Updates
-
-**Modify:** `webapp/src/prompt/CardMarkdown.js`
-- Update block detection to recognize new format
-- Parse edit blocks for inline status display
-- Show success/failure indicators per block
-
-**Modify:** `webapp/src/PromptView.js`
-- Add optional slide-out panel for edit summary
-- Handle click-to-diff-editor navigation
-- Display edit results from response
-
-**Modify:** `webapp/src/diff-viewer/DiffViewer.js`
-- Add method to highlight specific line/region
-- Support jumping to failed edit location
+- Old v2 anchor-separator format (`───────`) removed
+- `edit_applier_mixin.py` still exists but unused by main flow
+- Parser only handles v3 common-prefix format
 
 
 ## Error Messages
 
 | Error | Meaning | User Action |
 |-------|---------|-------------|
-| `Leading anchor not found in file` | File changed or LLM hallucinated content | Refresh context, retry |
+| `Anchor not found in file` | Context lines don't exist in file | LLM hallucinated or file changed - refresh context |
 | `Edit location is ambiguous (matches at lines X and Y)` | Anchor appears multiple times | LLM needs more unique context lines |
-| `Old lines don't match content after anchor` | Content between anchors changed | Refresh context, retry |
-| `Trailing anchor not found after old lines` | File structure changed | Refresh context, retry |
-| `File not found: {path}` | Path doesn't exist (and not a create operation) | Check path spelling |
+| `Old lines don't match content after anchor` | Lines after anchor differ from expected | File changed since context was loaded |
+| `Content sequence not found in file` | Combined anchor+old not found | Refresh file context, retry |
+| `File not found: {path}` | Path doesn't exist (not a create operation) | Check path spelling |
 | `Cannot edit binary file` | File detected as binary | Use shell commands instead |
 | `Previous edit to this file failed` | Earlier edit block to same file failed | Fix the earlier edit first |
 
@@ -786,15 +230,16 @@ The parser handles these edge cases gracefully:
 |------|----------|
 | File path with spaces | Entire line before `««« EDIT` is treated as path (trimmed) |
 | Empty or whitespace-only path | Block is skipped, parsing continues |
-| Unclosed block (no `»»»`) | Block is skipped, parsing continues |
-| Missing internal markers | Block is skipped, parsing continues |
-| Markers not at line start | Not recognized as markers (content containing `───────` mid-line is safe) |
+| Unclosed block (no `»»» EDIT END`) | Block is skipped, parsing continues |
+| Missing `═══════ REPL` separator | Block is skipped, parsing continues |
+| Markers mid-line | Not recognized (e.g., `x ═══════ REPL y` is content) |
 | Nested blocks | Outer block parsed; inner markers treated as content |
 | Empty response | Returns empty list |
 | No edit blocks in response | Returns empty list |
-| Malformed UTF-8 | Attempt decode with `errors='replace'`, log warning |
+| All lines match (100% common prefix) | Empty old_lines, entire content is anchor |
+| No lines match (0% common prefix) | Empty anchor, all lines are old/new |
 
-## Migration Strategy
+## Next Steps
 
 ### The Atomic Switchover Problem
 

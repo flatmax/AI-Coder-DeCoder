@@ -453,13 +453,10 @@ class EditParser:
 
         Returns:
             'edit_v3' for EDIT/REPL format,
-            'search_replace' for old format,
             'none' if no edits
         """
         if self.EDIT_START in response_text and self.REPL_SEPARATOR in response_text:
             return "edit_v3"
-        elif "<<<<<<< SEARCH" in response_text:
-            return "search_replace"
         return "none"
 
     def _normalize(self, text: str) -> str:

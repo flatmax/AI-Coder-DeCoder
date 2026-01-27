@@ -127,7 +127,7 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
 
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
-    
+
     const userContent = this.inputValue;
     const imagesToSend = this.getImagesForSend();
     const imagesToStore = this.pastedImages.length > 0 ? [...this.pastedImages] : null;

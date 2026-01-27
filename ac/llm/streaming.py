@@ -46,11 +46,11 @@ class StreamingMixin:
                        use_smaller_model=False, dry_run=False, use_repo_map=True):
         """
         Send a chat message with streaming response.
-        
+
         The response will be streamed via callbacks to the client:
         - PromptView.streamChunk(request_id, content) - accumulated content
         - PromptView.streamComplete(request_id, result) - final result with edits
-        
+
         Args:
             request_id: Unique ID for this request (for correlating callbacks)
             user_prompt: The user's message
@@ -59,7 +59,7 @@ class StreamingMixin:
             use_smaller_model: Whether to use the smaller/faster model
             dry_run: If True, don't write changes to disk
             use_repo_map: If True, include intelligent repo map in context
-        
+
         Returns:
             Dict with status: "started" or error
         """
@@ -75,7 +75,7 @@ class StreamingMixin:
             request_id, user_prompt, file_paths, images,
             use_smaller_model, dry_run, use_repo_map
         ))
-        
+
         return {"status": "started", "request_id": request_id}
     
     async def _stream_chat(self, request_id, user_prompt, file_paths, images,
@@ -160,95 +160,71 @@ class StreamingMixin:
             # Print token usage HUD
             self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
             
-            # Parse and apply edits using dual-format detection
+            # Parse and apply edits using v3 format
             edit_parser = EditParser()
-            format_type = edit_parser.detect_format(full_content)
             
             result = {
                 "response": full_content,
                 "summarized": summarized,
                 "token_usage": self.get_token_usage(),
-                "edit_format": format_type
+                "edit_format": "edit_v3"
             }
             
-            if format_type in ("edit_v2", "edit_v3"):
-                # Use new anchored edit format
-                blocks = edit_parser.parse_response(full_content)
-                shell_commands = edit_parser.detect_shell_suggestions(full_content)
+            # Use v3 anchored edit format
+            blocks = edit_parser.parse_response(full_content)
+            shell_commands = edit_parser.detect_shell_suggestions(full_content)
+            
+            result["shell_commands"] = shell_commands
+            result["file_edits"] = []  # Legacy format for compatibility
+            result["edit_blocks"] = [
+                {
+                    "file_path": b.file_path,
+                    "anchor": b.anchor[:100] if b.anchor else "",
+                    "old_lines": b.old_lines[:200] if b.old_lines else "",
+                    "new_lines": b.new_lines[:200] if b.new_lines else "",
+                }
+                for b in blocks
+            ]
+            
+            if blocks and not dry_run:
+                apply_result = edit_parser.apply_edits(blocks, self.repo, dry_run=dry_run)
                 
-                result["shell_commands"] = shell_commands
-                result["file_edits"] = []  # Legacy format for compatibility
-                result["edit_blocks"] = [
-                    {
-                        "file_path": b.file_path,
-                        "anchor": b.anchor[:100] if b.anchor else "",
-                        "old_lines": b.old_lines[:200] if b.old_lines else "",
-                        "new_lines": b.new_lines[:200] if b.new_lines else "",
-                    }
-                    for b in blocks
+                # Convert to legacy format for compatibility
+                result["passed"] = [
+                    (r.file_path, r.old_preview, r.new_preview)
+                    for r in apply_result.results if r.status == EditStatus.APPLIED
                 ]
+                result["failed"] = [
+                    (r.file_path, r.reason, "")
+                    for r in apply_result.results if r.status == EditStatus.FAILED
+                ]
+                result["skipped"] = [
+                    (r.file_path, r.reason, "")
+                    for r in apply_result.results if r.status == EditStatus.SKIPPED
+                ]
+                result["content"] = {}  # New parser writes directly
+                result["files_modified"] = apply_result.files_modified
                 
-                if blocks and not dry_run:
-                    apply_result = edit_parser.apply_edits(blocks, self.repo, dry_run=dry_run)
-                    
-                    # Convert to legacy format for compatibility
-                    result["passed"] = [
-                        (r.file_path, r.old_preview, r.new_preview)
-                        for r in apply_result.results if r.status == EditStatus.APPLIED
-                    ]
-                    result["failed"] = [
-                        (r.file_path, r.reason, "")
-                        for r in apply_result.results if r.status == EditStatus.FAILED
-                    ]
-                    result["skipped"] = [
-                        (r.file_path, r.reason, "")
-                        for r in apply_result.results if r.status == EditStatus.SKIPPED
-                    ]
-                    result["content"] = {}  # New parser writes directly
-                    result["files_modified"] = apply_result.files_modified
-                    
-                    # Detailed results for UI
-                    result["edit_results"] = [
-                        {
-                            "file_path": r.file_path,
-                            "status": r.status.value,
-                            "reason": r.reason,
-                            "estimated_line": r.estimated_line,
-                            "anchor_preview": r.anchor_preview,
-                            "old_preview": r.old_preview,
-                            "new_preview": r.new_preview,
-                        }
-                        for r in apply_result.results
-                    ]
-                else:
-                    result["passed"] = []
-                    result["failed"] = []
-                    result["skipped"] = []
-                    result["content"] = {}
-                    result["files_modified"] = []
-                    result["edit_results"] = []
-                    
-            elif format_type == "search_replace":
-                # Use legacy aider format
-                file_edits, shell_commands = aider_chat.editor.parse_response(full_content)
-                
-                result["file_edits"] = file_edits
-                result["shell_commands"] = shell_commands
-                
-                if file_edits and not dry_run:
-                    apply_result = aider_chat.editor.apply_edits(file_edits, dry_run=dry_run)
-                    result.update(apply_result)
-                else:
-                    result["passed"] = []
-                    result["failed"] = []
-                    result["content"] = {}
+                # Detailed results for UI
+                result["edit_results"] = [
+                    {
+                        "file_path": r.file_path,
+                        "status": r.status.value,
+                        "reason": r.reason,
+                        "estimated_line": r.estimated_line,
+                        "anchor_preview": r.anchor_preview,
+                        "old_preview": r.old_preview,
+                        "new_preview": r.new_preview,
+                    }
+                    for r in apply_result.results
+                ]
             else:
-                # No edits in response
-                result["file_edits"] = []
-                result["shell_commands"] = []
                 result["passed"] = []
                 result["failed"] = []
+                result["skipped"] = []
                 result["content"] = {}
+                result["files_modified"] = []
+                result["edit_results"] = []
             
             # Store assistant message in history
             # Handle both new format (files_modified list) and legacy format (passed tuples)
