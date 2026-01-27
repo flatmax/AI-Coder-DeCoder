@@ -45,10 +45,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         self.model = self.config.get('model', 'gpt-4o-mini')
         self.smaller_model = self.config.get('smallerModel', 'gpt-4o-mini')
         
-        # Lazy-loaded aider integration (deprecated, use _context_manager)
-        self._aider_chat = None
-        
-        # New context manager
+        # Context manager for history, files, and token tracking
         self._context_manager = None
         if repo:
             self._context_manager = ContextManager(
@@ -66,8 +63,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
     def set_model(self, model):
         """Set the LLM model to use."""
         self.model = model
-        if self._aider_chat:
-            self._aider_chat.model = model
         if self._context_manager:
             self._context_manager.model_name = model
             self._context_manager.token_counter.model_name = model
@@ -98,20 +93,13 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
     def clear_history(self):
         """Clear the conversation history and start a new history session."""
         self.conversation_history = []
-        if self._aider_chat:
-            self._aider_chat.clear_history()
+        if self._context_manager:
+            self._context_manager.clear_history()
         # Start a new history session
         if self._history_store:
             new_session = self._history_store.new_session()
             print(f"📜 New history session: {new_session}")
         return "Conversation history cleared"
-    
-    def get_aider_chat(self):
-        """Get or create the AiderChat instance for edit operations."""
-        if self._aider_chat is None:
-            from ac.aider_integration.chat_integration import AiderChat
-            self._aider_chat = AiderChat(model=self.model, repo=self.repo, token_tracker=self)
-        return self._aider_chat
     
     def track_token_usage(self, completion):
         """
@@ -177,18 +165,36 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         Returns:
             Formatted string with token breakdown
         """
-        aider = self.get_aider_chat()
+        if not self._context_manager:
+            return "Token report unavailable: no context manager"
         
         # Add files to context if provided
         if file_paths:
-            aider.clear_files()
+            self._context_manager.file_context.clear()
             for path in file_paths:
                 try:
-                    aider.add_file(path)
+                    content = self.repo.get_file_content(path) if self.repo else None
+                    if isinstance(content, dict) and 'error' in content:
+                        continue  # Skip files that don't exist
+                    self._context_manager.file_context.add_file(path, content)
                 except FileNotFoundError:
                     pass  # Skip files that don't exist
         
-        return aider.get_token_report(read_only_files=read_only_files)
+        # Build system prompt for token counting
+        from ..prompts import build_system_prompt
+        system_prompt = build_system_prompt()
+        
+        # Get symbol map for token counting
+        symbol_map = self.get_context_map(
+            chat_files=file_paths,
+            include_references=True
+        ) if self.repo else ""
+        
+        return self._context_manager.get_token_report(
+            system_prompt=system_prompt,
+            symbol_map=symbol_map,
+            read_only_files=read_only_files
+        )
     
     def _get_indexer(self):
         """Get or create the Indexer instance."""
@@ -600,17 +606,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         if format_type in ("edit_v2", "edit_v3"):
             blocks = edit_parser.parse_response(response_text)
             result["edit_blocks"] = blocks
-            result["file_edits"] = []  # Legacy format empty for v2
+            result["file_edits"] = []  # Legacy format empty for v3
         elif format_type == "search_replace":
-            aider = self.get_aider_chat()
-            if file_paths:
-                aider.clear_files()
-                for path in file_paths:
-                    aider.add_file(path)
-            file_edits, shell_commands = aider.editor.parse_response(response_text)
-            result["file_edits"] = file_edits
-            result["shell_commands"] = shell_commands
+            # Legacy SEARCH/REPLACE format no longer supported
+            result["file_edits"] = []
             result["edit_blocks"] = []
+            result["error"] = "Legacy SEARCH/REPLACE format not supported, use EDIT/REPL format"
         else:
             result["file_edits"] = []
             result["edit_blocks"] = []
@@ -663,6 +664,5 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 ]
             }
         else:
-            # Legacy format - use aider
-            aider = self.get_aider_chat()
-            return aider.editor.apply_edits(edits, dry_run=dry_run)
+            # Legacy tuple format no longer supported
+            return {"passed": [], "failed": [], "content": {}, "error": "Legacy edit format not supported"}

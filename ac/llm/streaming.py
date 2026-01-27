@@ -89,23 +89,27 @@ class StreamingMixin:
                            use_smaller_model, dry_run, use_repo_map):
         """Background task that streams the chat response."""
         try:
-            aider_chat = self.get_aider_chat()
             model = self.smaller_model if use_smaller_model else self.model
-            aider_chat.model = model
-            aider_chat.clear_files()
             
-            # Check/handle summarization
+            # Check/handle summarization using new context manager
             summarized = False
-            if self.check_history_needs_summarization():
+            if self._context_manager and self._context_manager.history_needs_summary():
                 summary_result = self.summarize_history()
                 if summary_result.get("status") == "summarized":
                     summarized = True
             
-            # Load files into aider context (for edit parsing)
+            # Load files into context manager
+            if self._context_manager:
+                self._context_manager.file_context.clear()
+            
             if file_paths:
                 for path in file_paths:
                     try:
-                        aider_chat.add_file(path)
+                        if self._context_manager:
+                            content = self.repo.get_file_content(path) if self.repo else None
+                            if isinstance(content, dict) and 'error' in content:
+                                raise FileNotFoundError(content['error'])
+                            self._context_manager.file_context.add_file(path, content)
                     except FileNotFoundError as e:
                         await self._send_stream_complete(request_id, {
                             "error": str(e),
@@ -153,13 +157,13 @@ class StreamingMixin:
                 })
                 return
             
-            # Store in conversation history (for aider's edit context)
-            aider_chat.messages.append({"role": "user", "content": user_text})
-            aider_chat.messages.append({"role": "assistant", "content": full_content})
-            
-            # Also store in our conversation history for persistence
+            # Store in conversation history
             self.conversation_history.append({"role": "user", "content": user_text})
             self.conversation_history.append({"role": "assistant", "content": full_content})
+            
+            # Also update new context manager history
+            if self._context_manager:
+                self._context_manager.add_exchange(user_text, full_content)
             
             # Update symbol map with current context files
             symbol_map_info = self._auto_save_symbol_map()
@@ -335,12 +339,11 @@ class StreamingMixin:
                     "content": "Ok."
                 })
                 # Count tokens in the map
-                try:
-                    aider_chat = self.get_aider_chat()
-                    if aider_chat._context_manager:
-                        context_map_tokens = aider_chat._context_manager.count_tokens(map_content)
-                except Exception:
-                    pass
+                if self._context_manager:
+                    try:
+                        context_map_tokens = self._context_manager.count_tokens(map_content)
+                    except Exception:
+                        pass
         
         # Add file contents
         if file_paths:
@@ -403,11 +406,10 @@ class StreamingMixin:
     def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0, symbol_map_info=None):
         """Print HUD after streaming completes."""
         try:
-            aider_chat = self.get_aider_chat()
-            ctx = aider_chat._context_manager
-            
-            if not ctx:
+            if not self._context_manager:
                 return
+            
+            ctx = self._context_manager
             
             # Count tokens in different parts
             total_tokens = 0
@@ -435,15 +437,10 @@ class StreamingMixin:
                         history_tokens += tokens
             
             # Get model info
-            model_name = aider_chat.model if hasattr(aider_chat, 'model') else 'unknown'
+            model_name = self.model
             
             # Get token limit
-            try:
-                import litellm
-                model_info = litellm.get_model_info(model_name)
-                max_tokens = model_info.get('max_input_tokens', 128000)
-            except Exception:
-                max_tokens = 128000
+            max_tokens = ctx.token_counter.max_input_tokens
             
             # Print compact HUD
             print(f"\n{'─' * 50}")

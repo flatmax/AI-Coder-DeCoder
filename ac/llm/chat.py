@@ -83,13 +83,15 @@ class ChatMixin:
     
     def get_token_budget(self):
         """Get current token budget information."""
-        aider_chat = self.get_aider_chat()
-        return aider_chat.get_token_budget()
+        if self._context_manager:
+            return self._context_manager.get_token_budget()
+        return {"used": 0, "max_input": 128000, "remaining": 128000}
     
     def check_history_needs_summarization(self):
         """Check if conversation history needs summarization."""
-        aider_chat = self.get_aider_chat()
-        return aider_chat.check_history_size()
+        if self._context_manager:
+            return self._context_manager.history_needs_summary()
+        return False
     
     def summarize_history(self):
         """
@@ -98,12 +100,13 @@ class ChatMixin:
         Returns:
             Dict with status and new token count
         """
-        aider_chat = self.get_aider_chat()
+        if not self._context_manager:
+            return {"status": "not_needed", "message": "No context manager"}
         
-        if not aider_chat.check_history_size():
+        if not self._context_manager.history_needs_summary():
             return {"status": "not_needed", "message": "History size is within limits"}
         
-        head, tail = aider_chat.get_summarization_split()
+        head, tail = self._context_manager.get_summarization_split()
         
         if not head:
             return {"status": "not_needed", "message": "No messages to summarize"}
@@ -133,9 +136,15 @@ class ChatMixin:
             summary = response.choices[0].message.content
             
             # Update history with summary
-            aider_chat.set_summarized_history(summary, tail)
+            new_history = [
+                {"role": "user", "content": f"Summary of previous conversation:\n{summary}"},
+                {"role": "assistant", "content": "Ok, I understand the context."}
+            ] + tail
             
-            new_budget = aider_chat.get_token_budget()
+            self._context_manager.set_history(new_history)
+            self.conversation_history = new_history
+            
+            new_budget = self._context_manager.get_token_budget()
             print(f"✓ History reduced to {new_budget.get('history_tokens', 0)} tokens")
             
             return {
