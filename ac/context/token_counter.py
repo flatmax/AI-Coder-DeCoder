@@ -82,8 +82,3 @@ class TokenCounter:
             elif isinstance(content, dict):
                 return len(content.get("content", "")) // 4
         return 0
-    
-    # Alias for backward compatibility
-    def token_count(self, content) -> int:
-        """Alias for count() - for backward compatibility."""
-        return self.count(content)

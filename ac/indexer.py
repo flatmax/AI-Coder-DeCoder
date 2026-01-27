@@ -113,22 +113,7 @@ class Indexer:
             Dict mapping file paths to their symbols.
         """
         index = self._get_symbol_index()
-        result = index.index_files(file_paths)
-        # Debug: if no results, try to understand why
-        if not result and file_paths:
-            # Try indexing first .py file manually to see error
-            for fp in file_paths[:3]:
-                if fp.endswith('.py'):
-                    try:
-                        from pathlib import Path
-                        abs_path = Path(fp)
-                        if not abs_path.is_absolute():
-                            abs_path = self.repo_root / fp
-                        print(f"  Debug: {fp} -> {abs_path} exists={abs_path.exists()}")
-                    except Exception as e:
-                        print(f"  Debug error: {e}")
-                    break
-        return result
+        return index.index_files(file_paths)
     
     def clear_cache(self):
         """Clear the symbol cache."""

@@ -258,15 +258,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             paths.extend(self._collect_file_paths(child, current_path))
         return paths
     
-    def save_repo_map(self, output_path=None, exclude_files=None):
-        """
-        DEPRECATED: Use save_symbol_map() instead.
-        
-        This method is kept for backwards compatibility but now delegates
-        to the symbol index.
-        """
-        return self.save_symbol_map(file_paths=exclude_files, output_path=output_path)
-    
     def save_symbol_map(self, file_paths=None, output_path=None):
         """
         Generate and save the symbol map.
@@ -582,85 +573,52 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         """
         Parse a response for edit blocks without applying them.
         
-        Supports both new anchored EDIT format and legacy SEARCH/REPLACE format.
-        
         Args:
             response_text: LLM response containing edit blocks
             file_paths: Optional list of valid file paths
             
         Returns:
-            Dict with file_edits, shell_commands, edit_format, and edit_blocks (for v2)
+            Dict with shell_commands, has_edits, and edit_blocks
         """
         from ..edit_parser import EditParser
         
         edit_parser = EditParser()
-        format_type = edit_parser.detect_format(response_text)
+        blocks = edit_parser.parse_response(response_text)
         
-        result = {
-            "edit_format": format_type,
+        return {
+            "has_edits": len(blocks) > 0,
+            "edit_blocks": blocks,
             "shell_commands": edit_parser.detect_shell_suggestions(response_text)
         }
-        
-        if format_type in ("edit_v2", "edit_v3"):
-            blocks = edit_parser.parse_response(response_text)
-            result["edit_blocks"] = blocks
-            result["file_edits"] = []  # Legacy format empty for v3
-        elif format_type == "search_replace":
-            # Legacy SEARCH/REPLACE format no longer supported
-            result["file_edits"] = []
-            result["edit_blocks"] = []
-            result["error"] = "Legacy SEARCH/REPLACE format not supported, use EDIT/REPL format"
-        else:
-            result["file_edits"] = []
-            result["edit_blocks"] = []
-        
-        return result
     
     def apply_edits(self, edits, dry_run=False):
         """
-        Apply previously parsed edits to files.
-        
-        Supports both new EditBlock objects and legacy (filename, original, updated) tuples.
+        Apply previously parsed edit blocks to files.
         
         Args:
-            edits: List of EditBlock objects or (filename, original, updated) tuples
+            edits: List of EditBlock objects
             dry_run: If True, don't write changes to disk
             
         Returns:
-            Dict with passed, failed, and content
+            Dict with results and files_modified
         """
-        from ..edit_parser import EditParser, EditBlock, EditStatus
+        from ..edit_parser import EditParser, EditStatus
         
         if not edits:
-            return {"passed": [], "failed": [], "content": {}}
+            return {"results": [], "files_modified": []}
         
-        # Check if we have new EditBlock objects or legacy tuples
-        if isinstance(edits[0], EditBlock):
-            # New format
-            edit_parser = EditParser()
-            apply_result = edit_parser.apply_edits(edits, self.repo, dry_run=dry_run)
-            
-            return {
-                "passed": [
-                    (r.file_path, r.old_preview, r.new_preview)
-                    for r in apply_result.results if r.status == EditStatus.APPLIED
-                ],
-                "failed": [
-                    (r.file_path, r.reason, "")
-                    for r in apply_result.results if r.status == EditStatus.FAILED
-                ],
-                "content": {},
-                "files_modified": apply_result.files_modified,
-                "edit_results": [
-                    {
-                        "file_path": r.file_path,
-                        "status": r.status.value,
-                        "reason": r.reason,
-                        "estimated_line": r.estimated_line,
-                    }
-                    for r in apply_result.results
-                ]
-            }
-        else:
-            # Legacy tuple format no longer supported
-            return {"passed": [], "failed": [], "content": {}, "error": "Legacy edit format not supported"}
+        edit_parser = EditParser()
+        apply_result = edit_parser.apply_edits(edits, self.repo, dry_run=dry_run)
+        
+        return {
+            "files_modified": apply_result.files_modified,
+            "results": [
+                {
+                    "file_path": r.file_path,
+                    "status": r.status.value,
+                    "reason": r.reason,
+                    "estimated_line": r.estimated_line,
+                }
+                for r in apply_result.results
+            ]
+        }

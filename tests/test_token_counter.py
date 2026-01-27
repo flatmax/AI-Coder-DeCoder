@@ -80,11 +80,13 @@ class TestTokenCounterCounting:
         assert count >= 0
         assert count < 10  # Sanity check
     
-    def test_token_count_alias(self):
-        """Test that token_count() is an alias for count()."""
+    def test_count_returns_integer(self):
+        """Test that count returns a positive integer for non-empty content."""
         counter = TokenCounter("gpt-4")
         text = "Hello, world!"
-        assert counter.token_count(text) == counter.count(text)
+        result = counter.count(text)
+        assert isinstance(result, int)
+        assert result > 0
     
     def test_longer_text_more_tokens(self):
         counter = TokenCounter("gpt-4")

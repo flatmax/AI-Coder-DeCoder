@@ -447,17 +447,9 @@ class EditParser:
             suggestions.extend(re.findall(pattern, response_text))
         return suggestions
 
-    def detect_format(self, response_text: str) -> str:
-        """
-        Detect which edit format the response uses.
-
-        Returns:
-            'edit_v3' for EDIT/REPL format,
-            'none' if no edits
-        """
-        if self.EDIT_START in response_text and self.REPL_SEPARATOR in response_text:
-            return "edit_v3"
-        return "none"
+    def detect_format(self, response_text: str) -> bool:
+        """Check if response contains edit blocks."""
+        return self.EDIT_START in response_text and self.REPL_SEPARATOR in response_text
 
     def _normalize(self, text: str) -> str:
         """Normalize line endings only. Preserves all other whitespace."""
