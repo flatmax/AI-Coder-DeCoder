@@ -15,7 +15,6 @@ dependencies = [
     "litellm",
     "GitPython",
     "boto3",
-    "aider-chat @ git+https://github.com/Aider-AI/aider.git@59250e070e6472967b9c83069baa33eb32d69faf",
     "tree-sitter>=0.24.0,<0.25.0",
     "tree-sitter-python>=0.23.0,<0.24.0",
     "tree-sitter-javascript>=0.23.0,<0.24.0",

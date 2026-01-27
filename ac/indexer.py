@@ -1,4 +1,4 @@
-"""Standalone indexer for repo map and symbol map generation.
+"""Standalone indexer for symbol map generation.
 
 This module provides indexing functionality for generating symbol maps
 using tree-sitter based code analysis.
