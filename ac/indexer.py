@@ -11,10 +11,9 @@ from typing import List, Optional
 
 class Indexer:
     """
-    Generates and saves repo map and symbol map files.
+    Generates and saves symbol map files.
     
     Saves to .aicoder/ directory:
-    - repo_map.txt - Repository structure map (via aider)
     - symbol_map.txt - Symbol index (via tree-sitter)
     """
     
