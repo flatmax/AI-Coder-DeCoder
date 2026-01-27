@@ -456,10 +456,25 @@ class StreamingMixin:
             # Show last request token usage if available
             if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
                 req = self._last_request_tokens
-                cache_info = ""
-                if req.get('cache_hit', 0) > 0:
-                    cache_info = f" (cache hit: {req['cache_hit']:,})"
-                print(f"  Last request:    {req.get('prompt', 0):,} in, {req.get('completion', 0):,} out{cache_info}")
+                print(f"  Last request:    {req.get('prompt', 0):,} in, {req.get('completion', 0):,} out")
+                
+                # Show cache details if any caching occurred
+                cache_hit = req.get('cache_hit', 0)
+                cache_write = req.get('cache_write', 0)
+                if cache_hit or cache_write:
+                    cache_parts = []
+                    if cache_hit:
+                        cache_parts.append(f"hit: {cache_hit:,}")
+                    if cache_write:
+                        cache_parts.append(f"write: {cache_write:,}")
+                    
+                    # Estimate what was cached (system + symbol map are the cacheable prefix)
+                    cacheable_estimate = system_tokens + context_map_tokens
+                    if cache_hit and cacheable_estimate:
+                        pct = min(100, int(cache_hit * 100 / cacheable_estimate))
+                        cache_parts.append(f"~{pct}% of sys+map")
+                    
+                    print(f"  Cache:           {', '.join(cache_parts)}")
             print(f"{'─' * 50}\n")
                 
         except Exception as e:
