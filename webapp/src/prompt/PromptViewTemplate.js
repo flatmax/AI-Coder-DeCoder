@@ -93,7 +93,7 @@ export function renderPromptView(component) {
                       if (message.role === 'user') {
                         return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
                       } else if (message.role === 'assistant') {
-                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .editResults=${message.editResults || []}></assistant-card>`;
+                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
                       }
                     }
                   )}

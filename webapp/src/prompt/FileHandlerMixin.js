@@ -159,21 +159,58 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
     const { path } = e.detail;
     if (!path) return;
     
-    // Add the file to selection (don't toggle - only add)
     const filePicker = this.shadowRoot?.querySelector('file-picker');
     if (filePicker) {
       const newSelected = { ...filePicker.selected };
-      // Only add, don't toggle off
-      if (!newSelected[path]) {
+      const fileName = path.split('/').pop();
+      const isCurrentlySelected = newSelected[path];
+      
+      // Toggle the selection
+      if (isCurrentlySelected) {
+        delete newSelected[path];
+      } else {
         newSelected[path] = true;
-        filePicker.selected = newSelected;
-        
-        // Update our selectedFiles to match
-        this.selectedFiles = Object.keys(newSelected).filter(k => newSelected[k]);
-        
-        // Dispatch the selection change event
-        filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
       }
+      
+      filePicker.selected = newSelected;
+      this.selectedFiles = Object.keys(newSelected).filter(k => newSelected[k]);
+      filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+      
+      // Auto-populate input to indicate file was added/removed
+      if (!isCurrentlySelected) {
+        // File was added
+        const addedMatch = this.inputValue.match(/^The files? (.+) added\. $/);
+        if (addedMatch) {
+          this.inputValue = `The files ${addedMatch[1]}, ${fileName} added. `;
+        } else if (this.inputValue.trim() === '') {
+          this.inputValue = `The file ${fileName} added. `;
+        } else {
+          this.inputValue = this.inputValue.trimEnd() + ` (added ${fileName}) `;
+        }
+      } else {
+        // File was removed - clear input if it was just the "added" message
+        const addedMatch = this.inputValue.match(/^The files? (.+) added\. $/);
+        if (addedMatch) {
+          // Remove this file from the list
+          const files = addedMatch[1].split(', ').filter(f => f !== fileName);
+          if (files.length === 0) {
+            this.inputValue = '';
+          } else if (files.length === 1) {
+            this.inputValue = `The file ${files[0]} added. `;
+          } else {
+            this.inputValue = `The files ${files.join(', ')} added. `;
+          }
+        }
+      }
+      
+      // Focus the textarea
+      this.updateComplete.then(() => {
+        const textarea = this.shadowRoot?.querySelector('textarea');
+        if (textarea) {
+          textarea.focus();
+          textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+        }
+      });
     }
   }
 

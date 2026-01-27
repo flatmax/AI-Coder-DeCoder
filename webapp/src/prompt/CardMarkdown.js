@@ -8,6 +8,7 @@ export class CardMarkdown extends LitElement {
     content: { type: String },
     role: { type: String },
     mentionedFiles: { type: Array },
+    selectedFiles: { type: Array },  // Files currently in context
     editResults: { type: Array }  // Array of {file_path, status, reason, estimated_line}
   };
 
@@ -51,6 +52,78 @@ export class CardMarkdown extends LitElement {
     .file-mention:hover {
       color: #a3e4b8;
       text-decoration-style: solid;
+    }
+
+    .file-mention.in-context {
+      color: #6e7681;
+      text-decoration: none;
+      cursor: default;
+    }
+
+    .file-mention.in-context::before {
+      content: '✓ ';
+      font-size: 10px;
+    }
+
+    /* Files summary section */
+    .files-summary {
+      margin-top: 12px;
+      padding: 10px 12px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .files-summary-header {
+      color: #8b949e;
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .files-summary-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .file-chip.not-in-context {
+      background: #1f3d1f;
+      color: #7ee787;
+      border: 1px solid #238636;
+    }
+
+    .file-chip.not-in-context:hover {
+      background: #238636;
+    }
+
+    .file-chip.in-context {
+      background: #21262d;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      cursor: pointer;
+    }
+
+    .file-chip.in-context:hover {
+      background: #30363d;
+    }
+
+    .file-chip .chip-icon {
+      font-size: 10px;
     }
 
     /* Edit block styles */
@@ -212,7 +285,9 @@ export class CardMarkdown extends LitElement {
     this.content = '';
     this.role = 'assistant';
     this.mentionedFiles = [];
+    this.selectedFiles = [];
     this.editResults = [];
+    this._foundFiles = [];  // Files actually found in content
     this._codeScrollPositions = new Map();
     
     marked.setOptions({
@@ -471,6 +546,7 @@ export class CardMarkdown extends LitElement {
     }
     
     let result = htmlContent;
+    this._foundFiles = [];  // Reset found files
     
     // Sort by length descending to match longer paths first
     const sortedFiles = [...this.mentionedFiles].sort((a, b) => b.length - a.length);
@@ -483,10 +559,37 @@ export class CardMarkdown extends LitElement {
       // Also avoid matching inside code blocks (already processed)
       const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
       
-      result = result.replace(regex, `<span class="file-mention" data-file="${filePath}">$1</span>`);
+      if (regex.test(htmlContent)) {
+        this._foundFiles.push(filePath);
+        const isInContext = this.selectedFiles && this.selectedFiles.includes(filePath);
+        const contextClass = isInContext ? ' in-context' : '';
+        // Reset regex lastIndex after test()
+        regex.lastIndex = 0;
+        result = result.replace(regex, `<span class="file-mention${contextClass}" data-file="${filePath}">$1</span>`);
+      }
     }
     
     return result;
+  }
+
+  renderFilesSummary() {
+    if (this._foundFiles.length === 0) {
+      return '';
+    }
+
+    const filesHtml = this._foundFiles.map(filePath => {
+      const isInContext = this.selectedFiles && this.selectedFiles.includes(filePath);
+      const chipClass = isInContext ? 'in-context' : 'not-in-context';
+      const icon = isInContext ? '✓' : '+';
+      return `<span class="file-chip ${chipClass}" data-file="${this.escapeHtml(filePath)}"><span class="chip-icon">${icon}</span>${this.escapeHtml(filePath)}</span>`;
+    }).join('');
+
+    return `
+      <div class="files-summary">
+        <div class="files-summary-header">📁 Files Referenced</div>
+        <div class="files-summary-list">${filesHtml}</div>
+      </div>
+    `;
   }
 
   handleClick(e) {
@@ -502,6 +605,19 @@ export class CardMarkdown extends LitElement {
       }
     }
     
+    // Handle file chip clicks in summary (allow both in-context and not-in-context)
+    const fileChip = e.target.closest('.file-chip');
+    if (fileChip) {
+      const filePath = fileChip.dataset.file;
+      if (filePath) {
+        this.dispatchEvent(new CustomEvent('file-mention-click', {
+          detail: { path: filePath },
+          bubbles: true,
+          composed: true
+        }));
+      }
+    }
+
     // Handle edit block file path clicks
     const editBlockFile = e.target.closest('.edit-block-file');
     if (editBlockFile) {
@@ -551,9 +667,11 @@ export class CardMarkdown extends LitElement {
   }
 
   render() {
+    const processedContent = this.processContent();
     return html`
       <div class="content" @click=${this.handleClick}>
-        ${unsafeHTML(this.processContent())}
+        ${unsafeHTML(processedContent)}
+        ${this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
       </div>
     `;
   }

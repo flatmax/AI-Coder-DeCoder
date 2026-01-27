@@ -5,6 +5,7 @@ export class AssistantCard extends LitElement {
   static properties = {
     content: { type: String },
     mentionedFiles: { type: Array },
+    selectedFiles: { type: Array },  // Files currently in context
     editResults: { type: Array }  // Results from edit operations
   };
 
@@ -94,7 +95,7 @@ export class AssistantCard extends LitElement {
             <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
           </div>
         </div>
-        <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []} .editResults=${this.editResults || []}></card-markdown>
+        <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []} .selectedFiles=${this.selectedFiles || []} .editResults=${this.editResults || []}></card-markdown>
         <div class="footer-actions">
           <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
           <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
