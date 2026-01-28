@@ -374,6 +374,8 @@ export class AppShell extends LitElement {
       // fetchedUrls is an object with URL keys, not an array
       const { [url]: removed, ...remaining } = promptView.fetchedUrls;
       promptView.fetchedUrls = remaining;
+      // Refresh the context viewer with updated data
+      this._refreshContextViewer();
     }
   }
 
