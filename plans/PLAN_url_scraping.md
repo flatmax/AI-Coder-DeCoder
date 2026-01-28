@@ -108,10 +108,18 @@ URL content appears as a separate section in the prompt:
 - `ac/url_handler/github_handler.py` - GitHubHandler class with fetch_repo(), fetch_file()
 - `tests/test_github_handler.py` - 19 tests
 
-### Phase 3: Web Page Handler
-- Trafilatura-based extraction (primary)
-- Playwright fallback for JS-heavy sites
-- Metadata extraction (title, description)
+### Phase 3: Web Page Handler ✅
+- Trafilatura-based extraction (primary) ✅
+- Fallback HTML parser when trafilatura fails ✅
+- Metadata extraction (title, description) ✅
+- Playwright deferred to future enhancement (optional)
+
+**Files created:**
+- `ac/url_handler/web_handler.py` - WebHandler class with fetch_page(), fetch_documentation()
+- `tests/test_web_handler.py` - 16 tests
+
+**Dependencies added:**
+- `trafilatura` in pyproject.toml
 
 ### Phase 4: Summarization
 Summary types with tailored Haiku prompts:

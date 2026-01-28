@@ -4,6 +4,7 @@ from .models import URLContent, URLResult, URLType
 from .detector import URLDetector
 from .config import URLConfig
 from .github_handler import GitHubHandler
+from .web_handler import WebHandler
 
 __all__ = [
     'URLContent',
@@ -12,4 +13,5 @@ __all__ = [
     'URLDetector',
     'URLConfig',
     'GitHubHandler',
+    'WebHandler',
 ]
