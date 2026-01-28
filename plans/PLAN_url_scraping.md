@@ -11,6 +11,14 @@ Add the ability to fetch, process, and summarize content from URLs - particularl
 3. **Post-processing**: Use Haiku to generate focused summaries
 4. **Caching**: Avoid re-fetching unchanged content
 
+## Design Decisions
+
+1. **Config file**: New `ac/ac-dc.json` for application config (separate from `llm.json`)
+2. **Cache location**: Default `/tmp/url_cache`, configurable via `ac-dc.json`
+3. **URL detection UX**: Button appears when URL detected, user confirms before fetch
+4. **Symbol map scope**: Let Haiku decide what's relevant based on user's question
+5. **Integration**: URL content as separate context section (like symbol map)
+
 ## Use Cases
 
 | Scenario | What to Extract | Output Format |
@@ -43,16 +51,39 @@ Both flows use the same fetch pipeline - detection triggers automatically for us
 
 ## Architecture
 
-New module `ac/url_handler/` with:
-- URL type detection and routing
-- GitHub-specific handler (clone, symbol map, README)
-- Web page handler (trafilatura, playwright fallback)
-- Summarizer (Haiku post-processing)
-- Cache layer (JSON files with TTL)
+### Config File (`ac/ac-dc.json`)
+```json
+{
+  "url_cache": {
+    "path": "/tmp/url_cache",
+    "ttl_hours": 24
+  }
+}
+```
+
+### New Module `ac/url_handler/`
+- `models.py` - URLContent, URLResult dataclasses
+- `detector.py` - URL type detection and parsing
+- `github_handler.py` - Clone, symbol map, README extraction
+- `web_handler.py` - Trafilatura + Playwright fallback
+- `summarizer.py` - Haiku post-processing
+- `cache.py` - JSON file cache with TTL
+- `fetcher.py` - Main orchestrator
+
+### Context Integration
+URL content appears as a separate section in the prompt:
+```
+[System Prompt]
+[Symbol Map]
+[URL Context]  <-- new section
+[Files in context]
+[User message]
+```
 
 ## Phased Implementation
 
 ### Phase 1: Foundation
+- Config file loading (`ac/ac-dc.json`)
 - URL type detection (GitHub repo vs file vs issue, docs sites, generic)
 - Data models for URLContent and URLResult
 - Basic routing infrastructure
@@ -79,11 +110,18 @@ Summary types with tailored Haiku prompts:
 ### Phase 5: Caching
 - URL hash as cache key
 - JSON storage with TTL (default 24 hours)
-- Location: `~/.aicoder/url_cache/`
+- Location: `/tmp/url_cache/` (configurable via `ac-dc.json`)
 
 ### Phase 6: Integration
 - New methods on LiteLLM: `fetch_url()`, `get_repo_symbol_map()`
 - RPC exposure for webapp
+- URL content section in `StreamingMixin._build_streaming_messages()`
+
+### Phase 7: Webapp UI
+- URL detection in input field
+- Fetch confirmation button/chip (similar to file detection)
+- Loading state during fetch
+- Display fetched content summary
 
 ## Testing
 
@@ -95,10 +133,10 @@ Summary types with tailored Haiku prompts:
 
 ## Open Questions
 
-1. **Cache location**: Global `~/.aicoder/` vs project-local?
-2. **Default TTL**: Same for all content types?
-3. **Symbol map scope**: How many files from external repos?
-4. **Private repos**: GitHub token support?
+1. ~~**Cache location**~~: Resolved - `/tmp/url_cache`, configurable
+2. **Default TTL**: Same for all content types? (Suggest: yes, 24 hours)
+3. ~~**Symbol map scope**~~: Resolved - Haiku decides based on context
+4. **Private repos**: GitHub token support? (Future enhancement)
 
 ## Future Enhancements
 
