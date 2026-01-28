@@ -3,6 +3,7 @@ import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
 import '../find-in-files/FindInFiles.js';
 import '../context-viewer/ContextViewer.js';
+import '../context-viewer/UrlContentModal.js';
 
 export class AppShell extends LitElement {
   static properties = {
@@ -12,6 +13,8 @@ export class AppShell extends LitElement {
     viewingFile: { type: String },
     activeLeftTab: { type: String },
     excludedUrls: { type: Object }, // Set of URLs excluded from context
+    showUrlModal: { type: Boolean },
+    urlModalContent: { type: Object },
   };
 
   static styles = css`
@@ -142,6 +145,8 @@ export class AppShell extends LitElement {
     this.viewingFile = null;
     this.activeLeftTab = 'files';
     this.excludedUrls = new Set();
+    this.showUrlModal = false;
+    this.urlModalContent = null;
     // Get server port from URL params or default
     const urlParams = new URLSearchParams(window.location.search);
     const port = urlParams.get('port') || '8765';
@@ -415,8 +420,25 @@ export class AppShell extends LitElement {
     this._refreshContextViewer();
   }
 
+  handleViewUrlContent(e) {
+    const { content } = e.detail;
+    this.urlModalContent = content;
+    this.showUrlModal = true;
+  }
+
+  closeUrlModal() {
+    this.showUrlModal = false;
+    this.urlModalContent = null;
+  }
+
   render() {
     return html`
+      <url-content-modal
+        .open=${this.showUrlModal}
+        .url=${this.urlModalContent?.url || ''}
+        .content=${this.urlModalContent}
+        @close=${this.closeUrlModal}
+      ></url-content-modal>
       <div class="app-container">
         <div class="header">
           <h1>AI Coder / DeCoder</h1>
@@ -469,6 +491,7 @@ export class AppShell extends LitElement {
             @navigate-to-edit=${this.handleNavigateToEdit}
             @url-removed=${this.handleUrlRemoved}
             @url-inclusion-changed=${this.handleUrlInclusionChanged}
+            @view-url-content=${this.handleViewUrlContent}
             style="${this.activeLeftTab === 'files' ? '' : 'display: none;'}"
           ></prompt-view>
           <find-in-files

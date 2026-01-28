@@ -33,7 +33,9 @@ function renderUrlChips(component) {
                 ` : html`
                   <span class="url-chip-icon">❌</span>
                 `}
-                <span class="url-chip-label">
+                <span class="url-chip-label" 
+                      @click=${() => component.viewUrlContent(result)}
+                      style="cursor: pointer;">
                   ${result.title || component.getUrlDisplayName({ url: result.url })}
                 </span>
                 <button class="url-chip-remove" @click=${() => component.removeFetchedUrl(result.url)} title="Remove">×</button>

@@ -190,6 +190,18 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   }
 
   /**
+   * View the content/summary of a fetched URL.
+   * Dispatches event for parent to show modal.
+   */
+  viewUrlContent(urlResult) {
+    this.dispatchEvent(new CustomEvent('view-url-content', {
+      detail: { url: urlResult.url, content: urlResult },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  /**
    * Clear transient URL state (called on send).
    * Keeps fetchedUrls - they persist as context across messages.
    */
