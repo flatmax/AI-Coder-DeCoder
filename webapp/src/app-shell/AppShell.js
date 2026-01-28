@@ -11,6 +11,7 @@ export class AppShell extends LitElement {
     serverURI: { type: String },
     viewingFile: { type: String },
     activeLeftTab: { type: String },
+    excludedUrls: { type: Object }, // Set of URLs excluded from context
   };
 
   static styles = css`
@@ -140,6 +141,7 @@ export class AppShell extends LitElement {
     this.showDiff = false;
     this.viewingFile = null;
     this.activeLeftTab = 'files';
+    this.excludedUrls = new Set();
     // Get server port from URL params or default
     const urlParams = new URLSearchParams(window.location.search);
     const port = urlParams.get('port') || '8765';
@@ -351,6 +353,28 @@ export class AppShell extends LitElement {
     return Object.keys(urlsObj);
   }
 
+  _getIncludedUrls() {
+    const allUrls = this._getFetchedUrls();
+    return allUrls.filter(url => !this.excludedUrls.has(url));
+  }
+
+  handleUrlInclusionChanged(e) {
+    const { url, included } = e.detail;
+    const newExcluded = new Set(this.excludedUrls);
+    if (included) {
+      newExcluded.delete(url);
+    } else {
+      newExcluded.add(url);
+    }
+    this.excludedUrls = newExcluded;
+    
+    // Update PromptView with the new excluded set
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    if (promptView) {
+      promptView.excludedUrls = newExcluded;
+    }
+  }
+
   async _refreshContextViewer() {
     await this.updateComplete;
     const contextViewer = this.shadowRoot?.querySelector('context-viewer');
@@ -444,7 +468,9 @@ export class AppShell extends LitElement {
             .rpcCall=${this._getPromptViewRpcCall()}
             .selectedFiles=${this._getSelectedFiles()}
             .fetchedUrls=${this._getFetchedUrls()}
+            .excludedUrls=${this.excludedUrls}
             @remove-url=${this.handleRemoveUrl}
+            @url-inclusion-changed=${this.handleUrlInclusionChanged}
             style="${this.activeLeftTab === 'context' ? '' : 'display: none;'}"
           ></context-viewer>
         </div>

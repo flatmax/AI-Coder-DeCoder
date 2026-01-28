@@ -162,12 +162,27 @@ export const contextViewerStyles = css`
     font-size: 12px;
   }
 
+  .item-row.excluded {
+    opacity: 0.6;
+  }
+
+  .url-checkbox {
+    margin-right: 8px;
+    cursor: pointer;
+    accent-color: #4ade80;
+  }
+
   .item-path {
     flex: 1;
     color: #aaa;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .item-path.excluded {
+    text-decoration: line-through;
+    color: #666;
   }
 
   .item-tokens {

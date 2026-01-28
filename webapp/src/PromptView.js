@@ -48,7 +48,8 @@ export class PromptView extends MixedBase {
     viewingFile: { type: String },
     detectedUrls: { type: Array },
     fetchingUrls: { type: Object },
-    fetchedUrls: { type: Object }
+    fetchedUrls: { type: Object },
+    excludedUrls: { type: Object }  // Set of URLs excluded from context
   };
 
   static styles = promptViewStyles;
@@ -73,6 +74,7 @@ export class PromptView extends MixedBase {
     this.detectedUrls = [];
     this.fetchingUrls = {};
     this.fetchedUrls = {};
+    this.excludedUrls = new Set();
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');

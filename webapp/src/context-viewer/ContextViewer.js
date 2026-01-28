@@ -16,6 +16,7 @@ export class ContextViewer extends LitElement {
     // These come from parent
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
+    excludedUrls: { type: Object }, // Set of URLs to exclude from context
   };
 
   static styles = contextViewerStyles;
@@ -32,11 +33,17 @@ export class ContextViewer extends LitElement {
     this.urlContent = null;
     this.selectedFiles = [];
     this.fetchedUrls = [];
+    this.excludedUrls = new Set();
   }
 
   connectedCallback() {
     super.connectedCallback();
     // Initial load will happen when rpcCall is set
+  }
+
+  getIncludedUrls() {
+    if (!this.fetchedUrls) return [];
+    return this.fetchedUrls.filter(url => !this.excludedUrls.has(url));
   }
 
   async refreshBreakdown() {
@@ -50,7 +57,7 @@ export class ContextViewer extends LitElement {
     try {
       const response = await this._call['LiteLLM.get_context_breakdown'](
         this.selectedFiles || [],
-        this.fetchedUrls || []
+        this.getIncludedUrls()
       );
       const result = this._extractResponse(response);
       
@@ -120,7 +127,37 @@ export class ContextViewer extends LitElement {
     this.urlContent = null;
   }
 
+  toggleUrlIncluded(url) {
+    const newExcluded = new Set(this.excludedUrls);
+    if (newExcluded.has(url)) {
+      newExcluded.delete(url);
+    } else {
+      newExcluded.add(url);
+    }
+    this.excludedUrls = newExcluded;
+    
+    // Notify parent of the change
+    this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
+      detail: { url, included: !newExcluded.has(url), includedUrls: this.getIncludedUrls() },
+      bubbles: true,
+      composed: true
+    }));
+    
+    // Refresh breakdown with updated included URLs
+    this.refreshBreakdown();
+  }
+
+  isUrlIncluded(url) {
+    return !this.excludedUrls.has(url);
+  }
+
   removeUrl(url) {
+    // Also remove from excluded set if present
+    if (this.excludedUrls.has(url)) {
+      const newExcluded = new Set(this.excludedUrls);
+      newExcluded.delete(url);
+      this.excludedUrls = newExcluded;
+    }
     this.dispatchEvent(new CustomEvent('remove-url', {
       detail: { url },
       bubbles: true,

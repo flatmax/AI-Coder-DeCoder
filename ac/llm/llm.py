@@ -852,7 +852,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         }
         total_tokens += file_total
         
-        # URLs
+        # URLs - estimate tokens as they would appear in the prompt
         url_items = []
         url_total = 0
         if fetched_urls:
@@ -861,10 +861,28 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 try:
                     cached = fetcher.cache.get(url)
                     if cached:
-                        # Estimate tokens from content - URLContent doesn't have summary,
-                        # use readme (for GitHub repos) or content
-                        content_text = cached.readme or cached.content or ""
-                        tokens = tc.count(content_text) if content_text else 0
+                        # Build the URL content as it would appear in the prompt
+                        # (mirrors _build_streaming_messages URL handling)
+                        url_part = f"## {cached.url}\n"
+                        if cached.title:
+                            url_part += f"**{cached.title}**\n\n"
+                        
+                        # Use readme or content (truncated as in streaming)
+                        if cached.readme:
+                            readme = cached.readme
+                            if len(readme) > 4000:
+                                readme = readme[:4000] + "\n\n[truncated...]"
+                            url_part += f"{readme}\n"
+                        elif cached.content:
+                            content = cached.content
+                            if len(content) > 4000:
+                                content = content[:4000] + "\n\n[truncated...]"
+                            url_part += f"{content}\n"
+                        
+                        if cached.symbol_map:
+                            url_part += f"\n### Symbol Map\n```\n{cached.symbol_map}\n```\n"
+                        
+                        tokens = tc.count(url_part)
                         url_items.append({
                             "url": url,
                             "tokens": tokens,
@@ -883,7 +901,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                             "fetched_at": None,
                             "not_cached": True
                         })
-                except Exception:
+                except Exception as e:
                     url_items.append({
                         "url": url,
                         "tokens": 0,
@@ -891,6 +909,13 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                         "type": "error",
                         "error": str(e)
                     })
+        # Add header overhead if there are URLs (mirrors streaming.py URL_CONTEXT_HEADER)
+        if url_items:
+            url_header = "# URL Context\n\nThe following content was fetched from URLs mentioned in the conversation:\n\n"
+            url_total += tc.count(url_header)
+            # Also count the assistant response "Ok, I've reviewed the URL content."
+            url_total += tc.count("Ok, I've reviewed the URL content.")
+        
         breakdown["urls"] = {
             "tokens": url_total,
             "label": f"URLs ({len(url_items)})",

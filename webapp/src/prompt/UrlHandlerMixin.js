@@ -4,12 +4,13 @@
 export const UrlHandlerMixin = (superClass) => class extends superClass {
   
   // Note: Properties are declared in PromptView.js to avoid Lit mixin property inheritance issues
-  // The mixin expects these properties to exist: detectedUrls, fetchingUrls, fetchedUrls
+  // The mixin expects these properties to exist: detectedUrls, fetchingUrls, fetchedUrls, excludedUrls
 
   initUrlHandler() {
     this.detectedUrls = [];
     this.fetchingUrls = {};  // url -> true while fetching
     this.fetchedUrls = {};   // url -> result after fetch
+    this.excludedUrls = new Set();  // URLs excluded from context (managed by ContextViewer)
     this._urlDetectDebounce = null;
   }
 
@@ -166,9 +167,11 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   /**
    * Get fetched URLs for including in message context.
    * Called before sending a message.
+   * Respects excludedUrls set by ContextViewer.
    */
   getFetchedUrlsForMessage() {
-    return Object.values(this.fetchedUrls).filter(r => !r.error);
+    return Object.values(this.fetchedUrls)
+      .filter(r => !r.error && !this.excludedUrls.has(r.url));
   }
 
   /**

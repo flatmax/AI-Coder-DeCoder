@@ -59,23 +59,47 @@ function renderExpandedItems(component, key, data) {
     `;
   }
 
-  if (key === 'urls' && data.items?.length) {
+  if (key === 'urls') {
+    // Show ALL fetched URLs from the component, not just ones in breakdown
+    const allUrls = component.fetchedUrls || [];
+    if (allUrls.length === 0) return '';
+    
+    // Build a map of URL -> token count from breakdown data
+    const tokenMap = {};
+    if (data.items) {
+      for (const item of data.items) {
+        tokenMap[item.url] = { tokens: item.tokens, title: item.title };
+      }
+    }
+    
     return html`
       <div class="expanded-items">
-        ${data.items.map(item => html`
-          <div class="item-row">
-            <span class="item-path" title="${item.url}">${item.title || item.url}</span>
-            <span class="item-tokens">${component.formatTokens(item.tokens)}</span>
-            <div class="item-actions">
-              <button class="item-btn" @click=${(e) => { e.stopPropagation(); component.viewUrl(item.url); }}>
-                View
-              </button>
-              <button class="item-btn danger" @click=${(e) => { e.stopPropagation(); component.removeUrl(item.url); }}>
-                ✕
-              </button>
+        ${allUrls.map(url => {
+          const included = component.isUrlIncluded(url);
+          const urlData = tokenMap[url] || {};
+          return html`
+            <div class="item-row ${included ? '' : 'excluded'}">
+              <input 
+                type="checkbox" 
+                class="url-checkbox"
+                .checked=${included}
+                @click=${(e) => e.stopPropagation()}
+                @change=${(e) => { e.stopPropagation(); component.toggleUrlIncluded(url); }}
+                title="${included ? 'Click to exclude from context' : 'Click to include in context'}"
+              />
+              <span class="item-path ${included ? '' : 'excluded'}" title="${url}">${urlData.title || url}</span>
+              <span class="item-tokens">${included ? component.formatTokens(urlData.tokens || 0) : '—'}</span>
+              <div class="item-actions">
+                <button class="item-btn" @click=${(e) => { e.stopPropagation(); component.viewUrl(url); }}>
+                  View
+                </button>
+                <button class="item-btn danger" @click=${(e) => { e.stopPropagation(); component.removeUrl(url); }}>
+                  ✕
+                </button>
+              </div>
             </div>
-          </div>
-        `)}
+          `;
+        })}
       </div>
     `;
   }
@@ -103,7 +127,7 @@ function renderBreakdownSection(component) {
       ${renderCategoryRow(component, 'system', bd.system)}
       ${renderCategoryRow(component, 'symbol_map', bd.symbol_map)}
       ${renderCategoryRow(component, 'files', bd.files, true)}
-      ${renderCategoryRow(component, 'urls', bd.urls, bd.urls?.items?.length > 0)}
+      ${renderCategoryRow(component, 'urls', bd.urls, (component.fetchedUrls?.length > 0))}
       ${renderCategoryRow(component, 'history', bd.history, bd.history?.needs_summary)}
       
       <div class="model-info">
