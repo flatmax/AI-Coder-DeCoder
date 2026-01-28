@@ -60,7 +60,24 @@ export const StreamingMixin = (superClass) => class extends superClass {
     
     // Handle error case - may need to create assistant message if none exists yet
     if (result.error) {
-      const errorContent = `⚠️ **Error:** ${result.error}`;
+      // Auto-deselect binary files that caused the error
+      const binaryMatch = result.error.match(/Cannot read binary file: (.+)/);
+      if (binaryMatch && this.selectedFiles) {
+        const binaryFile = binaryMatch[1];
+        this.selectedFiles = this.selectedFiles.filter(f => f !== binaryFile);
+        // Also update the file picker's selection state
+        const filePicker = this.shadowRoot?.querySelector('file-picker');
+        if (filePicker && filePicker.selected) {
+          const newSelected = { ...filePicker.selected };
+          delete newSelected[binaryFile];
+          filePicker.selected = newSelected;
+        }
+      }
+      
+      let errorContent = `⚠️ **Error:** ${result.error}`;
+      if (binaryMatch) {
+        errorContent += `\n\n*The file has been deselected. You can send your message again.*`;
+      }
       
       if (lastMessage && lastMessage.role === 'assistant') {
         // Update existing assistant message with error

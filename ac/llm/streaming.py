@@ -404,6 +404,9 @@ class StreamingMixin:
             for path in file_paths:
                 try:
                     content = self.repo.get_file_content(path, version='working')
+                    if isinstance(content, dict) and 'error' in content:
+                        print(f"⚠️ Skipping file: {content['error']}")
+                        continue
                     if content:
                         file_content_parts.append(f"{path}\n```\n{content}\n```")
                 except Exception as e:
