@@ -54,9 +54,12 @@ class URLFetcher:
         Returns:
             URLResult with content and optional summary
         """
+        print(f"🔗 [fetcher.fetch] Starting fetch for: {url}")
+        
         # Check cache first
         if use_cache:
             cached = self.cache.get(url)
+            print(f"🔗 [fetcher.fetch] Cache result: {type(cached).__name__}, value: {cached}")
             if cached:
                 result = URLResult(content=cached, cached=True)
                 
@@ -68,13 +71,18 @@ class URLFetcher:
         
         # Detect URL type and fetch
         url_type, github_info = URLDetector.detect_type(url)
+        print(f"🔗 [fetcher.fetch] URL type: {url_type}, github_info: {github_info}")
+        
         content = self._fetch_by_type(url, url_type, github_info)
+        print(f"🔗 [fetcher.fetch] Content type: {type(content).__name__}")
+        print(f"🔗 [fetcher.fetch] Content: {content}")
         
         # Cache successful fetches
         if not content.error and use_cache:
             self.cache.set(url, content)
         
         result = URLResult(content=content, cached=False)
+        print(f"🔗 [fetcher.fetch] Result type: {type(result).__name__}")
         
         # Summarize if requested
         if summarize and not content.error:
@@ -171,29 +179,23 @@ class URLFetcher:
         """Add summary to result."""
         content = result.content
         
-        # Determine what to summarize
-        text_to_summarize = ""
-        if content.readme:
-            text_to_summarize = content.readme
-        elif content.content:
-            text_to_summarize = content.content
-        
-        if not text_to_summarize:
+        # Check if there's content to summarize
+        if not content.readme and not content.content and not content.symbol_map:
             return result
         
-        # Generate summary
+        # Generate summary - pass the full URLContent object
         if context:
             # Contextual summary based on user's question
-            summary = self.summarizer.summarize_for_context(text_to_summarize, context)
+            summary = self.summarizer.summarize_for_context(content, context)
             result.summary = summary
             result.summary_type = SummaryType.BRIEF  # Contextual is a variant of brief
         elif summary_type:
-            summary = self.summarizer.summarize(text_to_summarize, summary_type.value)
+            summary = self.summarizer.summarize(content, summary_type)
             result.summary = summary
             result.summary_type = summary_type
         else:
             # Default to brief summary
-            summary = self.summarizer.summarize(text_to_summarize, "brief")
+            summary = self.summarizer.summarize(content, SummaryType.BRIEF)
             result.summary = summary
             result.summary_type = SummaryType.BRIEF
         

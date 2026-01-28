@@ -667,8 +667,11 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         Returns:
             Dict with url, type, content, summary, cached, error
         """
+        print(f"🔗 [fetch_url] Fetching: {url}", flush=True)
+        print(f"🔗 [fetch_url] Options: cache={use_cache}, summarize={summarize}, type={summary_type}", flush=True)
         try:
             fetcher = self._get_url_fetcher()
+            print(f"🔗 [fetch_url] Got fetcher: {fetcher}", flush=True)
             
             # Convert summary_type string to enum if provided
             st = None
@@ -678,6 +681,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 except ValueError:
                     pass
             
+            print(f"🔗 [fetch_url] Calling fetcher.fetch...", flush=True)
             result = fetcher.fetch(
                 url,
                 use_cache=use_cache,
@@ -685,6 +689,13 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 summary_type=st,
                 context=context,
             )
+            
+            print(f"🔗 [fetch_url] Got result: {type(result).__name__}", flush=True)
+            print(f"🔗 [fetch_url] Result content type: {type(result.content).__name__}", flush=True)
+            print(f"🔗 [fetch_url] Success: {result.content.title or url}", flush=True)
+            print(f"🔗 [fetch_url] Cached: {result.cached}, Has summary: {bool(result.summary)}")
+            if result.content.error:
+                print(f"🔗 [fetch_url] Error in content: {result.content.error}")
             
             return {
                 "url": result.content.url,
@@ -699,6 +710,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 "error": result.content.error,
             }
         except Exception as e:
+            print(f"🔗 [fetch_url] Exception: {e}")
+            import traceback
+            traceback.print_exc()
             return {"url": url, "error": str(e)}
     
     def fetch_urls_from_text(self, text, use_cache=True, summarize=True):
@@ -745,7 +759,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         Returns:
             List of dicts with url, type, and github_info
         """
+        print(f"🔗 [detect_urls] Scanning text: {text[:100] if text else 'None'}...")
         results = URLDetector.extract_urls_with_types(text)
+        print(f"🔗 [detect_urls] Found {len(results)} URLs: {[r[0] for r in results]}")
         return [
             {
                 "url": url,

@@ -9,16 +9,19 @@ import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
 import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
 import { ResizeHandlerMixin } from './prompt/ResizeHandlerMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
+import { UrlHandlerMixin } from './prompt/UrlHandlerMixin.js';
 import './file-picker/FilePicker.js';
 import './history-browser/HistoryBrowser.js';
 
 const MixedBase = StreamingMixin(
-  ResizeHandlerMixin(
-    DragHandlerMixin(
-      InputHandlerMixin(
-        ChatActionsMixin(
-          ImageHandlerMixin(
-            FileHandlerMixin(MessageHandler)
+  UrlHandlerMixin(
+    ResizeHandlerMixin(
+      DragHandlerMixin(
+        InputHandlerMixin(
+          ChatActionsMixin(
+            ImageHandlerMixin(
+              FileHandlerMixin(MessageHandler)
+            )
           )
         )
       )
@@ -42,7 +45,10 @@ export class PromptView extends MixedBase {
     dialogX: { type: Number },
     dialogY: { type: Number },
     showHistoryBrowser: { type: Boolean },
-    viewingFile: { type: String }
+    viewingFile: { type: String },
+    detectedUrls: { type: Array },
+    fetchingUrls: { type: Object },
+    fetchedUrls: { type: Object }
   };
 
   static styles = promptViewStyles;
@@ -64,6 +70,9 @@ export class PromptView extends MixedBase {
     this.dialogY = null;
     this.showHistoryBrowser = false;
     this.viewingFile = null;
+    this.detectedUrls = [];
+    this.fetchingUrls = {};
+    this.fetchedUrls = {};
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
@@ -118,6 +127,7 @@ export class PromptView extends MixedBase {
     this.initDragHandler();
     this.initResizeHandler();
     this.initStreaming();
+    this.initUrlHandler();
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));

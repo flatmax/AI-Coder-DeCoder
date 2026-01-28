@@ -132,11 +132,34 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     const imagesToSend = this.getImagesForSend();
     const imagesToStore = this.pastedImages.length > 0 ? [...this.pastedImages] : null;
     
+    // Get fetched URL content to include in message
+    const fetchedUrlContent = this.getFetchedUrlsForMessage ? this.getFetchedUrlsForMessage() : [];
+    
+    // Build message with URL context appended (sent to LLM but not shown in UI)
+    let messageToSend = this.inputValue;
+    if (fetchedUrlContent.length > 0) {
+      const urlContext = fetchedUrlContent.map(result => {
+        const title = result.title || result.url;
+        const summary = result.summary || result.content || '';
+        return `## ${title}\nSource: ${result.url}\n\n${summary}`;
+      }).join('\n\n---\n\n');
+      
+      messageToSend = `${this.inputValue}\n\n---\n**Referenced URL Content:**\n\n${urlContext}`;
+    }
+    
+    // Show original user content in UI (without URL dump)
     this.addMessage('user', userContent, imagesToStore);
     
-    const message = this.inputValue;
     this.inputValue = '';
     this.pastedImages = [];
+    
+    // Clear URL state after sending
+    if (this.clearFetchedUrls) {
+      this.clearFetchedUrls();
+    }
+    if (this.clearUrlState) {
+      this.clearUrlState();
+    }
     
     // Reset textarea height
     const textarea = this.shadowRoot?.querySelector('textarea');
@@ -148,13 +171,13 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     try {
       // Generate request ID and track it
       const requestId = this._generateRequestId();
-      this._streamingRequests.set(requestId, { message });
+      this._streamingRequests.set(requestId, { message: messageToSend });
       this.isStreaming = true;
       
       // Start streaming request - streamChunk will create the assistant message
       const response = await this.call['LiteLLM.chat_streaming'](
         requestId,
-        message,
+        messageToSend,
         this.selectedFiles.length > 0 ? this.selectedFiles : null,
         imagesToSend
       );
