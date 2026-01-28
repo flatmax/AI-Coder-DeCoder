@@ -30,6 +30,7 @@ def to_compact(
     include_instance_vars: bool = True,
     include_calls: bool = False,
     include_legend: bool = True,
+    file_order: Optional[List[str]] = None,
 ) -> str:
     """Generate compact format suitable for LLM context.
     
@@ -59,6 +60,8 @@ def to_compact(
         file_refs: Optional dict of file -> set of files that reference it
         file_imports: Optional dict of file -> set of in-repo files it imports
         include_legend: Whether to include the legend at the top
+        file_order: Optional list specifying file output order (for prefix cache optimization).
+                   If None, files are sorted alphabetically.
         
     Returns:
         Compact string representation
@@ -69,7 +72,13 @@ def to_compact(
         lines.append(LEGEND)
         lines.append("")
     
-    for file_path in sorted(symbols_by_file.keys()):
+    # Use provided order, or fall back to sorted for determinism
+    if file_order:
+        ordered_files = [f for f in file_order if f in symbols_by_file]
+    else:
+        ordered_files = sorted(symbols_by_file.keys())
+    
+    for file_path in ordered_files:
         symbols = symbols_by_file[file_path]
         if not symbols:
             continue

@@ -1,5 +1,6 @@
 """Main SymbolIndex class for extracting and querying symbols."""
 
+import json
 import os
 from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
@@ -22,10 +23,17 @@ class SymbolIndex:
     
     Supports optional cross-file reference tracking for richer context.
     Uses mtime-based caching to avoid re-parsing unchanged files.
+    
+    Maintains stable file ordering in symbol maps to optimize LLM prefix caching.
+    When files are removed from context and later return to the symbol map,
+    they are appended at the bottom rather than their alphabetical position,
+    preserving the cached prefix for unchanged files.
     """
     
     # Default output path for symbol map (separate from repo_map.txt)
     DEFAULT_SYMBOL_MAP_PATH = ".aicoder/symbol_map.txt"
+    # File to persist symbol map ordering for cache optimization
+    ORDER_FILE = ".aicoder/symbol_map_order.json"
     
     def __init__(self, repo_root: str = None):
         self.repo_root = Path(repo_root) if repo_root else Path.cwd()
@@ -36,6 +44,8 @@ class SymbolIndex:
         self._import_resolver = ImportResolver(str(self.repo_root))
         # Cache of file -> set of in-repo imports
         self._file_imports: Dict[str, set] = {}
+        # Cached file order (loaded lazily)
+        self._file_order: Optional[List[str]] = None
     
     def index_file(self, file_path: str, content: Optional[str] = None, use_cache: bool = True) -> List[Symbol]:
         """Index a single file and return its symbols.
@@ -193,6 +203,59 @@ class SymbolIndex:
         # Also invalidate references since they may be stale
         self._references_built = False
     
+    def _load_order(self) -> List[str]:
+        """Load persisted file order for stable symbol map generation."""
+        if self._file_order is not None:
+            return self._file_order
+        
+        order_path = self.repo_root / self.ORDER_FILE
+        if order_path.exists():
+            try:
+                with open(order_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._file_order = data.get("order", [])
+            except (json.JSONDecodeError, IOError):
+                self._file_order = []
+        else:
+            self._file_order = []
+        return self._file_order
+    
+    def _save_order(self, order: List[str]):
+        """Save file order to disk for prefix cache optimization."""
+        order_path = self.repo_root / self.ORDER_FILE
+        order_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(order_path, 'w', encoding='utf-8') as f:
+            json.dump({"order": order}, f, indent=2)
+        self._file_order = order
+    
+    def get_ordered_files(self, available_files: List[str]) -> List[str]:
+        """Get files in stable order for LLM context.
+        
+        Files maintain their position from previous generations.
+        New files are appended at the bottom to preserve the cached prefix.
+        Files no longer available are filtered out.
+        
+        Args:
+            available_files: List of files currently available for the symbol map
+            
+        Returns:
+            Ordered list of files optimized for prefix caching
+        """
+        existing_order = self._load_order()
+        available_set = set(available_files)
+        
+        # Keep existing order for files still available
+        result = [f for f in existing_order if f in available_set]
+        
+        # Append new files at bottom (sorted for determinism among new files)
+        new_files = sorted(f for f in available_files if f not in existing_order)
+        result.extend(new_files)
+        
+        # Save updated order
+        self._save_order(result)
+        
+        return result
+    
     def _get_reference_index(self) -> ReferenceIndex:
         """Get or create the reference index."""
         if self._reference_index is None:
@@ -259,6 +322,9 @@ class SymbolIndex:
     ) -> str:
         """Generate compact format suitable for LLM context.
         
+        Uses stable file ordering to optimize LLM prefix caching.
+        Files maintain their position; new files are appended at the bottom.
+        
         Args:
             file_paths: List of files to include. If None, uses cached files.
             include_references: If True, include cross-file reference annotations
@@ -302,11 +368,15 @@ class SymbolIndex:
             if file_path in self._file_imports:
                 file_imports[file_path] = self._file_imports[file_path]
         
+        # Get stable file order for prefix cache optimization
+        file_order = self.get_ordered_files(list(symbols_by_file.keys()))
+        
         return to_compact(
             symbols_by_file, 
             references=references, 
             file_refs=file_refs,
-            file_imports=file_imports
+            file_imports=file_imports,
+            file_order=file_order,
         )
     
     def save_compact(self, output_path: str = None, file_paths: List[str] = None) -> str:
