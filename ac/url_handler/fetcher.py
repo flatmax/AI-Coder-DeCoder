@@ -54,12 +54,9 @@ class URLFetcher:
         Returns:
             URLResult with content and optional summary
         """
-        print(f"🔗 [fetcher.fetch] Starting fetch for: {url}")
-        
         # Check cache first
         if use_cache:
             cached = self.cache.get(url)
-            print(f"🔗 [fetcher.fetch] Cache result: {type(cached).__name__}, value: {cached}")
             if cached:
                 result = URLResult(content=cached, cached=True)
                 
@@ -71,18 +68,14 @@ class URLFetcher:
         
         # Detect URL type and fetch
         url_type, github_info = URLDetector.detect_type(url)
-        print(f"🔗 [fetcher.fetch] URL type: {url_type}, github_info: {github_info}")
         
         content = self._fetch_by_type(url, url_type, github_info)
-        print(f"🔗 [fetcher.fetch] Content type: {type(content).__name__}")
-        print(f"🔗 [fetcher.fetch] Content: {content}")
         
         # Cache successful fetches
         if not content.error and use_cache:
             self.cache.set(url, content)
         
         result = URLResult(content=content, cached=False)
-        print(f"🔗 [fetcher.fetch] Result type: {type(result).__name__}")
         
         # Summarize if requested
         if summarize and not content.error:

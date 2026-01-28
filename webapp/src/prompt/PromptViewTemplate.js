@@ -17,9 +17,10 @@ function renderUrlChips(component) {
       ${hasFetched ? html`
         <div class="url-chips-row fetched">
           ${Object.values(component.fetchedUrls).map(result => html`
-            <div class="url-chip fetched ${result.error ? 'error' : 'success'}">
+            <div class="url-chip fetched ${result.error ? 'error' : 'success'}" 
+                 title=${result.error ? result.error : (result.summary || result.readme || 'No summary available')}>
               <span class="url-chip-icon">${result.error ? '❌' : '✅'}</span>
-              <span class="url-chip-label" title=${result.url}>
+              <span class="url-chip-label">
                 ${result.title || component.getUrlDisplayName({ url: result.url })}
               </span>
               <button class="url-chip-remove" @click=${() => component.removeFetchedUrl(result.url)} title="Remove">×</button>

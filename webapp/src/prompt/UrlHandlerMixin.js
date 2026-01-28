@@ -11,7 +11,6 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
     this.fetchingUrls = {};  // url -> true while fetching
     this.fetchedUrls = {};   // url -> result after fetch
     this._urlDetectDebounce = null;
-    console.log('🔗 UrlHandlerMixin initialized');
   }
 
   /**
@@ -19,8 +18,6 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
    * Called on input change with debouncing.
    */
   detectUrlsInInput(text) {
-    console.log('🔗 detectUrlsInInput called with:', text?.substring(0, 100));
-    
     if (this._urlDetectDebounce) {
       clearTimeout(this._urlDetectDebounce);
     }
@@ -31,31 +28,23 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   }
 
   async _performUrlDetection(text) {
-    console.log('🔗 _performUrlDetection called, this.call exists:', !!this.call);
-    
     if (!this.call || !text) {
-      console.log('🔗 Skipping detection - no call or text');
       this.detectedUrls = [];
       return;
     }
 
     try {
-      console.log('🔗 Calling LiteLLM.detect_urls...');
       const response = await this.call['LiteLLM.detect_urls'](text);
-      console.log('🔗 detect_urls response:', response);
       const urls = this.extractResponse(response);
-      console.log('🔗 Extracted URLs:', urls);
       
       if (Array.isArray(urls)) {
         // Filter out already fetched URLs
         this.detectedUrls = urls.filter(u => !this.fetchedUrls[u.url]);
-        console.log('🔗 Detected URLs (filtered):', this.detectedUrls);
       } else {
-        console.log('🔗 No URLs array returned');
         this.detectedUrls = [];
       }
     } catch (e) {
-      console.error('🔗 URL detection failed:', e);
+      console.error('URL detection failed:', e);
       this.detectedUrls = [];
     }
   }
@@ -108,10 +97,8 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
    */
   async fetchUrl(urlInfo) {
     const url = urlInfo.url;
-    console.log('🔗 fetchUrl called for:', url);
     
     if (this.fetchingUrls[url]) {
-      console.log('🔗 Already fetching, skipping');
       return; // Already fetching
     }
 
@@ -119,7 +106,6 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
     this.requestUpdate();
 
     try {
-      console.log('🔗 Calling LiteLLM.fetch_url...');
       const response = await this.call['LiteLLM.fetch_url'](
         url,
         true,  // use_cache
@@ -127,23 +113,18 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
         null,  // summary_type (auto)
         this.inputValue  // context
       );
-      console.log('🔗 fetch_url response:', response);
       const result = this.extractResponse(response);
-      console.log('🔗 Extracted result:', result);
       
       this.fetchedUrls = { ...this.fetchedUrls, [url]: result };
       
       // Remove from detected (it's now fetched)
       this.detectedUrls = this.detectedUrls.filter(u => u.url !== url);
       
-      // Show success feedback
       if (result.error) {
-        console.warn(`🔗 Failed to fetch ${url}:`, result.error);
-      } else {
-        console.log(`🔗 ✅ Fetched: ${result.title || url}`);
+        console.warn(`Failed to fetch ${url}:`, result.error);
       }
     } catch (e) {
-      console.error('🔗 URL fetch failed:', e);
+      console.error('URL fetch failed:', e);
       this.fetchedUrls = { 
         ...this.fetchedUrls, 
         [url]: { url, error: e.message } 
