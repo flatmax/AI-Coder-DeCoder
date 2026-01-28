@@ -16,8 +16,9 @@ class ConfigMixin:
             Dict with configuration settings
         """
         if config_path is None:
-            # Look for llm.json in the ac/ directory (parent of llm/)
-            config_path = os.path.join(os.path.dirname(__file__), '..', 'llm.json')
+            # Look for llm.json in the repo root (three levels up from llm/config.py)
+            # Path: ac/llm/config.py -> ac/llm/ -> ac/ -> repo root
+            config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'llm.json')
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
