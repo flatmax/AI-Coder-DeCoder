@@ -98,11 +98,15 @@ URL content appears as a separate section in the prompt:
 - `tests/test_url_models.py` - 11 tests
 - `tests/test_url_config.py` - 7 tests
 
-### Phase 2: GitHub Handler
-- Shallow clone (`--depth 1`) to temp directory
-- README extraction (md, rst, txt variants)
-- Symbol map generation using existing `SymbolIndex`
-- Single file fetching via raw.githubusercontent.com
+### Phase 2: GitHub Handler ✅
+- Shallow clone (`--depth 1`) to temp directory ✅
+- README extraction (md, rst, txt variants) ✅
+- Symbol map generation using existing `SymbolIndex` ✅
+- Single file fetching via raw.githubusercontent.com ✅
+
+**Files created:**
+- `ac/url_handler/github_handler.py` - GitHubHandler class with fetch_repo(), fetch_file()
+- `tests/test_github_handler.py` - 19 tests
 
 ### Phase 3: Web Page Handler
 - Trafilatura-based extraction (primary)
