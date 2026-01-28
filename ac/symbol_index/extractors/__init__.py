@@ -3,8 +3,9 @@
 from .base import BaseExtractor
 from .python import PythonExtractor
 from .javascript import JavaScriptExtractor
+from .cpp import CppExtractor
 
-__all__ = ['BaseExtractor', 'PythonExtractor', 'JavaScriptExtractor', 'get_extractor']
+__all__ = ['BaseExtractor', 'PythonExtractor', 'JavaScriptExtractor', 'CppExtractor', 'get_extractor']
 
 
 def get_extractor(language: str) -> BaseExtractor:
@@ -14,6 +15,7 @@ def get_extractor(language: str) -> BaseExtractor:
         'javascript': JavaScriptExtractor,
         'typescript': JavaScriptExtractor,  # JS extractor handles TS too
         'tsx': JavaScriptExtractor,
+        'cpp': CppExtractor,
     }
     extractor_class = extractors.get(language)
     if extractor_class:

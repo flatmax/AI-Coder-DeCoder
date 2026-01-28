@@ -3,6 +3,7 @@
 import tree_sitter_python
 import tree_sitter_javascript
 import tree_sitter_typescript
+import tree_sitter_cpp
 from tree_sitter import Language, Parser
 from typing import Optional
 from pathlib import Path
@@ -19,6 +20,17 @@ class TreeSitterParser:
         '.jsx': 'javascript',
         '.ts': 'typescript',
         '.tsx': 'tsx',
+        '.cpp': 'cpp',
+        '.cc': 'cpp',
+        '.cxx': 'cpp',
+        '.c++': 'cpp',
+        '.C': 'cpp',
+        '.hpp': 'cpp',
+        '.hh': 'cpp',
+        '.hxx': 'cpp',
+        '.h++': 'cpp',
+        '.H': 'cpp',
+        '.h': 'cpp',  # Could be C or C++, defaulting to C++
     }
     
     def __init__(self):
@@ -39,6 +51,8 @@ class TreeSitterParser:
             language = Language(tree_sitter_typescript.language_typescript())
         elif lang_name == 'tsx':
             language = Language(tree_sitter_typescript.language_tsx())
+        elif lang_name == 'cpp':
+            language = Language(tree_sitter_cpp.language())
         
         if language:
             self._languages[lang_name] = language
