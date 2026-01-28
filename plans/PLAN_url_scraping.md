@@ -82,11 +82,21 @@ URL content appears as a separate section in the prompt:
 
 ## Phased Implementation
 
-### Phase 1: Foundation
-- Config file loading (`ac/ac-dc.json`)
-- URL type detection (GitHub repo vs file vs issue, docs sites, generic)
-- Data models for URLContent and URLResult
-- Basic routing infrastructure
+### Phase 1: Foundation ✅
+- Config file loading (`ac/ac-dc.json`) ✅
+- URL type detection (GitHub repo vs file vs issue, docs sites, generic) ✅
+- Data models for URLContent and URLResult ✅
+- Basic routing infrastructure ✅
+
+**Files created:**
+- `ac/url_handler/__init__.py` - Module exports
+- `ac/url_handler/models.py` - URLType, SummaryType, GitHubInfo, URLContent, URLResult
+- `ac/url_handler/detector.py` - URLDetector with find_urls(), detect_type(), extract_urls_with_types()
+- `ac/url_handler/config.py` - URLCacheConfig, URLConfig with JSON loading
+- `ac/ac-dc.json` - Optional config file (defaults work without it)
+- `tests/test_url_detector.py` - 21 tests
+- `tests/test_url_models.py` - 11 tests
+- `tests/test_url_config.py` - 7 tests
 
 ### Phase 2: GitHub Handler
 - Shallow clone (`--depth 1`) to temp directory

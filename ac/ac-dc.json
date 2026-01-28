@@ -1,0 +1,6 @@
+{
+  "url_cache": {
+    "path": "/tmp/ac_url_cache",
+    "ttl_hours": 24
+  }
+}
