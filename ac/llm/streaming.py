@@ -109,20 +109,47 @@ class StreamingMixin:
                 self._context_manager.file_context.clear()
             
             if file_paths:
+                # Validate all files upfront before processing
+                invalid_files = []
+                binary_files = []
+                
                 for path in file_paths:
-                    try:
-                        if self._context_manager:
-                            content = self.repo.get_file_content(path) if self.repo else None
-                            if isinstance(content, dict) and 'error' in content:
-                                raise FileNotFoundError(content['error'])
-                            self._context_manager.file_context.add_file(path, content)
-                    except FileNotFoundError as e:
-                        await self._send_stream_complete(request_id, {
-                            "error": str(e),
-                            "response": "",
-                            "summarized": summarized
-                        })
-                        return
+                    if self.repo:
+                        if not self.repo.file_exists(path):
+                            invalid_files.append(path)
+                        elif self.repo.is_binary_file(path):
+                            binary_files.append(path)
+                
+                # Report all problematic files at once
+                if invalid_files or binary_files:
+                    error_parts = []
+                    if binary_files:
+                        error_parts.append(f"Binary files cannot be included: {', '.join(binary_files)}")
+                    if invalid_files:
+                        error_parts.append(f"Files not found: {', '.join(invalid_files)}")
+                    
+                    await self._send_stream_complete(request_id, {
+                        "error": "\n".join(error_parts),
+                        "response": "",
+                        "summarized": summarized,
+                        "invalid_files": invalid_files,
+                        "binary_files": binary_files
+                    })
+                    return
+                
+                # All files valid, now load them
+                for path in file_paths:
+                    if self._context_manager and self.repo:
+                        content = self.repo.get_file_content(path)
+                        if isinstance(content, dict) and 'error' in content:
+                            # Shouldn't happen after validation, but handle gracefully
+                            await self._send_stream_complete(request_id, {
+                                "error": content['error'],
+                                "response": "",
+                                "summarized": summarized
+                            })
+                            return
+                        self._context_manager.file_context.add_file(path, content)
             
             # Detect and fetch URLs from user prompt
             url_context = None

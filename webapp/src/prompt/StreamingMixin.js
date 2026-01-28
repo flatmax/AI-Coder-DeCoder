@@ -60,23 +60,30 @@ export const StreamingMixin = (superClass) => class extends superClass {
     
     // Handle error case - may need to create assistant message if none exists yet
     if (result.error) {
-      // Auto-deselect binary files that caused the error
-      const binaryMatch = result.error.match(/Cannot read binary file: (.+)/);
-      if (binaryMatch && this.selectedFiles) {
-        const binaryFile = binaryMatch[1];
-        this.selectedFiles = this.selectedFiles.filter(f => f !== binaryFile);
+      // Auto-deselect binary files and invalid files that caused the error
+      const filesToDeselect = [
+        ...(result.binary_files || []),
+        ...(result.invalid_files || [])
+      ];
+      
+      if (filesToDeselect.length > 0 && this.selectedFiles) {
+        const deselectedSet = new Set(filesToDeselect);
+        this.selectedFiles = this.selectedFiles.filter(f => !deselectedSet.has(f));
+        
         // Also update the file picker's selection state
         const filePicker = this.shadowRoot?.querySelector('file-picker');
         if (filePicker && filePicker.selected) {
           const newSelected = { ...filePicker.selected };
-          delete newSelected[binaryFile];
+          for (const file of filesToDeselect) {
+            delete newSelected[file];
+          }
           filePicker.selected = newSelected;
         }
       }
       
       let errorContent = `⚠️ **Error:** ${result.error}`;
-      if (binaryMatch) {
-        errorContent += `\n\n*The file has been deselected. You can send your message again.*`;
+      if (filesToDeselect.length > 0) {
+        errorContent += `\n\n*The problematic files have been deselected. You can send your message again.*`;
       }
       
       if (lastMessage && lastMessage.role === 'assistant') {
