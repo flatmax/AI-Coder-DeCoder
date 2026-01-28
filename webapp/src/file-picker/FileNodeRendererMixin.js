@@ -81,7 +81,11 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
     
     return html`
       <div class="node">
-        <div class="row" @contextmenu=${(e) => this.handleContextMenu(e, currentPath, 'dir', node)}>
+        <div class="row" 
+             @contextmenu=${(e) => this.handleContextMenu(e, currentPath, 'dir', node)}
+             @auxclick=${(e) => { if (e.button === 1) { e.preventDefault(); this.copyPathToPrompt(currentPath, e); } }}
+             @mousedown=${(e) => { if (e.button === 1) e.preventDefault(); }}
+             @mouseup=${(e) => { if (e.button === 1) e.preventDefault(); }}>
           <input 
             type="checkbox" 
             .checked=${isFullySelected}

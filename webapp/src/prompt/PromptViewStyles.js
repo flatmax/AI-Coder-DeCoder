@@ -308,6 +308,122 @@ export const promptViewStyles = css`
     border-color: #e94560;
   }
 
+  /* URL chips */
+  .url-chips-area {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid #0f3460;
+    background: #1a1a2e;
+  }
+
+  .url-chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .url-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 16px;
+    font-size: 12px;
+    max-width: 100%;
+  }
+
+  .url-chip.detected {
+    background: #0f3460;
+    border: 1px solid #4a9eff;
+    color: #4a9eff;
+  }
+
+  .url-chip.fetching {
+    background: #0f3460;
+    border: 1px solid #f0a500;
+    color: #f0a500;
+  }
+
+  .url-chip.fetched.success {
+    background: #1a3d2e;
+    border: 1px solid #7ec699;
+    color: #7ec699;
+  }
+
+  .url-chip.fetched.excluded {
+    background: #2a2a3e;
+    border: 1px solid #666;
+    color: #888;
+  }
+
+  .url-chip.fetched.error {
+    background: #3d1a1a;
+    border: 1px solid #e94560;
+    color: #e94560;
+  }
+
+  .url-chip-checkbox {
+    margin: 0;
+    cursor: pointer;
+    accent-color: #7ec699;
+  }
+
+  .url-chip-type {
+    font-size: 11px;
+    opacity: 0.9;
+  }
+
+  .url-chip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+  }
+
+  .url-chip-icon {
+    font-size: 14px;
+  }
+
+  .url-chip-loading {
+    animation: pulse 1s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .url-chip-fetch,
+  .url-chip-dismiss,
+  .url-chip-remove {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+  }
+
+  .url-chip-fetch:hover,
+  .url-chip-dismiss:hover,
+  .url-chip-remove:hover {
+    opacity: 1;
+  }
+
+  .url-chip-fetch {
+    color: #4a9eff;
+  }
+
+  .url-chip-dismiss,
+  .url-chip-remove {
+    color: inherit;
+  }
+
   /* Resize handles */
   .resize-handle {
     position: absolute;

@@ -2,6 +2,8 @@ import { LitElement, html, css } from 'lit';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
 import '../find-in-files/FindInFiles.js';
+import '../context-viewer/ContextViewer.js';
+import '../context-viewer/UrlContentModal.js';
 
 export class AppShell extends LitElement {
   static properties = {
@@ -10,6 +12,9 @@ export class AppShell extends LitElement {
     serverURI: { type: String },
     viewingFile: { type: String },
     activeLeftTab: { type: String },
+    excludedUrls: { type: Object }, // Set of URLs excluded from context
+    showUrlModal: { type: Boolean },
+    urlModalContent: { type: Object },
   };
 
   static styles = css`
@@ -139,6 +144,9 @@ export class AppShell extends LitElement {
     this.showDiff = false;
     this.viewingFile = null;
     this.activeLeftTab = 'files';
+    this.excludedUrls = new Set();
+    this.showUrlModal = false;
+    this.urlModalContent = null;
     // Get server port from URL params or default
     const urlParams = new URLSearchParams(window.location.search);
     const port = urlParams.get('port') || '8765';
@@ -185,6 +193,11 @@ export class AppShell extends LitElement {
         if (findInFiles) {
           findInFiles.focusInput();
         }
+      });
+    } else if (tab === 'context') {
+      // Use updateComplete to ensure DOM is ready
+      this.updateComplete.then(() => {
+        this._refreshContextViewer();
       });
     }
   }
@@ -265,10 +278,13 @@ export class AppShell extends LitElement {
     const { path, line, searchContext } = e.detail;
     this.viewingFile = path;
     
-    // Only navigate if file is already loaded in diff viewer (don't auto-load)
+    // Load the file if not already in diff viewer
     const alreadyLoaded = this.diffFiles.find(f => f.path === path);
     if (!alreadyLoaded) {
-      return;
+      const loaded = await this._loadFileIntoDiff(path);
+      if (!loaded) {
+        return;
+      }
     }
     
     await this.updateComplete;
@@ -331,8 +347,98 @@ export class AppShell extends LitElement {
     return promptView?.call || null;
   }
 
+  _getSelectedFiles() {
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    return promptView?.selectedFiles || [];
+  }
+
+  _getFetchedUrls() {
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    const urlsObj = promptView?.fetchedUrls || {};
+    return Object.keys(urlsObj);
+  }
+
+  _getIncludedUrls() {
+    const allUrls = this._getFetchedUrls();
+    return allUrls.filter(url => !this.excludedUrls.has(url));
+  }
+
+  handleUrlInclusionChanged(e) {
+    const { url, included } = e.detail;
+    const newExcluded = new Set(this.excludedUrls);
+    if (included) {
+      newExcluded.delete(url);
+    } else {
+      newExcluded.add(url);
+    }
+    this.excludedUrls = newExcluded;
+    
+    // Sync to PromptView
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    if (promptView) {
+      promptView.excludedUrls = newExcluded;
+    }
+    
+    // Sync to ContextViewer
+    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
+    if (contextViewer) {
+      contextViewer.excludedUrls = newExcluded;
+      contextViewer.refreshBreakdown();
+    }
+  }
+
+  async _refreshContextViewer() {
+    await this.updateComplete;
+    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    
+    if (contextViewer && promptView?.call) {
+      contextViewer.rpcCall = promptView.call;
+      contextViewer.selectedFiles = promptView.selectedFiles || [];
+      // fetchedUrls is an object with URL keys, convert to array
+      const urlsObj = promptView.fetchedUrls || {};
+      contextViewer.fetchedUrls = Object.keys(urlsObj);
+      // Force refresh after setting properties
+      contextViewer.refreshBreakdown();
+    }
+  }
+
+  handleRemoveUrl(e) {
+    const { url } = e.detail;
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    if (promptView && promptView.fetchedUrls) {
+      // fetchedUrls is an object with URL keys, not an array
+      const { [url]: removed, ...remaining } = promptView.fetchedUrls;
+      promptView.fetchedUrls = remaining;
+      // Refresh the context viewer with updated data
+      this._refreshContextViewer();
+    }
+  }
+
+  handleUrlRemoved(e) {
+    // URL was removed from PromptView, refresh the Context Viewer
+    this._refreshContextViewer();
+  }
+
+  handleViewUrlContent(e) {
+    const { content } = e.detail;
+    this.urlModalContent = content;
+    this.showUrlModal = true;
+  }
+
+  closeUrlModal() {
+    this.showUrlModal = false;
+    this.urlModalContent = null;
+  }
+
   render() {
     return html`
+      <url-content-modal
+        .open=${this.showUrlModal}
+        .url=${this.urlModalContent?.url || ''}
+        .content=${this.urlModalContent}
+        @close=${this.closeUrlModal}
+      ></url-content-modal>
       <div class="app-container">
         <div class="header">
           <h1>AI Coder / DeCoder</h1>
@@ -348,6 +454,12 @@ export class AppShell extends LitElement {
               @click=${() => this.switchTab('search')}
             >
               <span class="icon">🔍</span> Search
+            </button>
+            <button 
+              class="header-tab ${this.activeLeftTab === 'context' ? 'active' : ''}"
+              @click=${() => this.switchTab('context')}
+            >
+              <span class="icon">📊</span> Context
             </button>
           </div>
           <span class="subtitle">Code changes will appear here</span>
@@ -377,7 +489,10 @@ export class AppShell extends LitElement {
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
             @navigate-to-edit=${this.handleNavigateToEdit}
-            style="${this.activeLeftTab === 'search' ? 'display: none;' : ''}"
+            @url-removed=${this.handleUrlRemoved}
+            @url-inclusion-changed=${this.handleUrlInclusionChanged}
+            @view-url-content=${this.handleViewUrlContent}
+            style="${this.activeLeftTab === 'files' ? '' : 'display: none;'}"
           ></prompt-view>
           <find-in-files
             .rpcCall=${this._getPromptViewRpcCall()}
@@ -386,6 +501,15 @@ export class AppShell extends LitElement {
             @close-search=${this.handleCloseSearch}
             style="${this.activeLeftTab === 'search' ? '' : 'display: none;'}"
           ></find-in-files>
+          <context-viewer
+            .rpcCall=${this._getPromptViewRpcCall()}
+            .selectedFiles=${this._getSelectedFiles()}
+            .fetchedUrls=${this._getFetchedUrls()}
+            .excludedUrls=${this.excludedUrls}
+            @remove-url=${this.handleRemoveUrl}
+            @url-inclusion-changed=${this.handleUrlInclusionChanged}
+            style="${this.activeLeftTab === 'context' ? '' : 'display: none;'}"
+          ></context-viewer>
         </div>
       </div>
     `;

@@ -7,6 +7,7 @@ from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
 from ..indexer import Indexer
 from ..context import ContextManager
+from ..url_handler import URLFetcher, URLDetector, URLType, SummaryType
 
 
 class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
@@ -62,6 +63,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Lazy-loaded indexer
         self._indexer = None
+        
+        # Lazy-loaded URL fetcher
+        self._url_fetcher = None
         
         # Auto-save symbol map on startup
         self._auto_save_symbol_map()
@@ -640,3 +644,342 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 for r in apply_result.results
             ]
         }
+    
+    # ========== URL Fetching Methods ==========
+    
+    def _get_url_fetcher(self):
+        """Get or create the URLFetcher instance."""
+        if self._url_fetcher is None:
+            self._url_fetcher = URLFetcher(summarizer_model=self.smaller_model)
+        return self._url_fetcher
+    
+    def fetch_url(self, url, use_cache=True, summarize=True, summary_type=None, context=None):
+        """
+        Fetch content from a URL.
+        
+        Args:
+            url: URL to fetch
+            use_cache: Whether to use cached content if available
+            summarize: Whether to generate a summary
+            summary_type: Type of summary ('brief', 'usage', 'api', 'arch', 'eval')
+            context: User's question for contextual summarization
+            
+        Returns:
+            Dict with url, type, content, summary, cached, error
+        """
+        try:
+            fetcher = self._get_url_fetcher()
+            
+            # Convert summary_type string to enum if provided
+            st = None
+            if summary_type:
+                try:
+                    st = SummaryType(summary_type)
+                except ValueError:
+                    pass
+            
+            result = fetcher.fetch(
+                url,
+                use_cache=use_cache,
+                summarize=summarize,
+                summary_type=st,
+                context=context,
+            )
+            
+            if result.content.error:
+                print(f"⚠️ URL fetch error for {url}: {result.content.error}")
+            
+            return {
+                "url": result.content.url,
+                "type": result.content.url_type.value,
+                "title": result.content.title,
+                "content": result.content.content,
+                "readme": result.content.readme,
+                "symbol_map": result.content.symbol_map,
+                "summary": result.summary,
+                "summary_type": result.summary_type.value if result.summary_type else None,
+                "cached": result.cached,
+                "error": result.content.error,
+            }
+        except Exception as e:
+            print(f"⚠️ URL fetch failed for {url}: {e}")
+            return {"url": url, "error": str(e)}
+    
+    def fetch_urls_from_text(self, text, use_cache=True, summarize=True):
+        """
+        Detect and fetch all URLs in text.
+        
+        Args:
+            text: Text that may contain URLs
+            use_cache: Whether to use cached content
+            summarize: Whether to generate summaries
+            
+        Returns:
+            List of fetch results
+        """
+        try:
+            fetcher = self._get_url_fetcher()
+            results = fetcher.detect_and_fetch(
+                text,
+                use_cache=use_cache,
+                summarize=summarize,
+            )
+            
+            return [
+                {
+                    "url": r.content.url,
+                    "type": r.content.url_type.value,
+                    "title": r.content.title,
+                    "summary": r.summary,
+                    "cached": r.cached,
+                    "error": r.content.error,
+                }
+                for r in results
+            ]
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def detect_urls(self, text):
+        """
+        Detect URLs in text without fetching.
+        
+        Args:
+            text: Text to scan for URLs
+            
+        Returns:
+            List of dicts with url, type, and github_info
+        """
+        results = URLDetector.extract_urls_with_types(text)
+        return [
+            {
+                "url": url,
+                "type": url_type.value,
+                "github_info": {
+                    "owner": gi.owner,
+                    "repo": gi.repo,
+                    "branch": gi.branch,
+                    "path": gi.path,
+                } if gi else None,
+            }
+            for url, url_type, gi in results
+        ]
+    
+    def invalidate_url_cache(self, url):
+        """Invalidate cached content for a URL."""
+        fetcher = self._get_url_fetcher()
+        return {"invalidated": fetcher.invalidate_cache(url)}
+    
+    def clear_url_cache(self):
+        """Clear all cached URL content."""
+        fetcher = self._get_url_fetcher()
+        count = fetcher.clear_cache()
+        return {"cleared": count}
+    
+    # ========== Context Visualization Methods ==========
+    
+    def get_context_breakdown(self, file_paths=None, fetched_urls=None):
+        """
+        Get detailed breakdown of context token usage.
+        
+        Args:
+            file_paths: List of files currently in context
+            fetched_urls: List of URLs that have been fetched
+            
+        Returns:
+            Dict with token breakdown by category
+        """
+        from ..prompts import build_system_prompt
+        
+        if not self._context_manager:
+            return {"error": "No context manager available"}
+        
+        tc = self._context_manager.token_counter
+        max_input = tc.max_input_tokens
+        max_output = tc.max_output_tokens
+        
+        breakdown = {}
+        total_tokens = 0
+        
+        # System prompt
+        system_prompt = build_system_prompt()
+        system_tokens = tc.count(system_prompt)
+        breakdown["system"] = {
+            "tokens": system_tokens,
+            "label": "System Prompt"
+        }
+        total_tokens += system_tokens
+        
+        # Symbol map
+        symbol_map = ""
+        symbol_map_tokens = 0
+        if self.repo:
+            try:
+                symbol_map = self.get_context_map(
+                    chat_files=file_paths,
+                    include_references=True
+                )
+                if symbol_map:
+                    symbol_map_tokens = tc.count(symbol_map)
+            except Exception:
+                pass
+        breakdown["symbol_map"] = {
+            "tokens": symbol_map_tokens,
+            "label": "Symbol Map"
+        }
+        total_tokens += symbol_map_tokens
+        
+        # Files
+        file_items = []
+        file_total = 0
+        if file_paths and self.repo:
+            for path in file_paths:
+                try:
+                    content = self.repo.get_file_content(path)
+                    if isinstance(content, dict) and 'error' in content:
+                        continue
+                    if content:
+                        # Match the format used in streaming
+                        wrapped = f"{path}\n```\n{content}\n```\n"
+                        tokens = tc.count(wrapped)
+                        file_items.append({"path": path, "tokens": tokens})
+                        file_total += tokens
+                except Exception:
+                    pass
+        breakdown["files"] = {
+            "tokens": file_total,
+            "label": f"Files ({len(file_items)})",
+            "items": file_items
+        }
+        total_tokens += file_total
+        
+        # URLs - estimate tokens as they would appear in the prompt
+        url_items = []
+        url_total = 0
+        if fetched_urls:
+            fetcher = self._get_url_fetcher()
+            for url in fetched_urls:
+                try:
+                    cached = fetcher.cache.get(url)
+                    if cached:
+                        # Build the URL content as it would appear in the prompt
+                        # (mirrors _build_streaming_messages URL handling)
+                        url_part = f"## {cached.url}\n"
+                        if cached.title:
+                            url_part += f"**{cached.title}**\n\n"
+                        
+                        # Use readme or content (truncated as in streaming)
+                        if cached.readme:
+                            readme = cached.readme
+                            if len(readme) > 4000:
+                                readme = readme[:4000] + "\n\n[truncated...]"
+                            url_part += f"{readme}\n"
+                        elif cached.content:
+                            content = cached.content
+                            if len(content) > 4000:
+                                content = content[:4000] + "\n\n[truncated...]"
+                            url_part += f"{content}\n"
+                        
+                        if cached.symbol_map:
+                            url_part += f"\n### Symbol Map\n```\n{cached.symbol_map}\n```\n"
+                        
+                        tokens = tc.count(url_part)
+                        url_items.append({
+                            "url": url,
+                            "tokens": tokens,
+                            "title": cached.title or url,
+                            "type": cached.url_type.value if cached.url_type else "unknown",
+                            "fetched_at": cached.fetched_at.isoformat() if cached.fetched_at else None
+                        })
+                        url_total += tokens
+                    else:
+                        # URL was passed but not in cache - still show it
+                        url_items.append({
+                            "url": url,
+                            "tokens": 0,
+                            "title": url,
+                            "type": "unknown",
+                            "fetched_at": None,
+                            "not_cached": True
+                        })
+                except Exception as e:
+                    url_items.append({
+                        "url": url,
+                        "tokens": 0,
+                        "title": url,
+                        "type": "error",
+                        "error": str(e)
+                    })
+        # Add header overhead if there are URLs (mirrors streaming.py URL_CONTEXT_HEADER)
+        if url_items:
+            url_header = "# URL Context\n\nThe following content was fetched from URLs mentioned in the conversation:\n\n"
+            url_total += tc.count(url_header)
+            # Also count the assistant response "Ok, I've reviewed the URL content."
+            url_total += tc.count("Ok, I've reviewed the URL content.")
+        
+        breakdown["urls"] = {
+            "tokens": url_total,
+            "label": f"URLs ({len(url_items)})",
+            "items": url_items
+        }
+        total_tokens += url_total
+        
+        # History
+        history_tokens = self._context_manager.history_token_count()
+        history_count = len(self._context_manager.get_history())
+        breakdown["history"] = {
+            "tokens": history_tokens,
+            "label": f"History ({history_count} messages)",
+            "message_count": history_count,
+            "max_tokens": self._context_manager.max_history_tokens,
+            "needs_summary": self._context_manager.history_needs_summary()
+        }
+        total_tokens += history_tokens
+        
+        return {
+            "model": self.model,
+            "max_input_tokens": max_input,
+            "max_output_tokens": max_output,
+            "used_tokens": total_tokens,
+            "remaining_tokens": max_input - total_tokens,
+            "breakdown": breakdown
+        }
+    
+    def get_url_content(self, url):
+        """
+        Get cached content for a URL.
+        
+        Args:
+            url: URL to retrieve content for
+            
+        Returns:
+            Dict with url, content, metadata, tokens
+        """
+        if not self._context_manager:
+            return {"error": "No context manager available"}
+        
+        try:
+            fetcher = self._get_url_fetcher()
+            cached = fetcher.cache.get(url)
+            
+            if not cached:
+                return {"error": "URL not in cache", "url": url}
+            
+            tc = self._context_manager.token_counter
+            content_tokens = tc.count(cached.content) if cached.content else 0
+            readme_tokens = tc.count(cached.readme) if cached.readme else 0
+            
+            return {
+                "url": cached.url,
+                "title": cached.title,
+                "type": cached.url_type.value if cached.url_type else "unknown",
+                "content": cached.content,
+                "readme": cached.readme,
+                "symbol_map": cached.symbol_map,
+                "description": cached.description,
+                "content_tokens": content_tokens,
+                "readme_tokens": readme_tokens,
+                "fetched_at": cached.fetched_at.isoformat() if cached.fetched_at else None,
+                "error": cached.error
+            }
+        except Exception as e:
+            return {"error": str(e), "url": url}
