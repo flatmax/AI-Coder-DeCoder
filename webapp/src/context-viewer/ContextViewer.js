@@ -2,6 +2,7 @@ import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
 import './UrlContentModal.js';
+import './SymbolMapModal.js';
 
 export class ContextViewer extends LitElement {
   static properties = {
@@ -13,6 +14,10 @@ export class ContextViewer extends LitElement {
     selectedUrl: { type: String },
     showUrlModal: { type: Boolean },
     urlContent: { type: Object },
+    // Symbol map modal
+    showSymbolMapModal: { type: Boolean },
+    symbolMapContent: { type: String },
+    isLoadingSymbolMap: { type: Boolean },
     // These come from parent
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
@@ -31,6 +36,9 @@ export class ContextViewer extends LitElement {
     this.selectedUrl = null;
     this.showUrlModal = false;
     this.urlContent = null;
+    this.showSymbolMapModal = false;
+    this.symbolMapContent = null;
+    this.isLoadingSymbolMap = false;
     this.selectedFiles = [];
     this.fetchedUrls = [];
     this.excludedUrls = new Set();
@@ -163,6 +171,33 @@ export class ContextViewer extends LitElement {
       bubbles: true,
       composed: true
     }));
+  }
+
+  async viewSymbolMap() {
+    if (!this._call) return;
+    
+    this.isLoadingSymbolMap = true;
+    this.showSymbolMapModal = true;
+    this.symbolMapContent = null;
+    
+    try {
+      // Use get_context_map which fetches all trackable files and includes references
+      // Pass null for chat_files to include ALL files in the map
+      const response = await this._call['LiteLLM.get_context_map'](
+        null,  // Don't exclude any files
+        true   // include_references
+      );
+      this.symbolMapContent = this._extractResponse(response);
+    } catch (e) {
+      this.symbolMapContent = `Error loading symbol map: ${e.message}`;
+    } finally {
+      this.isLoadingSymbolMap = false;
+    }
+  }
+
+  closeSymbolMapModal() {
+    this.showSymbolMapModal = false;
+    this.symbolMapContent = null;
   }
 
   formatTokens(count) {

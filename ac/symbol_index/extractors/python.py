@@ -8,17 +8,22 @@ from .base import BaseExtractor
 class PythonExtractor(BaseExtractor):
     """Extracts symbols from Python source code."""
     
-    def __init__(self):
-        super().__init__()
-        self._import_map: dict = {}  # name -> module for resolution
-    
-    def extract_symbols(self, tree, file_path: str, content: bytes) -> List[Symbol]:
-        """Extract all symbols from a Python file."""
-        symbols = []
-        self._imports = []
-        self._import_map = {}
-        self._extract_from_node(tree.root_node, file_path, content, symbols, parent=None)
-        return symbols
+    CALL_NODE_TYPE = 'call'
+    SELF_PREFIX = 'self.'
+    CONDITIONAL_TYPES = {
+        'if_statement', 'elif_clause', 'else_clause',
+        'try_statement', 'except_clause', 'finally_clause',
+        'for_statement', 'while_statement',
+        'with_statement',
+        'conditional_expression',
+    }
+    BUILTINS_TO_SKIP = {
+        'print', 'len', 'str', 'int', 'list', 'dict', 'set',
+        'tuple', 'bool', 'range', 'enumerate', 'zip', 'map',
+        'filter', 'isinstance', 'hasattr', 'getattr', 'setattr',
+        'open', 'type', 'super', 'sorted', 'reversed', 'any', 'all',
+        'min', 'max', 'sum', 'abs', 'round', 'format', 'repr',
+    }
     
     def _extract_from_node(
         self, 
@@ -87,6 +92,32 @@ class PythonExtractor(BaseExtractor):
                 for child in node.children:
                     self._extract_from_node(child, file_path, content, symbols, parent)
     
+    def _update_import_map(self, imp: Import):
+        """Update the import map for call resolution."""
+        if imp.names:
+            for name in imp.names:
+                alias = imp.aliases.get(name, name)
+                self._import_map[alias] = f"{imp.module}.{name}" if imp.module else name
+        else:
+            module_name = imp.module.split('.')[0]
+            alias = imp.aliases.get(imp.module, module_name)
+            self._import_map[alias] = imp.module
+    
+    def _is_instance_var_assignment(self, node, content: bytes) -> Optional[str]:
+        """Check if node is a self.x = ... assignment."""
+        if node.type != 'assignment':
+            return None
+        left = node.children[0] if node.children else None
+        if not left or left.type != 'attribute':
+            return None
+        obj = self._find_child(left, 'identifier')
+        if not obj or self._get_node_text(obj, content) != 'self':
+            return None
+        identifiers = [c for c in left.children if c.type == 'identifier']
+        if len(identifiers) >= 2:
+            return identifiers[-1].text.decode('utf-8') if identifiers[-1].text else None
+        return None
+    
     def _extract_class(
         self, node, file_path: str, content: bytes, parent: Optional[str]
     ) -> Optional[Symbol]:
@@ -110,9 +141,6 @@ class PythonExtractor(BaseExtractor):
         # Get docstring
         docstring = self._get_class_docstring(node, content)
         
-        # Get instance variables
-        instance_vars = self._extract_instance_vars(node, content)
-        
         return Symbol(
             name=name,
             kind='class',
@@ -122,7 +150,7 @@ class PythonExtractor(BaseExtractor):
             parent=parent,
             bases=bases,
             docstring=docstring,
-            instance_vars=instance_vars,
+            instance_vars=self._extract_instance_vars(node, content),
         )
     
     def _extract_function(
@@ -148,10 +176,7 @@ class PythonExtractor(BaseExtractor):
         if ret_node:
             return_type = self._get_node_text(ret_node, content)
         
-        # Get docstring
         docstring = self._get_function_docstring(node, content)
-        
-        # Get calls made by this function
         calls, call_sites = self._extract_calls_with_context(node, content)
         
         return Symbol(
@@ -393,139 +418,3 @@ class PythonExtractor(BaseExtractor):
                 break  # Only check first statement
         
         return None
-    
-    def _extract_instance_vars(self, class_node, content: bytes) -> List[str]:
-        """Extract instance variables (self.x = ...) from a class."""
-        instance_vars = []
-        seen = set()
-        
-        # Walk all nodes in the class looking for self.x assignments
-        def walk(node):
-            for child in node.children:
-                if child.type == 'assignment':
-                    left = child.children[0] if child.children else None
-                    if left and left.type == 'attribute':
-                        # Check for self.x pattern
-                        obj = self._find_child(left, 'identifier')
-                        attr = self._find_attr_name(left)
-                        if obj and attr:
-                            obj_name = self._get_node_text(obj, content)
-                            if obj_name == 'self' and attr not in seen:
-                                seen.add(attr)
-                                instance_vars.append(attr)
-                walk(child)
-        
-        walk(class_node)
-        return instance_vars
-    
-    def _find_attr_name(self, attr_node) -> Optional[str]:
-        """Get the attribute name from an attribute node (self.x -> x)."""
-        for child in attr_node.children:
-            if child.type == 'identifier':
-                # Skip 'self', get the attribute name
-                continue
-            if child.type == 'identifier':
-                return None
-        # The attribute name is the last identifier after the dot
-        identifiers = [c for c in attr_node.children if c.type == 'identifier']
-        if len(identifiers) >= 2:
-            return identifiers[-1].text.decode('utf-8') if identifiers[-1].text else None
-        return None
-    
-    def _extract_calls_with_context(self, func_node, content: bytes) -> tuple:
-        """Extract function/method calls with conditional context.
-        
-        Returns:
-            Tuple of (calls: List[str], call_sites: List[CallSite])
-        """
-        calls = []
-        call_sites = []
-        seen: Set[str] = set()
-        
-        # Track conditional depth
-        conditional_types = {
-            'if_statement', 'elif_clause', 'else_clause',
-            'try_statement', 'except_clause', 'finally_clause',
-            'for_statement', 'while_statement',
-            'with_statement',
-            'conditional_expression',  # ternary
-        }
-        
-        builtins = {
-            'print', 'len', 'str', 'int', 'list', 'dict', 'set', 
-            'tuple', 'bool', 'range', 'enumerate', 'zip', 'map', 
-            'filter', 'isinstance', 'hasattr', 'getattr', 'setattr',
-            'open', 'type', 'super', 'sorted', 'reversed', 'any', 'all',
-            'min', 'max', 'sum', 'abs', 'round', 'format', 'repr',
-        }
-        
-        def walk(node, in_conditional: bool = False):
-            # Check if entering a conditional context
-            is_conditional = node.type in conditional_types
-            current_conditional = in_conditional or is_conditional
-            
-            for child in node.children:
-                if child.type == 'call':
-                    func = child.children[0] if child.children else None
-                    if func:
-                        call_name = self._get_call_name(func, content)
-                        if call_name and call_name not in builtins:
-                            # Add to simple calls list (deduped)
-                            if call_name not in seen:
-                                seen.add(call_name)
-                                calls.append(call_name)
-                            
-                            # Create CallSite with context
-                            call_site = CallSite(
-                                name=call_name,
-                                line=child.start_point[0] + 1,
-                                is_conditional=current_conditional,
-                            )
-                            
-                            # Try to resolve target
-                            self._resolve_call_target(call_name, call_site)
-                            call_sites.append(call_site)
-                
-                walk(child, current_conditional)
-        
-        walk(func_node)
-        return calls, call_sites
-    
-    def _resolve_call_target(self, call_name: str, call_site: CallSite):
-        """Try to resolve a call to its target module/symbol."""
-        # Check if it's an imported name
-        if call_name in self._import_map:
-            full_path = self._import_map[call_name]
-            parts = full_path.rsplit('.', 1)
-            if len(parts) == 2:
-                call_site.target_symbol = parts[1]
-                # Module path would need resolver to get file
-            else:
-                call_site.target_symbol = parts[0]
-        
-        # Handle attribute access like foo.bar()
-        elif '.' in call_name:
-            parts = call_name.split('.')
-            base = parts[0]
-            if base in self._import_map:
-                full_path = self._import_map[base]
-                call_site.target_symbol = '.'.join([full_path] + parts[1:])
-    
-    def _get_call_name(self, node, content: bytes) -> Optional[str]:
-        """Get the name of a called function/method."""
-        if node.type == 'identifier':
-            return self._get_node_text(node, content)
-        elif node.type == 'attribute':
-            # Get the full attribute chain (e.g., self.foo, obj.method)
-            text = self._get_node_text(node, content)
-            # Simplify self.x to just x
-            if text.startswith('self.'):
-                return text[5:]
-            # For other objects, keep short form (last part)
-            parts = text.split('.')
-            if len(parts) <= 2:
-                return text
-            # For long chains, keep last 2 parts
-            return '.'.join(parts[-2:])
-        return None
-    

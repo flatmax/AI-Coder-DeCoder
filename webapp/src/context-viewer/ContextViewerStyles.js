@@ -249,6 +249,38 @@ export const contextViewerStyles = css`
     cursor: not-allowed;
   }
 
+  /* Category row with action button */
+  .category-row-with-action {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .category-row-with-action .category-row {
+    flex: 1;
+  }
+
+  .symbol-map-btn {
+    background: #0f3460;
+    border: none;
+    border-radius: 4px;
+    color: #888;
+    padding: 4px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .symbol-map-btn:hover {
+    background: #1a4a7a;
+    color: #fff;
+  }
+
+  .symbol-map-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   /* Model Info */
   .model-info {
     display: flex;
