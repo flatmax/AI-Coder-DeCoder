@@ -1,5 +1,6 @@
 """Summarization of URL content using smaller/faster LLM."""
 
+import time
 import litellm as _litellm
 from typing import Optional
 
@@ -130,6 +131,10 @@ class Summarizer:
         user_prompt += f"---\n\n{full_content}"
         
         # Call the LLM
+        print(f"      🤖 Calling summarizer model: {self.model}")
+        print(f"      Content length: {len(full_content):,} chars, prompt length: {len(user_prompt):,} chars")
+        
+        llm_start = time.time()
         response = _litellm.completion(
             model=self.model,
             messages=[
@@ -137,6 +142,15 @@ class Summarizer:
                 {"role": "user", "content": user_prompt}
             ],
         )
+        llm_time = time.time() - llm_start
+        
+        # Log token usage if available
+        if hasattr(response, 'usage') and response.usage:
+            usage = response.usage
+            print(f"      ✓ LLM call took: {llm_time:.2f}s")
+            print(f"      Tokens: {usage.prompt_tokens} prompt, {usage.completion_tokens} completion")
+        else:
+            print(f"      ✓ LLM call took: {llm_time:.2f}s (no usage info)")
         
         return response.choices[0].message.content.strip()
     

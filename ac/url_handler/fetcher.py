@@ -1,5 +1,6 @@
 """Main URL fetcher orchestrating handlers and cache."""
 
+import time
 from typing import Optional, List
 
 from .cache import URLCache
@@ -54,33 +55,99 @@ class URLFetcher:
         Returns:
             URLResult with content and optional summary
         """
+        fetch_start = time.time()
+        
         # Check cache first
         if use_cache:
+            cache_check_start = time.time()
             cached = self.cache.get(url)
+            cache_check_time = time.time() - cache_check_start
+            
             if cached:
-                result = URLResult(content=cached, cached=True)
+                print(f"🔵 URL cache HIT: {url[:60]}{'...' if len(url) > 60 else ''}")
+                print(f"   Fetched at: {cached.fetched_at}")
+                print(f"   Type: {cached.url_type.value if cached.url_type else 'unknown'}")
+                print(f"   Cache check took: {cache_check_time*1000:.1f}ms")
                 
-                # Still summarize if requested (summaries aren't cached)
-                if summarize and not cached.error:
+                # Check if we have a cached summary
+                if cached.summary:
+                    print(f"   📝 Using cached summary (type={cached.summary_type})")
+                    result = URLResult(
+                        content=cached,
+                        cached=True,
+                        summary=cached.summary,
+                        summary_type=SummaryType(cached.summary_type) if cached.summary_type else None,
+                    )
+                elif summarize and not cached.error:
+                    # Generate summary and update cache
+                    print(f"   📝 Summarization requested (summarize={summarize}, type={summary_type})")
+                    summary_start = time.time()
+                    result = URLResult(content=cached, cached=True)
                     result = self._add_summary(result, summary_type, context)
+                    summary_time = time.time() - summary_start
+                    print(f"   ✓ Summarization took: {summary_time:.2f}s")
+                    
+                    # Update cache with summary
+                    if result.summary:
+                        cached.summary = result.summary
+                        cached.summary_type = result.summary_type.value if result.summary_type else None
+                        self.cache.set(url, cached)
+                        print(f"   💾 Summary cached for future requests")
+                else:
+                    print(f"   📝 No summarization (summarize={summarize}, error={cached.error})")
+                    result = URLResult(content=cached, cached=True)
                 
+                total_time = time.time() - fetch_start
+                print(f"   ⏱️  Total fetch time: {total_time:.2f}s")
                 return result
+            else:
+                print(f"🟡 URL cache MISS: {url[:60]}{'...' if len(url) > 60 else ''}")
+                print(f"   Cache check took: {cache_check_time*1000:.1f}ms")
+        else:
+            print(f"🟠 URL cache BYPASS (use_cache=False): {url[:60]}{'...' if len(url) > 60 else ''}")
         
         # Detect URL type and fetch
+        detect_start = time.time()
         url_type, github_info = URLDetector.detect_type(url)
+        detect_time = time.time() - detect_start
+        print(f"   URL type detection took: {detect_time*1000:.1f}ms -> {url_type.value}")
         
+        fetch_content_start = time.time()
         content = self._fetch_by_type(url, url_type, github_info)
+        fetch_content_time = time.time() - fetch_content_start
+        print(f"   Content fetch took: {fetch_content_time:.2f}s")
         
         # Cache successful fetches
         if not content.error and use_cache:
+            cache_set_start = time.time()
             self.cache.set(url, content)
+            cache_set_time = time.time() - cache_set_start
+            print(f"🟢 URL cached: {url[:60]}{'...' if len(url) > 60 else ''}")
+            print(f"   Type: {content.url_type.value if content.url_type else 'unknown'}")
+            print(f"   Title: {content.title or '(none)'}")
+            print(f"   Cache write took: {cache_set_time*1000:.1f}ms")
         
         result = URLResult(content=content, cached=False)
         
         # Summarize if requested
         if summarize and not content.error:
+            print(f"   📝 Summarization requested (summarize={summarize}, type={summary_type})")
+            summary_start = time.time()
             result = self._add_summary(result, summary_type, context)
+            summary_time = time.time() - summary_start
+            print(f"   ✓ Summarization took: {summary_time:.2f}s")
+            
+            # Store summary in content for caching
+            if result.summary and use_cache:
+                content.summary = result.summary
+                content.summary_type = result.summary_type.value if result.summary_type else None
+                self.cache.set(url, content)
+                print(f"   💾 Summary cached with content")
+        else:
+            print(f"   📝 No summarization (summarize={summarize}, error={content.error})")
         
+        total_time = time.time() - fetch_start
+        print(f"   ⏱️  Total fetch time: {total_time:.2f}s")
         return result
     
     def fetch_multiple(

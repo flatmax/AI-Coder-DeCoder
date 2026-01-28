@@ -60,6 +60,8 @@ class URLContent:
     github_info: Optional[GitHubInfo] = None
     fetched_at: Optional[datetime] = None
     error: Optional[str] = None
+    summary: Optional[str] = None
+    summary_type: Optional[str] = None  # Store as string for serialization
     
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -81,6 +83,8 @@ class URLContent:
             } if self.github_info else None,
             'fetched_at': self.fetched_at.isoformat() if self.fetched_at else None,
             'error': self.error,
+            'summary': self.summary,
+            'summary_type': self.summary_type,
         }
     
     @classmethod
@@ -113,6 +117,8 @@ class URLContent:
             github_info=github_info,
             fetched_at=fetched_at,
             error=data.get('error'),
+            summary=data.get('summary'),
+            summary_type=data.get('summary_type'),
         )
 
 
