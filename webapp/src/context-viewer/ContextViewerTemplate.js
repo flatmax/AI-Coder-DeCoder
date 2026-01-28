@@ -1,5 +1,17 @@
 import { html } from 'lit';
 
+function renderSymbolMapButton(component) {
+  return html`
+    <button 
+      class="symbol-map-btn"
+      @click=${() => component.viewSymbolMap()}
+      ?disabled=${component.isLoadingSymbolMap}
+    >
+      ${component.isLoadingSymbolMap ? '⏳' : '🗺️'} View Symbol Map
+    </button>
+  `;
+}
+
 function renderBudgetSection(component) {
   const { breakdown } = component;
   if (!breakdown) return html``;
@@ -125,7 +137,10 @@ function renderBreakdownSection(component) {
     <div class="breakdown-section">
       <div class="breakdown-title">Category Breakdown</div>
       ${renderCategoryRow(component, 'system', bd.system)}
-      ${renderCategoryRow(component, 'symbol_map', bd.symbol_map)}
+      <div class="category-row-with-action">
+        ${renderCategoryRow(component, 'symbol_map', bd.symbol_map)}
+        ${renderSymbolMapButton(component)}
+      </div>
       ${renderCategoryRow(component, 'files', bd.files, true)}
       ${renderCategoryRow(component, 'urls', bd.urls, (component.fetchedUrls?.length > 0))}
       ${renderCategoryRow(component, 'history', bd.history, bd.history?.needs_summary)}
@@ -169,5 +184,12 @@ export function renderContextViewer(component) {
       .content=${component.urlContent}
       @close=${() => component.closeUrlModal()}
     ></url-content-modal>
+    
+    <symbol-map-modal
+      ?open=${component.showSymbolMapModal}
+      .content=${component.symbolMapContent}
+      .isLoading=${component.isLoadingSymbolMap}
+      @close=${() => component.closeSymbolMapModal()}
+    ></symbol-map-modal>
   `;
 }
