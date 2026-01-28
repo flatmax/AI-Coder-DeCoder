@@ -26,16 +26,18 @@ class URLConfig:
         
         Args:
             config_path: Optional path to config file.
-                        If None, looks in ac/ directory.
+                        If None, looks in repo root.
         
         Returns:
             URLConfig instance with loaded or default values.
         """
         if config_path is None:
-            # Look for ac-dc.json in the ac/ directory
+            # Look for ac-dc.json in the repo root (three levels up from url_handler/config.py)
+            # Path: ac/url_handler/config.py -> ac/url_handler/ -> ac/ -> repo root
             config_path = os.path.join(
                 os.path.dirname(__file__), 
                 '..', 
+                '..',
                 'ac-dc.json'
             )
         

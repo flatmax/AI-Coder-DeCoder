@@ -66,7 +66,7 @@ pip install -e .
 
 # Or use a virtual environment (recommended)
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+uv pip install -e .
 ```
 
 That's it! The webapp is hosted on GitHub Pages and loads automatically.
@@ -86,7 +86,7 @@ Then run with `--dev` for hot-reloading during development.
 
 ## Configuration
 
-Create or edit `ac/llm.json` to configure your LLM provider:
+Create or edit `llm.json` in the repository root to configure your LLM provider:
 
 **OpenAI:**
 ```json
@@ -114,7 +114,6 @@ Create or edit `ac/llm.json` to configure your LLM provider:
 ```json
 {
   "env": {
-    "CLAUDE_CODE_USE_BEDROCK": "true",
     "AWS_REGION": "us-east-1"
   },
   "model": "anthropic.claude-sonnet-4-20250514-v1:0",
@@ -124,10 +123,30 @@ Create or edit `ac/llm.json` to configure your LLM provider:
 
 See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
 
+### Application Configuration (ac-dc.json)
+
+Modify `ac-dc.json` in the repository root to configure application settings. NOTE: the url_cache path if you don't want it in /tmp :
+
+```json
+{
+  "url_cache": {
+    "path": "/tmp/ac-dc_url_cache",
+    "ttl_hours": 24
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `url_cache.path` | `/tmp/ac_url_cache` | Directory for caching fetched URL content |
+| `url_cache.ttl_hours` | `24` | How long cached URLs remain valid (hours) |
+
 ## Usage
 
+Simply run ac-dc in your git repo you are working on.
+
 ```bash
-python ac/dc.py
+ac-dc
 ```
 
 This starts the backend server and opens the hosted webapp in your browser. The webapp connects to your local server via WebSocket.
@@ -136,9 +155,9 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| **Standard** | `python ac/dc.py` | Uses hosted webapp at GitHub Pages. No build required. |
-| **Dev** | `python ac/dc.py --dev` | Local Vite dev server with HMR. For webapp development. |
-| **Preview** | `python ac/dc.py --preview` | Builds and serves production bundle locally. For testing. |
+| **Standard** | `ac-dc` | Uses hosted webapp at GitHub Pages. No build required. |
+| **Dev** | `python ac/dc.py --dev` | Local Vite dev server with HMR. For AC⚡DC development. |
+| **Preview** | `python ac/dc.py --preview` | Builds AC⚡DC and serves production bundle locally. For testing. |
 
 ### Command Line Options
 
@@ -172,6 +191,9 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 ## Project Structure
 
 ```
+llm.json                # LLM provider configuration (model, API keys)
+ac-dc.json              # Application settings (URL cache, etc.)
+
 ac/                     # Python backend
 ├── dc.py              # Main entry point
 ├── llm/               # LLM integration (LiteLLM wrapper, streaming, chat)
