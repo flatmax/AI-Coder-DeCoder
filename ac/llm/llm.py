@@ -830,9 +830,22 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     symbol_map_tokens = tc.count(symbol_map)
             except Exception:
                 pass
+        # Get file order for display
+        symbol_map_files = []
+        if self.repo and symbol_map:
+            try:
+                indexer = self._get_indexer()
+                symbol_index = indexer._get_symbol_index()
+                # Get the current file order from the symbol index
+                symbol_map_files = symbol_index._load_order()
+            except Exception:
+                pass
+        
         breakdown["symbol_map"] = {
             "tokens": symbol_map_tokens,
-            "label": "Symbol Map"
+            "label": "Symbol Map",
+            "file_count": len(symbol_map_files),
+            "files": symbol_map_files,
         }
         total_tokens += symbol_map_tokens
         

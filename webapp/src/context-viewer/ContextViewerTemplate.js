@@ -71,6 +71,23 @@ function renderExpandedItems(component, key, data) {
     `;
   }
 
+  if (key === 'symbol_map' && data.files?.length) {
+    return html`
+      <div class="expanded-items symbol-map-files">
+        <div class="symbol-map-info">
+          Files are ordered for LLM prefix cache optimization.
+          New files appear at the bottom to preserve cached context.
+        </div>
+        ${data.files.map((file, index) => html`
+          <div class="item-row symbol-map-file">
+            <span class="file-order">${index + 1}.</span>
+            <span class="item-path" title="${file}">${file}</span>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
   if (key === 'urls') {
     // Show ALL fetched URLs from the component, not just ones in breakdown
     const allUrls = component.fetchedUrls || [];
@@ -132,13 +149,19 @@ function renderBreakdownSection(component) {
   if (!breakdown?.breakdown) return html``;
 
   const bd = breakdown.breakdown;
+  const hasSymbolMapFiles = bd.symbol_map?.files?.length > 0;
 
   return html`
     <div class="breakdown-section">
       <div class="breakdown-title">Category Breakdown</div>
       ${renderCategoryRow(component, 'system', bd.system)}
       <div class="category-row-with-action">
-        ${renderCategoryRow(component, 'symbol_map', bd.symbol_map)}
+        ${renderCategoryRow(component, 'symbol_map', {
+          ...bd.symbol_map,
+          label: hasSymbolMapFiles 
+            ? `Symbol Map (${bd.symbol_map.file_count} files)` 
+            : bd.symbol_map.label
+        }, hasSymbolMapFiles)}
         ${renderSymbolMapButton(component)}
       </div>
       ${renderCategoryRow(component, 'files', bd.files, true)}

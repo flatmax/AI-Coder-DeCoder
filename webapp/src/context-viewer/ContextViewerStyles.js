@@ -1,6 +1,34 @@
 import { css } from 'lit';
 
 export const contextViewerStyles = css`
+  .symbol-map-files {
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  
+  .symbol-map-info {
+    font-size: 11px;
+    color: #888;
+    padding: 6px 8px;
+    background: #1a1a2e;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+  
+  .symbol-map-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .file-order {
+    color: #666;
+    font-size: 11px;
+    min-width: 24px;
+    text-align: right;
+  }
+
   :host {
     display: block;
     height: 100%;
