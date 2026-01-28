@@ -177,28 +177,29 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       filePicker.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
       
       // Auto-populate input to indicate file was added/removed
+      const questionSuffix = 'Do you want to see more files before you continue?';
       if (!isCurrentlySelected) {
         // File was added
-        const addedMatch = this.inputValue.match(/^The files? (.+) added\. $/);
+        const addedMatch = this.inputValue.match(/^The files? (.+) added\. /);
         if (addedMatch) {
-          this.inputValue = `The files ${addedMatch[1]}, ${fileName} added. `;
+          this.inputValue = `The files ${addedMatch[1]}, ${fileName} added. ${questionSuffix}`;
         } else if (this.inputValue.trim() === '') {
-          this.inputValue = `The file ${fileName} added. `;
+          this.inputValue = `The file ${fileName} added. ${questionSuffix}`;
         } else {
           this.inputValue = this.inputValue.trimEnd() + ` (added ${fileName}) `;
         }
       } else {
         // File was removed - clear input if it was just the "added" message
-        const addedMatch = this.inputValue.match(/^The files? (.+) added\. $/);
+        const addedMatch = this.inputValue.match(/^The files? (.+) added\. /);
         if (addedMatch) {
           // Remove this file from the list
           const files = addedMatch[1].split(', ').filter(f => f !== fileName);
           if (files.length === 0) {
             this.inputValue = '';
           } else if (files.length === 1) {
-            this.inputValue = `The file ${files[0]} added. `;
+            this.inputValue = `The file ${files[0]} added. ${questionSuffix}`;
           } else {
-            this.inputValue = `The files ${files.join(', ')} added. `;
+            this.inputValue = `The files ${files.join(', ')} added. ${questionSuffix}`;
           }
         }
       }

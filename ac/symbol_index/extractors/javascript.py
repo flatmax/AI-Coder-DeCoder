@@ -8,17 +8,25 @@ from .base import BaseExtractor
 class JavaScriptExtractor(BaseExtractor):
     """Extracts symbols from JavaScript/TypeScript source code."""
     
-    def __init__(self):
-        super().__init__()
-        self._import_map: dict = {}  # name -> module for resolution
-    
-    def extract_symbols(self, tree, file_path: str, content: bytes) -> List[Symbol]:
-        """Extract all symbols from a JS/TS file."""
-        symbols = []
-        self._imports = []
-        self._import_map = {}
-        self._extract_from_node(tree.root_node, file_path, content, symbols, parent=None)
-        return symbols
+    CALL_NODE_TYPE = 'call_expression'
+    SELF_PREFIX = 'this.'
+    CONDITIONAL_TYPES = {
+        'if_statement', 'else_clause',
+        'try_statement', 'catch_clause', 'finally_clause',
+        'for_statement', 'for_in_statement', 'for_of_statement',
+        'while_statement', 'do_statement',
+        'switch_statement', 'switch_case',
+        'ternary_expression', 'conditional_expression',
+    }
+    BUILTINS_TO_SKIP = {
+        'console.log', 'console.error', 'console.warn', 'console.info',
+        'JSON.stringify', 'JSON.parse',
+        'Object.keys', 'Object.values', 'Object.entries', 'Object.assign',
+        'Array.isArray', 'Array.from',
+        'Promise.resolve', 'Promise.reject', 'Promise.all',
+        'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+        'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+    }
     
     def _extract_from_node(
         self, 
@@ -89,6 +97,18 @@ class JavaScriptExtractor(BaseExtractor):
                 for child in node.children:
                     self._extract_from_node(child, file_path, content, symbols, parent)
     
+    def _is_instance_var_assignment(self, node, content: bytes) -> Optional[str]:
+        """Check if node is a this.x = ... assignment."""
+        if node.type != 'assignment_expression':
+            return None
+        left = node.children[0] if node.children else None
+        if not left or left.type != 'member_expression':
+            return None
+        if not self._find_child(left, 'this'):
+            return None
+        prop = self._find_child(left, 'property_identifier')
+        return self._get_node_text(prop, content) if prop else None
+    
     def _extract_class(
         self, node, file_path: str, content: bytes, parent: Optional[str]
     ) -> Optional[Symbol]:
@@ -109,9 +129,6 @@ class JavaScriptExtractor(BaseExtractor):
                 elif child.type == 'member_expression':
                     bases.append(self._get_node_text(child, content))
         
-        # Get instance variables (this.x assignments)
-        instance_vars = self._extract_instance_vars(node, content)
-        
         return Symbol(
             name=name,
             kind='class',
@@ -120,7 +137,7 @@ class JavaScriptExtractor(BaseExtractor):
             selection_range=self._make_range(name_node),
             parent=parent,
             bases=bases,
-            instance_vars=instance_vars,
+            instance_vars=self._extract_instance_vars(node, content),
         )
     
     def _extract_function(
@@ -132,9 +149,10 @@ class JavaScriptExtractor(BaseExtractor):
             return None
         
         name = self._get_node_text(name_node, content)
+        calls, call_sites = self._extract_calls_with_context(node, content)
+        
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
-        calls, call_sites = self._extract_calls_with_context(node, content)
         
         return Symbol(
             name=name,
@@ -316,7 +334,6 @@ class JavaScriptExtractor(BaseExtractor):
         for name in imp.names:
             alias = imp.aliases.get(name, name)
             if name == '*':
-                # Namespace import: alias maps to module
                 self._import_map[alias] = imp.module
             else:
                 self._import_map[alias] = f"{imp.module}:{name}"
@@ -374,126 +391,6 @@ class JavaScriptExtractor(BaseExtractor):
                     parameters.append(Parameter(name='...' + self._get_node_text(name_node, content)))
         
         return parameters
-    
-    def _extract_instance_vars(self, class_node, content: bytes) -> List[str]:
-        """Extract instance variables (this.x = ...) from a class."""
-        instance_vars = []
-        seen = set()
-        
-        def walk(node):
-            for child in node.children:
-                # Look for this.x = ... assignments
-                if child.type == 'assignment_expression':
-                    left = child.children[0] if child.children else None
-                    if left and left.type == 'member_expression':
-                        obj = self._find_child(left, 'this')
-                        if obj:
-                            # Get property name
-                            prop = self._find_child(left, 'property_identifier')
-                            if prop:
-                                var_name = self._get_node_text(prop, content)
-                                if var_name not in seen:
-                                    seen.add(var_name)
-                                    instance_vars.append(var_name)
-                walk(child)
-        
-        walk(class_node)
-        return instance_vars
-    
-    def _extract_calls(self, func_node, content: bytes) -> List[str]:
-        """Extract function/method calls (simple list, for backward compat)."""
-        calls, _ = self._extract_calls_with_context(func_node, content)
-        return calls
-    
-    def _extract_calls_with_context(self, func_node, content: bytes) -> tuple:
-        """Extract function/method calls with conditional context.
-        
-        Returns:
-            Tuple of (calls: List[str], call_sites: List[CallSite])
-        """
-        calls = []
-        call_sites = []
-        seen: Set[str] = set()
-        
-        # Track conditional depth
-        conditional_types = {
-            'if_statement', 'else_clause',
-            'try_statement', 'catch_clause', 'finally_clause',
-            'for_statement', 'for_in_statement', 'for_of_statement',
-            'while_statement', 'do_statement',
-            'switch_statement', 'switch_case',
-            'ternary_expression', 'conditional_expression',
-        }
-        
-        globals_to_skip = {
-            'console.log', 'console.error', 'console.warn', 'console.info',
-            'JSON.stringify', 'JSON.parse',
-            'Object.keys', 'Object.values', 'Object.entries', 'Object.assign',
-            'Array.isArray', 'Array.from',
-            'Promise.resolve', 'Promise.reject', 'Promise.all',
-            'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-            'parseInt', 'parseFloat', 'isNaN', 'isFinite',
-        }
-        
-        def walk(node, in_conditional: bool = False):
-            is_conditional = node.type in conditional_types
-            current_conditional = in_conditional or is_conditional
-            
-            for child in node.children:
-                if child.type == 'call_expression':
-                    func = child.children[0] if child.children else None
-                    if func:
-                        call_name = self._get_call_name(func, content)
-                        if call_name and call_name not in globals_to_skip:
-                            # Add to simple calls list (deduped)
-                            if call_name not in seen:
-                                seen.add(call_name)
-                                calls.append(call_name)
-                            
-                            # Create CallSite with context
-                            call_site = CallSite(
-                                name=call_name,
-                                line=child.start_point[0] + 1,
-                                is_conditional=current_conditional,
-                            )
-                            
-                            # Try to resolve target
-                            self._resolve_call_target(call_name, call_site)
-                            call_sites.append(call_site)
-                
-                walk(child, current_conditional)
-        
-        walk(func_node)
-        return calls, call_sites
-    
-    def _resolve_call_target(self, call_name: str, call_site: CallSite):
-        """Try to resolve a call to its target module/symbol."""
-        base = call_name.split('.')[0]
-        
-        if base in self._import_map:
-            target = self._import_map[base]
-            if '.' in call_name:
-                # foo.bar() where foo is imported
-                rest = call_name[len(base)+1:]
-                call_site.target_symbol = f"{target}.{rest}"
-            else:
-                call_site.target_symbol = target
-    
-    def _get_call_name(self, node, content: bytes) -> Optional[str]:
-        """Get the name of a called function/method."""
-        if node.type == 'identifier':
-            return self._get_node_text(node, content)
-        elif node.type == 'member_expression':
-            text = self._get_node_text(node, content)
-            # Simplify this.x to just x
-            if text.startswith('this.'):
-                return text[5:]
-            # Keep short forms
-            parts = text.split('.')
-            if len(parts) <= 2:
-                return text
-            return '.'.join(parts[-2:])
-        return None
     
     def _get_return_type(self, node, content: bytes) -> Optional[str]:
         """Get return type annotation if present."""

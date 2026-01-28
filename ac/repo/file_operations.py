@@ -135,6 +135,8 @@ class FileOperationsMixin:
                 full_path = os.path.join(self.get_repo_root(), file_path)
                 if not os.path.exists(full_path):
                     return self._create_error_response(f"File not found: {file_path}")
+                if self.is_binary_file(file_path):
+                    return self._create_error_response(f"Cannot read binary file: {file_path}")
                 with open(full_path, 'r', encoding='utf-8') as f:
                     return f.read()
             elif version == 'HEAD':

@@ -246,8 +246,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             # Collect all file paths
             file_paths = self._collect_file_paths(tree)
             
-            # Filter to supported extensions
-            supported_extensions = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
+            # Filter to supported extensions (must match parser.py EXTENSION_MAP)
+            supported_extensions = {
+                '.py', '.js', '.mjs', '.jsx', '.ts', '.tsx',
+                '.cpp', '.cc', '.cxx', '.c++', '.C',
+                '.hpp', '.hh', '.hxx', '.h++', '.H', '.h'
+            }
             file_paths = [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
             
             if not file_paths:
@@ -384,8 +388,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         file_paths = self._collect_file_paths(tree_result['tree'])
         
-        # Filter to supported extensions
-        supported_extensions = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
+        # Filter to supported extensions (must match parser.py EXTENSION_MAP)
+        supported_extensions = {
+            '.py', '.js', '.mjs', '.jsx', '.ts', '.tsx',
+            '.cpp', '.cc', '.cxx', '.c++', '.C',
+            '.hpp', '.hh', '.hxx', '.h++', '.H', '.h'
+        }
         return [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
     
     def get_context_map(self, chat_files=None, include_references=True):
