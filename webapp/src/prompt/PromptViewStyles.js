@@ -353,10 +353,22 @@ export const promptViewStyles = css`
     color: #7ec699;
   }
 
+  .url-chip.fetched.excluded {
+    background: #2a2a3e;
+    border: 1px solid #666;
+    color: #888;
+  }
+
   .url-chip.fetched.error {
     background: #3d1a1a;
     border: 1px solid #e94560;
     color: #e94560;
+  }
+
+  .url-chip-checkbox {
+    margin: 0;
+    cursor: pointer;
+    accent-color: #7ec699;
   }
 
   .url-chip-type {

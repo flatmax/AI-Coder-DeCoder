@@ -138,11 +138,45 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   }
 
   /**
+   * Toggle whether a URL is included in context.
+   */
+  toggleUrlIncluded(url) {
+    const newExcluded = new Set(this.excludedUrls || new Set());
+    if (newExcluded.has(url)) {
+      newExcluded.delete(url);
+    } else {
+      newExcluded.add(url);
+    }
+    this.excludedUrls = newExcluded;
+    
+    // Notify parent components of the change
+    this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
+      detail: { url, included: !newExcluded.has(url) },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  /**
    * Remove a fetched URL from context.
    */
   removeFetchedUrl(url) {
     const { [url]: _, ...rest } = this.fetchedUrls;
     this.fetchedUrls = rest;
+    
+    // Also remove from excluded set if present
+    if (this.excludedUrls?.has(url)) {
+      const newExcluded = new Set(this.excludedUrls);
+      newExcluded.delete(url);
+      this.excludedUrls = newExcluded;
+    }
+    
+    // Notify parent components of the change
+    this.dispatchEvent(new CustomEvent('url-removed', {
+      detail: { url },
+      bubbles: true,
+      composed: true
+    }));
     
     // Re-detect in case the URL is still in input
     this.detectUrlsInInput(this.inputValue);
@@ -156,12 +190,22 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   }
 
   /**
-   * Clear all URL state (called on send or clear).
+   * Clear transient URL state (called on send).
+   * Keeps fetchedUrls - they persist as context across messages.
    */
   clearUrlState() {
     this.detectedUrls = [];
     this.fetchingUrls = {};
-    // Keep fetchedUrls until message is sent
+  }
+
+  /**
+   * Clear all URL state including fetched URLs (called on conversation clear).
+   */
+  clearAllUrlState() {
+    this.detectedUrls = [];
+    this.fetchingUrls = {};
+    this.fetchedUrls = {};
+    this.excludedUrls = new Set();
   }
 
   /**
@@ -172,12 +216,5 @@ export const UrlHandlerMixin = (superClass) => class extends superClass {
   getFetchedUrlsForMessage() {
     return Object.values(this.fetchedUrls)
       .filter(r => !r.error && !this.excludedUrls.has(r.url));
-  }
-
-  /**
-   * Clear fetched URLs after message is sent.
-   */
-  clearFetchedUrls() {
-    this.fetchedUrls = {};
   }
 };

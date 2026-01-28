@@ -16,16 +16,30 @@ function renderUrlChips(component) {
     <div class="url-chips-area">
       ${hasFetched ? html`
         <div class="url-chips-row fetched">
-          ${Object.values(component.fetchedUrls).map(result => html`
-            <div class="url-chip fetched ${result.error ? 'error' : 'success'}" 
-                 title=${result.error ? result.error : (result.summary || result.readme || 'No summary available')}>
-              <span class="url-chip-icon">${result.error ? '❌' : '✅'}</span>
-              <span class="url-chip-label">
-                ${result.title || component.getUrlDisplayName({ url: result.url })}
-              </span>
-              <button class="url-chip-remove" @click=${() => component.removeFetchedUrl(result.url)} title="Remove">×</button>
-            </div>
-          `)}
+          ${Object.values(component.fetchedUrls).map(result => {
+            const isIncluded = !component.excludedUrls?.has(result.url);
+            const statusClass = result.error ? 'error' : (isIncluded ? 'success' : 'excluded');
+            return html`
+              <div class="url-chip fetched ${statusClass}" 
+                   title=${result.error ? result.error : (result.summary || result.readme || 'No summary available')}>
+                ${!result.error ? html`
+                  <input 
+                    type="checkbox" 
+                    class="url-chip-checkbox"
+                    .checked=${isIncluded}
+                    @change=${() => component.toggleUrlIncluded(result.url)}
+                    title="${isIncluded ? 'Click to exclude from context' : 'Click to include in context'}"
+                  />
+                ` : html`
+                  <span class="url-chip-icon">❌</span>
+                `}
+                <span class="url-chip-label">
+                  ${result.title || component.getUrlDisplayName({ url: result.url })}
+                </span>
+                <button class="url-chip-remove" @click=${() => component.removeFetchedUrl(result.url)} title="Remove">×</button>
+              </div>
+            `;
+          })}
         </div>
       ` : ''}
       ${hasDetected || hasFetching ? html`

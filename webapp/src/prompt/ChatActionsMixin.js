@@ -45,6 +45,10 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       if (this.showHistoryBrowser) {
         this.showHistoryBrowser = false;
       }
+      // Clear all URL state when clearing conversation
+      if (this.clearAllUrlState) {
+        this.clearAllUrlState();
+      }
       this.addMessage('assistant', 'Context cleared. Starting fresh conversation.');
     } catch (e) {
       console.error('Error clearing context:', e);
@@ -153,10 +157,8 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     this.inputValue = '';
     this.pastedImages = [];
     
-    // Clear URL state after sending
-    if (this.clearFetchedUrls) {
-      this.clearFetchedUrls();
-    }
+    // Clear detected URLs (not yet fetched) after sending
+    // Keep fetchedUrls - they persist as context like selected files
     if (this.clearUrlState) {
       this.clearUrlState();
     }

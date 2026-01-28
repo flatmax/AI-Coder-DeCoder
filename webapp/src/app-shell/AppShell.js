@@ -368,10 +368,17 @@ export class AppShell extends LitElement {
     }
     this.excludedUrls = newExcluded;
     
-    // Update PromptView with the new excluded set
+    // Sync to PromptView
     const promptView = this.shadowRoot?.querySelector('prompt-view');
     if (promptView) {
       promptView.excludedUrls = newExcluded;
+    }
+    
+    // Sync to ContextViewer
+    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
+    if (contextViewer) {
+      contextViewer.excludedUrls = newExcluded;
+      contextViewer.refreshBreakdown();
     }
   }
 
@@ -401,6 +408,11 @@ export class AppShell extends LitElement {
       // Refresh the context viewer with updated data
       this._refreshContextViewer();
     }
+  }
+
+  handleUrlRemoved(e) {
+    // URL was removed from PromptView, refresh the Context Viewer
+    this._refreshContextViewer();
   }
 
   render() {
@@ -455,6 +467,8 @@ export class AppShell extends LitElement {
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
             @navigate-to-edit=${this.handleNavigateToEdit}
+            @url-removed=${this.handleUrlRemoved}
+            @url-inclusion-changed=${this.handleUrlInclusionChanged}
             style="${this.activeLeftTab === 'files' ? '' : 'display: none;'}"
           ></prompt-view>
           <find-in-files
