@@ -58,15 +58,44 @@ export const StreamingMixin = (superClass) => class extends superClass {
     // Mark the message as final and attach edit results
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     
+    // Handle error case - may need to create assistant message if none exists yet
+    if (result.error) {
+      const errorContent = `⚠️ **Error:** ${result.error}`;
+      
+      if (lastMessage && lastMessage.role === 'assistant') {
+        // Update existing assistant message with error
+        const updatedMessage = {
+          ...lastMessage,
+          content: errorContent,
+          final: true,
+          editResults: []
+        };
+        this.messageHistory = [
+          ...this.messageHistory.slice(0, -1),
+          updatedMessage
+        ];
+      } else {
+        // No assistant message yet - create one with the error
+        this.addMessage('assistant', errorContent);
+        // Mark it as final
+        const newLastMessage = this.messageHistory[this.messageHistory.length - 1];
+        if (newLastMessage && newLastMessage.role === 'assistant') {
+          this.messageHistory = [
+            ...this.messageHistory.slice(0, -1),
+            { ...newLastMessage, final: true, editResults: [] }
+          ];
+        }
+      }
+      return;
+    }
+    
     if (lastMessage && lastMessage.role === 'assistant') {
       // Build edit results for inline display
       const editResults = this._buildEditResults(result);
       
-      // Handle error case
+      // Handle cancelled case
       let content = lastMessage.content;
-      if (result.error) {
-        content = `⚠️ **Error:** ${result.error}`;
-      } else if (result.cancelled) {
+      if (result.cancelled) {
         content = content + '\n\n*[stopped]*';
       }
       
