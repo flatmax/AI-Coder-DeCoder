@@ -1,0 +1,155 @@
+import { LitElement, html } from 'lit';
+import { contextViewerStyles } from './ContextViewerStyles.js';
+import { renderContextViewer } from './ContextViewerTemplate.js';
+import './UrlContentModal.js';
+
+export class ContextViewer extends LitElement {
+  static properties = {
+    visible: { type: Boolean },
+    breakdown: { type: Object },
+    isLoading: { type: Boolean },
+    error: { type: String },
+    expandedSections: { type: Object },
+    selectedUrl: { type: String },
+    showUrlModal: { type: Boolean },
+    urlContent: { type: Object },
+    // These come from parent
+    selectedFiles: { type: Array },
+    fetchedUrls: { type: Array },
+  };
+
+  static styles = contextViewerStyles;
+
+  constructor() {
+    super();
+    this.visible = true;
+    this.breakdown = null;
+    this.isLoading = false;
+    this.error = null;
+    this.expandedSections = { files: false, urls: false, history: false };
+    this.selectedUrl = null;
+    this.showUrlModal = false;
+    this.urlContent = null;
+    this.selectedFiles = [];
+    this.fetchedUrls = [];
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    // Initial load will happen when rpcCall is set
+  }
+
+  async refreshBreakdown() {
+    if (!this._call) {
+      return;
+    }
+    
+    this.isLoading = true;
+    this.error = null;
+    
+    try {
+      const response = await this._call['LiteLLM.get_context_breakdown'](
+        this.selectedFiles || [],
+        this.fetchedUrls || []
+      );
+      const result = this._extractResponse(response);
+      
+      if (result?.error) {
+        this.error = result.error;
+      } else {
+        this.breakdown = result;
+      }
+    } catch (e) {
+      this.error = e.message || 'Failed to load context breakdown';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  set rpcCall(call) {
+    this._call = call;
+    if (call) {
+      this.refreshBreakdown();
+    }
+  }
+
+  get rpcCall() {
+    return this._call;
+  }
+
+  _extractResponse(response) {
+    if (!response) return null;
+    const values = Object.values(response);
+    return values.length > 0 ? values[0] : null;
+  }
+
+  willUpdate(changedProperties) {
+    // Refresh when files or URLs change
+    if (changedProperties.has('selectedFiles') || changedProperties.has('fetchedUrls')) {
+      if (this._call) {
+        this.refreshBreakdown();
+      }
+    }
+  }
+
+  toggleSection(section) {
+    this.expandedSections = {
+      ...this.expandedSections,
+      [section]: !this.expandedSections[section]
+    };
+  }
+
+  async viewUrl(url) {
+    if (!this._call) return;
+    
+    this.selectedUrl = url;
+    this.showUrlModal = true;
+    this.urlContent = null;
+    
+    try {
+      const response = await this._call['LiteLLM.get_url_content'](url);
+      this.urlContent = this._extractResponse(response);
+    } catch (e) {
+      this.urlContent = { error: e.message };
+    }
+  }
+
+  closeUrlModal() {
+    this.showUrlModal = false;
+    this.selectedUrl = null;
+    this.urlContent = null;
+  }
+
+  removeUrl(url) {
+    this.dispatchEvent(new CustomEvent('remove-url', {
+      detail: { url },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  formatTokens(count) {
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}K`;
+    }
+    return String(count);
+  }
+
+  getUsagePercent() {
+    if (!this.breakdown) return 0;
+    const { used_tokens, max_input_tokens } = this.breakdown;
+    if (!max_input_tokens) return 0;
+    return Math.min(100, Math.round((used_tokens / max_input_tokens) * 100));
+  }
+
+  getBarWidth(tokens) {
+    if (!this.breakdown || !this.breakdown.used_tokens) return 0;
+    return Math.round((tokens / this.breakdown.used_tokens) * 100);
+  }
+
+  render() {
+    return renderContextViewer(this);
+  }
+}
+
+customElements.define('context-viewer', ContextViewer);

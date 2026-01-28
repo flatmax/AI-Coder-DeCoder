@@ -774,3 +774,187 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         fetcher = self._get_url_fetcher()
         count = fetcher.clear_cache()
         return {"cleared": count}
+    
+    # ========== Context Visualization Methods ==========
+    
+    def get_context_breakdown(self, file_paths=None, fetched_urls=None):
+        """
+        Get detailed breakdown of context token usage.
+        
+        Args:
+            file_paths: List of files currently in context
+            fetched_urls: List of URLs that have been fetched
+            
+        Returns:
+            Dict with token breakdown by category
+        """
+        from ..prompts import build_system_prompt
+        
+        if not self._context_manager:
+            return {"error": "No context manager available"}
+        
+        tc = self._context_manager.token_counter
+        max_input = tc.max_input_tokens
+        max_output = tc.max_output_tokens
+        
+        breakdown = {}
+        total_tokens = 0
+        
+        # System prompt
+        system_prompt = build_system_prompt()
+        system_tokens = tc.count(system_prompt)
+        breakdown["system"] = {
+            "tokens": system_tokens,
+            "label": "System Prompt"
+        }
+        total_tokens += system_tokens
+        
+        # Symbol map
+        symbol_map = ""
+        symbol_map_tokens = 0
+        if self.repo:
+            try:
+                symbol_map = self.get_context_map(
+                    chat_files=file_paths,
+                    include_references=True
+                )
+                if symbol_map:
+                    symbol_map_tokens = tc.count(symbol_map)
+            except Exception:
+                pass
+        breakdown["symbol_map"] = {
+            "tokens": symbol_map_tokens,
+            "label": "Symbol Map"
+        }
+        total_tokens += symbol_map_tokens
+        
+        # Files
+        file_items = []
+        file_total = 0
+        if file_paths and self.repo:
+            for path in file_paths:
+                try:
+                    content = self.repo.get_file_content(path)
+                    if isinstance(content, dict) and 'error' in content:
+                        continue
+                    if content:
+                        # Match the format used in streaming
+                        wrapped = f"{path}\n```\n{content}\n```\n"
+                        tokens = tc.count(wrapped)
+                        file_items.append({"path": path, "tokens": tokens})
+                        file_total += tokens
+                except Exception:
+                    pass
+        breakdown["files"] = {
+            "tokens": file_total,
+            "label": f"Files ({len(file_items)})",
+            "items": file_items
+        }
+        total_tokens += file_total
+        
+        # URLs
+        url_items = []
+        url_total = 0
+        if fetched_urls:
+            fetcher = self._get_url_fetcher()
+            for url in fetched_urls:
+                try:
+                    cached = fetcher.cache.get(url)
+                    if cached:
+                        # Estimate tokens from content - URLContent doesn't have summary,
+                        # use readme (for GitHub repos) or content
+                        content_text = cached.readme or cached.content or ""
+                        tokens = tc.count(content_text) if content_text else 0
+                        url_items.append({
+                            "url": url,
+                            "tokens": tokens,
+                            "title": cached.title or url,
+                            "type": cached.url_type.value if cached.url_type else "unknown",
+                            "fetched_at": cached.fetched_at.isoformat() if cached.fetched_at else None
+                        })
+                        url_total += tokens
+                    else:
+                        # URL was passed but not in cache - still show it
+                        url_items.append({
+                            "url": url,
+                            "tokens": 0,
+                            "title": url,
+                            "type": "unknown",
+                            "fetched_at": None,
+                            "not_cached": True
+                        })
+                except Exception:
+                    url_items.append({
+                        "url": url,
+                        "tokens": 0,
+                        "title": url,
+                        "type": "error",
+                        "error": str(e)
+                    })
+        breakdown["urls"] = {
+            "tokens": url_total,
+            "label": f"URLs ({len(url_items)})",
+            "items": url_items
+        }
+        total_tokens += url_total
+        
+        # History
+        history_tokens = self._context_manager.history_token_count()
+        history_count = len(self._context_manager.get_history())
+        breakdown["history"] = {
+            "tokens": history_tokens,
+            "label": f"History ({history_count} messages)",
+            "message_count": history_count,
+            "max_tokens": self._context_manager.max_history_tokens,
+            "needs_summary": self._context_manager.history_needs_summary()
+        }
+        total_tokens += history_tokens
+        
+        return {
+            "model": self.model,
+            "max_input_tokens": max_input,
+            "max_output_tokens": max_output,
+            "used_tokens": total_tokens,
+            "remaining_tokens": max_input - total_tokens,
+            "breakdown": breakdown
+        }
+    
+    def get_url_content(self, url):
+        """
+        Get cached content for a URL.
+        
+        Args:
+            url: URL to retrieve content for
+            
+        Returns:
+            Dict with url, content, metadata, tokens
+        """
+        if not self._context_manager:
+            return {"error": "No context manager available"}
+        
+        try:
+            fetcher = self._get_url_fetcher()
+            cached = fetcher.cache.get(url)
+            
+            if not cached:
+                return {"error": "URL not in cache", "url": url}
+            
+            tc = self._context_manager.token_counter
+            content_tokens = tc.count(cached.content) if cached.content else 0
+            readme_tokens = tc.count(cached.readme) if cached.readme else 0
+            
+            return {
+                "url": cached.url,
+                "title": cached.title,
+                "type": cached.url_type.value if cached.url_type else "unknown",
+                "content": cached.content,
+                "readme": cached.readme,
+                "symbol_map": cached.symbol_map,
+                "description": cached.description,
+                "content_tokens": content_tokens,
+                "readme_tokens": readme_tokens,
+                "fetched_at": cached.fetched_at.isoformat() if cached.fetched_at else None,
+                "error": cached.error
+            }
+        except Exception as e:
+            return {"error": str(e), "url": url}

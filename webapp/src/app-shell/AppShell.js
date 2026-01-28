@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
 import '../find-in-files/FindInFiles.js';
+import '../context-viewer/ContextViewer.js';
 
 export class AppShell extends LitElement {
   static properties = {
@@ -186,6 +187,11 @@ export class AppShell extends LitElement {
           findInFiles.focusInput();
         }
       });
+    } else if (tab === 'context') {
+      // Use updateComplete to ensure DOM is ready
+      this.updateComplete.then(() => {
+        this._refreshContextViewer();
+      });
     }
   }
 
@@ -334,6 +340,43 @@ export class AppShell extends LitElement {
     return promptView?.call || null;
   }
 
+  _getSelectedFiles() {
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    return promptView?.selectedFiles || [];
+  }
+
+  _getFetchedUrls() {
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    const urlsObj = promptView?.fetchedUrls || {};
+    return Object.keys(urlsObj);
+  }
+
+  async _refreshContextViewer() {
+    await this.updateComplete;
+    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    
+    if (contextViewer && promptView?.call) {
+      contextViewer.rpcCall = promptView.call;
+      contextViewer.selectedFiles = promptView.selectedFiles || [];
+      // fetchedUrls is an object with URL keys, convert to array
+      const urlsObj = promptView.fetchedUrls || {};
+      contextViewer.fetchedUrls = Object.keys(urlsObj);
+      // Force refresh after setting properties
+      contextViewer.refreshBreakdown();
+    }
+  }
+
+  handleRemoveUrl(e) {
+    const { url } = e.detail;
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    if (promptView && promptView.fetchedUrls) {
+      // fetchedUrls is an object with URL keys, not an array
+      const { [url]: removed, ...remaining } = promptView.fetchedUrls;
+      promptView.fetchedUrls = remaining;
+    }
+  }
+
   render() {
     return html`
       <div class="app-container">
@@ -351,6 +394,12 @@ export class AppShell extends LitElement {
               @click=${() => this.switchTab('search')}
             >
               <span class="icon">🔍</span> Search
+            </button>
+            <button 
+              class="header-tab ${this.activeLeftTab === 'context' ? 'active' : ''}"
+              @click=${() => this.switchTab('context')}
+            >
+              <span class="icon">📊</span> Context
             </button>
           </div>
           <span class="subtitle">Code changes will appear here</span>
@@ -380,7 +429,7 @@ export class AppShell extends LitElement {
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
             @navigate-to-edit=${this.handleNavigateToEdit}
-            style="${this.activeLeftTab === 'search' ? 'display: none;' : ''}"
+            style="${this.activeLeftTab === 'files' ? '' : 'display: none;'}"
           ></prompt-view>
           <find-in-files
             .rpcCall=${this._getPromptViewRpcCall()}
@@ -389,6 +438,13 @@ export class AppShell extends LitElement {
             @close-search=${this.handleCloseSearch}
             style="${this.activeLeftTab === 'search' ? '' : 'display: none;'}"
           ></find-in-files>
+          <context-viewer
+            .rpcCall=${this._getPromptViewRpcCall()}
+            .selectedFiles=${this._getSelectedFiles()}
+            .fetchedUrls=${this._getFetchedUrls()}
+            @remove-url=${this.handleRemoveUrl}
+            style="${this.activeLeftTab === 'context' ? '' : 'display: none;'}"
+          ></context-viewer>
         </div>
       </div>
     `;
