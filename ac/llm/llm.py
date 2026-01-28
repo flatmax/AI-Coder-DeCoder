@@ -7,6 +7,7 @@ from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
 from ..indexer import Indexer
 from ..context import ContextManager
+from ..url_handler import URLFetcher, URLDetector, URLType, SummaryType
 
 
 class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
@@ -62,6 +63,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Lazy-loaded indexer
         self._indexer = None
+        
+        # Lazy-loaded URL fetcher
+        self._url_fetcher = None
         
         # Auto-save symbol map on startup
         self._auto_save_symbol_map()
@@ -640,3 +644,129 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 for r in apply_result.results
             ]
         }
+    
+    # ========== URL Fetching Methods ==========
+    
+    def _get_url_fetcher(self):
+        """Get or create the URLFetcher instance."""
+        if self._url_fetcher is None:
+            self._url_fetcher = URLFetcher(summarizer_model=self.smaller_model)
+        return self._url_fetcher
+    
+    def fetch_url(self, url, use_cache=True, summarize=True, summary_type=None, context=None):
+        """
+        Fetch content from a URL.
+        
+        Args:
+            url: URL to fetch
+            use_cache: Whether to use cached content if available
+            summarize: Whether to generate a summary
+            summary_type: Type of summary ('brief', 'usage', 'api', 'arch', 'eval')
+            context: User's question for contextual summarization
+            
+        Returns:
+            Dict with url, type, content, summary, cached, error
+        """
+        try:
+            fetcher = self._get_url_fetcher()
+            
+            # Convert summary_type string to enum if provided
+            st = None
+            if summary_type:
+                try:
+                    st = SummaryType(summary_type)
+                except ValueError:
+                    pass
+            
+            result = fetcher.fetch(
+                url,
+                use_cache=use_cache,
+                summarize=summarize,
+                summary_type=st,
+                context=context,
+            )
+            
+            return {
+                "url": result.content.url,
+                "type": result.content.url_type.value,
+                "title": result.content.title,
+                "content": result.content.content,
+                "readme": result.content.readme,
+                "symbol_map": result.content.symbol_map,
+                "summary": result.summary,
+                "summary_type": result.summary_type.value if result.summary_type else None,
+                "cached": result.cached,
+                "error": result.content.error,
+            }
+        except Exception as e:
+            return {"url": url, "error": str(e)}
+    
+    def fetch_urls_from_text(self, text, use_cache=True, summarize=True):
+        """
+        Detect and fetch all URLs in text.
+        
+        Args:
+            text: Text that may contain URLs
+            use_cache: Whether to use cached content
+            summarize: Whether to generate summaries
+            
+        Returns:
+            List of fetch results
+        """
+        try:
+            fetcher = self._get_url_fetcher()
+            results = fetcher.detect_and_fetch(
+                text,
+                use_cache=use_cache,
+                summarize=summarize,
+            )
+            
+            return [
+                {
+                    "url": r.content.url,
+                    "type": r.content.url_type.value,
+                    "title": r.content.title,
+                    "summary": r.summary,
+                    "cached": r.cached,
+                    "error": r.content.error,
+                }
+                for r in results
+            ]
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def detect_urls(self, text):
+        """
+        Detect URLs in text without fetching.
+        
+        Args:
+            text: Text to scan for URLs
+            
+        Returns:
+            List of dicts with url, type, and github_info
+        """
+        results = URLDetector.extract_urls_with_types(text)
+        return [
+            {
+                "url": url,
+                "type": url_type.value,
+                "github_info": {
+                    "owner": gi.owner,
+                    "repo": gi.repo,
+                    "branch": gi.branch,
+                    "path": gi.path,
+                } if gi else None,
+            }
+            for url, url_type, gi in results
+        ]
+    
+    def invalidate_url_cache(self, url):
+        """Invalidate cached content for a URL."""
+        fetcher = self._get_url_fetcher()
+        return {"invalidated": fetcher.invalidate_cache(url)}
+    
+    def clear_url_cache(self):
+        """Clear all cached URL content."""
+        fetcher = self._get_url_fetcher()
+        count = fetcher.clear_cache()
+        return {"cleared": count}

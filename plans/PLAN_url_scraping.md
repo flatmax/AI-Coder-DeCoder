@@ -133,15 +133,29 @@ Summary types with tailored Haiku prompts:
 - `ac/url_handler/summarizer.py` - Summarizer class with summarize(), summarize_for_context()
 - `tests/test_summarizer.py` - 15 tests
 
-### Phase 5: Caching
-- URL hash as cache key
-- JSON storage with TTL (default 24 hours)
-- Location: `/tmp/url_cache/` (configurable via `ac-dc.json`)
+### Phase 5: Caching ✅
+- URL hash as cache key ✅
+- JSON storage with TTL (default 24 hours) ✅
+- Location: `/tmp/url_cache/` (configurable via `ac-dc.json`) ✅
 
-### Phase 6: Integration
-- New methods on LiteLLM: `fetch_url()`, `get_repo_symbol_map()`
-- RPC exposure for webapp
-- URL content section in `StreamingMixin._build_streaming_messages()`
+**Files created:**
+- `ac/url_handler/cache.py` - URLCache class with get/set/invalidate/clear/cleanup_expired
+- `tests/test_url_cache.py` - 24 tests
+
+### Phase 6: Integration ✅
+- New methods on LiteLLM: `fetch_url()`, `detect_urls()`, `fetch_urls_from_text()` ✅
+- URL fetcher orchestrator with caching and summarization ✅
+- URL content section in `StreamingMixin._build_streaming_messages()` ✅
+- Auto-fetch URLs detected in user prompts during streaming ✅
+
+**Files created:**
+- `ac/url_handler/fetcher.py` - URLFetcher orchestrator class
+- `tests/test_url_fetcher.py` - 20 tests
+
+**Files modified:**
+- `ac/llm/llm.py` - Added fetch_url(), detect_urls(), fetch_urls_from_text(), cache management
+- `ac/llm/streaming.py` - Added URL context to message building, auto-fetch in streaming
+- `ac/url_handler/__init__.py` - Export URLFetcher
 
 ### Phase 7: Webapp UI
 - URL detection in input field

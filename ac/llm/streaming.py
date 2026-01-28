@@ -17,6 +17,12 @@ Use this to understand the codebase structure and find relevant code.
 
 """
 
+URL_CONTEXT_HEADER = """# URL Context
+
+The following content was fetched from URLs mentioned in the conversation:
+
+"""
+
 
 class StreamingMixin:
     """Mixin for streaming chat operations."""
@@ -118,9 +124,24 @@ class StreamingMixin:
                         })
                         return
             
+            # Detect and fetch URLs from user prompt
+            url_context = None
+            if hasattr(self, '_get_url_fetcher'):
+                try:
+                    from ..url_handler import URLDetector
+                    urls = URLDetector.find_urls(user_prompt)
+                    if urls:
+                        fetcher = self._get_url_fetcher()
+                        url_context = [
+                            fetcher.fetch(url, use_cache=True, summarize=True, context=user_prompt)
+                            for url in urls[:3]  # Limit to 3 URLs per message
+                        ]
+                except Exception as e:
+                    print(f"⚠️ URL fetch error: {e}")
+            
             # Build messages using symbol map for context
             messages, user_text, context_map_tokens = self._build_streaming_messages(
-                user_prompt, file_paths, images, use_repo_map
+                user_prompt, file_paths, images, use_repo_map, url_context
             )
             
             # Capture the event loop BEFORE running in executor
@@ -302,7 +323,7 @@ class StreamingMixin:
         
         return full_content, was_cancelled
     
-    def _build_streaming_messages(self, user_prompt, file_paths, images, use_repo_map):
+    def _build_streaming_messages(self, user_prompt, file_paths, images, use_repo_map, url_context=None):
         """
         Build messages for streaming using symbol map for context.
         
@@ -311,6 +332,7 @@ class StreamingMixin:
             file_paths: List of file paths to include as context
             images: Optional list of base64 encoded images
             use_repo_map: Whether to include the symbol map
+            url_context: Optional list of URLResult objects to include
             
         Returns:
             Tuple of (messages, user_text, context_map_tokens)
@@ -340,6 +362,41 @@ class StreamingMixin:
                         context_map_tokens = self._context_manager.count_tokens(map_content)
                     except Exception:
                         pass
+        
+        # Add URL context if provided
+        if url_context:
+            url_parts = []
+            for result in url_context:
+                if result.content.error:
+                    continue
+                
+                url_part = f"## {result.content.url}\n"
+                if result.content.title:
+                    url_part += f"**{result.content.title}**\n\n"
+                
+                if result.summary:
+                    url_part += f"{result.summary}\n"
+                elif result.content.readme:
+                    # Truncate long READMEs
+                    readme = result.content.readme
+                    if len(readme) > 4000:
+                        readme = readme[:4000] + "\n\n[truncated...]"
+                    url_part += f"{readme}\n"
+                elif result.content.content:
+                    content = result.content.content
+                    if len(content) > 4000:
+                        content = content[:4000] + "\n\n[truncated...]"
+                    url_part += f"{content}\n"
+                
+                if result.content.symbol_map:
+                    url_part += f"\n### Symbol Map\n```\n{result.content.symbol_map}\n```\n"
+                
+                url_parts.append(url_part)
+            
+            if url_parts:
+                url_message = URL_CONTEXT_HEADER + "\n---\n".join(url_parts)
+                messages.append({"role": "user", "content": url_message})
+                messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
         
         # Add file contents
         if file_paths:

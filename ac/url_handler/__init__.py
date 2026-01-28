@@ -4,6 +4,7 @@ from .models import URLType, SummaryType, GitHubInfo, URLContent, URLResult
 from .detector import URLDetector
 from .config import URLConfig, URLCacheConfig
 from .cache import URLCache
+from .fetcher import URLFetcher
 from .github_handler import GitHubHandler
 from .web_handler import WebHandler
 from .summarizer import Summarizer
@@ -18,6 +19,7 @@ __all__ = [
     'URLConfig',
     'URLCacheConfig',
     'URLCache',
+    'URLFetcher',
     'GitHubHandler',
     'WebHandler',
     'Summarizer',
