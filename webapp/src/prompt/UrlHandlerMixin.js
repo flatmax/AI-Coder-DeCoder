@@ -1,0 +1,232 @@
+/**
+ * Mixin for URL detection and fetching in chat input.
+ */
+export const UrlHandlerMixin = (superClass) => class extends superClass {
+  
+  // Note: Properties are declared in PromptView.js to avoid Lit mixin property inheritance issues
+  // The mixin expects these properties to exist: detectedUrls, fetchingUrls, fetchedUrls, excludedUrls
+
+  initUrlHandler() {
+    this.detectedUrls = [];
+    this.fetchingUrls = {};  // url -> true while fetching
+    this.fetchedUrls = {};   // url -> result after fetch
+    this.excludedUrls = new Set();  // URLs excluded from context (managed by ContextViewer)
+    this._urlDetectDebounce = null;
+  }
+
+  /**
+   * Detect URLs in the input text.
+   * Called on input change with debouncing.
+   */
+  detectUrlsInInput(text) {
+    if (this._urlDetectDebounce) {
+      clearTimeout(this._urlDetectDebounce);
+    }
+    
+    this._urlDetectDebounce = setTimeout(async () => {
+      await this._performUrlDetection(text);
+    }, 300);
+  }
+
+  async _performUrlDetection(text) {
+    if (!this.call || !text) {
+      this.detectedUrls = [];
+      return;
+    }
+
+    try {
+      const response = await this.call['LiteLLM.detect_urls'](text);
+      const urls = this.extractResponse(response);
+      
+      if (Array.isArray(urls)) {
+        // Filter out already fetched URLs
+        this.detectedUrls = urls.filter(u => !this.fetchedUrls[u.url]);
+      } else {
+        this.detectedUrls = [];
+      }
+    } catch (e) {
+      console.error('URL detection failed:', e);
+      this.detectedUrls = [];
+    }
+  }
+
+  /**
+   * Get display label for URL type.
+   */
+  getUrlTypeLabel(type) {
+    const labels = {
+      'github_repo': '📦 GitHub Repo',
+      'github_file': '📄 GitHub File',
+      'github_issue': '🐛 Issue',
+      'github_pr': '🔀 PR',
+      'documentation': '📚 Docs',
+      'generic_web': '🌐 Web',
+    };
+    return labels[type] || '🔗 URL';
+  }
+
+  /**
+   * Get short display name for a URL.
+   */
+  getUrlDisplayName(urlInfo) {
+    if (urlInfo.github_info) {
+      const gi = urlInfo.github_info;
+      if (gi.path) {
+        return `${gi.owner}/${gi.repo}/${gi.path.split('/').pop()}`;
+      }
+      return `${gi.owner}/${gi.repo}`;
+    }
+    
+    try {
+      const url = new URL(urlInfo.url);
+      const path = url.pathname;
+      if (path && path !== '/') {
+        const parts = path.split('/').filter(Boolean);
+        if (parts.length > 2) {
+          return `${url.hostname}/.../${parts.slice(-1)[0]}`;
+        }
+        return `${url.hostname}${path}`;
+      }
+      return url.hostname;
+    } catch {
+      return urlInfo.url.substring(0, 40);
+    }
+  }
+
+  /**
+   * Fetch a specific URL when user confirms.
+   */
+  async fetchUrl(urlInfo) {
+    const url = urlInfo.url;
+    
+    if (this.fetchingUrls[url]) {
+      return; // Already fetching
+    }
+
+    this.fetchingUrls = { ...this.fetchingUrls, [url]: true };
+    this.requestUpdate();
+
+    try {
+      const response = await this.call['LiteLLM.fetch_url'](
+        url,
+        true,  // use_cache
+        true,  // summarize
+        null,  // summary_type (auto)
+        this.inputValue  // context
+      );
+      const result = this.extractResponse(response);
+      
+      this.fetchedUrls = { ...this.fetchedUrls, [url]: result };
+      
+      // Remove from detected (it's now fetched)
+      this.detectedUrls = this.detectedUrls.filter(u => u.url !== url);
+      
+      if (result.error) {
+        console.warn(`Failed to fetch ${url}:`, result.error);
+      }
+    } catch (e) {
+      console.error('URL fetch failed:', e);
+      this.fetchedUrls = { 
+        ...this.fetchedUrls, 
+        [url]: { url, error: e.message } 
+      };
+    } finally {
+      const { [url]: _, ...rest } = this.fetchingUrls;
+      this.fetchingUrls = rest;
+      this.requestUpdate();
+    }
+  }
+
+  /**
+   * Toggle whether a URL is included in context.
+   */
+  toggleUrlIncluded(url) {
+    const newExcluded = new Set(this.excludedUrls || new Set());
+    if (newExcluded.has(url)) {
+      newExcluded.delete(url);
+    } else {
+      newExcluded.add(url);
+    }
+    this.excludedUrls = newExcluded;
+    
+    // Notify parent components of the change
+    this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
+      detail: { url, included: !newExcluded.has(url) },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  /**
+   * Remove a fetched URL from context.
+   */
+  removeFetchedUrl(url) {
+    const { [url]: _, ...rest } = this.fetchedUrls;
+    this.fetchedUrls = rest;
+    
+    // Also remove from excluded set if present
+    if (this.excludedUrls?.has(url)) {
+      const newExcluded = new Set(this.excludedUrls);
+      newExcluded.delete(url);
+      this.excludedUrls = newExcluded;
+    }
+    
+    // Notify parent components of the change
+    this.dispatchEvent(new CustomEvent('url-removed', {
+      detail: { url },
+      bubbles: true,
+      composed: true
+    }));
+    
+    // Re-detect in case the URL is still in input
+    this.detectUrlsInInput(this.inputValue);
+  }
+
+  /**
+   * Dismiss a detected URL (don't fetch it).
+   */
+  dismissUrl(url) {
+    this.detectedUrls = this.detectedUrls.filter(u => u.url !== url);
+  }
+
+  /**
+   * View the content/summary of a fetched URL.
+   * Dispatches event for parent to show modal.
+   */
+  viewUrlContent(urlResult) {
+    this.dispatchEvent(new CustomEvent('view-url-content', {
+      detail: { url: urlResult.url, content: urlResult },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  /**
+   * Clear transient URL state (called on send).
+   * Keeps fetchedUrls - they persist as context across messages.
+   */
+  clearUrlState() {
+    this.detectedUrls = [];
+    this.fetchingUrls = {};
+  }
+
+  /**
+   * Clear all URL state including fetched URLs (called on conversation clear).
+   */
+  clearAllUrlState() {
+    this.detectedUrls = [];
+    this.fetchingUrls = {};
+    this.fetchedUrls = {};
+    this.excludedUrls = new Set();
+  }
+
+  /**
+   * Get fetched URLs for including in message context.
+   * Called before sending a message.
+   * Respects excludedUrls set by ContextViewer.
+   */
+  getFetchedUrlsForMessage() {
+    return Object.values(this.fetchedUrls)
+      .filter(r => !r.error && !this.excludedUrls.has(r.url));
+  }
+};

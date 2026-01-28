@@ -71,13 +71,19 @@ export class DiffViewer extends MixedBase {
     this._lspProvidersRegistered = false;
   }
 
+  willUpdate(changedProperties) {
+    // Compute selectedFile before render to avoid post-update property changes
+    if (changedProperties.has('files') && this.files.length > 0) {
+      if (!this.selectedFile || !this.files.find(f => f.path === this.selectedFile)) {
+        this.selectedFile = this.files[0].path;
+      }
+    }
+  }
+
   updated(changedProperties) {
     super.updated(changedProperties);
     if (changedProperties.has('files') && this.files.length > 0 && this._editor) {
       this.updateModels();
-      if (!this.selectedFile || !this.files.find(f => f.path === this.selectedFile)) {
-        this.selectedFile = this.files[0].path;
-      }
       this.showDiff(this.selectedFile);
       this._emitFileSelected(this.selectedFile);
     }

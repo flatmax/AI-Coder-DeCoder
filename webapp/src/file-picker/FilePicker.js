@@ -40,10 +40,9 @@ export class FilePicker extends MixedBase {
     this._expandedInitialized = false;
   }
 
-  updated(changedProperties) {
-    super.updated && super.updated(changedProperties);
-    
+  willUpdate(changedProperties) {
     // Auto-expand directories containing changed files when data first loads
+    // Using willUpdate to avoid triggering additional update cycles
     if (!this._expandedInitialized && this.tree && 
         (this.modified.length > 0 || this.staged.length > 0 || this.untracked.length > 0)) {
       this._expandedInitialized = true;

@@ -144,6 +144,11 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     this.inputValue = e.target.value;
     this._handleAtMention(e.target.value);
     this._autoResizeTextarea(e.target);
+    
+    // Detect URLs in input (if mixin is present)
+    if (this.detectUrlsInInput) {
+      this.detectUrlsInInput(e.target.value);
+    }
   }
 
   toggleMinimize() {
