@@ -125,7 +125,7 @@ See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) f
 
 ### Application Configuration (ac-dc.json)
 
-Create `ac-dc.json` in the repository root to configure application settings:
+Modify `ac-dc.json` in the repository root to configure application settings. NOTE: the url_cache path if you don't want it in /tmp :
 
 ```json
 {
@@ -191,6 +191,9 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 ## Project Structure
 
 ```
+llm.json                # LLM provider configuration (model, API keys)
+ac-dc.json              # Application settings (URL cache, etc.)
+
 ac/                     # Python backend
 ├── dc.py              # Main entry point
 ├── llm/               # LLM integration (LiteLLM wrapper, streaming, chat)
