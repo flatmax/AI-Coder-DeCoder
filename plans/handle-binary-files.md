@@ -1,5 +1,7 @@
 # Plan: Handle Binary Files in LLM Context
 
+## Status: IMPLEMENTED ✅
+
 ## Problem
 
 When a user selects a binary file in the file picker, the system crashes with:
@@ -9,67 +11,50 @@ When a user selects a binary file in the file picker, the system crashes with:
 
 Binary files can't be sent to the LLM (expects text/images only).
 
-## Solution
+## Solution Implemented
 
-### Phase 1: Backend Protection (Immediate)
-
-Prevent crashes by detecting binary files before attempting to read them as UTF-8.
+### Phase 1: Backend Protection ✅
 
 **1. `ac/repo/file_operations.py` - `get_file_content`**
 
-Add binary check before reading:
-```python
-if version == 'working':
-    if self.is_binary_file(file_path):
-        return self._create_error_response(f"Cannot read binary file: {file_path}")
-    # ... existing read logic
-```
+Added binary check before reading working copy files:
+- Calls `is_binary_file()` before attempting UTF-8 decode
+- Returns error response for binary files instead of crashing
 
 **2. `ac/llm/streaming.py` - `_build_streaming_messages`**
 
-Skip files that return errors (log server-side for debugging):
-```python
-for path in file_paths:
-    content = self.repo.get_file_content(path, version='working')
-    if isinstance(content, dict) and 'error' in content:
-        print(f"Skipping file: {content['error']}")  # Server-side log
-        continue
-    # ... include file
-```
+Skip files that return errors:
+- Checks for error dict responses from `get_file_content()`
+- Logs skipped files server-side for debugging
+- Continues processing remaining valid files
 
-### Phase 2: Frontend Prevention (Immediate)
+### Phase 2: Frontend Prevention ✅
 
-Prevent binary file selection at the source - in the file picker.
+**1. `webapp/src/file-picker/FileSelectionMixin.js`**
 
-**1. Add RPC method to check if file is binary**
+Added binary file detection on selection:
+- Async RPC call to `is_binary_file` when checkbox clicked
+- If binary: shows toast/error message, prevents selection
+- If text: proceeds with normal selection
 
-Expose `is_binary_file` via RPC so frontend can call it.
+**2. Visual feedback in file picker**
 
-**2. `webapp/src/file-picker/FileSelectionMixin.js`**
+- Binary files show error state briefly when user attempts selection
+- Clear user feedback explaining why file cannot be selected
 
-When user clicks a file checkbox:
-- Call RPC to check if binary
-- If binary: show inline error, prevent selection
-- If text: allow selection as normal
+## Files Changed
 
-This gives immediate feedback without complex streaming metadata flow.
-
-## Files to Modify
-
-### Phase 1 (Backend)
-1. `ac/repo/file_operations.py` - Add binary guard in `get_file_content`
-2. `ac/llm/streaming.py` - Skip error responses gracefully with server log
-
-### Phase 2 (Frontend)
-3. RPC handler - Expose `is_binary_file` method
-4. `webapp/src/file-picker/FileSelectionMixin.js` - Check before selecting
+1. `ac/repo/file_operations.py` - Binary guard in `get_file_content`
+2. `ac/llm/streaming.py` - Skip error responses gracefully
+3. `webapp/src/file-picker/FileSelectionMixin.js` - Frontend binary check
 
 ## Testing
 
-1. **Phase 1:** Select binary file, send message → no crash, file silently skipped
-2. **Phase 2:** Click binary file in picker → immediate error shown, checkbox not checked
+1. ✅ Select binary file via picker → immediate error shown, not selected
+2. ✅ If binary file somehow reaches backend → gracefully skipped, no crash
+3. ✅ Text files continue to work normally
 
-## Non-Goals
+## Non-Goals (Unchanged)
 
 - No streaming metadata for skipped files (avoids signal flow complexity)
 - No automatic unchecking of files (user controls selection)
