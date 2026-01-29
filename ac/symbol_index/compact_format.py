@@ -206,13 +206,13 @@ def _format_file_block(
     if imports:
         import_names = _extract_import_names(imports)
         if import_names:
-            lines.append(f"│i {','.join(import_names)}")
+            lines.append(f"i {','.join(import_names)}")
     
     # Output in-repo file imports (outgoing dependencies)
     if file_imports and file_path in file_imports:
         in_repo_imports = sorted(file_imports[file_path])
         if in_repo_imports:
-            lines.append(f"│i→ {','.join(in_repo_imports)}")
+            lines.append(f"i→ {','.join(in_repo_imports)}")
     
     # Output non-variable symbols, using ditto marks for repeated references
     last_refs_str = None
@@ -252,7 +252,7 @@ def _format_file_block(
             if len(line_nums) > 5:
                 line_str += f",+{len(line_nums)-5}"
             
-            line_parts = [f"│v {var_name}:{line_str}"]
+            line_parts = [f"v {var_name}:{line_str}"]
             
             # Add refs for first occurrence, ditto for rest is implicit
             if var_refs:
@@ -273,7 +273,7 @@ def _format_file_block(
                 ref_summary = ','.join(aliased_refs[:5]) + f",+{len(aliased_refs)-5}"
             else:
                 ref_summary = ','.join(aliased_refs)
-            lines.append(f"│←refs: {ref_summary}")
+            lines.append(f"←refs: {ref_summary}")
     
     lines.append("")  # Blank line between files
     
@@ -649,7 +649,7 @@ def _format_symbol(
     """
     lines = []
     prefix = KIND_PREFIX.get(symbol.kind, '?')
-    indent_str = "│" + "  " * indent
+    indent_str = "  " * indent
     
     # Build the symbol line
     line_parts = [f"{indent_str}{prefix} {symbol.name}"]
@@ -699,7 +699,7 @@ def _format_symbol(
     
     # Add instance variables for classes
     if include_instance_vars and symbol.kind == 'class' and symbol.instance_vars:
-        var_indent = "│" + "  " * (indent + 1)
+        var_indent = "  " * (indent + 1)
         for var in symbol.instance_vars:
             lines.append(f"{var_indent}v {var}")
     
