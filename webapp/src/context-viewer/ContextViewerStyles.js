@@ -423,4 +423,46 @@ export const contextViewerStyles = css`
     padding-top: 8px;
     border-top: 1px solid #0f3460;
   }
+
+  /* Session Totals */
+  .session-totals {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid #0f3460;
+  }
+
+  .session-totals .breakdown-title {
+    margin-bottom: 12px;
+  }
+
+  .session-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+
+  .session-label {
+    color: #888;
+  }
+
+  .session-value {
+    font-family: monospace;
+    color: #4ade80;
+  }
+
+  .session-row.total {
+    border-top: 1px solid #0f3460;
+    margin-top: 4px;
+    padding-top: 8px;
+    font-weight: 600;
+  }
+
+  .session-row.total .session-value {
+    color: #fff;
+  }
+
+  .session-row.cache .session-value {
+    color: #fbbf24;
+  }
 `;
