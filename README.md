@@ -1,5 +1,7 @@
 # AI Coder / DeCoder (AC⚡DC)
 
+> ⚠️ **Alpha Software** — AC⚡DC is in active development. Expect rough edges, breaking changes, and incomplete features. Currently optimized for **Anthropic models via AWS Bedrock**. Other LLM setups should work but are not tested.
+
 AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
 ## Philosophy: Speed Over Agency
@@ -110,7 +112,7 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 }
 ```
 
-**AWS Bedrock:**
+**AWS Bedrock :**
 ```json
 {
   "env": {
@@ -121,11 +123,15 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 }
 ```
 
+> **Note:** AC⚡DC is currently optimized for Anthropic models on AWS Bedrock, which provides prompt caching for significant cost savings. Other providers should work via LiteLLM but may have reduced functionality or higher costs.
+
 See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
 
 ### Application Configuration (ac-dc.json)
 
-Modify `ac-dc.json` in the repository root to configure application settings. NOTE: the url_cache path if you don't want it in /tmp :
+Create or modify `ac-dc.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
+
+> ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac-dc_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
 
 ```json
 {
