@@ -498,4 +498,90 @@ export const promptViewStyles = css`
     background: rgba(233, 69, 96, 0.3);
   }
 
+  /* Token HUD overlay */
+  .token-hud {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: rgba(22, 33, 62, 0.85);
+    border: 1px solid rgba(233, 69, 96, 0.4);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 12px;
+    color: #aaa;
+    pointer-events: none;
+    z-index: 10000;
+    backdrop-filter: blur(4px);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+
+  .token-hud.visible {
+    opacity: 1;
+    transform: translateY(0);
+    animation: hud-fade-out 4s ease-in-out forwards;
+  }
+
+  @keyframes hud-fade-out {
+    0% { opacity: 1; transform: translateY(0); }
+    70% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-10px); }
+  }
+
+  .hud-title {
+    color: #e94560;
+    font-weight: 600;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+
+  .hud-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 0;
+  }
+
+  .hud-label {
+    color: #888;
+  }
+
+  .hud-value {
+    color: #ddd;
+    font-weight: 500;
+  }
+
+  .hud-row.total {
+    border-top: 1px solid rgba(233, 69, 96, 0.3);
+    margin-top: 4px;
+    padding-top: 6px;
+  }
+
+  .hud-row.total .hud-value {
+    color: #e94560;
+  }
+
+  .hud-row.cache .hud-value {
+    color: #7ec699;
+  }
+
+  .hud-divider {
+    border-top: 1px solid rgba(233, 69, 96, 0.3);
+    margin: 6px 0;
+  }
+
+  .hud-section-title {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  .hud-row.cumulative .hud-value {
+    color: #4a9eff;
+  }
+
 `;

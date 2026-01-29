@@ -6,13 +6,18 @@ export const StreamingMixin = (superClass) => class extends superClass {
   static get properties() {
     return {
       ...super.properties,
-      isStreaming: { type: Boolean }
+      isStreaming: { type: Boolean },
+      _hudVisible: { type: Boolean },
+      _hudData: { type: Object }
     };
   }
 
   initStreaming() {
     this._streamingRequests = new Map();
     this.isStreaming = false;
+    this._hudVisible = false;
+    this._hudData = null;
+    this._hudTimeout = null;
   }
 
   /**
@@ -142,6 +147,30 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (result.passed && result.passed.length > 0) {
       await this.loadFileTree();
     }
+    
+    // Show token usage HUD if available
+    if (result.token_usage) {
+      this._showHud(result.token_usage);
+    }
+  }
+
+  /**
+   * Show the token usage HUD overlay.
+   * @param {object} tokenUsage - Token usage data from server
+   */
+  _showHud(tokenUsage) {
+    // Clear any existing timeout
+    if (this._hudTimeout) {
+      clearTimeout(this._hudTimeout);
+    }
+    
+    this._hudData = tokenUsage;
+    this._hudVisible = true;
+    
+    // Auto-hide after 4 seconds
+    this._hudTimeout = setTimeout(() => {
+      this._hudVisible = false;
+    }, 4000);
   }
 
   /**

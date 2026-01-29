@@ -216,8 +216,8 @@ class StreamingMixin:
             # Update symbol map with current context files
             symbol_map_info = self._auto_save_symbol_map()
             
-            # Print token usage HUD
-            self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
+            # Print token usage HUD and get breakdown for frontend
+            hud_breakdown = self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
             
             # Parse and apply edits using v3 format
             edit_parser = EditParser()
@@ -292,6 +292,19 @@ class StreamingMixin:
                 content=full_content,
                 files_modified=files_modified if files_modified else None
             )
+            
+            # Add last request token usage for the HUD (not cumulative)
+            if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
+                result["token_usage"] = {
+                    "prompt_tokens": self._last_request_tokens.get('prompt', 0),
+                    "completion_tokens": self._last_request_tokens.get('completion', 0),
+                    "total_tokens": self._last_request_tokens.get('prompt', 0) + self._last_request_tokens.get('completion', 0),
+                    "cache_hit_tokens": self._last_request_tokens.get('cache_hit', 0),
+                    "cache_write_tokens": self._last_request_tokens.get('cache_write', 0),
+                }
+                # Include context breakdown if available
+                if hud_breakdown:
+                    result["token_usage"].update(hud_breakdown)
             
             await self._send_stream_complete(request_id, result)
             
@@ -543,10 +556,10 @@ class StreamingMixin:
             print(f"Error firing stream chunk: {e}")
     
     def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0, symbol_map_info=None):
-        """Print HUD after streaming completes."""
+        """Print HUD after streaming completes and return breakdown for frontend."""
         try:
             if not self._context_manager:
-                return
+                return None
             
             ctx = self._context_manager
             
@@ -615,11 +628,22 @@ class StreamingMixin:
                     
                     print(f"  Cache:           {', '.join(cache_parts)}")
             print(f"{'─' * 50}\n")
+            
+            # Return breakdown for frontend HUD
+            return {
+                "system_tokens": system_tokens,
+                "symbol_map_tokens": context_map_tokens,
+                "file_tokens": file_tokens,
+                "history_tokens": history_tokens,
+                "context_total_tokens": total_tokens,
+                "max_input_tokens": max_tokens,
+            }
                 
         except Exception as e:
             import traceback
             print(f"⚠️ HUD error: {e}")
             traceback.print_exc()
+            return None
     
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
