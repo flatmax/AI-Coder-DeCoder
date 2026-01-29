@@ -1,6 +1,6 @@
 """Compact format for LLM context."""
 
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Union
 from .models import Symbol, CallSite
 
 
@@ -20,6 +20,84 @@ CONDITIONAL_MARKER = '?'
 
 # Legend for compact format
 LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line ->T=returns ?=optional ←=refs →=calls +N=more"
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count using ~4 chars per token heuristic."""
+    return len(text) // 4 + 1
+
+
+def _format_file_block(
+    file_path: str,
+    symbols: List[Symbol],
+    references: Optional[Dict[str, Dict[str, List]]],
+    file_refs: Optional[Dict[str, Set[str]]],
+    file_imports: Optional[Dict[str, Set[str]]],
+    include_instance_vars: bool,
+    include_calls: bool,
+) -> List[str]:
+    """Format a single file's symbols into lines.
+    
+    Args:
+        file_path: Path to the file
+        symbols: List of symbols in the file
+        references: Optional dict of file -> symbol -> [locations]
+        file_refs: Optional dict of file -> set of files that reference it
+        file_imports: Optional dict of file -> set of in-repo files it imports
+        include_instance_vars: Whether to include instance variables
+        include_calls: Whether to include call information
+        
+    Returns:
+        List of formatted lines for this file
+    """
+    if not symbols:
+        return []
+    
+    lines = []
+    lines.append(f"{file_path}:")
+    
+    # Get references for this file if available
+    file_references = references.get(file_path, {}) if references else {}
+    
+    # Group imports together
+    imports = [s for s in symbols if s.kind == 'import']
+    other_symbols = [s for s in symbols if s.kind != 'import']
+    
+    # Output imports on one line if any
+    if imports:
+        import_names = _extract_import_names(imports)
+        if import_names:
+            lines.append(f"│i {','.join(import_names)}")
+    
+    # Output in-repo file imports (outgoing dependencies)
+    if file_imports and file_path in file_imports:
+        in_repo_imports = sorted(file_imports[file_path])
+        if in_repo_imports:
+            lines.append(f"│i→ {','.join(in_repo_imports)}")
+    
+    # Output other symbols
+    for symbol in other_symbols:
+        symbol_refs = file_references.get(symbol.name, [])
+        lines.extend(_format_symbol(
+            symbol, indent=0, refs=symbol_refs,
+            include_instance_vars=include_instance_vars,
+            include_calls=include_calls,
+        ))
+    
+    # Add file-level reference summary if available
+    if file_refs and file_path in file_refs:
+        ref_files = sorted(file_refs[file_path])
+        if ref_files:
+            # Limit to first 5 files to keep it compact
+            if len(ref_files) > 5:
+                ref_summary = ','.join(ref_files[:5]) + f",+{len(ref_files)-5}"
+            else:
+                ref_summary = ','.join(ref_files)
+            lines.append(f"│←refs: {ref_summary}")
+    
+    lines.append("")  # Blank line between files
+    
+    return lines
 
 
 def to_compact(
@@ -66,11 +144,8 @@ def to_compact(
     Returns:
         Compact string representation
     """
-    lines = []
-    
-    if include_legend:
-        lines.append(LEGEND)
-        lines.append("")
+    # Use _split_by_token_threshold with 0 to get single chunk
+    # This avoids the num_chunks logic which would still create 1 chunk
     
     # Use provided order, or fall back to sorted for determinism
     if file_order:
@@ -78,55 +153,258 @@ def to_compact(
     else:
         ordered_files = sorted(symbols_by_file.keys())
     
+    if not ordered_files:
+        return ''
+    
+    lines = []
+    
+    if include_legend:
+        lines.extend([LEGEND, ""])
+    
     for file_path in ordered_files:
         symbols = symbols_by_file[file_path]
-        if not symbols:
-            continue
-        
-        lines.append(f"{file_path}:")
-        
-        # Get references for this file if available
-        file_references = references.get(file_path, {}) if references else {}
-        
-        # Group imports together
-        imports = [s for s in symbols if s.kind == 'import']
-        other_symbols = [s for s in symbols if s.kind != 'import']
-        
-        # Output imports on one line if any
-        if imports:
-            import_names = _extract_import_names(imports)
-            if import_names:
-                lines.append(f"│i {','.join(import_names)}")
-        
-        # Output in-repo file imports (outgoing dependencies)
-        if file_imports and file_path in file_imports:
-            in_repo_imports = sorted(file_imports[file_path])
-            if in_repo_imports:
-                lines.append(f"│i→ {','.join(in_repo_imports)}")
-        
-        # Output other symbols
-        for symbol in other_symbols:
-            symbol_refs = file_references.get(symbol.name, [])
-            lines.extend(_format_symbol(
-                symbol, indent=0, refs=symbol_refs,
-                include_instance_vars=include_instance_vars,
-                include_calls=include_calls,
-            ))
-        
-        # Add file-level reference summary if available
-        if file_refs and file_path in file_refs:
-            ref_files = sorted(file_refs[file_path])
-            if ref_files:
-                # Limit to first 5 files to keep it compact
-                if len(ref_files) > 5:
-                    ref_summary = ','.join(ref_files[:5]) + f",+{len(ref_files)-5}"
-                else:
-                    ref_summary = ','.join(ref_files)
-                lines.append(f"│←refs: {ref_summary}")
-        
-        lines.append("")  # Blank line between files
+        file_lines = _format_file_block(
+            file_path=file_path,
+            symbols=symbols,
+            references=references,
+            file_refs=file_refs,
+            file_imports=file_imports,
+            include_instance_vars=include_instance_vars,
+            include_calls=include_calls,
+        )
+        if file_lines:
+            lines.extend(file_lines)
     
     return '\n'.join(lines)
+
+
+def to_compact_chunked(
+    symbols_by_file: Dict[str, List[Symbol]],
+    references: Optional[Dict[str, Dict[str, List]]] = None,
+    file_refs: Optional[Dict[str, Set[str]]] = None,
+    file_imports: Optional[Dict[str, Set[str]]] = None,
+    include_instance_vars: bool = True,
+    include_calls: bool = False,
+    include_legend: bool = True,
+    file_order: Optional[List[str]] = None,
+    min_chunk_tokens: int = 1024,
+    num_chunks: int = None,
+    return_metadata: bool = False,
+) -> Union[List[str], List[dict]]:
+    """Generate compact format as cacheable chunks.
+    
+    Files are processed in order and grouped into chunks. If num_chunks is
+    specified, splits into exactly that many chunks (for Bedrock's 4-block
+    cache limit). Otherwise uses min_chunk_tokens threshold.
+    
+    Args:
+        symbols_by_file: Dict mapping file paths to their symbols
+        references: Optional dict of file -> symbol -> [locations]
+        file_refs: Optional dict of file -> set of files that reference it
+        file_imports: Optional dict of file -> set of in-repo files it imports
+        include_instance_vars: Whether to include instance variables
+        include_calls: Whether to include call information
+        include_legend: Whether to include the legend in the first chunk
+        file_order: Optional list specifying file output order
+        min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic cache)
+        num_chunks: If specified, split into exactly this many chunks
+        return_metadata: If True, return list of dicts with content, files, tokens, cached
+        
+    Returns:
+        List of chunk strings (or dicts if return_metadata=True)
+    """
+    # Use provided order, or fall back to sorted for determinism
+    if file_order:
+        ordered_files = [f for f in file_order if f in symbols_by_file]
+    else:
+        ordered_files = sorted(symbols_by_file.keys())
+    
+    if not ordered_files:
+        return []
+    
+    # First, format all files
+    all_file_blocks = []
+    for file_path in ordered_files:
+        symbols = symbols_by_file[file_path]
+        file_lines = _format_file_block(
+            file_path=file_path,
+            symbols=symbols,
+            references=references,
+            file_refs=file_refs,
+            file_imports=file_imports,
+            include_instance_vars=include_instance_vars,
+            include_calls=include_calls,
+        )
+        if file_lines:
+            all_file_blocks.append(file_lines)
+    
+    if not all_file_blocks:
+        return []
+    
+    # If num_chunks specified, distribute files evenly across chunks
+    if num_chunks and num_chunks > 0:
+        if return_metadata:
+            return _split_into_n_chunks_with_metadata(
+                all_file_blocks, num_chunks, include_legend, ordered_files
+            )
+        return _split_into_n_chunks(all_file_blocks, num_chunks, include_legend)
+    
+    # Otherwise use token-based chunking
+    return _split_by_token_threshold(all_file_blocks, min_chunk_tokens, include_legend)
+
+
+def _split_into_n_chunks(
+    file_blocks: List[List[str]],
+    num_chunks: int,
+    include_legend: bool,
+    file_paths: List[str] = None,
+) -> List[str]:
+    """Split file blocks into exactly N chunks.
+    
+    Args:
+        file_blocks: List of formatted line lists, one per file
+        num_chunks: Target number of chunks
+        include_legend: Whether to include legend in first chunk
+        file_paths: Optional list of file paths (parallel to file_blocks) for metadata
+        
+    Returns:
+        List of chunk strings
+    """
+    if num_chunks <= 0:
+        num_chunks = 1
+    
+    # Calculate files per chunk (distribute evenly, extras go to later chunks)
+    total_files = len(file_blocks)
+    base_size = total_files // num_chunks
+    extras = total_files % num_chunks
+    
+    chunks = []
+    file_idx = 0
+    
+    for chunk_idx in range(num_chunks):
+        # Earlier chunks get base_size, later chunks get base_size + 1 if there are extras
+        # This puts newer/volatile files in later chunks (which won't be cached)
+        chunk_size = base_size + (1 if chunk_idx >= (num_chunks - extras) else 0)
+        
+        if chunk_size == 0:
+            continue
+        
+        chunk_lines = []
+        
+        # Add legend to first chunk
+        if chunk_idx == 0 and include_legend:
+            chunk_lines.extend([LEGEND, ""])
+        
+        # Add files for this chunk
+        for _ in range(chunk_size):
+            if file_idx < total_files:
+                chunk_lines.extend(file_blocks[file_idx])
+                file_idx += 1
+        
+        if chunk_lines:
+            chunks.append('\n'.join(chunk_lines))
+    
+    return chunks
+
+
+def _split_into_n_chunks_with_metadata(
+    file_blocks: List[List[str]],
+    num_chunks: int,
+    include_legend: bool,
+    file_paths: List[str],
+) -> List[dict]:
+    """Split file blocks into exactly N chunks with metadata.
+    
+    Args:
+        file_blocks: List of formatted line lists, one per file
+        num_chunks: Target number of chunks
+        include_legend: Whether to include legend in first chunk
+        file_paths: List of file paths (parallel to file_blocks)
+        
+    Returns:
+        List of dicts with 'content', 'files', 'tokens', 'cached' keys
+    """
+    if num_chunks <= 0:
+        num_chunks = 1
+    
+    total_files = len(file_blocks)
+    base_size = total_files // num_chunks
+    extras = total_files % num_chunks
+    
+    # Bedrock limit: 4 cache blocks total, 1 for system prompt = 3 for symbol map
+    max_cached_chunks = 3
+    
+    chunks = []
+    file_idx = 0
+    
+    for chunk_idx in range(num_chunks):
+        chunk_size = base_size + (1 if chunk_idx >= (num_chunks - extras) else 0)
+        
+        if chunk_size == 0:
+            continue
+        
+        chunk_lines = []
+        chunk_files = []
+        
+        if chunk_idx == 0 and include_legend:
+            chunk_lines.extend([LEGEND, ""])
+        
+        for _ in range(chunk_size):
+            if file_idx < total_files:
+                chunk_lines.extend(file_blocks[file_idx])
+                chunk_files.append(file_paths[file_idx])
+                file_idx += 1
+        
+        if chunk_lines:
+            content = '\n'.join(chunk_lines)
+            chunks.append({
+                'content': content,
+                'files': chunk_files,
+                'tokens': _estimate_tokens(content),
+                'chars': len(content),
+                'lines': content.count('\n'),
+                'cached': chunk_idx < max_cached_chunks,
+            })
+    
+    return chunks
+
+
+def _split_by_token_threshold(
+    file_blocks: List[List[str]],
+    min_chunk_tokens: int,
+    include_legend: bool
+) -> List[str]:
+    """Split file blocks using token threshold."""
+    chunks = []
+    current_chunk_lines = []
+    current_tokens = 0
+    
+    # Add legend to first chunk if requested
+    if include_legend:
+        legend_lines = [LEGEND, ""]
+        current_chunk_lines.extend(legend_lines)
+        current_tokens += _estimate_tokens('\n'.join(legend_lines))
+    
+    for file_lines in file_blocks:
+        file_text = '\n'.join(file_lines)
+        file_tokens = _estimate_tokens(file_text)
+        
+        # Check if we should start a new chunk
+        if (min_chunk_tokens > 0 and 
+            current_tokens >= min_chunk_tokens and 
+            current_chunk_lines):
+            chunks.append('\n'.join(current_chunk_lines))
+            current_chunk_lines = []
+            current_tokens = 0
+        
+        current_chunk_lines.extend(file_lines)
+        current_tokens += file_tokens
+    
+    # Don't forget the last chunk
+    if current_chunk_lines:
+        chunks.append('\n'.join(current_chunk_lines))
+    
+    return chunks
 
 
 def _extract_import_names(import_symbols: List[Symbol]) -> List[str]:

@@ -72,18 +72,46 @@ function renderExpandedItems(component, key, data) {
   }
 
   if (key === 'symbol_map' && data.files?.length) {
+    // Check if chunks have file info
+    const chunksWithFiles = data.chunks?.some(c => c.files?.length > 0);
+    
     return html`
       <div class="expanded-items symbol-map-files">
-        <div class="symbol-map-info">
-          Files are ordered for LLM prefix cache optimization.
-          New files appear at the bottom to preserve cached context.
-        </div>
-        ${data.files.map((file, index) => html`
-          <div class="item-row symbol-map-file">
-            <span class="file-order">${index + 1}.</span>
-            <span class="item-path" title="${file}">${file}</span>
+        ${data.chunks?.length ? html`
+          <div class="symbol-map-chunks">
+            <div class="chunks-header">Cache Chunks (Bedrock limit: 4 blocks, 1 used by system prompt)</div>
+            ${data.chunks.map(chunk => html`
+              <div class="chunk-container">
+                <div class="chunk-row ${chunk.cached ? 'cached' : 'uncached'}">
+                  <span class="chunk-icon">${chunk.cached ? '🔒' : '📝'}</span>
+                  <span class="chunk-label">Chunk ${chunk.index}</span>
+                  <span class="chunk-tokens">~${component.formatTokens(chunk.tokens)}</span>
+                  <span class="chunk-file-count">${chunk.files?.length || 0} files</span>
+                  <span class="chunk-status">${chunk.cached ? 'cached' : 'volatile'}</span>
+                </div>
+                ${chunk.files?.length ? html`
+                  <div class="chunk-files">
+                    ${chunk.files.map(file => html`
+                      <div class="chunk-file" title="${file}">${file}</div>
+                    `)}
+                  </div>
+                ` : ''}
+              </div>
+            `)}
           </div>
-        `)}
+        ` : ''}
+        ${!chunksWithFiles ? html`
+          <div class="symbol-map-info">
+            Files are ordered for LLM prefix cache optimization.
+            New files appear at the bottom to preserve cached context.
+          </div>
+          ${data.files.map((file, index) => html`
+            <div class="item-row symbol-map-file">
+              <span class="file-order">${index + 1}.</span>
+              <span class="item-path" title="${file}">${file}</span>
+            </div>
+          `)}
+        ` : ''}
       </div>
     `;
   }

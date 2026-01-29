@@ -315,25 +315,20 @@ class SymbolIndex:
         ref_index = self._get_reference_index()
         return sorted(ref_index.get_files_referencing(file_path))
     
-    def to_compact(
+    def _get_symbols_and_refs(
         self, 
         file_paths: List[str] = None,
         include_references: bool = False,
-    ) -> str:
-        """Generate compact format suitable for LLM context.
-        
-        Uses stable file ordering to optimize LLM prefix caching.
-        Files maintain their position; new files are appended at the bottom.
+    ) -> tuple:
+        """Get symbols, references, and file order for compact format generation.
         
         Args:
             file_paths: List of files to include. If None, uses cached files.
-            include_references: If True, include cross-file reference annotations
+            include_references: If True, include cross-file reference data
             
         Returns:
-            Compact string representation
+            Tuple of (symbols_by_file, references, file_refs, file_imports, file_order)
         """
-        from .compact_format import to_compact
-        
         if file_paths:
             symbols_by_file = self.index_files(file_paths)
         else:
@@ -371,12 +366,78 @@ class SymbolIndex:
         # Get stable file order for prefix cache optimization
         file_order = self.get_ordered_files(list(symbols_by_file.keys()))
         
+        return symbols_by_file, references, file_refs, file_imports, file_order
+    
+    def to_compact(
+        self, 
+        file_paths: List[str] = None,
+        include_references: bool = False,
+    ) -> str:
+        """Generate compact format suitable for LLM context.
+        
+        Uses stable file ordering to optimize LLM prefix caching.
+        Files maintain their position; new files are appended at the bottom.
+        
+        Args:
+            file_paths: List of files to include. If None, uses cached files.
+            include_references: If True, include cross-file reference annotations
+            
+        Returns:
+            Compact string representation
+        """
+        from .compact_format import to_compact
+        
+        symbols_by_file, references, file_refs, file_imports, file_order = \
+            self._get_symbols_and_refs(file_paths, include_references)
+        
         return to_compact(
             symbols_by_file, 
             references=references, 
             file_refs=file_refs,
             file_imports=file_imports,
             file_order=file_order,
+        )
+    
+    def to_compact_chunked(
+        self, 
+        file_paths: List[str] = None,
+        include_references: bool = False,
+        min_chunk_tokens: int = 1024,
+        num_chunks: int = None,
+        return_metadata: bool = False,
+    ) -> List[str]:
+        """Generate compact format as cacheable chunks.
+        
+        Files are processed in stable order and grouped into chunks. If num_chunks
+        is specified, splits into exactly that many chunks. Otherwise uses
+        min_chunk_tokens. This enables LLM prompt caching - stable files at the
+        start of the list form stable chunks that remain cached even when later
+        files change.
+        
+        Args:
+            file_paths: List of files to include. If None, uses cached files.
+            include_references: If True, include cross-file reference annotations
+            min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic)
+            num_chunks: If specified, split into exactly this many chunks
+            return_metadata: If True, return list of dicts with content, files, tokens
+            
+        Returns:
+            List of chunk strings (or dicts if return_metadata=True)
+        """
+        from .compact_format import to_compact_chunked
+        
+        symbols_by_file, references, file_refs, file_imports, file_order = \
+            self._get_symbols_and_refs(file_paths, include_references)
+        
+        return to_compact_chunked(
+            symbols_by_file, 
+            references=references, 
+            file_refs=file_refs,
+            file_imports=file_imports,
+            file_order=file_order,
+            min_chunk_tokens=min_chunk_tokens,
+            num_chunks=num_chunks,
+            return_metadata=return_metadata,
         )
     
     def save_compact(self, output_path: str = None, file_paths: List[str] = None) -> str:
