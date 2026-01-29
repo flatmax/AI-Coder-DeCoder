@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from ac.symbol_index.symbol_index import SymbolIndex
-from ac.symbol_index.compact_format import to_compact
+from ac.symbol_index.compact_format import to_compact, _is_test_file, _format_collapsed_test_file
 from ac.symbol_index.models import Symbol, Range
 
 
@@ -206,6 +206,180 @@ class TestCompactFormatFileOrder:
         assert file_lines == ["a.py:", "b.py:"]
 
 
+class TestIsTestFile:
+    """Test the _is_test_file helper function."""
+    
+    def test_test_prefix_in_path(self):
+        assert _is_test_file("tests/test_foo.py") is True
+        assert _is_test_file("test_foo.py") is True
+    
+    def test_tests_directory(self):
+        assert _is_test_file("tests/something.py") is True
+        assert _is_test_file("src/tests/helper.py") is True
+    
+    def test_test_suffix(self):
+        assert _is_test_file("foo_test.py") is True
+        assert _is_test_file("src/bar_test.js") is True
+    
+    def test_spec_files(self):
+        assert _is_test_file("Component.test.js") is True
+        assert _is_test_file("utils.spec.ts") is True
+    
+    def test_non_test_files(self):
+        assert _is_test_file("src/main.py") is False
+        assert _is_test_file("ac/context/manager.py") is False
+        assert _is_test_file("testing_utils.py") is False  # Has 'test' but not a test file
+
+
+class TestTestFileCollapsing:
+    """Test that test files are collapsed to summaries."""
+    
+    def _make_symbol(self, name, kind="function", line=1, children=None):
+        """Helper to create a symbol."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+            children=children or [],
+        )
+    
+    def test_collapsed_test_file_shows_counts(self):
+        """Collapsed test file should show class/method counts."""
+        test_class = self._make_symbol("TestFoo", kind="class", children=[
+            self._make_symbol("test_one", kind="method"),
+            self._make_symbol("test_two", kind="method"),
+            self._make_symbol("test_three", kind="method"),
+        ])
+        symbols = [test_class]
+        
+        lines = _format_collapsed_test_file("tests/test_foo.py", symbols, None)
+        content = '\n'.join(lines)
+        
+        assert "tests/test_foo.py:" in content
+        assert "1c/3m" in content  # 1 class, 3 methods
+    
+    def test_collapsed_test_file_shows_imports(self):
+        """Collapsed test file should still show imports."""
+        import_sym = self._make_symbol("import pytest", kind="import")
+        symbols = [import_sym]
+        
+        lines = _format_collapsed_test_file("tests/test_foo.py", symbols, None)
+        content = '\n'.join(lines)
+        
+        assert "i pytest" in content
+    
+    def test_collapsed_test_file_shows_local_imports(self):
+        """Collapsed test file should show i→ local imports."""
+        symbols = []
+        file_imports = {"tests/test_foo.py": {"ac/foo.py", "ac/bar.py"}}
+        
+        lines = _format_collapsed_test_file("tests/test_foo.py", symbols, file_imports)
+        content = '\n'.join(lines)
+        
+        assert "i→" in content
+        assert "ac/bar.py" in content
+        assert "ac/foo.py" in content
+    
+    def test_collapsed_test_file_shows_fixtures(self):
+        """Collapsed test file should show fixture functions."""
+        symbols = [
+            self._make_symbol("my_fixture", kind="function"),
+            self._make_symbol("test_something", kind="function"),
+        ]
+        
+        lines = _format_collapsed_test_file("tests/test_foo.py", symbols, None)
+        content = '\n'.join(lines)
+        
+        assert "fixtures:my_fixture" in content
+        assert "1f" in content  # 1 test function
+    
+    def test_to_compact_collapses_test_files(self):
+        """to_compact should collapse test files by default."""
+        test_class = self._make_symbol("TestFoo", kind="class", children=[
+            self._make_symbol("test_one", kind="method"),
+            self._make_symbol("test_two", kind="method"),
+        ])
+        symbols_by_file = {
+            "tests/test_foo.py": [test_class],
+        }
+        
+        result = to_compact(symbols_by_file, include_legend=False)
+        
+        # Should have summary, not individual methods
+        assert "1c/2m" in result
+        assert "test_one" not in result
+        assert "test_two" not in result
+    
+    def test_to_compact_collapse_tests_false(self):
+        """collapse_tests=False should show full test details."""
+        test_class = self._make_symbol("TestFoo", kind="class", children=[
+            self._make_symbol("test_one", kind="method"),
+            self._make_symbol("test_two", kind="method"),
+        ])
+        symbols_by_file = {
+            "tests/test_foo.py": [test_class],
+        }
+        
+        result = to_compact(symbols_by_file, include_legend=False, collapse_tests=False)
+        
+        # Should have full details
+        assert "test_one" in result
+        assert "test_two" in result
+        assert "1c/2m" not in result
+
+
+class TestFileWeight:
+    """Test that file headers show reference weight."""
+    
+    def _make_symbol(self, name, line=1):
+        """Helper to create a simple symbol."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind="function",
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+        )
+    
+    def test_file_weight_shown_when_referenced(self):
+        """Files with references should show ←N in header."""
+        symbols_by_file = {
+            "src/foo.py": [self._make_symbol("func")],
+        }
+        file_refs = {
+            "src/foo.py": {"bar.py", "baz.py", "qux.py"},
+        }
+        
+        result = to_compact(
+            symbols_by_file,
+            file_refs=file_refs,
+            include_legend=False,
+            collapse_tests=False,
+        )
+        
+        assert "src/foo.py: ←3" in result
+    
+    def test_file_weight_not_shown_when_zero(self):
+        """Files with no references should not show ←N."""
+        symbols_by_file = {
+            "src/foo.py": [self._make_symbol("func")],
+        }
+        
+        result = to_compact(
+            symbols_by_file,
+            file_refs={},
+            include_legend=False,
+            collapse_tests=False,
+        )
+        
+        assert "src/foo.py:" in result
+        assert "src/foo.py: ←" not in result
+
+
 class TestSymbolIndexToCompactOrdering:
     """Test that SymbolIndex.to_compact uses stable ordering."""
     
@@ -334,13 +508,13 @@ class TestToCompactChunked:
         
         # Each chunk should have complete files (file header and content together)
         for chunk in chunks:
-            # Count file headers
-            file_headers = [l for l in chunk.split('\n') if l.endswith(':') and not l.startswith('│')]
-            # Each file header should have corresponding content
+            # Count file headers (lines ending with : that look like file paths)
+            file_headers = [l for l in chunk.split('\n') if l.endswith(':') and '.' in l.split(':')[0]]
+            # Each file header should have corresponding content (f = function symbols)
             for header in file_headers:
-                file_name = header.rstrip(':')
+                file_name = header.rstrip(':').split(':')[0].strip()  # Handle "file.py: ←N" format
                 # The file's symbols should be in the same chunk
-                assert f"│" in chunk  # Has symbol content
+                assert 'f ' in chunk  # Has function symbol content
     
     def test_empty_symbols_returns_empty_list(self):
         """Empty input should return empty list."""
