@@ -2,6 +2,8 @@ import { html } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
+import '../find-in-files/FindInFiles.js';
+import '../context-viewer/ContextViewer.js';
 
 function renderHud(component) {
   if (!component._hudVisible || !component._hudData) {
@@ -187,100 +189,136 @@ export function renderPromptView(component) {
       ${renderResizeHandles(component)}
       <div class="header" @mousedown=${(e) => component._handleDragStart(e)}>
         <div class="header-left" @click=${component.toggleMinimize}>
-          <span>💬 Chat</span>
+          <span>${component.activeLeftTab === 'files' ? '💬 Chat' : 
+                  component.activeLeftTab === 'search' ? '🔍 Search' : 
+                  '📊 Context'}</span>
         </div>
-        <div class="header-center">
-          ${!component.minimized ? html`
-            <button class="clear-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
-              💾 Commit
-            </button>
-            <button class="clear-btn reset-btn" @click=${component.handleResetHard} title="Reset to HEAD (discard all changes)">
-              ⚠️ Reset
-            </button>
-          ` : ''}
+        <div class="header-tabs">
+          <button 
+            class="header-tab ${component.activeLeftTab === 'files' ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab('files'); }}
+            title="Files & Chat"
+          >📁</button>
+          <button 
+            class="header-tab ${component.activeLeftTab === 'search' ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab('search'); }}
+            title="Search"
+          >🔍</button>
+          <button 
+            class="header-tab ${component.activeLeftTab === 'context' ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab('context'); }}
+            title="Context"
+          >📊</button>
         </div>
         <div class="header-right">
-          ${!component.minimized ? html`
-            <button class="clear-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
-              📜 History
+          ${!component.minimized && component.activeLeftTab === 'files' ? html`
+            <button class="header-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
+              💾
             </button>
-            <button class="clear-btn" @click=${component.showTokenReport} title="Show token usage">
-              📊 Tokens
+            <button class="header-btn reset-btn" @click=${component.handleResetHard} title="Reset to HEAD (discard all changes)">
+              ⚠️
             </button>
-            <button class="clear-btn" @click=${component.clearContext} title="Clear conversation context">
-              🗑️ Clear
+            <button class="header-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
+              📜
+            </button>
+            <button class="header-btn" @click=${component.showTokenReport} title="Show token usage">
+              📊
+            </button>
+            <button class="header-btn" @click=${component.clearContext} title="Clear conversation context">
+              🗑️
             </button>
           ` : ''}
-          <button @click=${component.toggleMinimize}>${component.minimized ? '▲' : '▼'}</button>
+          <button class="header-btn" @click=${component.toggleMinimize}>${component.minimized ? '▲' : '▼'}</button>
         </div>
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">
-          ${component.showFilePicker ? html`
-            <div class="picker-panel">
-              <file-picker
-                .tree=${component.fileTree}
-                .modified=${component.modifiedFiles}
-                .staged=${component.stagedFiles}
-                .untracked=${component.untrackedFiles}
-                .diffStats=${component.diffStats}
-                .viewingFile=${component.viewingFile}
-                @selection-change=${component.handleSelectionChange}
-                @file-view=${component.handleFileView}
-                @copy-path-to-prompt=${component.handleCopyPathToPrompt}
-              ></file-picker>
-            </div>
-          ` : ''}
-          <div class="chat-panel">
-            <div class="messages-wrapper">
-              <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
-                ${repeat(
-                  component.messageHistory,
-                  (message) => message.id,
-                  message => {
-                    if (message.role === 'user') {
-                      return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
-                    } else if (message.role === 'assistant') {
-                      return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
-                    }
-                  }
-                )}
-              </div>
-              ${component._showScrollButton ? html`
-                <button class="scroll-to-bottom-btn" @click=${() => component.scrollToBottomNow()} title="Scroll to bottom">
-                  ↓
-                </button>
-              ` : ''}
-            </div>
-            ${component.pastedImages.length > 0 ? html`
-              <div class="image-preview-area">
-                ${component.pastedImages.map((img, index) => html`
-                  <div class="image-preview">
-                    <img src=${img.preview} alt=${img.name}>
-                    <button class="remove-image" @click=${() => component.removeImage(index)}>×</button>
-                  </div>
-                `)}
-                <button class="clear-images" @click=${() => component.clearImages()}>Clear all</button>
+          ${component.activeLeftTab === 'files' ? html`
+            ${component.showFilePicker ? html`
+              <div class="picker-panel">
+                <file-picker
+                  .tree=${component.fileTree}
+                  .modified=${component.modifiedFiles}
+                  .staged=${component.stagedFiles}
+                  .untracked=${component.untrackedFiles}
+                  .diffStats=${component.diffStats}
+                  .viewingFile=${component.viewingFile}
+                  @selection-change=${component.handleSelectionChange}
+                  @file-view=${component.handleFileView}
+                  @copy-path-to-prompt=${component.handleCopyPathToPrompt}
+                ></file-picker>
               </div>
             ` : ''}
-            ${renderUrlChips(component)}
-            <div class="input-area">
-              <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
-                📁 ${component.selectedFiles.length || ''}
-              </button>
-              <textarea
-                placeholder="Type a message... (paste images with Ctrl+V)"
-                .value=${component.inputValue}
-                @input=${component.handleInput}
-                @keydown=${component.handleKeyDown}
-                ?disabled=${component.isStreaming}
-              ></textarea>
-              ${component.isStreaming 
-                ? html`<button class="send-btn stop-btn" @click=${() => component.stopStreaming()}>Stop</button>`
-                : html`<button class="send-btn" @click=${component.sendMessage}>Send</button>`
-              }
+            <div class="chat-panel">
+              <div class="messages-wrapper">
+                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
+                  ${repeat(
+                    component.messageHistory,
+                    (message) => message.id,
+                    message => {
+                      if (message.role === 'user') {
+                        return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
+                      } else if (message.role === 'assistant') {
+                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
+                      }
+                    }
+                  )}
+                </div>
+                ${component._showScrollButton ? html`
+                  <button class="scroll-to-bottom-btn" @click=${() => component.scrollToBottomNow()} title="Scroll to bottom">
+                    ↓
+                  </button>
+                ` : ''}
+              </div>
+              ${component.pastedImages.length > 0 ? html`
+                <div class="image-preview-area">
+                  ${component.pastedImages.map((img, index) => html`
+                    <div class="image-preview">
+                      <img src=${img.preview} alt=${img.name}>
+                      <button class="remove-image" @click=${() => component.removeImage(index)}>×</button>
+                    </div>
+                  `)}
+                  <button class="clear-images" @click=${() => component.clearImages()}>Clear all</button>
+                </div>
+              ` : ''}
+              ${renderUrlChips(component)}
+              <div class="input-area">
+                <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
+                  📁 ${component.selectedFiles.length || ''}
+                </button>
+                <textarea
+                  placeholder="Type a message... (paste images with Ctrl+V)"
+                  .value=${component.inputValue}
+                  @input=${component.handleInput}
+                  @keydown=${component.handleKeyDown}
+                  ?disabled=${component.isStreaming}
+                ></textarea>
+                ${component.isStreaming 
+                  ? html`<button class="send-btn stop-btn" @click=${() => component.stopStreaming()}>Stop</button>`
+                  : html`<button class="send-btn" @click=${component.sendMessage}>Send</button>`
+                }
+              </div>
             </div>
-          </div>
+          ` : component.activeLeftTab === 'search' ? html`
+            <div class="embedded-panel">
+              <find-in-files
+                .rpcCall=${component.call}
+                @result-selected=${(e) => component.handleSearchResultSelected(e)}
+                @file-selected=${(e) => component.handleSearchFileSelected(e)}
+              ></find-in-files>
+            </div>
+          ` : html`
+            <div class="embedded-panel">
+              <context-viewer
+                .rpcCall=${component.call}
+                .selectedFiles=${component.selectedFiles || []}
+                .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
+                .excludedUrls=${component.excludedUrls}
+                @remove-url=${(e) => component.handleContextRemoveUrl(e)}
+                @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
+              ></context-viewer>
+            </div>
+          `}
         </div>
       `}
     </div>
