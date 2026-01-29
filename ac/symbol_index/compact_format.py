@@ -19,7 +19,7 @@ CONDITIONAL_MARKER = '?'
 
 
 # Legend for compact format
-LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
+LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -75,6 +75,14 @@ def _format_file_block(
         else:
             non_var_symbols.append(s)
     
+    # Group symbols by their reference signature to use ditto marks
+    # This handles cases like TEST(...) macros that all reference the same location
+    def _refs_signature(refs: List) -> str:
+        """Create a hashable signature for a reference list."""
+        if not refs:
+            return ""
+        return _format_refs(refs)
+    
     # Output imports on one line if any
     if imports:
         import_names = _extract_import_names(imports)
@@ -87,14 +95,24 @@ def _format_file_block(
         if in_repo_imports:
             lines.append(f"│i→ {','.join(in_repo_imports)}")
     
-    # Output non-variable symbols
+    # Output non-variable symbols, using ditto marks for repeated references
+    last_refs_str = None
     for symbol in non_var_symbols:
         symbol_refs = file_references.get(symbol.name, [])
+        refs_str = _refs_signature(symbol_refs)
+        
+        # Use ditto mark if refs are identical to previous symbol
+        use_ditto = (refs_str and refs_str == last_refs_str)
+        
         lines.extend(_format_symbol(
             symbol, indent=0, refs=symbol_refs,
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
+            use_ditto_refs=use_ditto,
         ))
+        
+        if refs_str:
+            last_refs_str = refs_str
     
     # Output grouped variables (consolidate same-named vars onto one line)
     for var_name, var_symbols in sorted(var_groups.items(), key=lambda x: x[1][0].range.start_line):
@@ -476,6 +494,7 @@ def _format_symbol(
     parent_refs: Dict = None,
     include_instance_vars: bool = True,
     include_calls: bool = False,
+    use_ditto_refs: bool = False,
 ) -> List[str]:
     """Format a single symbol and its children.
     
@@ -486,6 +505,7 @@ def _format_symbol(
         parent_refs: Dict of child_name -> [locations] for children
         include_instance_vars: Whether to include instance variables
         include_calls: Whether to include call information
+        use_ditto_refs: If True, use ″ instead of full ref list (same as previous)
     """
     lines = []
     prefix = KIND_PREFIX.get(symbol.kind, '?')
@@ -528,9 +548,12 @@ def _format_symbol(
     
     # Add reference annotations if available
     if refs:
-        ref_annotations = _format_refs(refs)
-        if ref_annotations:
-            line_parts.append(f" {ref_annotations}")
+        if use_ditto_refs:
+            line_parts.append(" ←″")
+        else:
+            ref_annotations = _format_refs(refs)
+            if ref_annotations:
+                line_parts.append(f" {ref_annotations}")
     
     lines.append(''.join(line_parts))
     
