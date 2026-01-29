@@ -71,6 +71,51 @@ function renderExpandedItems(component, key, data) {
     `;
   }
 
+  if (key === 'symbol_map' && data.files?.length) {
+    // Check if chunks have file info
+    const chunksWithFiles = data.chunks?.some(c => c.files?.length > 0);
+    
+    return html`
+      <div class="expanded-items symbol-map-files">
+        ${data.chunks?.length ? html`
+          <div class="symbol-map-chunks">
+            <div class="chunks-header">Cache Chunks (Bedrock limit: 4 blocks, 1 used by system prompt)</div>
+            ${data.chunks.map(chunk => html`
+              <div class="chunk-container">
+                <div class="chunk-row ${chunk.cached ? 'cached' : 'uncached'}">
+                  <span class="chunk-icon">${chunk.cached ? '🔒' : '📝'}</span>
+                  <span class="chunk-label">Chunk ${chunk.index}</span>
+                  <span class="chunk-tokens">~${component.formatTokens(chunk.tokens)}</span>
+                  <span class="chunk-file-count">${chunk.files?.length || 0} files</span>
+                  <span class="chunk-status">${chunk.cached ? 'cached' : 'volatile'}</span>
+                </div>
+                ${chunk.files?.length ? html`
+                  <div class="chunk-files">
+                    ${chunk.files.map(file => html`
+                      <div class="chunk-file" title="${file}">${file}</div>
+                    `)}
+                  </div>
+                ` : ''}
+              </div>
+            `)}
+          </div>
+        ` : ''}
+        ${!chunksWithFiles ? html`
+          <div class="symbol-map-info">
+            Files are ordered for LLM prefix cache optimization.
+            New files appear at the bottom to preserve cached context.
+          </div>
+          ${data.files.map((file, index) => html`
+            <div class="item-row symbol-map-file">
+              <span class="file-order">${index + 1}.</span>
+              <span class="item-path" title="${file}">${file}</span>
+            </div>
+          `)}
+        ` : ''}
+      </div>
+    `;
+  }
+
   if (key === 'urls') {
     // Show ALL fetched URLs from the component, not just ones in breakdown
     const allUrls = component.fetchedUrls || [];
@@ -132,13 +177,19 @@ function renderBreakdownSection(component) {
   if (!breakdown?.breakdown) return html``;
 
   const bd = breakdown.breakdown;
+  const hasSymbolMapFiles = bd.symbol_map?.files?.length > 0;
 
   return html`
     <div class="breakdown-section">
       <div class="breakdown-title">Category Breakdown</div>
       ${renderCategoryRow(component, 'system', bd.system)}
       <div class="category-row-with-action">
-        ${renderCategoryRow(component, 'symbol_map', bd.symbol_map)}
+        ${renderCategoryRow(component, 'symbol_map', {
+          ...bd.symbol_map,
+          label: hasSymbolMapFiles 
+            ? `Symbol Map (${bd.symbol_map.file_count} files)` 
+            : bd.symbol_map.label
+        }, hasSymbolMapFiles)}
         ${renderSymbolMapButton(component)}
       </div>
       ${renderCategoryRow(component, 'files', bd.files, true)}
@@ -155,6 +206,30 @@ function renderBreakdownSection(component) {
           ${component.isLoading ? '...' : '↻ Refresh'}
         </button>
       </div>
+      
+      ${breakdown.session_totals ? html`
+        <div class="session-totals">
+          <div class="breakdown-title">Session Totals</div>
+          <div class="session-row">
+            <span class="session-label">Tokens In:</span>
+            <span class="session-value">${component.formatTokens(breakdown.session_totals.prompt_tokens)}</span>
+          </div>
+          <div class="session-row">
+            <span class="session-label">Tokens Out:</span>
+            <span class="session-value">${component.formatTokens(breakdown.session_totals.completion_tokens)}</span>
+          </div>
+          <div class="session-row total">
+            <span class="session-label">Total:</span>
+            <span class="session-value">${component.formatTokens(breakdown.session_totals.total_tokens)}</span>
+          </div>
+          ${breakdown.session_totals.cache_hit_tokens ? html`
+            <div class="session-row cache">
+              <span class="session-label">Cache Hits:</span>
+              <span class="session-value">${component.formatTokens(breakdown.session_totals.cache_hit_tokens)}</span>
+            </div>
+          ` : ''}
+        </div>
+      ` : ''}
     </div>
   `;
 }

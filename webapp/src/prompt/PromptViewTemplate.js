@@ -3,6 +3,80 @@ import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
 
+function renderHud(component) {
+  if (!component._hudVisible || !component._hudData) {
+    return '';
+  }
+  
+  const data = component._hudData;
+  const formatNum = (n) => n?.toLocaleString() ?? '0';
+  
+  return html`
+    <div class="token-hud ${component._hudVisible ? 'visible' : ''}">
+      <div class="hud-title">📊 Tokens</div>
+      ${data.system_tokens !== undefined ? html`
+        <div class="hud-section-title">Context Breakdown</div>
+        <div class="hud-row">
+          <span class="hud-label">System:</span>
+          <span class="hud-value">${formatNum(data.system_tokens)}</span>
+        </div>
+        <div class="hud-row">
+          <span class="hud-label">Symbol Map:</span>
+          <span class="hud-value">${formatNum(data.symbol_map_tokens)}</span>
+        </div>
+        <div class="hud-row">
+          <span class="hud-label">Files:</span>
+          <span class="hud-value">${formatNum(data.file_tokens)}</span>
+        </div>
+        <div class="hud-row">
+          <span class="hud-label">History:</span>
+          <span class="hud-value">${formatNum(data.history_tokens)}</span>
+        </div>
+        <div class="hud-row total">
+          <span class="hud-label">Context:</span>
+          <span class="hud-value">${formatNum(data.context_total_tokens)} / ${formatNum(data.max_input_tokens)}</span>
+        </div>
+        <div class="hud-divider"></div>
+        <div class="hud-section-title">This Request</div>
+      ` : ''}
+      <div class="hud-row">
+        <span class="hud-label">Prompt:</span>
+        <span class="hud-value">${formatNum(data.prompt_tokens)}</span>
+      </div>
+      <div class="hud-row">
+        <span class="hud-label">Response:</span>
+        <span class="hud-value">${formatNum(data.completion_tokens)}</span>
+      </div>
+      <div class="hud-row total">
+        <span class="hud-label">Total:</span>
+        <span class="hud-value">${formatNum(data.total_tokens)}</span>
+      </div>
+      ${data.cache_hit_tokens ? html`
+        <div class="hud-row cache">
+          <span class="hud-label">Cache hit:</span>
+          <span class="hud-value">${formatNum(data.cache_hit_tokens)}</span>
+        </div>
+      ` : ''}
+      ${data.session_total_tokens ? html`
+        <div class="hud-divider"></div>
+        <div class="hud-section-title">Session Total</div>
+        <div class="hud-row cumulative">
+          <span class="hud-label">In:</span>
+          <span class="hud-value">${formatNum(data.session_prompt_tokens)}</span>
+        </div>
+        <div class="hud-row cumulative">
+          <span class="hud-label">Out:</span>
+          <span class="hud-value">${formatNum(data.session_completion_tokens)}</span>
+        </div>
+        <div class="hud-row cumulative total">
+          <span class="hud-label">Total:</span>
+          <span class="hud-value">${formatNum(data.session_total_tokens)}</span>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
 function renderUrlChips(component) {
   const hasDetected = component.detectedUrls?.length > 0;
   const hasFetched = Object.keys(component.fetchedUrls || {}).length > 0;
@@ -101,6 +175,7 @@ export function renderPromptView(component) {
   const dialogStyle = [positionStyle, resizeStyle].filter(Boolean).join('; ');
   
   return html`
+    ${renderHud(component)}
     ${component.showHistoryBrowser ? html`
       <history-browser
         @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}

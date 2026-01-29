@@ -133,9 +133,18 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         if completion and hasattr(completion, "usage") and completion.usage is not None:
             prompt_tokens = completion.usage.prompt_tokens or 0
             completion_tokens = completion.usage.completion_tokens or 0
+            # Check various cache token attribute names across providers
             cache_hit_tokens = getattr(completion.usage, "prompt_cache_hit_tokens", 0) or getattr(
                 completion.usage, "cache_read_input_tokens", 0
             ) or 0
+            # Bedrock via LiteLLM uses prompt_tokens_details.cached_tokens
+            if not cache_hit_tokens:
+                prompt_details = getattr(completion.usage, "prompt_tokens_details", None)
+                if prompt_details:
+                    if isinstance(prompt_details, dict):
+                        cache_hit_tokens = prompt_details.get("cached_tokens", 0) or 0
+                    else:
+                        cache_hit_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
             cache_write_tokens = getattr(completion.usage, "cache_creation_input_tokens", 0) or 0
             
             self._total_prompt_tokens += prompt_tokens
@@ -446,6 +455,65 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             print(f"⚠️ Failed to get context map: {e}")
             traceback.print_exc()
             return ""
+    
+    def get_context_map_chunked(self, chat_files=None, include_references=True, min_chunk_tokens=1024, num_chunks=None, return_metadata=False):
+        """
+        Get repository context map as cacheable chunks.
+
+        Returns the symbol map split into chunks. If num_chunks is specified,
+        splits into exactly that many chunks. Otherwise uses min_chunk_tokens.
+        This enables better LLM prompt caching - stable files at the start
+        form stable chunks that remain cached even when later files change.
+
+        Args:
+            chat_files: List of files included in chat (to exclude from map)
+            include_references: Whether to include cross-file references
+            min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic)
+            num_chunks: If specified, split into exactly this many chunks
+            return_metadata: If True, return list of dicts with content, files, tokens, cached
+
+        Returns:
+            List of strings (or dicts if return_metadata=True), each a cacheable chunk
+        """
+        if not self.repo:
+            return []
+        
+        try:
+            # Get all trackable files
+            all_files = self._get_all_trackable_files()
+            
+            if not all_files:
+                return []
+            
+            # Exclude chat files (they're included verbatim)
+            chat_files_set = set(chat_files or [])
+            map_files = [f for f in all_files if f not in chat_files_set]
+            
+            if not map_files:
+                return []
+            
+            indexer = self._get_indexer()
+            
+            # Build references if requested
+            if include_references:
+                indexer.build_references(map_files)
+            
+            # Get symbol index
+            symbol_index = indexer._get_symbol_index()
+            
+            # Generate chunked compact format
+            return symbol_index.to_compact_chunked(
+                file_paths=map_files,
+                include_references=include_references,
+                min_chunk_tokens=min_chunk_tokens,
+                num_chunks=num_chunks,
+                return_metadata=return_metadata
+            )
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Failed to get chunked context map: {e}")
+            traceback.print_exc()
+            return []
     
     def get_references_to_symbol(self, file_path, symbol_name):
         """
@@ -830,9 +898,47 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     symbol_map_tokens = tc.count(symbol_map)
             except Exception:
                 pass
+        # Get file order for display
+        symbol_map_files = []
+        if self.repo and symbol_map:
+            try:
+                indexer = self._get_indexer()
+                symbol_index = indexer._get_symbol_index()
+                # Get the current file order from the symbol index
+                symbol_map_files = symbol_index._load_order()
+            except Exception:
+                pass
+        
+        # Get chunk info for cache visualization (with file lists)
+        chunk_info = []
+        if self.repo and symbol_map:
+            try:
+                indexer = self._get_indexer()
+                symbol_index = indexer._get_symbol_index()
+                chunk_metadata = symbol_index.to_compact_chunked(
+                    file_paths=self._get_all_trackable_files(),
+                    include_references=True,
+                    num_chunks=5,
+                    return_metadata=True,
+                )
+                for i, chunk in enumerate(chunk_metadata):
+                    chunk_info.append({
+                        "index": i,
+                        "tokens": chunk.get('tokens', 0),
+                        "chars": chunk.get('chars', 0),
+                        "lines": chunk.get('lines', 0),
+                        "cached": chunk.get('cached', False),
+                        "files": chunk.get('files', []),
+                    })
+            except Exception:
+                pass
+        
         breakdown["symbol_map"] = {
             "tokens": symbol_map_tokens,
-            "label": "Symbol Map"
+            "label": "Symbol Map",
+            "file_count": len(symbol_map_files),
+            "files": symbol_map_files,
+            "chunks": chunk_info,
         }
         total_tokens += symbol_map_tokens
         
@@ -949,7 +1055,14 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             "max_output_tokens": max_output,
             "used_tokens": total_tokens,
             "remaining_tokens": max_input - total_tokens,
-            "breakdown": breakdown
+            "breakdown": breakdown,
+            "session_totals": {
+                "prompt_tokens": self._total_prompt_tokens,
+                "completion_tokens": self._total_completion_tokens,
+                "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+                "cache_hit_tokens": self._total_cache_hit_tokens,
+                "cache_write_tokens": self._total_cache_write_tokens,
+            }
         }
     
     def get_url_content(self, url):

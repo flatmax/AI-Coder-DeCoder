@@ -32,7 +32,7 @@ export class ContextViewer extends LitElement {
     this.breakdown = null;
     this.isLoading = false;
     this.error = null;
-    this.expandedSections = { files: false, urls: false, history: false };
+    this.expandedSections = { files: false, urls: false, history: false, symbol_map: false };
     this.selectedUrl = null;
     this.showUrlModal = false;
     this.urlContent = null;
