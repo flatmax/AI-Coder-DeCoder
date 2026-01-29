@@ -4,6 +4,58 @@ from typing import List, Dict, Optional, Set, Union
 from .models import Symbol, CallSite
 
 
+def format_file_tree(tree_data: dict, include_lines: bool = True) -> str:
+    """Format repository file tree as a flat list for LLM context.
+    
+    Args:
+        tree_data: Tree dict from Repo.get_file_tree() with 'tree' key
+        include_lines: Whether to include line counts [N]
+        
+    Returns:
+        Formatted string with one file per line, sorted by path
+    """
+    if not tree_data or 'tree' not in tree_data:
+        return ""
+    
+    # Collect all files from the tree
+    files = []
+    _collect_files(tree_data['tree'], files)
+    
+    if not files:
+        return ""
+    
+    # Sort by path for consistency
+    files.sort(key=lambda x: x[0])
+    
+    # Format as flat list
+    lines = [f"# File Tree ({len(files)} files)", ""]
+    for path, line_count in files:
+        if include_lines and line_count > 0:
+            lines.append(f"{path} [{line_count}]")
+        else:
+            lines.append(path)
+    
+    return "\n".join(lines)
+
+
+def _collect_files(node: dict, files: list, current_path: str = ""):
+    """Recursively collect files from tree structure.
+    
+    Args:
+        node: Tree node dict
+        files: List to append (path, lines) tuples to
+        current_path: Current directory path
+    """
+    # Files have 'path' but no 'children'
+    if 'path' in node and 'children' not in node:
+        files.append((node['path'], node.get('lines', 0)))
+        return
+    
+    # Process children
+    for child in node.get('children', []):
+        _collect_files(child, files, current_path)
+
+
 # Single-letter kind prefixes
 KIND_PREFIX = {
     'class': 'c',
@@ -101,7 +153,7 @@ def _compute_path_aliases(
     
     aliases = {}
     for i, (prefix, count, savings) in enumerate(selected):
-        aliases[prefix] = f"@{i + 1}"
+        aliases[prefix] = f"@{i + 1}/"
     
     return aliases
 
