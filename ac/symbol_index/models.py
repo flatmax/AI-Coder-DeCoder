@@ -98,6 +98,8 @@ class Symbol:
     call_sites: List[CallSite] = field(default_factory=list)
     # For inherited methods, which parent class it comes from
     inherited_from: Optional[str] = None
+    # Whether this is an async function/method
+    is_async: bool = False
     
     def to_dict(self) -> dict:
         result = {
@@ -126,4 +128,6 @@ class Symbol:
             result['callSites'] = [c.to_dict() for c in self.call_sites]
         if self.inherited_from:
             result['inheritedFrom'] = self.inherited_from
+        if self.is_async:
+            result['isAsync'] = True
         return result

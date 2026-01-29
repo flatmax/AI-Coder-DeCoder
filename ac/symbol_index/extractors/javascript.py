@@ -64,6 +64,9 @@ class JavaScriptExtractor(BaseExtractor):
                     symbol = self._extract_variable_declarator(child, file_path, content, parent)
                     if symbol:
                         symbols.append(symbol)
+                        # Check for mixin pattern: const Mixin = (superClass) => class extends superClass { ... }
+                        if symbol.kind == 'function':
+                            self._extract_mixin_class(child, file_path, content, symbol.children)
         
         # Method definition in class
         elif node.type == 'method_definition':
@@ -154,9 +157,13 @@ class JavaScriptExtractor(BaseExtractor):
         parameters = self._extract_parameters(node, content)
         return_type = self._get_return_type(node, content)
         
+        # Check if async (look for 'async' keyword in node text or type)
+        is_async = any(child.type == 'async' for child in node.children)
+        
         return Symbol(
             name=name,
             kind='function',
+            is_async=is_async,
             file_path=file_path,
             range=self._make_range(node),
             selection_range=self._make_range(name_node),
@@ -180,6 +187,9 @@ class JavaScriptExtractor(BaseExtractor):
         return_type = self._get_return_type(node, content)
         calls, call_sites = self._extract_calls_with_context(node, content)
         
+        # Check if async method
+        is_async = any(child.type == 'async' for child in node.children)
+        
         # Determine if it's a getter/setter/static
         kind = 'method'
         for child in node.children:
@@ -201,6 +211,7 @@ class JavaScriptExtractor(BaseExtractor):
             return_type=return_type,
             calls=calls,
             call_sites=call_sites,
+            is_async=is_async,
         )
     
     def _extract_field(
@@ -398,4 +409,31 @@ class JavaScriptExtractor(BaseExtractor):
         if type_node:
             return self._get_node_text(type_node, content)
         return None
+    
+    def _extract_mixin_class(
+        self, node, file_path: str, content: bytes, symbols: List[Symbol]
+    ):
+        """Extract class from mixin pattern: const Mixin = (superClass) => class extends superClass { ... }
+        
+        Args:
+            node: The variable_declarator node
+            file_path: Path to the file
+            content: File content as bytes
+            symbols: List to append extracted symbols to
+        """
+        # Look for arrow_function with class_expression body
+        for child in node.children:
+            if child.type == 'arrow_function':
+                # Find the class expression in the arrow function body
+                for arrow_child in child.children:
+                    if arrow_child.type == 'class':
+                        # Extract methods from this anonymous class
+                        body = self._find_child(arrow_child, 'class_body')
+                        if body:
+                            for class_child in body.children:
+                                self._extract_from_node(
+                                    class_child, file_path, content,
+                                    symbols, parent=None
+                                )
+                        return
     
