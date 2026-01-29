@@ -1,8 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
-import '../find-in-files/FindInFiles.js';
-import '../context-viewer/ContextViewer.js';
 import '../context-viewer/UrlContentModal.js';
 
 export class AppShell extends LitElement {
@@ -11,8 +9,6 @@ export class AppShell extends LitElement {
     showDiff: { type: Boolean },
     serverURI: { type: String },
     viewingFile: { type: String },
-    activeLeftTab: { type: String },
-    excludedUrls: { type: Object }, // Set of URLs excluded from context
     showUrlModal: { type: Boolean },
     urlModalContent: { type: Object },
   };
@@ -39,101 +35,12 @@ export class AppShell extends LitElement {
 
     .prompt-overlay {
       position: fixed;
-      top: 60px;
+      top: 20px;
       bottom: 20px;
       left: 20px;
       z-index: 1000;
       display: flex;
       flex-direction: column;
-    }
-
-    .header {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 40px;
-      background: #16213e;
-      display: flex;
-      align-items: center;
-      padding: 0 16px;
-      z-index: 100;
-      border-bottom: 1px solid #0f3460;
-      gap: 16px;
-    }
-
-    .header h1 {
-      font-size: 14px;
-      color: #e94560;
-      margin: 0;
-      font-weight: 600;
-    }
-
-    .header .subtitle {
-      color: #666;
-      font-size: 12px;
-    }
-
-    .header-tabs {
-      display: flex;
-      gap: 4px;
-      margin-left: 16px;
-    }
-
-    .header-tab {
-      padding: 6px 12px;
-      background: transparent;
-      border: none;
-      border-radius: 4px;
-      color: #888;
-      cursor: pointer;
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.15s;
-    }
-
-    .header-tab:hover {
-      color: #ccc;
-      background: #0f3460;
-    }
-
-    .header-tab.active {
-      color: #e94560;
-      background: #0f3460;
-    }
-
-    .header-tab .icon {
-      font-size: 12px;
-    }
-
-    .main-content {
-      position: absolute;
-      top: 40px;
-      left: 0;
-      right: 0;
-      bottom: 0;
-    }
-
-    .clear-btn {
-      margin-left: auto;
-      background: #0f3460;
-      color: #eee;
-      border: none;
-      border-radius: 4px;
-      padding: 6px 12px;
-      cursor: pointer;
-      font-size: 12px;
-    }
-
-    .clear-btn:hover {
-      background: #1a3a6e;
-    }
-
-    .clear-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
     }
 
   `;
@@ -143,8 +50,6 @@ export class AppShell extends LitElement {
     this.diffFiles = [];
     this.showDiff = false;
     this.viewingFile = null;
-    this.activeLeftTab = 'files';
-    this.excludedUrls = new Set();
     this.showUrlModal = false;
     this.urlModalContent = null;
     // Get server port from URL params or default
@@ -170,35 +75,18 @@ export class AppShell extends LitElement {
     // Ctrl+Shift+F to open search
     if (e.ctrlKey && e.shiftKey && e.key === 'F') {
       e.preventDefault();
-      this.activeLeftTab = 'search';
-      this.updateComplete.then(() => {
-        const findInFiles = this.shadowRoot.querySelector('find-in-files');
-        if (findInFiles) {
-          findInFiles.focusInput();
-        }
-      });
+      const promptView = this.shadowRoot?.querySelector('prompt-view');
+      if (promptView) {
+        promptView.switchTab('search');
+      }
     }
     // Ctrl+B to toggle back to files
     if (e.ctrlKey && e.key === 'b') {
       e.preventDefault();
-      this.activeLeftTab = 'files';
-    }
-  }
-
-  switchTab(tab) {
-    this.activeLeftTab = tab;
-    if (tab === 'search') {
-      this.updateComplete.then(() => {
-        const findInFiles = this.shadowRoot.querySelector('find-in-files');
-        if (findInFiles) {
-          findInFiles.focusInput();
-        }
-      });
-    } else if (tab === 'context') {
-      // Use updateComplete to ensure DOM is ready
-      this.updateComplete.then(() => {
-        this._refreshContextViewer();
-      });
+      const promptView = this.shadowRoot?.querySelector('prompt-view');
+      if (promptView) {
+        promptView.switchTab('files');
+      }
     }
   }
 
@@ -370,67 +258,6 @@ export class AppShell extends LitElement {
     }
   }
 
-  _getPromptViewRpcCall() {
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    return promptView?.call || null;
-  }
-
-  _getSelectedFiles() {
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    return promptView?.selectedFiles || [];
-  }
-
-  _getFetchedUrls() {
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    const urlsObj = promptView?.fetchedUrls || {};
-    return Object.keys(urlsObj);
-  }
-
-  _getIncludedUrls() {
-    const allUrls = this._getFetchedUrls();
-    return allUrls.filter(url => !this.excludedUrls.has(url));
-  }
-
-  handleUrlInclusionChanged(e) {
-    const { url, included } = e.detail;
-    const newExcluded = new Set(this.excludedUrls);
-    if (included) {
-      newExcluded.delete(url);
-    } else {
-      newExcluded.add(url);
-    }
-    this.excludedUrls = newExcluded;
-    
-    // Sync to PromptView
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    if (promptView) {
-      promptView.excludedUrls = newExcluded;
-    }
-    
-    // Sync to ContextViewer
-    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
-    if (contextViewer) {
-      contextViewer.excludedUrls = newExcluded;
-      contextViewer.refreshBreakdown();
-    }
-  }
-
-  async _refreshContextViewer() {
-    await this.updateComplete;
-    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    
-    if (contextViewer && promptView?.call) {
-      contextViewer.rpcCall = promptView.call;
-      contextViewer.selectedFiles = promptView.selectedFiles || [];
-      // fetchedUrls is an object with URL keys, convert to array
-      const urlsObj = promptView.fetchedUrls || {};
-      contextViewer.fetchedUrls = Object.keys(urlsObj);
-      // Force refresh after setting properties
-      contextViewer.refreshBreakdown();
-    }
-  }
-
   handleRemoveUrl(e) {
     const { url } = e.detail;
     const promptView = this.shadowRoot?.querySelector('prompt-view');
@@ -468,49 +295,17 @@ export class AppShell extends LitElement {
         @close=${this.closeUrlModal}
       ></url-content-modal>
       <div class="app-container">
-        <div class="header">
-          <h1>AI Coder / DeCoder</h1>
-          <div class="header-tabs">
-            <button 
-              class="header-tab ${this.activeLeftTab === 'files' ? 'active' : ''}"
-              @click=${() => this.switchTab('files')}
-            >
-              <span class="icon">📁</span> Files
-            </button>
-            <button 
-              class="header-tab ${this.activeLeftTab === 'search' ? 'active' : ''}"
-              @click=${() => this.switchTab('search')}
-            >
-              <span class="icon">🔍</span> Search
-            </button>
-            <button 
-              class="header-tab ${this.activeLeftTab === 'context' ? 'active' : ''}"
-              @click=${() => this.switchTab('context')}
-            >
-              <span class="icon">📊</span> Context
-            </button>
-          </div>
-          <button 
-            class="clear-btn" 
-            @click=${this.clearDiff}
-            ?disabled=${this.diffFiles.length === 0}
-          >
-            Clear Diff
-          </button>
-        </div>
-        <div class="main-content">
-          <div class="diff-area">
-            <diff-viewer
-              .files=${this.diffFiles}
-              .visible=${true}
-              .serverURI=${this.serverURI}
-              .viewingFile=${this.viewingFile}
-              @file-save=${this.handleFileSave}
-              @files-save=${this.handleFilesSave}
-              @file-selected=${this.handleFileSelected}
-              @request-file-load=${this.handleRequestFileLoad}
-            ></diff-viewer>
-          </div>
+        <div class="diff-area">
+          <diff-viewer
+            .files=${this.diffFiles}
+            .visible=${true}
+            .serverURI=${this.serverURI}
+            .viewingFile=${this.viewingFile}
+            @file-save=${this.handleFileSave}
+            @files-save=${this.handleFilesSave}
+            @file-selected=${this.handleFileSelected}
+            @request-file-load=${this.handleRequestFileLoad}
+          ></diff-viewer>
         </div>
         <div class="prompt-overlay">
           <prompt-view 
@@ -518,26 +313,11 @@ export class AppShell extends LitElement {
             @edits-applied=${this.handleEditsApplied}
             @navigate-to-edit=${this.handleNavigateToEdit}
             @url-removed=${this.handleUrlRemoved}
-            @url-inclusion-changed=${this.handleUrlInclusionChanged}
             @view-url-content=${this.handleViewUrlContent}
-            style="${this.activeLeftTab === 'files' ? '' : 'display: none;'}"
+            @search-result-selected=${this.handleSearchResultSelected}
+            @search-file-selected=${this.handleSearchFileSelected}
+            @context-remove-url=${this.handleRemoveUrl}
           ></prompt-view>
-          <find-in-files
-            .rpcCall=${this._getPromptViewRpcCall()}
-            @result-selected=${this.handleSearchResultSelected}
-            @file-selected=${this.handleSearchFileSelected}
-            @close-search=${this.handleCloseSearch}
-            style="${this.activeLeftTab === 'search' ? '' : 'display: none;'}"
-          ></find-in-files>
-          <context-viewer
-            .rpcCall=${this._getPromptViewRpcCall()}
-            .selectedFiles=${this._getSelectedFiles()}
-            .fetchedUrls=${this._getFetchedUrls()}
-            .excludedUrls=${this.excludedUrls}
-            @remove-url=${this.handleRemoveUrl}
-            @url-inclusion-changed=${this.handleUrlInclusionChanged}
-            style="${this.activeLeftTab === 'context' ? '' : 'display: none;'}"
-          ></context-viewer>
         </div>
       </div>
     `;
