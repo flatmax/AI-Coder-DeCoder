@@ -4,88 +4,160 @@
 Create consistent headers across Chat, Search, and Context views with:
 - Icon + Title on the left (💬 Chat, 🔍 Search, 📊 Context)
 - Tab switcher buttons (📁 🔍 📊) in the same location across all views
-- Commit/action buttons on the right
-- Same sizing and spacing
+- Commit/action buttons on the right (Chat view only)
+- Same dialog sizing and spacing across all views
 
-## Current State
-- PromptView has header with "💬 Chat" + tabs + commit buttons
-- FindInFiles and ContextViewer render inside PromptView's picker-panel
-- Header title changes dynamically but tabs/layout may not be consistent
+## Current State Analysis
 
-## Target Layout (from image)
+### AppShell.js
+- Has a global header bar at the **top of the page** with tabs (📁 Files, 🔍 Search, 📊 Context)
+- Renders `PromptView`, `FindInFiles`, `ContextViewer` in `prompt-overlay` div
+- Shows/hides views via `style="display: none"`
+- Manages `activeLeftTab` state
+
+### PromptView
+- Has its own `.dialog` wrapper with header, drag, resize capabilities
+- Header shows "💬 Chat" + action buttons (Commit, Reset, History, Tokens, Clear)
+- Has `picker-panel` for file picker and `chat-panel` for messages
+- Sizing: `width: 400px` (or `700px` with picker)
+
+### FindInFiles & ContextViewer  
+- **No dialog wrapper** - just bare content
+- No header of their own
+- Sizing: `height: 100%`, `width: 100%` - fill their container
+- Rely on parent for sizing
+
+## Target Layout
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 💬 Chat    [📁][🔍][📊]           [💾][🎁]    ▼ │
+│ 💬 Chat    [📁][🔍][📊]              [💾][⚠️][📜][📊][🗑️] [▼] │
 ├─────────────────────────────────────────────────────────────────┤
-│ Filter files...                                                 │
-│ (content area)                                                  │
+│ (content area - file picker + chat, or search, or context)     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Implementation Steps
+## Architecture Decision
 
-### 1. Standardize Header Structure in PromptViewTemplate.js
-- Header left: Icon + Title (changes based on activeLeftTab)
-- Header center: Tab buttons (📁 🔍 📊) - always visible, same position
-- Header right: Commit buttons (only show for Chat view) + minimize
+**Option A: Duplicate header in each component** ❌
+- Would require header code in PromptView, FindInFiles, ContextViewer
+- Hard to keep synchronized
+- Sizing issues between components
 
-### 2. Ensure Tab Buttons Are Consistently Sized
-- Use fixed width/height for tab buttons
-- Same padding, border-radius, colors
-- Active state highlighting
+**Option B: Wrap all views in shared dialog in AppShell** ❌  
+- Major refactor of AppShell
+- Would break PromptView's drag/resize functionality
+- Complex state management
 
-### 3. Remove Duplicate Headers
-- FindInFiles and ContextViewer should NOT have their own headers
-- They render as content inside PromptView's picker-panel
-- PromptView's header serves all three views
+**Option C: Embed FindInFiles/ContextViewer inside PromptView** ✅
+- PromptView already has the dialog structure
+- Add `activeLeftTab` prop to PromptView
+- Render FindInFiles/ContextViewer as content inside PromptView
+- Unified header naturally works
+- Tab switching handled by PromptView or passed from AppShell
 
-### 4. Files to Modify
+## Implementation Plan (Option C)
 
-**PromptViewTemplate.js:**
-- Update header-left to show correct icon/title per tab
-- Ensure tab buttons are centered and consistent
-- Conditionally show commit buttons only for 'files' tab
+### Step 1: Update AppShell.js
+- Remove the header tabs from global header (or keep for navigation, emit events)
+- Pass `activeLeftTab` to PromptView as a property
+- Remove direct rendering of FindInFiles/ContextViewer in prompt-overlay
+- Keep event handlers but wire them through PromptView
 
-**PromptViewStyles.js:**
-- Standardize `.header-tab` button sizing
-- Ensure consistent spacing
+### Step 2: Update PromptView.js
+- Add `activeLeftTab` property (default: 'files')
+- Add `switchTab(tab)` method that emits event to AppShell
+- Import and render FindInFiles and ContextViewer components
 
-**FindInFilesTemplate.js / ContextViewerTemplate.js:**
-- Confirm no header rendering (already removed)
-- Content should start immediately
+### Step 3: Update PromptViewTemplate.js
+- Update header-left to show dynamic icon + title based on `activeLeftTab`
+- Add tab switcher buttons to header-center
+- Conditionally show action buttons based on active tab
+- Replace `main-content` to conditionally render:
+  - `activeLeftTab === 'files'`: current picker-panel + chat-panel
+  - `activeLeftTab === 'search'`: FindInFiles component
+  - `activeLeftTab === 'context'`: ContextViewer component
 
-### 5. Specific Changes
+### Step 4: Update PromptViewStyles.js
+- Add `.header-tabs` container styles
+- Add `.header-tab` button styles with active state
+- Ensure consistent sizing
+
+### Step 5: Cleanup
+- Remove FindInFiles/ContextViewer from AppShell render
+- Update event flow (search results, context refresh, etc.)
+
+## Files to Modify
+
+1. **webapp/src/app-shell/AppShell.js**
+   - Pass `activeLeftTab` to PromptView
+   - Handle tab change events from PromptView
+   - Remove direct FindInFiles/ContextViewer rendering
+
+2. **webapp/src/PromptView.js**
+   - Add `activeLeftTab` property
+   - Add `switchTab()` method
+   - Import FindInFiles and ContextViewer
+
+3. **webapp/src/prompt/PromptViewTemplate.js**
+   - Dynamic header title
+   - Tab switcher buttons
+   - Conditional content rendering
+
+4. **webapp/src/prompt/PromptViewStyles.js**
+   - Header tab styles
+
+## Header Layout Details
 
 ```javascript
-// Header left - dynamic title
-<div class="header-left">
-  <span>${activeLeftTab === 'files' ? '💬 Chat' : 
-          activeLeftTab === 'search' ? '🔍 Search' : 
-          '📊 Context'}</span>
-</div>
-
-// Header center - tabs (always same position)
-<div class="header-tabs">
-  <button class="header-tab ${activeLeftTab === 'files' ? 'active' : ''}" 
-          @click=${() => switchTab('files')}>📁</button>
-  <button class="header-tab ${activeLeftTab === 'search' ? 'active' : ''}"
-          @click=${() => switchTab('search')}>🔍</button>
-  <button class="header-tab ${activeLeftTab === 'context' ? 'active' : ''}"
-          @click=${() => switchTab('context')}>📊</button>
-</div>
-
-// Header right - commit buttons (conditional)
-<div class="header-right">
-  ${activeLeftTab === 'files' ? html`
-    <button class="commit-btn" @click=${...}>💾</button>
-    <button class="commit-btn" @click=${...}>🎁</button>
-  ` : ''}
-  <button class="minimize-btn" @click=${toggleMinimize}>▼</button>
+// Header structure
+<div class="header">
+  <div class="header-left">
+    <span class="header-title">
+      ${activeLeftTab === 'files' ? '💬 Chat' : 
+        activeLeftTab === 'search' ? '🔍 Search' : 
+        '📊 Context'}
+    </span>
+  </div>
+  
+  <div class="header-tabs">
+    <button class="header-tab ${activeLeftTab === 'files' ? 'active' : ''}"
+            @click=${() => this.switchTab('files')} title="Files & Chat">
+      📁
+    </button>
+    <button class="header-tab ${activeLeftTab === 'search' ? 'active' : ''}"
+            @click=${() => this.switchTab('search')} title="Search">
+      🔍
+    </button>
+    <button class="header-tab ${activeLeftTab === 'context' ? 'active' : ''}"
+            @click=${() => this.switchTab('context')} title="Context">
+      📊
+    </button>
+  </div>
+  
+  <div class="header-right">
+    ${activeLeftTab === 'files' ? html`
+      <!-- Chat-specific buttons -->
+      <button class="header-btn commit" @click=${this.handleCommit}>💾</button>
+      <button class="header-btn reset" @click=${this.handleResetHard}>⚠️</button>
+      <button class="header-btn" @click=${this.toggleHistoryBrowser}>📜</button>
+      <button class="header-btn" @click=${this.showTokenReport}>📊</button>
+      <button class="header-btn" @click=${this.clearContext}>🗑️</button>
+    ` : ''}
+    <button class="header-btn" @click=${this.toggleMinimize}>
+      ${this.minimized ? '▲' : '▼'}
+    </button>
+  </div>
 </div>
 ```
 
-### 6. Style Consistency
+## Style Specifications
+
 ```css
+.header-tabs {
+  display: flex;
+  gap: 4px;
+}
+
 .header-tab {
   width: 32px;
   height: 32px;
@@ -94,21 +166,34 @@ Create consistent headers across Chat, Search, and Context views with:
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 14px;
+  color: #888;
+  transition: all 0.15s;
+}
+
+.header-tab:hover {
+  background: rgba(233, 69, 96, 0.1);
+  color: #ccc;
 }
 
 .header-tab.active {
-  background: rgba(233, 69, 96, 0.3);
-  box-shadow: 0 0 0 1px #e94560;
+  background: rgba(233, 69, 96, 0.2);
+  border-color: #e94560;
+  color: #e94560;
 }
 ```
 
-## Verification
-- Switch between tabs - header layout should not shift
-- Tab buttons stay in same position
-- Title updates correctly
-- Commit buttons only visible in Chat view
-- All buttons same size
+## Verification Checklist
+- [ ] Switch between tabs - header layout should not shift
+- [ ] Tab buttons stay in same position across all views
+- [ ] Title updates correctly (💬 Chat / 🔍 Search / 📊 Context)
+- [ ] Action buttons only visible in Chat view
+- [ ] All tab buttons same size
+- [ ] Search Ctrl+Shift+F still works
+- [ ] Context viewer refreshes when switched to
+- [ ] Search result navigation still works
+- [ ] Drag/resize still works for dialog
+- [ ] Minimize/maximize still works
