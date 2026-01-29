@@ -202,8 +202,9 @@ export class AppShell extends LitElement {
     }
   }
 
-  async _loadFileIntoDiff(file) {
-    if (this.diffFiles.find(f => f.path === file)) {
+  async _loadFileIntoDiff(file, replace = false) {
+    const existing = this.diffFiles.find(f => f.path === file);
+    if (existing && !replace) {
       return true; // Already loaded
     }
     
@@ -218,13 +219,21 @@ export class AppShell extends LitElement {
       const content = typeof result === 'string' ? result : (result?.content ?? null);
       
       if (content !== null) {
-        this.diffFiles = [...this.diffFiles, {
+        const newFile = {
           path: file,
           original: content,
           modified: content,
           isNew: false,
           isReadOnly: true
-        }];
+        };
+        
+        if (replace) {
+          // Replace all files with just this one (LSP navigation mode)
+          this.diffFiles = [newFile];
+        } else {
+          // Add to existing files
+          this.diffFiles = [...this.diffFiles, newFile];
+        }
         return true;
       }
     } catch (err) {
@@ -343,8 +352,8 @@ export class AppShell extends LitElement {
   }
 
   async handleRequestFileLoad(e) {
-    const { file, line, column } = e.detail;
-    const loaded = await this._loadFileIntoDiff(file);
+    const { file, line, column, replace } = e.detail;
+    const loaded = await this._loadFileIntoDiff(file, replace);
     if (loaded && (line || column)) {
       await this.updateComplete;
       const diffViewer = this.shadowRoot.querySelector('diff-viewer');
