@@ -88,15 +88,22 @@ class CppExtractor(BaseExtractor):
         
         elif node.type == 'namespace_definition':
             symbol = self._extract_namespace(node, file_path, content, parent)
+            body = self._find_child(node, 'declaration_list')
             if symbol:
                 symbols.append(symbol)
-                body = self._find_child(node, 'declaration_list')
                 if body:
                     for child in body.children:
                         self._extract_from_node(
                             child, file_path, content,
                             symbol.children, parent=symbol.name
                         )
+            elif body:
+                # Anonymous namespace - still extract contents at current level
+                for child in body.children:
+                    self._extract_from_node(
+                        child, file_path, content,
+                        symbols, parent=parent
+                    )
         
         elif node.type == 'template_declaration':
             # Extract the templated entity
@@ -202,7 +209,10 @@ class CppExtractor(BaseExtractor):
         """Extract a namespace definition."""
         name_node = self._find_child(node, 'identifier')
         if not name_node:
-            # Anonymous namespace
+            # Try namespace_identifier (used in some tree-sitter-cpp versions)
+            name_node = self._find_child(node, 'namespace_identifier')
+        if not name_node:
+            # Anonymous namespace - still recurse into body
             return None
         
         name = self._get_node_text(name_node, content)
