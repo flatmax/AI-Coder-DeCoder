@@ -221,9 +221,6 @@ export function renderPromptView(component) {
             <button class="header-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
               📜
             </button>
-            <button class="header-btn" @click=${component.showTokenReport} title="Show token usage">
-              📊
-            </button>
             <button class="header-btn" @click=${component.clearContext} title="Clear conversation context">
               🗑️
             </button>
