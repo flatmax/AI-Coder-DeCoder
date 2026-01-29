@@ -26,7 +26,7 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **File Selection** — Pick specific files to include in context, with git status indicators (modified/staged/untracked)
 - **Image Support** — Paste screenshots or diagrams directly into the chat for visual context
 - **Streaming Responses** — Real-time streaming of AI responses with stop capability
-- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns
+- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns and automatic prompt caching optimization
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
 - **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
 - **Find in Files** — Search across the codebase with regex support and context preview
