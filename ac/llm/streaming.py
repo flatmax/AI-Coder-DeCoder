@@ -368,16 +368,34 @@ class StreamingMixin:
         context_map_tokens = 0
         
         # System prompt with edit instructions
-        messages.append({"role": "system", "content": build_system_prompt()})
+        # Use cache_control for providers that support prompt caching (Anthropic, Bedrock)
+        system_text = build_system_prompt()
+        messages.append({
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
         
         # Add symbol map context if requested
         if use_repo_map and self.repo:
             context_map = self.get_context_map(chat_files=file_paths, include_references=True)
             if context_map:
                 map_content = REPO_MAP_HEADER + context_map
+                # Mark symbol map for caching - it's stable across requests
                 messages.append({
                     "role": "user",
-                    "content": map_content
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": map_content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
                 })
                 messages.append({
                     "role": "assistant", 
@@ -503,8 +521,8 @@ class StreamingMixin:
             for msg in messages:
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    # Handle image messages - just count text parts
-                    text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                    # Handle structured content (images, cache_control blocks)
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
                     content = " ".join(text_parts)
                 tokens = ctx.count_tokens(content)
                 total_tokens += tokens
