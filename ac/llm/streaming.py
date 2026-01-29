@@ -390,15 +390,19 @@ class StreamingMixin:
             context_map_chunks = self.get_context_map_chunked(
                 chat_files=file_paths, 
                 include_references=True,
-                num_chunks=5  # Split into 5 chunks: cache first 4, leave last uncached
+                num_chunks=5,  # Split into 5 chunks: cache first 4, leave last uncached
+                return_metadata=True
             )
             if context_map_chunks:
                 # Diagnostic: show chunk info
                 print(f"📦 Symbol map: {len(context_map_chunks)} chunks")
                 for i, chunk in enumerate(context_map_chunks):
-                    lines = chunk.count('\n')
-                    cached = "🔒" if i < 3 else "📝"  # First 3 get cache_control
-                    print(f"  {cached} Chunk {i}: {len(chunk):,} chars, ~{len(chunk)//4:,} tokens, {lines} lines")
+                    # chunk is a dict with 'content', 'files', 'tokens', 'cached' keys
+                    content = chunk['content']
+                    file_count = len(chunk['files'])
+                    lines = content.count('\n')
+                    cached = "🔒" if chunk['cached'] else "📝"
+                    print(f"  {cached} Chunk {i}: {len(content):,} chars, ~{len(content)//4:,} tokens, {lines} lines, {file_count} files")
                 # Bedrock limits cache_control to 4 blocks total
                 # System prompt uses 1, so we can cache 3 symbol map chunks
                 # The 5th chunk (newest/most volatile files) stays uncached
@@ -406,10 +410,11 @@ class StreamingMixin:
                 
                 for i, chunk in enumerate(context_map_chunks):
                     # First chunk gets the header, others get continuation
+                    content = chunk['content']
                     if i == 0:
-                        map_content = REPO_MAP_HEADER + chunk
+                        map_content = REPO_MAP_HEADER + content
                     else:
-                        map_content = REPO_MAP_CONTINUATION + chunk
+                        map_content = REPO_MAP_CONTINUATION + content
                     
                     # Only first N chunks get cache_control to stay under Bedrock's limit
                     if i < max_cached_chunks:
