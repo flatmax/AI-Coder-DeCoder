@@ -6,6 +6,110 @@ export const contextViewerStyles = css`
     overflow-y: auto;
   }
   
+  .symbol-map-chunks {
+    background: #0f3460;
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 10px;
+  }
+  
+  .chunks-header {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1a4a7a;
+  }
+  
+  .chunk-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+  }
+  
+  .chunk-row:last-child {
+    margin-bottom: 0;
+  }
+  
+  .chunk-row.cached {
+    background: rgba(74, 222, 128, 0.1);
+  }
+  
+  .chunk-row.uncached {
+    background: rgba(251, 191, 36, 0.1);
+  }
+  
+  .chunk-icon {
+    font-size: 12px;
+  }
+  
+  .chunk-label {
+    color: #ccc;
+    min-width: 60px;
+  }
+  
+  .chunk-tokens {
+    font-family: monospace;
+    color: #888;
+    font-size: 11px;
+    min-width: 70px;
+  }
+  
+  .chunk-status {
+    font-size: 10px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  
+  .chunk-row.cached .chunk-status {
+    color: #4ade80;
+  }
+  
+  .chunk-row.uncached .chunk-status {
+    color: #fbbf24;
+  }
+  
+  .chunk-container {
+    margin-bottom: 8px;
+  }
+  
+  .chunk-container:last-child {
+    margin-bottom: 0;
+  }
+  
+  .chunk-file-count {
+    font-size: 11px;
+    color: #888;
+    min-width: 50px;
+  }
+  
+  .chunk-files {
+    margin-left: 28px;
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  
+  .chunk-file {
+    font-size: 11px;
+    color: #888;
+    padding: 2px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .chunk-row.cached + .chunk-files .chunk-file {
+    color: #6ee7b7;
+  }
+
   .symbol-map-info {
     font-size: 11px;
     color: #888;

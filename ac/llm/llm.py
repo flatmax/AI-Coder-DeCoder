@@ -456,6 +456,63 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             traceback.print_exc()
             return ""
     
+    def get_context_map_chunked(self, chat_files=None, include_references=True, min_chunk_tokens=1024, num_chunks=None):
+        """
+        Get repository context map as cacheable chunks.
+        
+        Returns the symbol map split into chunks. If num_chunks is specified,
+        splits into exactly that many chunks. Otherwise uses min_chunk_tokens.
+        This enables better LLM prompt caching - stable files at the start
+        form stable chunks that remain cached even when later files change.
+        
+        Args:
+            chat_files: List of files included in chat (to exclude from map)
+            include_references: Whether to include cross-file references
+            min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic)
+            num_chunks: If specified, split into exactly this many chunks
+            
+        Returns:
+            List of strings, each a cacheable chunk of the symbol map
+        """
+        if not self.repo:
+            return []
+        
+        try:
+            # Get all trackable files
+            all_files = self._get_all_trackable_files()
+            
+            if not all_files:
+                return []
+            
+            # Exclude chat files (they're included verbatim)
+            chat_files_set = set(chat_files or [])
+            map_files = [f for f in all_files if f not in chat_files_set]
+            
+            if not map_files:
+                return []
+            
+            indexer = self._get_indexer()
+            
+            # Build references if requested
+            if include_references:
+                indexer.build_references(map_files)
+            
+            # Get symbol index
+            symbol_index = indexer._get_symbol_index()
+            
+            # Generate chunked compact format
+            return symbol_index.to_compact_chunked(
+                file_paths=map_files,
+                include_references=include_references,
+                min_chunk_tokens=min_chunk_tokens,
+                num_chunks=num_chunks
+            )
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Failed to get chunked context map: {e}")
+            traceback.print_exc()
+            return []
+    
     def get_references_to_symbol(self, file_path, symbol_name):
         """
         Get all locations that reference a symbol.
@@ -850,11 +907,36 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             except Exception:
                 pass
         
+        # Get chunk info for cache visualization (with file lists)
+        chunk_info = []
+        if self.repo and symbol_map:
+            try:
+                indexer = self._get_indexer()
+                symbol_index = indexer._get_symbol_index()
+                chunk_metadata = symbol_index.to_compact_chunked(
+                    file_paths=self._get_all_trackable_files(),
+                    include_references=True,
+                    num_chunks=5,
+                    return_metadata=True,
+                )
+                for i, chunk in enumerate(chunk_metadata):
+                    chunk_info.append({
+                        "index": i,
+                        "tokens": chunk.get('tokens', 0),
+                        "chars": chunk.get('chars', 0),
+                        "lines": chunk.get('lines', 0),
+                        "cached": chunk.get('cached', False),
+                        "files": chunk.get('files', []),
+                    })
+            except Exception:
+                pass
+        
         breakdown["symbol_map"] = {
             "tokens": symbol_map_tokens,
             "label": "Symbol Map",
             "file_count": len(symbol_map_files),
             "files": symbol_map_files,
+            "chunks": chunk_info,
         }
         total_tokens += symbol_map_tokens
         

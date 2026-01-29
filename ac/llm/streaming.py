@@ -17,6 +17,10 @@ Use this to understand the codebase structure and find relevant code.
 
 """
 
+REPO_MAP_CONTINUATION = """# Repository Structure (continued)
+
+"""
+
 URL_CONTEXT_HEADER = """# URL Context
 
 The following content was fetched from URLs mentioned in the conversation:
@@ -381,32 +385,61 @@ class StreamingMixin:
             ]
         })
         
-        # Add symbol map context if requested
+        # Add symbol map context if requested (chunked for better caching)
         if use_repo_map and self.repo:
-            context_map = self.get_context_map(chat_files=file_paths, include_references=True)
-            if context_map:
-                map_content = REPO_MAP_HEADER + context_map
-                # Mark symbol map for caching - it's stable across requests
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": map_content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                })
-                messages.append({
-                    "role": "assistant", 
-                    "content": "Ok."
-                })
-                # Count tokens in the map
-                if self._context_manager:
-                    try:
-                        context_map_tokens = self._context_manager.count_tokens(map_content)
-                    except Exception:
-                        pass
+            context_map_chunks = self.get_context_map_chunked(
+                chat_files=file_paths, 
+                include_references=True,
+                num_chunks=5  # Split into 5 chunks: cache first 4, leave last uncached
+            )
+            if context_map_chunks:
+                # Diagnostic: show chunk info
+                print(f"📦 Symbol map: {len(context_map_chunks)} chunks")
+                for i, chunk in enumerate(context_map_chunks):
+                    lines = chunk.count('\n')
+                    cached = "🔒" if i < 3 else "📝"  # First 3 get cache_control
+                    print(f"  {cached} Chunk {i}: {len(chunk):,} chars, ~{len(chunk)//4:,} tokens, {lines} lines")
+                # Bedrock limits cache_control to 4 blocks total
+                # System prompt uses 1, so we can cache 3 symbol map chunks
+                # The 5th chunk (newest/most volatile files) stays uncached
+                max_cached_chunks = 3
+                
+                for i, chunk in enumerate(context_map_chunks):
+                    # First chunk gets the header, others get continuation
+                    if i == 0:
+                        map_content = REPO_MAP_HEADER + chunk
+                    else:
+                        map_content = REPO_MAP_CONTINUATION + chunk
+                    
+                    # Only first N chunks get cache_control to stay under Bedrock's limit
+                    if i < max_cached_chunks:
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": map_content,
+                                    "cache_control": {"type": "ephemeral"}
+                                }
+                            ]
+                        })
+                    else:
+                        # Later chunks don't get cache_control
+                        messages.append({
+                            "role": "user",
+                            "content": map_content
+                        })
+                    messages.append({
+                        "role": "assistant", 
+                        "content": "Ok."
+                    })
+                    
+                    # Count tokens in this chunk
+                    if self._context_manager:
+                        try:
+                            context_map_tokens += self._context_manager.count_tokens(map_content)
+                        except Exception:
+                            pass
         
         # Add URL context if provided
         if url_context:
