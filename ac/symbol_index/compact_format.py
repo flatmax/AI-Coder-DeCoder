@@ -4,7 +4,7 @@ from typing import List, Dict, Optional, Set, Union
 from .models import Symbol, CallSite
 
 
-def format_file_tree(tree_data: dict, include_lines: bool = True) -> str:
+def format_file_tree(tree_data: dict, include_lines: bool = False) -> str:
     """Format repository file tree as a flat list for LLM context.
     
     Args:
