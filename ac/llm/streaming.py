@@ -21,6 +21,12 @@ REPO_MAP_CONTINUATION = """# Repository Structure (continued)
 
 """
 
+FILE_TREE_HEADER = """# Repository Files
+
+Complete list of files in the repository:
+
+"""
+
 URL_CONTEXT_HEADER = """# URL Context
 
 The following content was fetched from URLs mentioned in the conversation:
@@ -462,6 +468,14 @@ class StreamingMixin:
                             context_map_tokens += self._context_manager.count_tokens(map_content)
                         except Exception:
                             pass
+        
+        # Add file tree (uncached - changes more frequently than symbol map)
+        if use_repo_map and self.repo:
+            file_tree = self.get_file_tree_for_context()
+            if file_tree:
+                tree_content = FILE_TREE_HEADER + file_tree
+                messages.append({"role": "user", "content": tree_content})
+                messages.append({"role": "assistant", "content": "Ok."})
         
         # Add URL context if provided
         if url_context:
