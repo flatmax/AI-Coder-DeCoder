@@ -153,6 +153,34 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     }
   }
 
+  handleSpeechTranscript(e) {
+    const { text } = e.detail;
+    if (!text) return;
+    
+    const transcript = text;
+    
+    // Append transcript to input (with space if needed)
+    const needsSpace = this.inputValue && !this.inputValue.endsWith(' ') && !this.inputValue.endsWith('\n');
+    this.inputValue = this.inputValue + (needsSpace ? ' ' : '') + transcript;
+    
+    // Update textarea and resize
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.value = this.inputValue;
+        this._autoResizeTextarea(textarea);
+        // Move cursor to end
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+        textarea.focus();
+      }
+    });
+    
+    // Detect URLs in the new input
+    if (this.detectUrlsInInput) {
+      this.detectUrlsInInput(this.inputValue);
+    }
+  }
+
   toggleMinimize() {
     const container = this.shadowRoot?.querySelector('#messages-container');
     
