@@ -355,6 +355,10 @@ class StreamingMixin:
                     full_content += delta
                     # Fire-and-forget: schedule the send on the main event loop
                     self._fire_stream_chunk(request_id, full_content, loop)
+            
+            # Send final chunk (non-blocking, streamComplete will ensure ordering)
+            if full_content:
+                self._fire_stream_chunk(request_id, full_content, loop)
         finally:
             if hasattr(response, 'close'):
                 response.close()
@@ -536,7 +540,7 @@ class StreamingMixin:
         return messages, user_prompt, context_map_tokens
     
     def _fire_stream_chunk(self, request_id, content, loop):
-        """Fire-and-forget stream chunk send.
+        """Fire stream chunk send (non-blocking).
         
         Args:
             request_id: The request ID
@@ -657,6 +661,8 @@ class StreamingMixin:
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
         try:
+            # Small delay to ensure final streamChunk is delivered first
+            await asyncio.sleep(0.05)
             if hasattr(self, 'get_call'):
                 call = self.get_call()
                 if call and 'PromptView.streamComplete' in call:
