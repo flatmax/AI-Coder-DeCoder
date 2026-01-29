@@ -137,7 +137,7 @@ export class DiffViewer extends MixedBase {
     
     // File not loaded - dispatch event for AppShell to load it
     this.dispatchEvent(new CustomEvent('request-file-load', {
-      detail: { file, line, column },
+      detail: { file, line, column, replace: true },
       bubbles: true,
       composed: true
     }));
