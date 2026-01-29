@@ -133,9 +133,18 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         if completion and hasattr(completion, "usage") and completion.usage is not None:
             prompt_tokens = completion.usage.prompt_tokens or 0
             completion_tokens = completion.usage.completion_tokens or 0
+            # Check various cache token attribute names across providers
             cache_hit_tokens = getattr(completion.usage, "prompt_cache_hit_tokens", 0) or getattr(
                 completion.usage, "cache_read_input_tokens", 0
             ) or 0
+            # Bedrock via LiteLLM uses prompt_tokens_details.cached_tokens
+            if not cache_hit_tokens:
+                prompt_details = getattr(completion.usage, "prompt_tokens_details", None)
+                if prompt_details:
+                    if isinstance(prompt_details, dict):
+                        cache_hit_tokens = prompt_details.get("cached_tokens", 0) or 0
+                    else:
+                        cache_hit_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
             cache_write_tokens = getattr(completion.usage, "cache_creation_input_tokens", 0) or 0
             
             self._total_prompt_tokens += prompt_tokens
