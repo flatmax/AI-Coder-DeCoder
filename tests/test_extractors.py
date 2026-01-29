@@ -247,3 +247,82 @@ class TestExtractorGetImportsEmpty:
     def test_javascript_imports_empty_initially(self):
         extractor = JavaScriptExtractor()
         assert extractor.get_imports() == []
+
+
+class TestAsyncFunctionExtraction:
+    """Test async function/method extraction."""
+    
+    def test_python_async_function(self):
+        """Test that async def is detected and is_async flag is set."""
+        extractor = PythonExtractor()
+        parser = get_parser()
+        
+        code = b"async def fetch_data(url):\n    return await get(url)"
+        tree, lang = parser.parse_file("test.py", code)
+        
+        symbols = extractor.extract_symbols(tree, "test.py", code)
+        
+        assert len(symbols) == 1
+        assert symbols[0].name == 'fetch_data'
+        assert symbols[0].kind == 'function'
+        assert symbols[0].is_async is True
+    
+    def test_python_sync_function_not_async(self):
+        """Test that regular def does not set is_async."""
+        extractor = PythonExtractor()
+        parser = get_parser()
+        
+        code = b"def regular_func():\n    pass"
+        tree, lang = parser.parse_file("test.py", code)
+        
+        symbols = extractor.extract_symbols(tree, "test.py", code)
+        
+        assert len(symbols) == 1
+        assert symbols[0].is_async is False
+    
+    def test_python_async_method(self):
+        """Test async methods in classes."""
+        extractor = PythonExtractor()
+        parser = get_parser()
+        
+        code = b"class MyClass:\n    async def async_method(self):\n        pass"
+        tree, lang = parser.parse_file("test.py", code)
+        
+        symbols = extractor.extract_symbols(tree, "test.py", code)
+        
+        assert len(symbols) == 1
+        assert symbols[0].name == 'MyClass'
+        assert len(symbols[0].children) == 1
+        assert symbols[0].children[0].name == 'async_method'
+        assert symbols[0].children[0].kind == 'method'
+        assert symbols[0].children[0].is_async is True
+    
+    def test_javascript_async_function(self):
+        """Test JavaScript async function detection."""
+        extractor = JavaScriptExtractor()
+        parser = get_parser()
+        
+        code = b"async function fetchData(url) { return await fetch(url); }"
+        tree, lang = parser.parse_file("test.js", code)
+        
+        symbols = extractor.extract_symbols(tree, "test.js", code)
+        
+        assert len(symbols) == 1
+        assert symbols[0].name == 'fetchData'
+        assert symbols[0].kind == 'function'
+        assert symbols[0].is_async is True
+    
+    def test_javascript_async_method(self):
+        """Test JavaScript async method detection."""
+        extractor = JavaScriptExtractor()
+        parser = get_parser()
+        
+        code = b"class Api {\n  async getData() { return 1; }\n}"
+        tree, lang = parser.parse_file("test.js", code)
+        
+        symbols = extractor.extract_symbols(tree, "test.js", code)
+        
+        assert len(symbols) == 1
+        assert len(symbols[0].children) == 1
+        assert symbols[0].children[0].name == 'getData'
+        assert symbols[0].children[0].is_async is True

@@ -64,6 +64,8 @@ KIND_PREFIX = {
     'variable': 'v',
     'import': 'i',
     'property': 'p',
+    'async_method': 'am',
+    'async_function': 'af',
 }
 
 # Conditional marker
@@ -71,7 +73,7 @@ CONDITIONAL_MARKER = '?'
 
 
 # Legend for compact format (path aliases appended dynamically)
-LEGEND_BASE = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
+LEGEND_BASE = "# c=class m=method f=function af=async func am=async method v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -700,7 +702,15 @@ def _format_symbol(
         aliases: Optional dict mapping path prefixes to short aliases
     """
     lines = []
-    prefix = KIND_PREFIX.get(symbol.kind, '?')
+    
+    # Determine prefix, using async variants if applicable
+    if symbol.is_async and symbol.kind == 'function':
+        prefix = 'af'
+    elif symbol.is_async and symbol.kind == 'method':
+        prefix = 'am'
+    else:
+        prefix = KIND_PREFIX.get(symbol.kind, '?')
+    
     indent_str = "  " * indent
     
     # Build the symbol line
