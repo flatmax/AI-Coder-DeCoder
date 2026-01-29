@@ -18,13 +18,128 @@ KIND_PREFIX = {
 CONDITIONAL_MARKER = '?'
 
 
-# Legend for compact format
-LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
+# Legend for compact format (path aliases appended dynamically)
+LEGEND_BASE = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
 
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count using ~4 chars per token heuristic."""
     return len(text) // 4 + 1
+
+
+def _compute_path_aliases(
+    references: Optional[Dict[str, Dict[str, List]]],
+    file_refs: Optional[Dict[str, Set[str]]],
+    min_occurrences: int = 3,
+    max_aliases: int = 9,
+) -> Dict[str, str]:
+    """Compute directory aliases for compressing reference paths.
+    
+    Analyzes all reference paths to find common directory prefixes,
+    then assigns short aliases (@1, @2, etc.) to the most frequent ones.
+    
+    Args:
+        references: Dict of file -> symbol -> [locations]
+        file_refs: Dict of file -> set of files that reference it
+        min_occurrences: Minimum times a prefix must appear to get an alias
+        max_aliases: Maximum number of aliases to create (1-9)
+        
+    Returns:
+        Dict mapping directory prefix to alias (e.g., "ac/llm/" -> "@1")
+    """
+    from collections import Counter
+    
+    # Collect all referenced file paths
+    ref_paths = []
+    
+    if references:
+        for file_refs_dict in references.values():
+            for locations in file_refs_dict.values():
+                for loc in locations:
+                    if hasattr(loc, 'file_path'):
+                        ref_paths.append(loc.file_path)
+                    elif isinstance(loc, dict):
+                        path = loc.get('file', loc.get('file_path', ''))
+                        if path:
+                            ref_paths.append(path)
+    
+    if file_refs:
+        for files in file_refs.values():
+            ref_paths.extend(files)
+    
+    if not ref_paths:
+        return {}
+    
+    # Count directory prefixes (try multiple levels)
+    prefix_counts = Counter()
+    for path in ref_paths:
+        parts = path.split('/')
+        # Try prefixes of length 1, 2, 3 directories
+        for depth in range(1, min(4, len(parts))):
+            prefix = '/'.join(parts[:depth]) + '/'
+            # Only count if it's a real directory (not the file itself)
+            if prefix != path + '/':
+                prefix_counts[prefix] += 1
+    
+    # Filter by minimum occurrences and calculate savings
+    candidates = []
+    for prefix, count in prefix_counts.items():
+        if count >= min_occurrences:
+            # Savings = (prefix_len - 2) * count - legend_cost
+            # Legend cost is roughly len("@N=prefix/ ") ≈ len(prefix) + 5
+            savings = (len(prefix) - 2) * count - (len(prefix) + 5)
+            if savings > 0:
+                candidates.append((prefix, count, savings))
+    
+    # Sort by savings descending, take top max_aliases
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    
+    # Assign aliases, avoiding prefix conflicts (longer prefixes first)
+    # Sort selected candidates by length descending so longer paths match first
+    selected = candidates[:max_aliases]
+    selected.sort(key=lambda x: len(x[0]), reverse=True)
+    
+    aliases = {}
+    for i, (prefix, count, savings) in enumerate(selected):
+        aliases[prefix] = f"@{i + 1}"
+    
+    return aliases
+
+
+def _apply_path_alias(path: str, aliases: Dict[str, str]) -> str:
+    """Apply path aliases to a file path.
+    
+    Args:
+        path: Full file path
+        aliases: Dict mapping prefix -> alias
+        
+    Returns:
+        Path with alias applied, or original path if no alias matches
+    """
+    # Try aliases in order (they're sorted by length descending)
+    for prefix, alias in aliases.items():
+        if path.startswith(prefix):
+            return alias + path[len(prefix):]
+    return path
+
+
+def _format_legend(aliases: Dict[str, str]) -> str:
+    """Format the legend including any path aliases.
+    
+    Args:
+        aliases: Dict mapping prefix -> alias (e.g., "ac/llm/" -> "@1")
+        
+    Returns:
+        Complete legend string
+    """
+    if not aliases:
+        return LEGEND_BASE
+    
+    # Sort aliases by their number (@1, @2, etc.)
+    sorted_aliases = sorted(aliases.items(), key=lambda x: x[1])
+    alias_str = ' '.join(f"{alias}={prefix}" for prefix, alias in sorted_aliases)
+    
+    return f"{LEGEND_BASE}\n# {alias_str}"
 
 
 def _format_file_block(
@@ -35,6 +150,7 @@ def _format_file_block(
     file_imports: Optional[Dict[str, Set[str]]],
     include_instance_vars: bool,
     include_calls: bool,
+    aliases: Dict[str, str] = None,
 ) -> List[str]:
     """Format a single file's symbols into lines.
     
@@ -46,6 +162,7 @@ def _format_file_block(
         file_imports: Optional dict of file -> set of in-repo files it imports
         include_instance_vars: Whether to include instance variables
         include_calls: Whether to include call information
+        aliases: Optional dict mapping path prefixes to short aliases
         
     Returns:
         List of formatted lines for this file
@@ -75,13 +192,15 @@ def _format_file_block(
         else:
             non_var_symbols.append(s)
     
+    aliases = aliases or {}
+    
     # Group symbols by their reference signature to use ditto marks
     # This handles cases like TEST(...) macros that all reference the same location
     def _refs_signature(refs: List) -> str:
         """Create a hashable signature for a reference list."""
         if not refs:
             return ""
-        return _format_refs(refs)
+        return _format_refs(refs, aliases)
     
     # Output imports on one line if any
     if imports:
@@ -109,6 +228,7 @@ def _format_file_block(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             use_ditto_refs=use_ditto,
+            aliases=aliases,
         ))
         
         if refs_str:
@@ -123,6 +243,7 @@ def _format_file_block(
                 var_symbols[0], indent=0, refs=var_refs,
                 include_instance_vars=include_instance_vars,
                 include_calls=include_calls,
+                aliases=aliases,
             ))
         else:
             # Multiple variables with same name - consolidate line numbers
@@ -135,7 +256,7 @@ def _format_file_block(
             
             # Add refs for first occurrence, ditto for rest is implicit
             if var_refs:
-                ref_annotations = _format_refs(var_refs)
+                ref_annotations = _format_refs(var_refs, aliases)
                 if ref_annotations:
                     line_parts.append(f" {ref_annotations}")
             
@@ -145,11 +266,13 @@ def _format_file_block(
     if file_refs and file_path in file_refs:
         ref_files = sorted(file_refs[file_path])
         if ref_files:
+            # Apply aliases to file-level refs too
+            aliased_refs = [_apply_path_alias(f, aliases) for f in ref_files]
             # Limit to first 5 files to keep it compact
-            if len(ref_files) > 5:
-                ref_summary = ','.join(ref_files[:5]) + f",+{len(ref_files)-5}"
+            if len(aliased_refs) > 5:
+                ref_summary = ','.join(aliased_refs[:5]) + f",+{len(aliased_refs)-5}"
             else:
-                ref_summary = ','.join(ref_files)
+                ref_summary = ','.join(aliased_refs)
             lines.append(f"│←refs: {ref_summary}")
     
     lines.append("")  # Blank line between files
@@ -189,6 +312,13 @@ def to_compact(
     │←refs: other.py,test.py,main.py
     ```
     
+    Path aliases are automatically computed for frequently-referenced directories:
+    ```
+    # @1=ac/llm/ @2=tests/
+    ac/foo.py:
+    │f func:10 ←@1streaming.py:20,@2test_foo.py:15
+    ```
+    
     Args:
         symbols_by_file: Dict mapping file paths to their symbols
         references: Optional dict of file -> symbol -> [locations]
@@ -201,9 +331,6 @@ def to_compact(
     Returns:
         Compact string representation
     """
-    # Use _split_by_token_threshold with 0 to get single chunk
-    # This avoids the num_chunks logic which would still create 1 chunk
-    
     # Use provided order, or fall back to sorted for determinism
     if file_order:
         ordered_files = [f for f in file_order if f in symbols_by_file]
@@ -213,10 +340,13 @@ def to_compact(
     if not ordered_files:
         return ''
     
+    # Compute path aliases for references
+    aliases = _compute_path_aliases(references, file_refs)
+    
     lines = []
     
     if include_legend:
-        lines.extend([LEGEND, ""])
+        lines.extend([_format_legend(aliases), ""])
     
     for file_path in ordered_files:
         symbols = symbols_by_file[file_path]
@@ -228,6 +358,7 @@ def to_compact(
             file_imports=file_imports,
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
+            aliases=aliases,
         )
         if file_lines:
             lines.extend(file_lines)
@@ -279,6 +410,9 @@ def to_compact_chunked(
     if not ordered_files:
         return []
     
+    # Compute path aliases for references
+    aliases = _compute_path_aliases(references, file_refs)
+    
     # First, format all files
     all_file_blocks = []
     for file_path in ordered_files:
@@ -291,6 +425,7 @@ def to_compact_chunked(
             file_imports=file_imports,
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
+            aliases=aliases,
         )
         if file_lines:
             all_file_blocks.append(file_lines)
@@ -298,22 +433,25 @@ def to_compact_chunked(
     if not all_file_blocks:
         return []
     
+    # Compute legend with aliases for chunking functions
+    legend = _format_legend(aliases) if include_legend else None
+    
     # If num_chunks specified, distribute files evenly across chunks
     if num_chunks and num_chunks > 0:
         if return_metadata:
             return _split_into_n_chunks_with_metadata(
-                all_file_blocks, num_chunks, include_legend, ordered_files
+                all_file_blocks, num_chunks, legend, ordered_files
             )
-        return _split_into_n_chunks(all_file_blocks, num_chunks, include_legend)
+        return _split_into_n_chunks(all_file_blocks, num_chunks, legend)
     
     # Otherwise use token-based chunking
-    return _split_by_token_threshold(all_file_blocks, min_chunk_tokens, include_legend)
+    return _split_by_token_threshold(all_file_blocks, min_chunk_tokens, legend)
 
 
 def _split_into_n_chunks(
     file_blocks: List[List[str]],
     num_chunks: int,
-    include_legend: bool,
+    legend: Optional[str],
     file_paths: List[str] = None,
 ) -> List[str]:
     """Split file blocks into exactly N chunks.
@@ -321,7 +459,7 @@ def _split_into_n_chunks(
     Args:
         file_blocks: List of formatted line lists, one per file
         num_chunks: Target number of chunks
-        include_legend: Whether to include legend in first chunk
+        legend: Legend string to include in first chunk, or None
         file_paths: Optional list of file paths (parallel to file_blocks) for metadata
         
     Returns:
@@ -349,8 +487,8 @@ def _split_into_n_chunks(
         chunk_lines = []
         
         # Add legend to first chunk
-        if chunk_idx == 0 and include_legend:
-            chunk_lines.extend([LEGEND, ""])
+        if chunk_idx == 0 and legend:
+            chunk_lines.extend([legend, ""])
         
         # Add files for this chunk
         for _ in range(chunk_size):
@@ -367,7 +505,7 @@ def _split_into_n_chunks(
 def _split_into_n_chunks_with_metadata(
     file_blocks: List[List[str]],
     num_chunks: int,
-    include_legend: bool,
+    legend: Optional[str],
     file_paths: List[str],
 ) -> List[dict]:
     """Split file blocks into exactly N chunks with metadata.
@@ -375,7 +513,7 @@ def _split_into_n_chunks_with_metadata(
     Args:
         file_blocks: List of formatted line lists, one per file
         num_chunks: Target number of chunks
-        include_legend: Whether to include legend in first chunk
+        legend: Legend string to include in first chunk, or None
         file_paths: List of file paths (parallel to file_blocks)
         
     Returns:
@@ -403,8 +541,8 @@ def _split_into_n_chunks_with_metadata(
         chunk_lines = []
         chunk_files = []
         
-        if chunk_idx == 0 and include_legend:
-            chunk_lines.extend([LEGEND, ""])
+        if chunk_idx == 0 and legend:
+            chunk_lines.extend([legend, ""])
         
         for _ in range(chunk_size):
             if file_idx < total_files:
@@ -429,7 +567,7 @@ def _split_into_n_chunks_with_metadata(
 def _split_by_token_threshold(
     file_blocks: List[List[str]],
     min_chunk_tokens: int,
-    include_legend: bool
+    legend: Optional[str]
 ) -> List[str]:
     """Split file blocks using token threshold."""
     chunks = []
@@ -437,8 +575,8 @@ def _split_by_token_threshold(
     current_tokens = 0
     
     # Add legend to first chunk if requested
-    if include_legend:
-        legend_lines = [LEGEND, ""]
+    if legend:
+        legend_lines = [legend, ""]
         current_chunk_lines.extend(legend_lines)
         current_tokens += _estimate_tokens('\n'.join(legend_lines))
     
@@ -495,6 +633,7 @@ def _format_symbol(
     include_instance_vars: bool = True,
     include_calls: bool = False,
     use_ditto_refs: bool = False,
+    aliases: Dict[str, str] = None,
 ) -> List[str]:
     """Format a single symbol and its children.
     
@@ -506,6 +645,7 @@ def _format_symbol(
         include_instance_vars: Whether to include instance variables
         include_calls: Whether to include call information
         use_ditto_refs: If True, use ″ instead of full ref list (same as previous)
+        aliases: Optional dict mapping path prefixes to short aliases
     """
     lines = []
     prefix = KIND_PREFIX.get(symbol.kind, '?')
@@ -551,7 +691,7 @@ def _format_symbol(
         if use_ditto_refs:
             line_parts.append(" ←″")
         else:
-            ref_annotations = _format_refs(refs)
+            ref_annotations = _format_refs(refs, aliases)
             if ref_annotations:
                 line_parts.append(f" {ref_annotations}")
     
@@ -571,6 +711,7 @@ def _format_symbol(
             child, indent + 1, refs=child_refs,
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
+            aliases=aliases,
         ))
     
     return lines
@@ -613,17 +754,20 @@ def _format_calls(symbol: Symbol) -> str:
     return ''
 
 
-def _format_refs(locations: List) -> str:
+def _format_refs(locations: List, aliases: Dict[str, str] = None) -> str:
     """Format reference locations compactly.
     
     Args:
         locations: List of Location objects or dicts
+        aliases: Optional dict mapping path prefixes to short aliases
         
     Returns:
         String like "←file.py:10,other.py:20" or empty string
     """
     if not locations:
         return ""
+    
+    aliases = aliases or {}
     
     # Group by file and take first line number per file
     by_file = {}
@@ -644,7 +788,10 @@ def _format_refs(locations: List) -> str:
     
     # Sort by file name and limit to 3 references
     items = sorted(by_file.items())[:3]
-    parts = [f"{f}:{l}" for f, l in items]
+    parts = []
+    for f, l in items:
+        aliased_path = _apply_path_alias(f, aliases) if aliases else f
+        parts.append(f"{aliased_path}:{l}")
     
     result = "←" + ",".join(parts)
     if len(by_file) > 3:
