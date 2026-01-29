@@ -354,6 +354,17 @@ export const promptViewStyles = css`
     border-color: #e94560;
   }
 
+  .input-buttons-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .input-buttons-stack .file-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
   /* URL chips */
   .url-chips-area {
     display: flex;

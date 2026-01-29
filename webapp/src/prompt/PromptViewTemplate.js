@@ -2,6 +2,7 @@ import { html } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
+import './SpeechToText.js';
 import '../find-in-files/FindInFiles.js';
 import '../context-viewer/ContextViewer.js';
 
@@ -284,9 +285,12 @@ export function renderPromptView(component) {
               ` : ''}
               ${renderUrlChips(component)}
               <div class="input-area">
-                <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
-                  📁 ${component.selectedFiles.length || ''}
-                </button>
+                <div class="input-buttons-stack">
+                  <speech-to-text @transcript=${(e) => component.handleSpeechTranscript(e)}></speech-to-text>
+                  <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
+                    📁 ${component.selectedFiles.length || ''}
+                  </button>
+                </div>
                 <textarea
                   placeholder="Type a message... (paste images with Ctrl+V)"
                   .value=${component.inputValue}
