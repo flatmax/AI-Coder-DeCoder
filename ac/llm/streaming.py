@@ -17,6 +17,10 @@ Use this to understand the codebase structure and find relevant code.
 
 """
 
+REPO_MAP_CONTINUATION = """# Repository Structure (continued)
+
+"""
+
 URL_CONTEXT_HEADER = """# URL Context
 
 The following content was fetched from URLs mentioned in the conversation:
@@ -212,8 +216,8 @@ class StreamingMixin:
             # Update symbol map with current context files
             symbol_map_info = self._auto_save_symbol_map()
             
-            # Print token usage HUD
-            self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
+            # Print token usage HUD and get breakdown for frontend
+            hud_breakdown = self._print_streaming_hud(messages, file_paths, context_map_tokens, symbol_map_info)
             
             # Parse and apply edits using v3 format
             edit_parser = EditParser()
@@ -288,6 +292,19 @@ class StreamingMixin:
                 content=full_content,
                 files_modified=files_modified if files_modified else None
             )
+            
+            # Add last request token usage for the HUD (not cumulative)
+            if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
+                result["token_usage"] = {
+                    "prompt_tokens": self._last_request_tokens.get('prompt', 0),
+                    "completion_tokens": self._last_request_tokens.get('completion', 0),
+                    "total_tokens": self._last_request_tokens.get('prompt', 0) + self._last_request_tokens.get('completion', 0),
+                    "cache_hit_tokens": self._last_request_tokens.get('cache_hit', 0),
+                    "cache_write_tokens": self._last_request_tokens.get('cache_write', 0),
+                }
+                # Include context breakdown if available
+                if hud_breakdown:
+                    result["token_usage"].update(hud_breakdown)
             
             await self._send_stream_complete(request_id, result)
             
@@ -368,27 +385,79 @@ class StreamingMixin:
         context_map_tokens = 0
         
         # System prompt with edit instructions
-        messages.append({"role": "system", "content": build_system_prompt()})
+        # Use cache_control for providers that support prompt caching (Anthropic, Bedrock)
+        system_text = build_system_prompt()
+        messages.append({
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
         
-        # Add symbol map context if requested
+        # Add symbol map context if requested (chunked for better caching)
         if use_repo_map and self.repo:
-            context_map = self.get_context_map(chat_files=file_paths, include_references=True)
-            if context_map:
-                map_content = REPO_MAP_HEADER + context_map
-                messages.append({
-                    "role": "user",
-                    "content": map_content
-                })
-                messages.append({
-                    "role": "assistant", 
-                    "content": "Ok."
-                })
-                # Count tokens in the map
-                if self._context_manager:
-                    try:
-                        context_map_tokens = self._context_manager.count_tokens(map_content)
-                    except Exception:
-                        pass
+            context_map_chunks = self.get_context_map_chunked(
+                chat_files=file_paths, 
+                include_references=True,
+                num_chunks=5,  # Split into 5 chunks: cache first 4, leave last uncached
+                return_metadata=True
+            )
+            if context_map_chunks:
+                # Diagnostic: show chunk info
+                print(f"📦 Symbol map: {len(context_map_chunks)} chunks")
+                for i, chunk in enumerate(context_map_chunks):
+                    # chunk is a dict with 'content', 'files', 'tokens', 'cached' keys
+                    content = chunk['content']
+                    file_count = len(chunk['files'])
+                    lines = content.count('\n')
+                    cached = "🔒" if chunk['cached'] else "📝"
+                    print(f"  {cached} Chunk {i}: {len(content):,} chars, ~{len(content)//4:,} tokens, {lines} lines, {file_count} files")
+                # Bedrock limits cache_control to 4 blocks total
+                # System prompt uses 1, so we can cache 3 symbol map chunks
+                # The 5th chunk (newest/most volatile files) stays uncached
+                max_cached_chunks = 3
+                
+                for i, chunk in enumerate(context_map_chunks):
+                    # First chunk gets the header, others get continuation
+                    content = chunk['content']
+                    if i == 0:
+                        map_content = REPO_MAP_HEADER + content
+                    else:
+                        map_content = REPO_MAP_CONTINUATION + content
+                    
+                    # Only first N chunks get cache_control to stay under Bedrock's limit
+                    if i < max_cached_chunks:
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": map_content,
+                                    "cache_control": {"type": "ephemeral"}
+                                }
+                            ]
+                        })
+                    else:
+                        # Later chunks don't get cache_control
+                        messages.append({
+                            "role": "user",
+                            "content": map_content
+                        })
+                    messages.append({
+                        "role": "assistant", 
+                        "content": "Ok."
+                    })
+                    
+                    # Count tokens in this chunk
+                    if self._context_manager:
+                        try:
+                            context_map_tokens += self._context_manager.count_tokens(map_content)
+                        except Exception:
+                            pass
         
         # Add URL context if provided
         if url_context:
@@ -487,10 +556,10 @@ class StreamingMixin:
             print(f"Error firing stream chunk: {e}")
     
     def _print_streaming_hud(self, messages, file_paths, context_map_tokens=0, symbol_map_info=None):
-        """Print HUD after streaming completes."""
+        """Print HUD after streaming completes and return breakdown for frontend."""
         try:
             if not self._context_manager:
-                return
+                return None
             
             ctx = self._context_manager
             
@@ -503,8 +572,8 @@ class StreamingMixin:
             for msg in messages:
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    # Handle image messages - just count text parts
-                    text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                    # Handle structured content (images, cache_control blocks)
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
                     content = " ".join(text_parts)
                 tokens = ctx.count_tokens(content)
                 total_tokens += tokens
@@ -558,12 +627,32 @@ class StreamingMixin:
                         cache_parts.append(f"~{pct}% of sys+map")
                     
                     print(f"  Cache:           {', '.join(cache_parts)}")
+            
+            # Show session totals
+            print(f"{'─' * 50}")
+            print(f"  Session in:      {self._total_prompt_tokens:,}")
+            print(f"  Session out:     {self._total_completion_tokens:,}")
+            print(f"  Session total:   {self._total_prompt_tokens + self._total_completion_tokens:,}")
             print(f"{'─' * 50}\n")
+            
+            # Return breakdown for frontend HUD
+            return {
+                "system_tokens": system_tokens,
+                "symbol_map_tokens": context_map_tokens,
+                "file_tokens": file_tokens,
+                "history_tokens": history_tokens,
+                "context_total_tokens": total_tokens,
+                "max_input_tokens": max_tokens,
+                "session_prompt_tokens": self._total_prompt_tokens,
+                "session_completion_tokens": self._total_completion_tokens,
+                "session_total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+            }
                 
         except Exception as e:
             import traceback
             print(f"⚠️ HUD error: {e}")
             traceback.print_exc()
+            return None
     
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
