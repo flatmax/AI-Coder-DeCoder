@@ -167,10 +167,10 @@ export const StreamingMixin = (superClass) => class extends superClass {
     this._hudData = tokenUsage;
     this._hudVisible = true;
     
-    // Auto-hide after 4 seconds
+    // Auto-hide after 8 seconds
     this._hudTimeout = setTimeout(() => {
       this._hudVisible = false;
-    }, 4000);
+    }, 8000);
   }
 
   /**
