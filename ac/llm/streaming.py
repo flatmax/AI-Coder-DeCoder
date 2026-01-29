@@ -627,6 +627,12 @@ class StreamingMixin:
                         cache_parts.append(f"~{pct}% of sys+map")
                     
                     print(f"  Cache:           {', '.join(cache_parts)}")
+            
+            # Show session totals
+            print(f"{'─' * 50}")
+            print(f"  Session in:      {self._total_prompt_tokens:,}")
+            print(f"  Session out:     {self._total_completion_tokens:,}")
+            print(f"  Session total:   {self._total_prompt_tokens + self._total_completion_tokens:,}")
             print(f"{'─' * 50}\n")
             
             # Return breakdown for frontend HUD
@@ -637,6 +643,9 @@ class StreamingMixin:
                 "history_tokens": history_tokens,
                 "context_total_tokens": total_tokens,
                 "max_input_tokens": max_tokens,
+                "session_prompt_tokens": self._total_prompt_tokens,
+                "session_completion_tokens": self._total_completion_tokens,
+                "session_total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
             }
                 
         except Exception as e:

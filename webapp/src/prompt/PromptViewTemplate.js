@@ -57,27 +57,21 @@ function renderHud(component) {
           <span class="hud-value">${formatNum(data.cache_hit_tokens)}</span>
         </div>
       ` : ''}
-      ${data.cumulative_total_tokens ? html`
+      ${data.session_total_tokens ? html`
         <div class="hud-divider"></div>
         <div class="hud-section-title">Session Total</div>
         <div class="hud-row cumulative">
-          <span class="hud-label">Prompt:</span>
-          <span class="hud-value">${formatNum(data.cumulative_prompt_tokens)}</span>
+          <span class="hud-label">In:</span>
+          <span class="hud-value">${formatNum(data.session_prompt_tokens)}</span>
         </div>
         <div class="hud-row cumulative">
-          <span class="hud-label">Response:</span>
-          <span class="hud-value">${formatNum(data.cumulative_completion_tokens)}</span>
+          <span class="hud-label">Out:</span>
+          <span class="hud-value">${formatNum(data.session_completion_tokens)}</span>
         </div>
         <div class="hud-row cumulative total">
           <span class="hud-label">Total:</span>
-          <span class="hud-value">${formatNum(data.cumulative_total_tokens)}</span>
+          <span class="hud-value">${formatNum(data.session_total_tokens)}</span>
         </div>
-        ${data.cumulative_cache_hit_tokens ? html`
-          <div class="hud-row cumulative cache">
-            <span class="hud-label">Cache hits:</span>
-            <span class="hud-value">${formatNum(data.cumulative_cache_hit_tokens)}</span>
-          </div>
-        ` : ''}
       ` : ''}
     </div>
   `;

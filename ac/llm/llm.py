@@ -1055,7 +1055,14 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             "max_output_tokens": max_output,
             "used_tokens": total_tokens,
             "remaining_tokens": max_input - total_tokens,
-            "breakdown": breakdown
+            "breakdown": breakdown,
+            "session_totals": {
+                "prompt_tokens": self._total_prompt_tokens,
+                "completion_tokens": self._total_completion_tokens,
+                "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+                "cache_hit_tokens": self._total_cache_hit_tokens,
+                "cache_write_tokens": self._total_cache_write_tokens,
+            }
         }
     
     def get_url_content(self, url):
