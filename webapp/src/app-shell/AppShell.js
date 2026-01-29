@@ -490,7 +490,6 @@ export class AppShell extends LitElement {
               <span class="icon">📊</span> Context
             </button>
           </div>
-          <span class="subtitle">Code changes will appear here</span>
           <button 
             class="clear-btn" 
             @click=${this.clearDiff}
