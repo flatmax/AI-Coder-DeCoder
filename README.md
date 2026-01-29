@@ -32,6 +32,7 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
 - **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
 - **Find in Files** — Search across the codebase with regex support and context preview
+- **Voice Input** — Speech-to-text for hands-free prompt dictation with continuous auto-transcribe mode
 
 ## Tech Stack
 
