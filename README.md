@@ -14,7 +14,7 @@ AC⚡DC intentionally avoids agentic behavior. No automatic tool use, no shell c
 
 2. **Hit a wall** — Eventually you'll encounter a stubborn bug, complex integration issue, or something requiring deeper debugging with tool access.
 
-3. **Punch through with an agent** — Switch to an agentic AI coder (Claude Code, Aider, Cursor Agent, etc.) that can run commands, inspect outputs, and iterate autonomously to solve the hard problem.
+3. **Punch through with an agent** — Switch to an agentic AI coder (Claude Code, Cursor, etc.) that can run commands, inspect outputs, and iterate autonomously to solve the hard problem.
 
 4. **Return to AC⚡DC** — Once unstuck, switch back to AC⚡DC for continued fast development.
 
