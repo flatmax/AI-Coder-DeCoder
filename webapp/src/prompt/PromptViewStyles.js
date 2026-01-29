@@ -36,7 +36,6 @@ export const promptViewStyles = css`
 
   .header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
     background: #0f3460;
@@ -50,16 +49,31 @@ export const promptViewStyles = css`
     cursor: grabbing;
   }
 
-  .header-left {
+  .header-section {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
+  }
+
+  .header-left {
+    flex: 1;
+    justify-content: flex-start;
     cursor: pointer;
   }
 
   .header-tabs {
-    display: flex;
-    gap: 4px;
+    flex: 1;
+    justify-content: center;
+  }
+
+  .header-git {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .header-right {
+    flex: 1;
+    justify-content: flex-end;
   }
 
   .header-tab {
@@ -89,12 +103,7 @@ export const promptViewStyles = css`
     color: #e94560;
   }
 
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-left: auto;
-  }
+
 
   .header-btn {
     background: transparent;

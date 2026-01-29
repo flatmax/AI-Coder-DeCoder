@@ -188,12 +188,12 @@ export function renderPromptView(component) {
          style=${dialogStyle}>
       ${renderResizeHandles(component)}
       <div class="header" @mousedown=${(e) => component._handleDragStart(e)}>
-        <div class="header-left" @click=${component.toggleMinimize}>
+        <div class="header-section header-left" @click=${component.toggleMinimize}>
           <span>${component.activeLeftTab === 'files' ? '💬 Chat' : 
                   component.activeLeftTab === 'search' ? '🔍 Search' : 
                   '📊 Context'}</span>
         </div>
-        <div class="header-tabs">
+        <div class="header-section header-tabs">
           <button 
             class="header-tab ${component.activeLeftTab === 'files' ? 'active' : ''}"
             @click=${(e) => { e.stopPropagation(); component.switchTab('files'); }}
@@ -210,7 +210,7 @@ export function renderPromptView(component) {
             title="Context"
           >📊</button>
         </div>
-        <div class="header-right">
+        <div class="header-section header-git">
           ${!component.minimized && component.activeLeftTab === 'files' ? html`
             <button class="header-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
               💾
@@ -218,6 +218,10 @@ export function renderPromptView(component) {
             <button class="header-btn reset-btn" @click=${component.handleResetHard} title="Reset to HEAD (discard all changes)">
               ⚠️
             </button>
+          ` : ''}
+        </div>
+        <div class="header-section header-right">
+          ${!component.minimized && component.activeLeftTab === 'files' ? html`
             <button class="header-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
               📜
             </button>
