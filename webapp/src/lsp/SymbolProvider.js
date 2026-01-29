@@ -73,20 +73,11 @@ function registerDefinitionProvider(rpcClient, language) {
         const result = response ? Object.values(response)[0] : null;
 
         if (result && result.file && result.range) {
-          const targetUri = window.monaco.Uri.file(result.file);
           const startLine = result.range.start_line ?? result.range.start?.line;
           const startCol = result.range.start_col ?? result.range.start?.col ?? 0;
-          const endLine = result.range.end_line ?? result.range.end?.line ?? startLine;
-          const endCol = result.range.end_col ?? result.range.end?.col ?? startCol;
-          
-          const targetRange = new window.monaco.Range(
-            startLine,
-            startCol + 1,
-            endLine,
-            endCol + 1
-          );
-          
+
           // Dispatch event to request file navigation
+          // Return null to prevent Monaco's built-in navigation (which fails with "Model not found")
           window.dispatchEvent(new CustomEvent('lsp-navigate-to-file', {
             detail: {
               file: result.file,
@@ -94,11 +85,9 @@ function registerDefinitionProvider(rpcClient, language) {
               column: startCol + 1
             }
           }));
-          
-          return {
-            uri: targetUri,
-            range: targetRange
-          };
+
+          // Return null - our custom handler will load the file
+          return null;
         }
       } catch (e) {
         console.error('Definition provider error:', e);

@@ -64,26 +64,28 @@ def find_identifier_at_position(file_path: str, line: int, col: int, repo) -> Op
     
     try:
         # Try to read file content - handle both relative and absolute paths
+        # get_file_content returns string on success, dict with 'error' on failure
         content_result = repo.get_file_content(file_path)
-        if 'error' in content_result:
+        if isinstance(content_result, str):
+            content = content_result
+        elif isinstance(content_result, dict) and 'error' in content_result:
             # Try as absolute path by joining with repo root
             repo_root = repo.get_repo_root()
             if repo_root and not os.path.isabs(file_path):
                 abs_path = os.path.join(repo_root, file_path)
                 content_result = repo.get_file_content(abs_path)
-                if 'error' in content_result:
+                if isinstance(content_result, str):
+                    content = content_result
+                elif os.path.exists(abs_path):
                     # Try reading directly from filesystem
-                    if os.path.exists(abs_path):
-                        with open(abs_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                    else:
-                        return None
+                    with open(abs_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
                 else:
-                    content = content_result.get('content', '')
+                    return None
             else:
                 return None
         else:
-            content = content_result.get('content', '')
+            return None
         if not content:
             return None
             

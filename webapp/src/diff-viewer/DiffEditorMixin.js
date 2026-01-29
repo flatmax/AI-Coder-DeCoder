@@ -33,6 +33,24 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
       () => this.saveCurrentFile()
     );
 
+    // Add Ctrl+Click for Go to Definition
+    this._editor.getModifiedEditor().onMouseUp((e) => {
+      if (e.event.ctrlKey && e.target.position) {
+        this._handleGoToDefinition(e.target.position);
+      }
+    });
+
+    // Add F12 keybinding for Go to Definition
+    this._editor.getModifiedEditor().addCommand(
+      window.monaco.KeyCode.F12,
+      () => {
+        const position = this._editor.getModifiedEditor().getPosition();
+        if (position) {
+          this._handleGoToDefinition(position);
+        }
+      }
+    );
+
     if (this.files.length > 0) {
       this.updateModels();
       this.showDiff(this.selectedFile || this.files[0].path);
@@ -92,6 +110,41 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     const models = this._models.get(filePath);
     if (models) {
       this._editor.setModel({ original: models.original, modified: models.modified });
+    }
+  }
+
+  async _handleGoToDefinition(position) {
+    if (!this.call) return;
+
+    const model = this._editor?.getModifiedEditor()?.getModel();
+    if (!model) return;
+
+    const filePath = model._associatedFilePath;
+    if (!filePath) return;
+
+    try {
+      const response = await this.call['LiteLLM.lsp_get_definition'](
+        filePath,
+        position.lineNumber,
+        position.column
+      );
+      const result = response ? Object.values(response)[0] : null;
+
+      if (result && result.file && result.range) {
+        const startLine = result.range.start?.line || result.range.start_line;
+        const startCol = (result.range.start?.col || result.range.start_col || 0) + 1;
+
+        // Dispatch navigation event
+        window.dispatchEvent(new CustomEvent('lsp-navigate-to-file', {
+          detail: {
+            file: result.file,
+            line: startLine,
+            column: startCol
+          }
+        }));
+      }
+    } catch (e) {
+      console.error('Go to definition error:', e);
     }
   }
 
