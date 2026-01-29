@@ -456,23 +456,24 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             traceback.print_exc()
             return ""
     
-    def get_context_map_chunked(self, chat_files=None, include_references=True, min_chunk_tokens=1024, num_chunks=None):
+    def get_context_map_chunked(self, chat_files=None, include_references=True, min_chunk_tokens=1024, num_chunks=None, return_metadata=False):
         """
         Get repository context map as cacheable chunks.
-        
+
         Returns the symbol map split into chunks. If num_chunks is specified,
         splits into exactly that many chunks. Otherwise uses min_chunk_tokens.
         This enables better LLM prompt caching - stable files at the start
         form stable chunks that remain cached even when later files change.
-        
+
         Args:
             chat_files: List of files included in chat (to exclude from map)
             include_references: Whether to include cross-file references
             min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic)
             num_chunks: If specified, split into exactly this many chunks
-            
+            return_metadata: If True, return list of dicts with content, files, tokens, cached
+
         Returns:
-            List of strings, each a cacheable chunk of the symbol map
+            List of strings (or dicts if return_metadata=True), each a cacheable chunk
         """
         if not self.repo:
             return []
@@ -505,7 +506,8 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 file_paths=map_files,
                 include_references=include_references,
                 min_chunk_tokens=min_chunk_tokens,
-                num_chunks=num_chunks
+                num_chunks=num_chunks,
+                return_metadata=return_metadata
             )
         except Exception as e:
             import traceback
