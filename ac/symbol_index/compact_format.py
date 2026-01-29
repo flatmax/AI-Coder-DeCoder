@@ -73,12 +73,99 @@ CONDITIONAL_MARKER = '?'
 
 
 # Legend for compact format (path aliases appended dynamically)
-LEGEND_BASE = "# c=class m=method f=function af=async func am=async method v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
+LEGEND_BASE = "# c=class m=method f=function af=async func am=async method v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←N=refs →=calls +N=more ″=ditto Nc/Nm=test summary"
 
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count using ~4 chars per token heuristic."""
     return len(text) // 4 + 1
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Check if a file is a test file based on path/name conventions."""
+    path_lower = file_path.lower()
+    # Check common test file patterns
+    if '/test_' in path_lower or '\\test_' in path_lower:
+        return True
+    if path_lower.startswith('test_'):
+        return True
+    if path_lower.startswith('tests/') or '\\tests\\' in path_lower:
+        return True
+    if '/tests/' in path_lower:
+        return True
+    if '_test.py' in path_lower or '_test.js' in path_lower:
+        return True
+    if '.test.' in path_lower or '.spec.' in path_lower:
+        return True
+    return False
+
+
+def _format_collapsed_test_file(
+    file_path: str,
+    symbols: List[Symbol],
+    file_imports: Optional[Dict[str, Set[str]]],
+    aliases: Dict[str, str] = None,
+) -> List[str]:
+    """Format a test file as a collapsed summary.
+    
+    Instead of listing every test method, shows:
+    - Import dependencies (important for understanding what's being tested)
+    - Summary counts of test classes and methods
+    """
+    lines = []
+    lines.append(f"{file_path}:")
+    
+    aliases = aliases or {}
+    
+    # Still show imports - these reveal what's being tested
+    imports = [s for s in symbols if s.kind == 'import']
+    if imports:
+        import_names = _extract_import_names(imports)
+        if import_names:
+            lines.append(f"i {','.join(import_names)}")
+    
+    # Show in-repo imports (critical - shows test dependencies)
+    if file_imports and file_path in file_imports:
+        in_repo_imports = sorted(file_imports[file_path])
+        if in_repo_imports:
+            lines.append(f"i→ {','.join(in_repo_imports)}")
+    
+    # Count test classes and methods
+    test_classes = []
+    test_functions = 0
+    fixture_functions = []
+    
+    for s in symbols:
+        if s.kind == 'class':
+            method_count = len([c for c in s.children if c.kind in ('method', 'async_method')])
+            test_classes.append((s.name, method_count))
+        elif s.kind in ('function', 'async_function'):
+            name_lower = s.name.lower()
+            if name_lower.startswith('test_'):
+                test_functions += 1
+            elif not name_lower.startswith('_'):
+                # Likely a fixture or helper
+                fixture_functions.append(s.name)
+    
+    # Format summary
+    parts = []
+    if test_classes:
+        total_methods = sum(m for _, m in test_classes)
+        parts.append(f"{len(test_classes)}c/{total_methods}m")
+    if test_functions:
+        parts.append(f"{test_functions}f")
+    if fixture_functions:
+        # Show fixture names (often important: conftest fixtures, factories)
+        if len(fixture_functions) <= 3:
+            parts.append(f"fixtures:{','.join(fixture_functions)}")
+        else:
+            parts.append(f"{len(fixture_functions)} fixtures")
+    
+    if parts:
+        lines.append(f"# {' '.join(parts)}")
+    
+    lines.append("")  # Blank line between files
+    return lines
 
 
 def _compute_path_aliases(
@@ -205,6 +292,7 @@ def _format_file_block(
     include_instance_vars: bool,
     include_calls: bool,
     aliases: Dict[str, str] = None,
+    collapse_tests: bool = True,
 ) -> List[str]:
     """Format a single file's symbols into lines.
     
@@ -217,6 +305,7 @@ def _format_file_block(
         include_instance_vars: Whether to include instance variables
         include_calls: Whether to include call information
         aliases: Optional dict mapping path prefixes to short aliases
+        collapse_tests: Whether to collapse test files to summaries
         
     Returns:
         List of formatted lines for this file
@@ -225,7 +314,20 @@ def _format_file_block(
         return []
     
     lines = []
-    lines.append(f"{file_path}:")
+    
+    # Check if this is a test file that should be collapsed
+    is_test_file = _is_test_file(file_path)
+    if is_test_file and collapse_tests:
+        return _format_collapsed_test_file(file_path, symbols, file_imports, aliases)
+    
+    # Calculate file weight (total incoming references)
+    file_weight = len(file_refs.get(file_path, set())) if file_refs else 0
+    
+    # Format header with weight if significant
+    if file_weight > 0:
+        lines.append(f"{file_path}: ←{file_weight}")
+    else:
+        lines.append(f"{file_path}:")
     
     # Get references for this file if available
     file_references = references.get(file_path, {}) if references else {}
@@ -343,6 +445,7 @@ def to_compact(
     include_calls: bool = False,
     include_legend: bool = True,
     file_order: Optional[List[str]] = None,
+    collapse_tests: bool = True,
 ) -> str:
     """Generate compact format suitable for LLM context.
     
@@ -381,6 +484,7 @@ def to_compact(
         include_legend: Whether to include the legend at the top
         file_order: Optional list specifying file output order (for prefix cache optimization).
                    If None, files are sorted alphabetically.
+        collapse_tests: Whether to collapse test files to summary lines (default: True)
         
     Returns:
         Compact string representation
@@ -413,6 +517,7 @@ def to_compact(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             aliases=aliases,
+            collapse_tests=collapse_tests,
         )
         if file_lines:
             lines.extend(file_lines)
@@ -432,6 +537,7 @@ def to_compact_chunked(
     min_chunk_tokens: int = 1024,
     num_chunks: int = None,
     return_metadata: bool = False,
+    collapse_tests: bool = True,
 ) -> Union[List[str], List[dict]]:
     """Generate compact format as cacheable chunks.
     
@@ -451,6 +557,7 @@ def to_compact_chunked(
         min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic cache)
         num_chunks: If specified, split into exactly this many chunks
         return_metadata: If True, return list of dicts with content, files, tokens, cached
+        collapse_tests: Whether to collapse test files to summary lines (default: True)
         
     Returns:
         List of chunk strings (or dicts if return_metadata=True)
@@ -480,6 +587,7 @@ def to_compact_chunked(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             aliases=aliases,
+            collapse_tests=collapse_tests,
         )
         if file_lines:
             all_file_blocks.append(file_lines)
@@ -716,8 +824,10 @@ def _format_symbol(
     # Build the symbol line
     line_parts = [f"{indent_str}{prefix} {symbol.name}"]
     
-    # Add bases for classes
+    # Add bases for classes (with method counts if available)
     if symbol.bases:
+        # Just show base names - method counts would require cross-file lookup
+        # which isn't available at this level
         line_parts.append(f"({','.join(symbol.bases)})")
     
     # Add parameters for functions/methods
