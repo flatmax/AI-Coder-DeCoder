@@ -19,7 +19,7 @@ CONDITIONAL_MARKER = '?'
 
 
 # Legend for compact format
-LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line ->T=returns ?=optional ←=refs →=calls +N=more"
+LEGEND = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -63,6 +63,18 @@ def _format_file_block(
     imports = [s for s in symbols if s.kind == 'import']
     other_symbols = [s for s in symbols if s.kind != 'import']
     
+    # Group same-named variables together to avoid redundant reference output
+    # e.g., 15 "result" vars with identical refs become one line with multiple line numbers
+    var_groups = {}  # name -> list of symbols
+    non_var_symbols = []
+    for s in other_symbols:
+        if s.kind == 'variable':
+            if s.name not in var_groups:
+                var_groups[s.name] = []
+            var_groups[s.name].append(s)
+        else:
+            non_var_symbols.append(s)
+    
     # Output imports on one line if any
     if imports:
         import_names = _extract_import_names(imports)
@@ -75,14 +87,41 @@ def _format_file_block(
         if in_repo_imports:
             lines.append(f"│i→ {','.join(in_repo_imports)}")
     
-    # Output other symbols
-    for symbol in other_symbols:
+    # Output non-variable symbols
+    for symbol in non_var_symbols:
         symbol_refs = file_references.get(symbol.name, [])
         lines.extend(_format_symbol(
             symbol, indent=0, refs=symbol_refs,
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
         ))
+    
+    # Output grouped variables (consolidate same-named vars onto one line)
+    for var_name, var_symbols in sorted(var_groups.items(), key=lambda x: x[1][0].range.start_line):
+        var_refs = file_references.get(var_name, [])
+        if len(var_symbols) == 1:
+            # Single variable, output normally
+            lines.extend(_format_symbol(
+                var_symbols[0], indent=0, refs=var_refs,
+                include_instance_vars=include_instance_vars,
+                include_calls=include_calls,
+            ))
+        else:
+            # Multiple variables with same name - consolidate line numbers
+            line_nums = [str(s.range.start_line) for s in var_symbols]
+            line_str = ','.join(line_nums[:5])
+            if len(line_nums) > 5:
+                line_str += f",+{len(line_nums)-5}"
+            
+            line_parts = [f"│v {var_name}:{line_str}"]
+            
+            # Add refs for first occurrence, ditto for rest is implicit
+            if var_refs:
+                ref_annotations = _format_refs(var_refs)
+                if ref_annotations:
+                    line_parts.append(f" {ref_annotations}")
+            
+            lines.append(''.join(line_parts))
     
     # Add file-level reference summary if available
     if file_refs and file_path in file_refs:
