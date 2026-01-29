@@ -521,7 +521,7 @@ export const promptViewStyles = css`
   .token-hud.visible {
     opacity: 1;
     transform: translateY(0);
-    animation: hud-fade-out 4s ease-in-out forwards;
+    animation: hud-fade-out 8s ease-in-out forwards;
   }
 
   @keyframes hud-fade-out {
