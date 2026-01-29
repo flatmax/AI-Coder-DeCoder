@@ -58,10 +58,14 @@ Create consistent headers across Chat, Search, and Context views with:
 ## Implementation Plan (Option C)
 
 ### Step 1: Update AppShell.js
-- Remove the header tabs from global header (or keep for navigation, emit events)
+- **Remove the global header entirely** - reclaim 40px vertical space
+- Remove `.header` element and its styles
+- Update `.main-content` to start at `top: 0`
+- Update `.prompt-overlay` to start at `top: 20px` (was `top: 60px`)
 - Pass `activeLeftTab` to PromptView as a property
 - Remove direct rendering of FindInFiles/ContextViewer in prompt-overlay
 - Keep event handlers but wire them through PromptView
+- Move "Clear Diff" button elsewhere (e.g., into diff-viewer or remove)
 
 ### Step 2: Update PromptView.js
 - Add `activeLeftTab` property (default: 'files')
