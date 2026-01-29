@@ -2,6 +2,8 @@
 
 AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
+This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
+
 ## Philosophy: Speed Over Agency
 
 AC⚡DC intentionally avoids agentic behavior. No automatic tool use, no shell command execution, no multi-step autonomous workflows. This keeps the feedback loop tight and the token costs low.
