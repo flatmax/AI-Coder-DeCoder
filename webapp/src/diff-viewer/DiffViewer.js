@@ -101,10 +101,6 @@ export class DiffViewer extends MixedBase {
       }));
     }
 
-    // Handle external file open requests (e.g., from find-in-files)
-    if (changedProperties.has('viewingFile') && this.viewingFile) {
-      this._openExternalFile(this.viewingFile);
-    }
   }
 
   selectFile(filePath) {
@@ -128,7 +124,7 @@ export class DiffViewer extends MixedBase {
     window.removeEventListener('lsp-navigate-to-file', this._handleLspNavigate);
   }
 
-  async _handleLspNavigate(event) {
+  _handleLspNavigate(event) {
     const { file, line, column } = event.detail;
     
     // Check if file is already loaded
@@ -139,36 +135,12 @@ export class DiffViewer extends MixedBase {
       return;
     }
     
-    // Load the file content from server
-    try {
-      const response = await this.call['Repo.get_file_content'](file);
-      const result = response ? Object.values(response)[0] : null;
-      
-      // Check if we got content - it might be result.content or just result as a string
-      const content = typeof result === 'string' ? result : (result?.content ?? null);
-      
-      if (content !== null) {
-        // Add as a read-only file (same content for original and modified)
-        const newFile = {
-          path: file,
-          original: content,
-          modified: content,
-          isNew: false,
-          isReadOnly: true
-        };
-        
-        this.files = [...this.files, newFile];
-        this.selectedFile = file;
-        
-        // Wait for update to complete, then reveal position
-        await this.updateComplete;
-        this._revealPosition(line, column);
-      } else {
-        console.error('Failed to load file for navigation:', file);
-      }
-    } catch (e) {
-      console.error('Error loading file for navigation:', e);
-    }
+    // File not loaded - dispatch event for AppShell to load it
+    this.dispatchEvent(new CustomEvent('request-file-load', {
+      detail: { file, line, column },
+      bubbles: true,
+      composed: true
+    }));
   }
 
   _revealPosition(line, column) {
@@ -238,17 +210,6 @@ export class DiffViewer extends MixedBase {
     }
     
     return null;
-  }
-
-  _openExternalFile(filePath) {
-    if (!filePath) return;
-    
-    // Check if file is already loaded - just select it
-    const existingFile = this.files.find(f => f.path === filePath);
-    if (existingFile) {
-      this.selectedFile = filePath;
-    }
-    // File loading is now handled by AppShell
   }
 
   render() {

@@ -342,6 +342,25 @@ export class AppShell extends LitElement {
     }
   }
 
+  async handleRequestFileLoad(e) {
+    const { file, line, column } = e.detail;
+    const loaded = await this._loadFileIntoDiff(file);
+    if (loaded && (line || column)) {
+      await this.updateComplete;
+      const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+      if (diffViewer) {
+        setTimeout(() => {
+          diffViewer.selectFile(file);
+          if (line) {
+            setTimeout(() => {
+              diffViewer._revealPosition(line, column || 1);
+            }, 150);
+          }
+        }, 100);
+      }
+    }
+  }
+
   _getPromptViewRpcCall() {
     const promptView = this.shadowRoot?.querySelector('prompt-view');
     return promptView?.call || null;
@@ -481,6 +500,7 @@ export class AppShell extends LitElement {
               @file-save=${this.handleFileSave}
               @files-save=${this.handleFilesSave}
               @file-selected=${this.handleFileSelected}
+              @request-file-load=${this.handleRequestFileLoad}
             ></diff-viewer>
           </div>
         </div>
