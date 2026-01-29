@@ -1,5 +1,7 @@
 # AI Coder / DeCoder (AC⚡DC)
 
+> ⚠️ **Alpha Software** — AC⚡DC is in active development. Expect rough edges, breaking changes, and incomplete features. Currently optimized for **Anthropic models via AWS Bedrock**. Other LLM setups should work but are not tested.
+
 AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
@@ -28,7 +30,7 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **File Selection** — Pick specific files to include in context, with git status indicators (modified/staged/untracked)
 - **Image Support** — Paste screenshots or diagrams directly into the chat for visual context
 - **Streaming Responses** — Real-time streaming of AI responses with stop capability
-- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns
+- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns and automatic prompt caching optimization
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
 - **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
 - **Find in Files** — Search across the codebase with regex support and context preview
@@ -112,7 +114,7 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 }
 ```
 
-**AWS Bedrock:**
+**AWS Bedrock :**
 ```json
 {
   "env": {
@@ -123,11 +125,15 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 }
 ```
 
+> **Note:** AC⚡DC is currently optimized for Anthropic models on AWS Bedrock, which provides prompt caching for significant cost savings. Other providers should work via LiteLLM but may have reduced functionality or higher costs.
+
 See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
 
 ### Application Configuration (ac-dc.json)
 
-Modify `ac-dc.json` in the repository root to configure application settings. NOTE: the url_cache path if you don't want it in /tmp :
+Create or modify `ac-dc.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
+
+> ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac-dc_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
 
 ```json
 {

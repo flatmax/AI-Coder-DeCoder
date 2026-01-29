@@ -36,7 +36,6 @@ export const promptViewStyles = css`
 
   .header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
     background: #0f3460;
@@ -50,60 +49,94 @@ export const promptViewStyles = css`
     cursor: grabbing;
   }
 
-  .header-left {
+  .header-section {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
+  }
+
+  .header-left {
+    flex: 1;
+    justify-content: flex-start;
     cursor: pointer;
+  }
+
+  .header-tabs {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .header-git {
+    flex: 1;
+    justify-content: center;
   }
 
   .header-right {
+    flex: 1;
+    justify-content: flex-end;
+  }
+
+  .header-tab {
+    width: 32px;
+    height: 32px;
+    padding: 0;
     display: flex;
     align-items: center;
-    gap: 8px;
-  }
-
-  .header button {
-    background: none;
-    border: none;
-    color: #e94560;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 18px;
-    padding: 0;
+    font-size: 14px;
+    color: #888;
+    transition: all 0.15s;
   }
 
-  .clear-btn {
-    background: #1a1a2e !important;
-    border: 1px solid #e94560 !important;
-    border-radius: 4px !important;
-    padding: 4px 8px !important;
-    font-size: 11px !important;
-    color: #e94560 !important;
+  .header-tab:hover {
+    background: rgba(233, 69, 96, 0.1);
+    color: #ccc;
   }
 
-  .clear-btn:hover {
-    background: #e94560 !important;
-    color: white !important;
+  .header-tab.active {
+    background: rgba(233, 69, 96, 0.2);
+    border-color: #e94560;
+    color: #e94560;
   }
 
-  .clear-btn.commit-btn {
-    border-color: #7ec699 !important;
-    color: #7ec699 !important;
+
+
+  .header-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #888;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 4px 6px;
+    transition: all 0.15s;
   }
 
-  .clear-btn.commit-btn:hover {
-    background: #7ec699 !important;
-    color: #1a1a2e !important;
+  .header-btn:hover {
+    background: rgba(233, 69, 96, 0.1);
+    color: #ccc;
   }
 
-  .clear-btn.reset-btn {
-    border-color: #f0a500 !important;
-    color: #f0a500 !important;
+  .header-btn.commit-btn {
+    color: #7ec699;
   }
 
-  .clear-btn.reset-btn:hover {
-    background: #f0a500 !important;
-    color: #1a1a2e !important;
+  .header-btn.commit-btn:hover {
+    background: rgba(126, 198, 153, 0.2);
+    color: #7ec699;
+  }
+
+  .header-btn.reset-btn {
+    color: #f0a500;
+  }
+
+  .header-btn.reset-btn:hover {
+    background: rgba(240, 165, 0, 0.2);
+    color: #f0a500;
   }
 
   .main-content {
@@ -121,6 +154,19 @@ export const promptViewStyles = css`
   }
 
   file-picker {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .embedded-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .embedded-panel find-in-files,
+  .embedded-panel context-viewer {
     flex: 1;
     min-height: 0;
   }
