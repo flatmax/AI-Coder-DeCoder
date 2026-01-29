@@ -6,6 +6,8 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
   initInputHandler() {
     this._historyIndex = -1;  // -1 means we're at the draft/current input
     this._inputDraft = '';     // Preserves unsent content when navigating history
+    this._savedScrollRatio = 1;  // Saved scroll position for minimize/maximize
+    this._savedWasAtBottom = true;
   }
 
   _getUserMessageHistory() {
@@ -152,6 +154,37 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
   }
 
   toggleMinimize() {
-    this.minimized = !this.minimized;
+    const container = this.shadowRoot?.querySelector('#messages-container');
+    
+    if (!this.minimized) {
+      // About to minimize - save scroll position while maximized
+      if (container) {
+        const scrollTop = container.scrollTop;
+        const scrollHeight = container.scrollHeight;
+        const clientHeight = container.clientHeight;
+        const maxScroll = scrollHeight - clientHeight;
+        const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+        this._savedWasAtBottom = distanceFromBottom < 50;
+        this._savedScrollRatio = maxScroll > 0 ? scrollTop / maxScroll : 1;
+      }
+      this.minimized = true;
+    } else {
+      // About to maximize - restore saved scroll position
+      this.minimized = false;
+      
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => {
+          const container = this.shadowRoot?.querySelector('#messages-container');
+          if (!container) return;
+          
+          if (this._savedWasAtBottom) {
+            container.scrollTop = container.scrollHeight;
+          } else {
+            const maxScroll = container.scrollHeight - container.clientHeight;
+            container.scrollTop = maxScroll * this._savedScrollRatio;
+          }
+        });
+      });
+    }
   }
 };
