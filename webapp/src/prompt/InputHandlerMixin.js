@@ -1,5 +1,5 @@
 /**
- * Mixin for input handling (keyboard, text input).
+ * Mixin for input handling (keyboard, text input, image paste).
  */
 export const InputHandlerMixin = (superClass) => class extends superClass {
 
@@ -8,7 +8,69 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     this._inputDraft = '';     // Preserves unsent content when navigating history
     this._savedScrollRatio = 1;  // Saved scroll position for minimize/maximize
     this._savedWasAtBottom = true;
+    
+    // Image paste handling
+    this._boundHandlePaste = this._handlePaste.bind(this);
+    document.addEventListener('paste', this._boundHandlePaste);
   }
+
+  destroyInputHandler() {
+    document.removeEventListener('paste', this._boundHandlePaste);
+  }
+
+  // ============ Image Handling ============
+
+  _handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          this.processImageFile(file);
+        }
+        break;
+      }
+    }
+  }
+
+  processImageFile(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64Data = e.target.result.split(',')[1];
+      const mimeType = file.type;
+      this.pastedImages = [
+        ...this.pastedImages,
+        {
+          data: base64Data,
+          mime_type: mimeType,
+          preview: e.target.result,
+          name: file.name || `image-${Date.now()}.${mimeType.split('/')[1]}`
+        }
+      ];
+    };
+    reader.readAsDataURL(file);
+  }
+
+  removeImage(index) {
+    this.pastedImages = this.pastedImages.filter((_, i) => i !== index);
+  }
+
+  clearImages() {
+    this.pastedImages = [];
+  }
+
+  getImagesForSend() {
+    if (this.pastedImages.length === 0) return null;
+    return this.pastedImages.map(img => ({ 
+      data: img.data, 
+      mime_type: img.mime_type 
+    }));
+  }
+
+  // ============ History Navigation ============
 
   _getUserMessageHistory() {
     // Get all user messages from messageHistory

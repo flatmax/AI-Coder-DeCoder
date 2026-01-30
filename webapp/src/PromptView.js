@@ -3,7 +3,6 @@ import { MessageHandler } from './MessageHandler.js';
 import { promptViewStyles } from './prompt/PromptViewStyles.js';
 import { renderPromptView } from './prompt/PromptViewTemplate.js';
 import { FileHandlerMixin } from './prompt/FileHandlerMixin.js';
-import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
 import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
@@ -19,9 +18,7 @@ const MixedBase = StreamingMixin(
     WindowControlsMixin(
       InputHandlerMixin(
         ChatActionsMixin(
-          ImageHandlerMixin(
-            FileHandlerMixin(MessageHandler)
-          )
+          FileHandlerMixin(MessageHandler)
         )
       )
     )
@@ -126,7 +123,6 @@ export class PromptView extends MixedBase {
     super.connectedCallback();
     this.addClass(this, 'PromptView');
     this.initInputHandler();
-    this.initImageHandler();
     this.initWindowControls();
     this.initStreaming();
     this.initUrlHandler();
@@ -239,7 +235,7 @@ export class PromptView extends MixedBase {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this.destroyImageHandler();
+    this.destroyInputHandler();
     this.destroyWindowControls();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
   }
