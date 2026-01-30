@@ -1,6 +1,7 @@
 import { LitElement, html } from 'lit';
 import { findInFilesStyles } from './FindInFilesStyles.js';
 import { renderFindInFiles } from './FindInFilesTemplate.js';
+import { extractResponse } from '../utils/rpc.js';
 
 export class FindInFiles extends LitElement {
   static properties = {
@@ -159,7 +160,7 @@ export class FindInFiles extends LitElement {
         4  // context_lines
       );
       
-      const results = this._extractResponse(response);
+      const results = extractResponse(response);
       
       if (Array.isArray(results)) {
         this.results = results;
@@ -236,16 +237,6 @@ export class FindInFiles extends LitElement {
       return this.rpcCall[method](...args);
     }
     return Promise.reject(new Error('RPC not available'));
-  }
-
-  _extractResponse(response) {
-    if (response && typeof response === 'object') {
-      const keys = Object.keys(response);
-      if (keys.length > 0) {
-        return response[keys[0]];
-      }
-    }
-    return response;
   }
 
   render() {

@@ -1,6 +1,8 @@
 import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
+import { formatTokens } from '../utils/formatters.js';
+import { extractResponse } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -67,7 +69,7 @@ export class ContextViewer extends LitElement {
         this.selectedFiles || [],
         this.getIncludedUrls()
       );
-      const result = this._extractResponse(response);
+      const result = extractResponse(response);
       
       if (result?.error) {
         this.error = result.error;
@@ -90,12 +92,6 @@ export class ContextViewer extends LitElement {
 
   get rpcCall() {
     return this._call;
-  }
-
-  _extractResponse(response) {
-    if (!response) return null;
-    const values = Object.values(response);
-    return values.length > 0 ? values[0] : null;
   }
 
   willUpdate(changedProperties) {
@@ -123,7 +119,7 @@ export class ContextViewer extends LitElement {
     
     try {
       const response = await this._call['LiteLLM.get_url_content'](url);
-      this.urlContent = this._extractResponse(response);
+      this.urlContent = extractResponse(response);
     } catch (e) {
       this.urlContent = { error: e.message };
     }
@@ -187,7 +183,7 @@ export class ContextViewer extends LitElement {
         null,  // Don't exclude any files
         true   // include_references
       );
-      this.symbolMapContent = this._extractResponse(response);
+      this.symbolMapContent = extractResponse(response);
     } catch (e) {
       this.symbolMapContent = `Error loading symbol map: ${e.message}`;
     } finally {
@@ -201,10 +197,7 @@ export class ContextViewer extends LitElement {
   }
 
   formatTokens(count) {
-    if (count >= 1000) {
-      return `${(count / 1000).toFixed(1)}K`;
-    }
-    return String(count);
+    return formatTokens(count);
   }
 
   getUsagePercent() {
