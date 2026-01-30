@@ -2,7 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { marked } from 'marked';
 import './PrismSetup.js';
-import { computeLineDiff } from '../utils/diff.js';
+import { computeLineDiff, computeCharDiff } from '../utils/diff.js';
 
 export class CardMarkdown extends LitElement {
   static properties = {
@@ -233,6 +233,19 @@ export class CardMarkdown extends LitElement {
       width: 1.5ch;
       color: inherit;
       opacity: 0.6;
+    }
+
+    /* Inline word-level highlighting */
+    .diff-line.remove .diff-change {
+      background: #8b3d3d;
+      border-radius: 2px;
+      padding: 0 2px;
+    }
+
+    .diff-line.add .diff-change {
+      background: #2d6b2d;
+      border-radius: 2px;
+      padding: 0 2px;
     }
 
     .edit-block-error {
@@ -469,6 +482,7 @@ export class CardMarkdown extends LitElement {
 
   /**
    * Format edit/repl content as unified diff HTML using LCS algorithm.
+   * Includes word-level inline highlighting for modified lines.
    */
   formatUnifiedDiff(editContent, replContent) {
     const oldLines = editContent ? editContent.split('\n') : [];
@@ -483,11 +497,44 @@ export class CardMarkdown extends LitElement {
     
     const lines = diff.map(entry => {
       const prefix = entry.type === 'add' ? '+' : entry.type === 'remove' ? '-' : ' ';
+      
+      // Check if this line has inline highlighting info
+      if (entry.pair?.charDiff) {
+        const highlightedContent = this.renderInlineHighlight(entry.pair.charDiff, entry.type);
+        return `<span class="diff-line ${entry.type}"><span class="diff-line-prefix">${prefix}</span>${highlightedContent}</span>`;
+      }
+      
       const escapedLine = this.escapeHtml(entry.line);
       return `<span class="diff-line ${entry.type}"><span class="diff-line-prefix">${prefix}</span>${escapedLine}</span>`;
     });
     
     return lines.join('\n');
+  }
+
+  /**
+   * Render line content with inline character-level highlighting.
+   * @param {Array<{type: 'same'|'add'|'remove', text: string}>} segments
+   * @param {string} lineType - 'add' or 'remove'
+   */
+  renderInlineHighlight(segments, lineType) {
+    return segments.map(segment => {
+      const escapedText = this.escapeHtml(segment.text);
+      
+      // For 'same' segments, just return the text
+      if (segment.type === 'same') {
+        return escapedText;
+      }
+      
+      // For changed segments, wrap in highlight span
+      // On remove lines, highlight 'remove' segments
+      // On add lines, highlight 'add' segments
+      if ((lineType === 'remove' && segment.type === 'remove') ||
+          (lineType === 'add' && segment.type === 'add')) {
+        return `<span class="diff-change">${escapedText}</span>`;
+      }
+      
+      return escapedText;
+    }).join('');
   }
 
   /**
