@@ -33,6 +33,24 @@ The following content was fetched from URLs mentioned in the conversation:
 
 """
 
+FILES_L0_HEADER = """# Reference Files (Stable)
+
+These files are included for reference:
+
+"""
+
+FILES_L1_HEADER = """# Reference Files
+
+These files are included for reference:
+
+"""
+
+FILES_ACTIVE_HEADER = """# Working Files
+
+Here are the files:
+
+"""
+
 
 class StreamingMixin:
     """Mixin for streaming chat operations."""
@@ -299,6 +317,19 @@ class StreamingMixin:
                 files_modified=files_modified if files_modified else None
             )
             
+            # Update file stability tracking after response
+            if file_paths and self._context_manager and self._context_manager.file_stability:
+                tier_changes = self._context_manager.file_stability.update_after_response(
+                    items=file_paths,
+                    get_content=lambda p: self.repo.get_file_content(p, version='working'),
+                    modified=files_modified
+                )
+                # Log tier changes for debugging
+                if tier_changes:
+                    for file_path, new_tier in tier_changes.items():
+                        tier_icon = {'L0': '🔒', 'L1': '📌', 'active': '✏️'}.get(new_tier, '?')
+                        print(f"  {tier_icon} {file_path} → {new_tier}")
+            
             # Add last request token usage for the HUD (not cumulative)
             if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
                 result["token_usage"] = {
@@ -381,6 +412,9 @@ class StreamingMixin:
         """
         Build messages for streaming using symbol map for context.
         
+        Uses tiered file caching: L0 (most stable) and L1 (moderately stable) files
+        get cache_control for better prompt caching, while active files are uncached.
+        
         Args:
             user_prompt: The user's message
             file_paths: List of file paths to include as context
@@ -394,80 +428,97 @@ class StreamingMixin:
         messages = []
         context_map_tokens = 0
         
+        # Get file tiers from stability tracker
+        file_tiers = {'L0': [], 'L1': [], 'active': []}
+        if file_paths and self._context_manager and self._context_manager.file_stability:
+            file_tiers = self._context_manager.file_stability.get_items_by_tier(file_paths)
+            # Any files not yet tracked go to active
+            tracked = set(file_tiers['L0'] + file_tiers['L1'] + file_tiers['active'])
+            for path in file_paths:
+                if path not in tracked:
+                    file_tiers['active'].append(path)
+        elif file_paths:
+            # No stability tracker - all files are active
+            file_tiers['active'] = list(file_paths)
+        
+        # Log tier distribution
+        if file_paths:
+            l0_count = len(file_tiers['L0'])
+            l1_count = len(file_tiers['L1'])
+            active_count = len(file_tiers['active'])
+            print(f"📁 Files: {l0_count} L0 (cached), {l1_count} L1 (cached), {active_count} active")
+        
         # System prompt with edit instructions
         # Use cache_control for providers that support prompt caching (Anthropic, Bedrock)
         system_text = build_system_prompt()
-        messages.append({
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": system_text,
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ]
-        })
-        
-        # Add symbol map context if requested (chunked for better caching)
+
+        # Get symbol map chunks - we'll combine first chunk with system prompt
+        # Block allocation (4 total):
+        #   Block 1: system + symbol map part 1 (cached)
+        #   Block 2: symbol map part 2 (cached)
+        #   Block 3: L0 files (cached)
+        #   Block 4: L1 files (cached)
+        context_map_chunks = []
         if use_repo_map and self.repo:
             context_map_chunks = self.get_context_map_chunked(
-                chat_files=file_paths, 
+                chat_files=file_paths,
                 include_references=True,
-                num_chunks=5,  # Split into 5 chunks: cache first 4, leave last uncached
+                num_chunks=2,  # 2 chunks: first goes in system, second in user message
                 return_metadata=True
             )
             if context_map_chunks:
                 # Diagnostic: show chunk info
                 print(f"📦 Symbol map: {len(context_map_chunks)} chunks")
                 for i, chunk in enumerate(context_map_chunks):
-                    # chunk is a dict with 'content', 'files', 'tokens', 'cached' keys
                     content = chunk['content']
                     file_count = len(chunk['files'])
                     lines = content.count('\n')
-                    cached = "🔒" if chunk['cached'] else "📝"
+                    cached = "🔒"  # Both chunks end up cached
                     print(f"  {cached} Chunk {i}: {len(content):,} chars, ~{len(content)//4:,} tokens, {lines} lines, {file_count} files")
-                # Bedrock limits cache_control to 4 blocks total
-                # System prompt uses 1, so we can cache 3 symbol map chunks
-                # The 5th chunk (newest/most volatile files) stays uncached
-                max_cached_chunks = 3
-                
-                for i, chunk in enumerate(context_map_chunks):
-                    # First chunk gets the header, others get continuation
-                    content = chunk['content']
-                    if i == 0:
-                        map_content = REPO_MAP_HEADER + content
-                    else:
-                        map_content = REPO_MAP_CONTINUATION + content
-                    
-                    # Only first N chunks get cache_control to stay under Bedrock's limit
-                    if i < max_cached_chunks:
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": map_content,
-                                    "cache_control": {"type": "ephemeral"}
-                                }
-                            ]
-                        })
-                    else:
-                        # Later chunks don't get cache_control
-                        messages.append({
-                            "role": "user",
-                            "content": map_content
-                        })
-                    messages.append({
-                        "role": "assistant", 
-                        "content": "Ok."
-                    })
-                    
-                    # Count tokens in this chunk
-                    if self._context_manager:
-                        try:
-                            context_map_tokens += self._context_manager.count_tokens(map_content)
-                        except Exception:
-                            pass
+
+        # Combine system prompt with first symbol map chunk (Block 1)
+        system_and_map1 = system_text
+        if context_map_chunks:
+            system_and_map1 += "\n\n" + REPO_MAP_HEADER + context_map_chunks[0]['content']
+            if self._context_manager:
+                try:
+                    context_map_tokens += self._context_manager.count_tokens(context_map_chunks[0]['content'])
+                except Exception:
+                    pass
+
+        messages.append({
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": system_and_map1,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
+
+        # Add second symbol map chunk as separate user message (Block 2)
+        if len(context_map_chunks) > 1:
+            map_content = REPO_MAP_CONTINUATION + context_map_chunks[1]['content']
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": map_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Ok."
+            })
+            if self._context_manager:
+                try:
+                    context_map_tokens += self._context_manager.count_tokens(map_content)
+                except Exception:
+                    pass
         
         # Add file tree (uncached - changes more frequently than symbol map)
         if use_repo_map and self.repo:
@@ -492,23 +543,44 @@ class StreamingMixin:
                 messages.append({"role": "user", "content": url_message})
                 messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
         
-        # Add file contents
-        if file_paths:
-            file_content_parts = []
-            for path in file_paths:
-                try:
-                    content = self.repo.get_file_content(path, version='working')
-                    if isinstance(content, dict) and 'error' in content:
-                        print(f"⚠️ Skipping file: {content['error']}")
-                        continue
-                    if content:
-                        file_content_parts.append(f"{path}\n```\n{content}\n```")
-                except Exception as e:
-                    print(f"⚠️ Could not read {path}: {e}")
-            
-            if file_content_parts:
-                files_message = "Here are the files:\n\n" + "\n\n".join(file_content_parts)
-                messages.append({"role": "user", "content": files_message})
+        # Add tiered file contents
+        # L0 files (most stable) - cached
+        if file_tiers['L0']:
+            l0_content = self._format_files_for_cache(file_tiers['L0'], FILES_L0_HEADER)
+            if l0_content:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": l0_content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                })
+                messages.append({"role": "assistant", "content": "Ok."})
+        
+        # L1 files (moderately stable) - cached
+        if file_tiers['L1']:
+            l1_content = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
+            if l1_content:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": l1_content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                })
+                messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Active files (recently changed) - not cached
+        if file_tiers['active']:
+            active_content = self._format_files_for_cache(file_tiers['active'], FILES_ACTIVE_HEADER)
+            if active_content:
+                messages.append({"role": "user", "content": active_content})
                 messages.append({"role": "assistant", "content": "Ok."})
         
         # Add conversation history
@@ -532,6 +604,24 @@ class StreamingMixin:
         messages.append(user_message)
         
         return messages, user_prompt, context_map_tokens
+    
+    def _format_files_for_cache(self, file_paths: list[str], header: str) -> str:
+        """Format files for inclusion in a cache block."""
+        parts = [header]
+        for path in file_paths:
+            try:
+                content = self.repo.get_file_content(path, version='working')
+                if isinstance(content, dict) and 'error' in content:
+                    continue
+                if content:
+                    parts.append(f"{path}\n```\n{content}\n```")
+            except Exception as e:
+                print(f"⚠️ Could not read {path}: {e}")
+        
+        # Return empty string if only header (no files added)
+        if len(parts) == 1:
+            return ""
+        return "\n\n".join(parts)
     
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire stream chunk send (non-blocking).
