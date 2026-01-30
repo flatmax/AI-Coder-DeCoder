@@ -6,8 +6,7 @@ import { FileHandlerMixin } from './prompt/FileHandlerMixin.js';
 import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
-import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
-import { ResizeHandlerMixin } from './prompt/ResizeHandlerMixin.js';
+import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import { UrlHandlerMixin } from './prompt/UrlHandlerMixin.js';
 import './file-picker/FilePicker.js';
@@ -17,13 +16,11 @@ import './context-viewer/ContextViewer.js';
 
 const MixedBase = StreamingMixin(
   UrlHandlerMixin(
-    ResizeHandlerMixin(
-      DragHandlerMixin(
-        InputHandlerMixin(
-          ChatActionsMixin(
-            ImageHandlerMixin(
-              FileHandlerMixin(MessageHandler)
-            )
+    WindowControlsMixin(
+      InputHandlerMixin(
+        ChatActionsMixin(
+          ImageHandlerMixin(
+            FileHandlerMixin(MessageHandler)
           )
         )
       )
@@ -130,8 +127,7 @@ export class PromptView extends MixedBase {
     this.addClass(this, 'PromptView');
     this.initInputHandler();
     this.initImageHandler();
-    this.initDragHandler();
-    this.initResizeHandler();
+    this.initWindowControls();
     this.initStreaming();
     this.initUrlHandler();
     
@@ -244,8 +240,7 @@ export class PromptView extends MixedBase {
   disconnectedCallback() {
     super.disconnectedCallback();
     this.destroyImageHandler();
-    this.destroyDragHandler();
-    this.destroyResizeHandler();
+    this.destroyWindowControls();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
   }
 
