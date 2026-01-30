@@ -2,59 +2,56 @@
 
 ## Problem
 
-`PromptView.js` currently uses 9 mixins, indicating the component has too many responsibilities:
-- FileHandlerMixin
-- ImageHandlerMixin
-- ChatActionsMixin
-- InputHandlerMixin
-- WindowControlsMixin
-- StreamingMixin
-- UrlHandlerMixin
-- DragHandlerMixin
-- ResizeHandlerMixin
+`PromptView.js` currently uses 7 mixins:
+- FileHandlerMixin - file tree loading, selection, git operations
+- ImageHandlerMixin - paste handling, image preview (~60 lines)
+- ChatActionsMixin - send message, commit, reset, clear context
+- InputHandlerMixin - keyboard handling, history navigation, auto-resize
+- WindowControlsMixin - drag, resize, minimize (already consolidated)
+- StreamingMixin - streaming responses, request management
+- UrlHandlerMixin - URL detection, fetching, state management
 
 This creates:
 - Complex initialization order dependencies
 - Difficulty understanding which mixin provides what functionality
-- Tight coupling between unrelated concerns
-- Hard to test individual pieces
+- Hard to test individual pieces in isolation
+
+## Current State Analysis
+
+**WindowControlsMixin is already consolidated** - it handles:
+- Drag (mousedown/mousemove/mouseup on header)
+- Resize (8 directional handles)
+- State management (dialogX, dialogY, width, height)
+
+**ImageHandlerMixin is small** (~60 lines) and closely related to input handling.
+
+**UrlHandlerMixin** has significant state management that could be extracted.
 
 ## Proposed Consolidation
 
-### Phase 1: Consolidate Window Management Mixins
+### Phase 1: Merge ImageHandlerMixin into InputHandlerMixin
 
-**Merge into single `WindowMixin`:**
-- `WindowControlsMixin` - minimize/restore, window controls
-- `DragHandlerMixin` - dialog dragging
-- `ResizeHandlerMixin` - resize handles
+ImageHandlerMixin is small (~60 lines) and conceptually related to input handling:
+- Both deal with user input content
+- Both have init/destroy lifecycle with event listeners
+- Image paste is just another form of input
 
-These are all related to window/dialog positioning and sizing. They share:
-- Mouse event handling patterns
-- Position/size state management
-- Similar lifecycle (init/destroy)
-
-**New structure:**
-```
-webapp/src/prompt/WindowMixin.js  (new, consolidated)
-```
-
-**Delete after merge:**
-```
-webapp/src/prompt/WindowControlsMixin.js
-webapp/src/prompt/DragHandlerMixin.js (if exists)
-webapp/src/prompt/ResizeHandlerMixin.js (if exists)
-```
+**Changes:**
+- Move `handlePaste`, `processImageFile`, `removeImage`, `clearImages`, `getImagesForSend` into InputHandlerMixin
+- Rename lifecycle methods: `initImageHandler` → part of `initInputHandler`
+- Delete `ImageHandlerMixin.js`
+- Update PromptView.js imports and mixin chain
 
 ### Phase 2: Extract URL Handling to Service
 
 **Current:** `UrlHandlerMixin` mixes URL detection, fetching, and state into PromptView.
 
-**Proposed:** Extract to a standalone service class that PromptView instantiates:
+**Proposed:** Extract to a standalone service class:
 
 ```javascript
 // webapp/src/services/UrlService.js
 export class UrlService {
-  constructor(rpcCall) { ... }
+  constructor(rpcCall, onStateChange) { ... }
   
   // Detection
   detectUrlsInInput(text) { ... }
@@ -67,78 +64,59 @@ export class UrlService {
   removeFetchedUrl(url) { ... }
   dismissUrl(url) { ... }
   clearState() { ... }
+  clearAllState() { ... }
   
   // Getters
-  getDetectedUrls() { ... }
-  getFetchedUrls() { ... }
-  getExcludedUrls() { ... }
+  get detectedUrls() { ... }
+  get fetchedUrls() { ... }
+  get excludedUrls() { ... }
   getFetchedUrlsForMessage() { ... }
 }
 ```
 
+**PromptView changes:**
+- Instantiate `UrlService` in constructor
+- Keep reactive properties (`detectedUrls`, `fetchedUrls`, etc.) in PromptView
+- Service calls `onStateChange` callback to trigger updates
+- Remove UrlHandlerMixin from mixin chain
+
 **Benefits:**
-- Testable in isolation
+- Testable in isolation (no LitElement dependency)
 - Reusable by other components
 - Clear API boundary
 - State management contained in one place
 
-### Phase 3: Consider Further Consolidation
-
-After Phase 1 & 2, evaluate remaining mixins:
-
-| Mixin | Keep Separate? | Rationale |
-|-------|---------------|-----------|
-| FileHandlerMixin | Yes | File tree is complex, distinct concern |
-| ImageHandlerMixin | Maybe merge with Input | Small, related to input handling |
-| ChatActionsMixin | Yes | Core chat logic, distinct |
-| InputHandlerMixin | Yes | Keyboard/input handling is substantial |
-| StreamingMixin | Yes | Async streaming is complex |
-
-**Potential merge:** ImageHandlerMixin → InputHandlerMixin (both deal with input content)
-
 ## Implementation Order
 
-1. **Phase 1a:** Audit existing window-related mixins to understand current state
-2. **Phase 1b:** Create consolidated `WindowMixin.js`
-3. **Phase 1c:** Update PromptView to use new mixin, remove old ones
-4. **Phase 2a:** Create `UrlService.js` with extracted logic
-5. **Phase 2b:** Create thin `UrlHandlerMixin` that delegates to service (or remove mixin entirely)
-6. **Phase 2c:** Update PromptView to use service
-7. **Phase 3:** Evaluate ImageHandler → InputHandler merge
+1. **Phase 1a:** Merge ImageHandlerMixin methods into InputHandlerMixin
+1. **Phase 1b:** Update PromptView to remove ImageHandlerMixin from chain
+1. **Phase 1c:** Delete ImageHandlerMixin.js
+2. **Phase 2a:** Create `UrlService.js` with extracted logic
+2. **Phase 2b:** Update PromptView to use service, remove UrlHandlerMixin
+2. **Phase 2c:** Delete UrlHandlerMixin.js
 
 ## Success Criteria
 
-- PromptView uses ≤6 mixins (down from 9)
-- URL logic is testable independently
-- Window management is in one place
+- PromptView uses 5 mixins (down from 7)
+- URL logic is testable independently  
 - No functionality regression
-- Existing tests pass
+- Image paste still works
+- URL detection/fetching still works
 
 ## Files to Modify
 
 **Phase 1:**
-- Create: `webapp/src/prompt/WindowMixin.js`
-- Modify: `webapp/src/PromptView.js`
-- Delete: `webapp/src/prompt/WindowControlsMixin.js`
-- Delete: `webapp/src/prompt/DragHandlerMixin.js` (if exists)
-- Delete: `webapp/src/prompt/ResizeHandlerMixin.js` (if exists)
+- Modify: `webapp/src/prompt/InputHandlerMixin.js` (add image handling)
+- Modify: `webapp/src/PromptView.js` (remove ImageHandlerMixin)
+- Delete: `webapp/src/prompt/ImageHandlerMixin.js`
 
 **Phase 2:**
 - Create: `webapp/src/services/UrlService.js`
-- Modify: `webapp/src/prompt/UrlHandlerMixin.js` (or delete)
-- Modify: `webapp/src/PromptView.js`
+- Modify: `webapp/src/PromptView.js` (use service, remove mixin)
+- Delete: `webapp/src/prompt/UrlHandlerMixin.js`
 
 ## Risks
 
-- **Event handler binding:** Mixins often bind `this` in connectedCallback - must preserve order
-- **State reactivity:** LitElement reactive properties must remain in component, not service
-- **Template references:** Some mixins may have tight coupling to template structure
-
-## Notes
-
-Looking at the symbol map, I see:
-- `WindowControlsMixin` exists at `webapp/src/prompt/WindowControlsMixin.js`
-- `DragHandlerMixin` referenced in template but not in symbol map - may be part of WindowControls
-- `ResizeHandlerMixin` referenced in template but not in symbol map - may be part of WindowControls
-
-Need to inspect actual files to confirm current structure before implementing.
+- **Event handler binding:** Paste handler currently bound in `initImageHandler` - must preserve in `initInputHandler`
+- **State reactivity:** URL state properties must remain reactive in PromptView; service triggers updates via callback
+- **Template references:** UrlHandlerMixin methods called from template - need to proxy or keep methods on PromptView
