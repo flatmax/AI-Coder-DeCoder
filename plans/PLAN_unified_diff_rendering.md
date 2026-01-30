@@ -2,7 +2,7 @@
 
 ## Objective
 
-Replace the current three-section edit block rendering (Context / Remove / Add) with a unified diff view that interleaves changes line-by-line, similar to GitHub's diff display.
+Replace the current three-section edit block rendering (Context / Remove / Add) with a unified diff view that interleaves changes line-by-line, similar to GitHub's diff display. Include word-level highlighting within changed lines.
 
 ## Current State
 
@@ -10,19 +10,18 @@ Replace the current three-section edit block rendering (Context / Remove / Add) 
 - Current output shows three separate blocks: context lines, then all removed lines, then all added lines
 - This makes it hard to see exactly what changed where
 
-## Proposed Approach
+## Implementation Status
 
-### 1. Create LCS Diff Utility
+- [x] Phase 1: Line-level unified diff (COMPLETE)
+- [ ] Phase 2: Word-level inline highlighting
 
-Create a new utility module `webapp/src/utils/diff.js` with:
+## Phase 1: Line-Level Unified Diff (COMPLETE)
+
+### 1. LCS Diff Utility
+
+Created `webapp/src/utils/diff.js` with:
 
 ```javascript
-/**
- * Compute unified diff between two arrays of lines using LCS algorithm.
- * @param {string[]} oldLines - Original lines
- * @param {string[]} newLines - New lines  
- * @returns {Array<{type: 'context'|'add'|'remove', line: string}>}
- */
 export function computeLineDiff(oldLines, newLines) { ... }
 ```
 
@@ -31,45 +30,81 @@ export function computeLineDiff(oldLines, newLines) { ... }
 2. Backtrack to identify which lines are common (context), removed, or added
 3. Return array of diff entries in display order
 
-**Implementation notes:**
-- Pure function, no side effects
-- ~40-50 lines of code
-- No external dependencies
+### 2. CardMarkdown Updates
 
-### 2. Update CardMarkdown Rendering
+- Replaced `formatEditSections()` with `formatUnifiedDiff()`
+- Updated `renderEditBlock()` to render unified diff output
+- Added CSS styles for `.diff-line`, `.diff-line.context`, `.diff-line.remove`, `.diff-line.add`
 
-Modify `CardMarkdown.js`:
+## Phase 2: Word-Level Inline Highlighting
 
-1. **Replace `formatEditSections()`** with a new method that uses the LCS diff utility
-2. **Update `renderEditBlock()`** to render unified diff output:
-   - Context lines: neutral background, no prefix (or space prefix)
-   - Removed lines: red background, `-` prefix
-   - Added lines: green background, `+` prefix
+### Objective
 
-### 3. Update Styles
+When a line is modified (not purely added/removed), highlight the specific words or characters that changed within the line, similar to GitHub's inline diff highlighting.
 
-Add/modify CSS in `CardMarkdown.js`:
+### Approach
+
+#### 1. Extend diff.js with character-level diff
+
+Add new function to `webapp/src/utils/diff.js`:
+
+```javascript
+/**
+ * Compute character-level diff between two strings.
+ * Returns array of segments with type and text.
+ * @param {string} oldStr - Original string
+ * @param {string} newStr - New string
+ * @returns {Array<{type: 'same'|'add'|'remove', text: string}>}
+ */
+export function computeCharDiff(oldStr, newStr) { ... }
+```
+
+#### 2. Pair adjacent remove/add lines
+
+In `formatUnifiedDiff()`, detect when a remove line is immediately followed by an add line (indicating a modification rather than pure delete+insert). Group these into pairs for inline highlighting.
+
+#### 3. Render with inline highlights
+
+For paired lines, run character-level diff and wrap changed segments:
+
+```html
+<span class="diff-line remove">
+  <span class="diff-line-prefix">-</span>
+  import <span class="diff-change">json</span>
+</span>
+<span class="diff-line add">
+  <span class="diff-line-prefix">+</span>
+  import <span class="diff-change">json_modified</span>
+</span>
+```
+
+#### 4. Add CSS for inline highlights
 
 ```css
-.diff-line { ... }
-.diff-line.context { background: #0d1117; color: #8b949e; }
-.diff-line.remove { background: #3d1f1f; color: #ffa198; }
-.diff-line.add { background: #1f3d1f; color: #7ee787; }
-.diff-line-prefix { 
-  user-select: none; 
-  width: 1ch; 
-  display: inline-block;
-  color: inherit;
-  opacity: 0.6;
+.diff-line.remove .diff-change {
+  background: #6e2d2d;
+  border-radius: 2px;
+}
+
+.diff-line.add .diff-change {
+  background: #2d5a2d;
+  border-radius: 2px;
 }
 ```
 
-## File Changes
+### Edge Cases
+
+- Multiple changes on one line: show multiple highlighted segments
+- Entire line changed: don't highlight (falls back to line-level coloring)
+- Whitespace-only changes: still highlight
+- Very long lines: ensure horizontal scroll still works
+
+### File Changes
 
 | File | Change |
 |------|--------|
-| `webapp/src/utils/diff.js` | **NEW** - LCS diff utility |
-| `webapp/src/prompt/CardMarkdown.js` | Update rendering to use unified diff |
+| `webapp/src/utils/diff.js` | Add `computeCharDiff()` function |
+| `webapp/src/prompt/CardMarkdown.js` | Update `formatUnifiedDiff()` to use inline highlighting |
 
 ## Testing Strategy
 
@@ -80,6 +115,8 @@ Add/modify CSS in `CardMarkdown.js`:
    - Mixed changes (some lines modified, some unchanged)
    - Pure insertions (empty old section)
    - Pure deletions (empty new section)
+   - Word changes within lines (Phase 2)
+   - Multiple word changes on same line (Phase 2)
 
 2. Verify edge cases:
    - Empty edit/repl sections
@@ -88,15 +125,24 @@ Add/modify CSS in `CardMarkdown.js`:
 
 ## Future Enhancements (Out of Scope)
 
-- Word-level inline diff highlighting within changed lines
 - Collapsible long unchanged sections
 - Line numbers in diff view
+- Move detection (detecting when blocks move rather than delete+add)
+- Patience diff algorithm for better handling of repeated lines
 
 ## Effort Estimate
 
+### Phase 1 (COMPLETE)
 - LCS utility: ~30 minutes
 - CardMarkdown updates: ~30 minutes
 - Styling refinements: ~15 minutes
 - Testing: ~15 minutes
+- **Total: ~1.5 hours**
 
-**Total: ~1.5 hours**
+### Phase 2
+- Character-level diff function: ~30 minutes
+- Line pairing logic: ~20 minutes
+- Inline highlight rendering: ~30 minutes
+- Styling: ~15 minutes
+- Testing: ~20 minutes
+- **Total: ~2 hours**
