@@ -456,6 +456,27 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             traceback.print_exc()
             return ""
     
+    def get_file_tree_for_context(self) -> str:
+        """
+        Get formatted file tree for LLM context.
+        
+        Returns:
+            Formatted file tree string, or empty string if unavailable
+        """
+        if not self.repo:
+            return ""
+        
+        try:
+            tree_data = self.repo.get_file_tree()
+            if not tree_data or 'error' in tree_data:
+                return ""
+            
+            from ..symbol_index.compact_format import format_file_tree
+            return format_file_tree(tree_data)
+        except Exception as e:
+            print(f"⚠️ Failed to get file tree: {e}")
+            return ""
+    
     def get_context_map_chunked(self, chat_files=None, include_references=True, min_chunk_tokens=1024, num_chunks=None, return_metadata=False):
         """
         Get repository context map as cacheable chunks.
