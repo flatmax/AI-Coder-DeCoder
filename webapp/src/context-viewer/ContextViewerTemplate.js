@@ -224,8 +224,14 @@ function renderBreakdownSection(component) {
           </div>
           ${breakdown.session_totals.cache_hit_tokens ? html`
             <div class="session-row cache">
-              <span class="session-label">Cache Hits:</span>
+              <span class="session-label">Cache Reads:</span>
               <span class="session-value">${component.formatTokens(breakdown.session_totals.cache_hit_tokens)}</span>
+            </div>
+          ` : ''}
+          ${breakdown.session_totals.cache_write_tokens ? html`
+            <div class="session-row cache">
+              <span class="session-label">Cache Writes:</span>
+              <span class="session-value">${component.formatTokens(breakdown.session_totals.cache_write_tokens)}</span>
             </div>
           ` : ''}
         </div>

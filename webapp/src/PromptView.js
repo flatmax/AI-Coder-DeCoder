@@ -3,29 +3,21 @@ import { MessageHandler } from './MessageHandler.js';
 import { promptViewStyles } from './prompt/PromptViewStyles.js';
 import { renderPromptView } from './prompt/PromptViewTemplate.js';
 import { FileHandlerMixin } from './prompt/FileHandlerMixin.js';
-import { ImageHandlerMixin } from './prompt/ImageHandlerMixin.js';
 import { ChatActionsMixin } from './prompt/ChatActionsMixin.js';
 import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
-import { DragHandlerMixin } from './prompt/DragHandlerMixin.js';
-import { ResizeHandlerMixin } from './prompt/ResizeHandlerMixin.js';
+import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
-import { UrlHandlerMixin } from './prompt/UrlHandlerMixin.js';
+import { UrlService } from './services/UrlService.js';
 import './file-picker/FilePicker.js';
 import './history-browser/HistoryBrowser.js';
 import './find-in-files/FindInFiles.js';
 import './context-viewer/ContextViewer.js';
 
 const MixedBase = StreamingMixin(
-  UrlHandlerMixin(
-    ResizeHandlerMixin(
-      DragHandlerMixin(
-        InputHandlerMixin(
-          ChatActionsMixin(
-            ImageHandlerMixin(
-              FileHandlerMixin(MessageHandler)
-            )
-          )
-        )
+  WindowControlsMixin(
+    InputHandlerMixin(
+      ChatActionsMixin(
+        FileHandlerMixin(MessageHandler)
       )
     )
   )
@@ -79,10 +71,94 @@ export class PromptView extends MixedBase {
     this.fetchedUrls = {};
     this.excludedUrls = new Set();
     this.activeLeftTab = 'files';
+    this._filePickerScrollTop = 0;
+    this._messagesScrollTop = 0;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
+    
+    this._urlService = null;
   }
+
+  // ============ URL Service Integration ============
+
+  _initUrlService() {
+    this._urlService = new UrlService(
+      // RPC call wrapper
+      async (method, ...args) => {
+        const response = await this.call[method](...args);
+        return this.extractResponse(response);
+      },
+      // State change callback
+      (state) => {
+        this.detectedUrls = state.detectedUrls;
+        this.fetchingUrls = state.fetchingUrls;
+        this.fetchedUrls = state.fetchedUrls;
+        this.excludedUrls = state.excludedUrls;
+      }
+    );
+  }
+
+  detectUrlsInInput(text) {
+    this._urlService?.detectUrlsInInput(text);
+  }
+
+  async fetchUrl(urlInfo) {
+    await this._urlService?.fetchUrl(urlInfo, this.inputValue);
+  }
+
+  toggleUrlIncluded(url) {
+    const included = this._urlService?.toggleUrlIncluded(url);
+    this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
+      detail: { url, included },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  removeFetchedUrl(url) {
+    this._urlService?.removeFetchedUrl(url);
+    this.dispatchEvent(new CustomEvent('url-removed', {
+      detail: { url },
+      bubbles: true,
+      composed: true
+    }));
+    this._urlService?.detectUrlsInInput(this.inputValue);
+  }
+
+  dismissUrl(url) {
+    this._urlService?.dismissUrl(url);
+  }
+
+  viewUrlContent(urlResult) {
+    this.dispatchEvent(new CustomEvent('view-url-content', {
+      detail: { url: urlResult.url, content: urlResult },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  clearUrlState() {
+    this._urlService?.clearState();
+  }
+
+  clearAllUrlState() {
+    this._urlService?.clearAllState();
+  }
+
+  getFetchedUrlsForMessage() {
+    return this._urlService?.getFetchedUrlsForMessage() || [];
+  }
+
+  getUrlTypeLabel(type) {
+    return this._urlService?.getUrlTypeLabel(type) || '🔗 URL';
+  }
+
+  getUrlDisplayName(urlInfo) {
+    return this._urlService?.getUrlDisplayName(urlInfo) || urlInfo.url;
+  }
+
+  // ============ History Browser ============
 
   toggleHistoryBrowser() {
     this.showHistoryBrowser = !this.showHistoryBrowser;
@@ -129,11 +205,9 @@ export class PromptView extends MixedBase {
     super.connectedCallback();
     this.addClass(this, 'PromptView');
     this.initInputHandler();
-    this.initImageHandler();
-    this.initDragHandler();
-    this.initResizeHandler();
+    this.initWindowControls();
     this.initStreaming();
-    this.initUrlHandler();
+    this._initUrlService();
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
@@ -157,9 +231,34 @@ export class PromptView extends MixedBase {
    * Switch between tabs (files/search/context)
    */
   switchTab(tab) {
+    // Save scroll positions before switching away from files tab
+    if (this.activeLeftTab === 'files') {
+      const filePicker = this.shadowRoot?.querySelector('file-picker');
+      if (filePicker) {
+        this._filePickerScrollTop = filePicker.getScrollTop();
+      }
+      const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+      if (messagesContainer) {
+        this._messagesScrollTop = messagesContainer.scrollTop;
+      }
+    }
+
     this.activeLeftTab = tab;
-    
-    if (tab === 'search') {
+
+    // Restore scroll positions when switching back to files tab
+    if (tab === 'files') {
+      this.updateComplete.then(async () => {
+        const filePicker = this.shadowRoot?.querySelector('file-picker');
+        if (filePicker && this._filePickerScrollTop > 0) {
+          await filePicker.updateComplete;
+          filePicker.setScrollTop(this._filePickerScrollTop);
+        }
+        const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+        if (messagesContainer && this._messagesScrollTop > 0) {
+          messagesContainer.scrollTop = this._messagesScrollTop;
+        }
+      });
+    } else if (tab === 'search') {
       this.updateComplete.then(() => {
         const findInFiles = this.shadowRoot?.querySelector('find-in-files');
         if (findInFiles) {
@@ -243,9 +342,8 @@ export class PromptView extends MixedBase {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this.destroyImageHandler();
-    this.destroyDragHandler();
-    this.destroyResizeHandler();
+    this.destroyInputHandler();
+    this.destroyWindowControls();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
   }
 

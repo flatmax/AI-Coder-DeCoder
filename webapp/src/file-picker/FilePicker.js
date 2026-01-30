@@ -38,6 +38,7 @@ export class FilePicker extends MixedBase {
     this.filter = '';
     this.viewingFile = null;
     this._expandedInitialized = false;
+    this._savedScrollTop = 0;
   }
 
   willUpdate(changedProperties) {
@@ -62,6 +63,46 @@ export class FilePicker extends MixedBase {
     }
     this.selected = newSelected;
     this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback?.();
+    // Save scroll position when component is disconnected (tab switch)
+    const treeEl = this.shadowRoot?.querySelector('.tree');
+    if (treeEl) {
+      this._savedScrollTop = treeEl.scrollTop;
+    }
+  }
+
+  updated(changedProperties) {
+    super.updated?.(changedProperties);
+    // Restore scroll position after render
+    if (this._savedScrollTop > 0) {
+      const treeEl = this.shadowRoot?.querySelector('.tree');
+      if (treeEl) {
+        treeEl.scrollTop = this._savedScrollTop;
+      }
+    }
+  }
+
+  /**
+   * Get current scroll position of the tree element.
+   * @returns {number} The scrollTop value
+   */
+  getScrollTop() {
+    const treeEl = this.shadowRoot?.querySelector('.tree');
+    return treeEl?.scrollTop ?? 0;
+  }
+
+  /**
+   * Set scroll position of the tree element.
+   * @param {number} value - The scrollTop value to set
+   */
+  setScrollTop(value) {
+    const treeEl = this.shadowRoot?.querySelector('.tree');
+    if (treeEl && value >= 0) {
+      treeEl.scrollTop = value;
+    }
   }
 
   _expandChangedFileDirs() {

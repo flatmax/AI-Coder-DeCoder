@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'lit';
+import { formatTokens, formatRelativeTime } from '../utils/formatters.js';
 
 export class UrlContentModal extends LitElement {
   static properties = {
@@ -183,28 +184,6 @@ export class UrlContentModal extends LitElement {
     this.showFullContent = !this.showFullContent;
   }
 
-  _formatDate(isoString) {
-    if (!isoString) return 'Unknown';
-    try {
-      const date = new Date(isoString);
-      const now = new Date();
-      const diff = now - date;
-      
-      if (diff < 60000) return 'Just now';
-      if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
-      if (diff < 86400000) return `${Math.floor(diff / 3600000)} hours ago`;
-      return date.toLocaleDateString();
-    } catch {
-      return 'Unknown';
-    }
-  }
-
-  _formatTokens(count) {
-    if (!count) return '0';
-    if (count >= 1000) return `${(count / 1000).toFixed(1)}K`;
-    return String(count);
-  }
-
   render() {
     if (!this.open) return html``;
 
@@ -245,11 +224,11 @@ export class UrlContentModal extends LitElement {
         </div>
         <div class="meta-item">
           <span class="meta-label">Fetched:</span>
-          <span class="meta-value">${this._formatDate(fetched_at)}</span>
+          <span class="meta-value">${formatRelativeTime(fetched_at)}</span>
         </div>
         <div class="meta-item">
           <span class="meta-label">Tokens:</span>
-          <span class="meta-value">${this._formatTokens(readme_tokens || content_tokens)}</span>
+          <span class="meta-value">${formatTokens(readme_tokens || content_tokens)}</span>
         </div>
       </div>
       
