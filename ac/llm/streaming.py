@@ -484,27 +484,7 @@ class StreamingMixin:
                 if result.content.error:
                     continue
                 
-                url_part = f"## {result.content.url}\n"
-                if result.content.title:
-                    url_part += f"**{result.content.title}**\n\n"
-                
-                if result.summary:
-                    url_part += f"{result.summary}\n"
-                elif result.content.readme:
-                    # Truncate long READMEs
-                    readme = result.content.readme
-                    if len(readme) > 4000:
-                        readme = readme[:4000] + "\n\n[truncated...]"
-                    url_part += f"{readme}\n"
-                elif result.content.content:
-                    content = result.content.content
-                    if len(content) > 4000:
-                        content = content[:4000] + "\n\n[truncated...]"
-                    url_part += f"{content}\n"
-                
-                if result.content.symbol_map:
-                    url_part += f"\n### Symbol Map\n```\n{result.content.symbol_map}\n```\n"
-                
+                url_part = result.content.format_for_prompt(summary=result.summary)
                 url_parts.append(url_part)
             
             if url_parts:
