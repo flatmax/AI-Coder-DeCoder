@@ -1,5 +1,9 @@
 # Plan: Tiered Stability Caching for LLM Context
 
+## Status: COMPLETE
+
+Phases 1-4 implemented. Phase 5 (UI) descoped to separate plan.
+
 ## Overview
 
 Implement a generic stability tracking system that automatically promotes stable content to cached context blocks, reducing API costs through better prompt caching utilization. The initial implementation targets file content caching, with the architecture designed for reuse with symbol map caching.
@@ -570,23 +574,8 @@ def get_stable_file_order(self, file_paths: list[str]) -> list[str]:
 
 This ensures symbol map chunks have stable files at the start (cached prefix) and volatile files at the end (uncached suffix).
 
-### Phase 5: Context Viewer UI
+### Phase 5: Context Viewer UI (DESCOPED)
 
-**Goal:** Show cache tier badges on files in the context viewer so users can see what's cached.
+**Descoped to separate plan.** The UI needs a unified approach that handles both symbol map and file caches consistently. See `PLAN_unified_cache_system.md` for the follow-up work.
 
-**Changes to `ac/llm/llm.py`:**
-- Update `get_context_breakdown()` to include tier info for each file
-
-**Changes to `webapp/src/context-viewer/ContextViewerTemplate.js`:**
-- Add tier badges (🔒 L0, 📌 L1, ✏️ active) to file items in the expanded files section
-
-```javascript
-// Show tier badges on files
-const tierBadge = {
-    'L0': '🔒',  // Cached, most stable
-    'L1': '📌',  // Cached, moderately stable  
-    'active': '✏️'  // Uncached, being edited
-}[item.tier] || '';
-
-return html`<span>${tierBadge} ${item.path} (${formatTokens(item.tokens)})</span>`;
-```
+Original goal was to show cache tier badges on files in the context viewer.
