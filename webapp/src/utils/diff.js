@@ -66,7 +66,7 @@ function pairModifiedLines(diff) {
       
       // Only use inline highlighting if lines are similar enough
       // (avoid highlighting when entire line is different)
-      if (charDiff.similarity > 0.3) {
+      if (charDiff.similarity > 0.7) {
         result.push({ ...current, pair: { charDiff: charDiff.oldSegments } });
         result.push({ ...next, pair: { charDiff: charDiff.newSegments } });
         i += 2;
