@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { marked } from 'marked';
 import './PrismSetup.js';
+import { computeLineDiff } from '../utils/diff.js';
 
 export class CardMarkdown extends LitElement {
   static properties = {
@@ -201,38 +202,37 @@ export class CardMarkdown extends LitElement {
       padding: 0;
     }
 
-    .edit-section {
-      padding: 8px 12px;
+    .diff-line {
+      display: block;
+      padding: 0 12px;
       white-space: pre-wrap;
       word-break: break-word;
+      font-family: 'Fira Code', monospace;
+      font-size: 13px;
+      line-height: 1.4;
     }
 
-    .edit-section-header {
-      font-size: 10px;
-      text-transform: uppercase;
-      color: #6e7681;
-      padding: 4px 12px;
-      background: #0d1117;
-      border-top: 1px solid #30363d;
-    }
-
-    .edit-section-header:first-child {
-      border-top: none;
-    }
-
-    .edit-section.context {
+    .diff-line.context {
       background: #0d1117;
       color: #8b949e;
     }
 
-    .edit-section.old-lines {
+    .diff-line.remove {
       background: #3d1f1f;
       color: #ffa198;
     }
 
-    .edit-section.new-lines {
+    .diff-line.add {
       background: #1f3d1f;
       color: #7ee787;
+    }
+
+    .diff-line-prefix {
+      user-select: none;
+      display: inline-block;
+      width: 1.5ch;
+      color: inherit;
+      opacity: 0.6;
     }
 
     .edit-block-error {
@@ -423,7 +423,7 @@ export class CardMarkdown extends LitElement {
   }
 
   /**
-   * Render an edit block as HTML.
+   * Render an edit block as HTML with unified diff view.
    */
   renderEditBlock(block) {
     const result = this.getEditResultForFile(block.filePath);
@@ -442,12 +442,12 @@ export class CardMarkdown extends LitElement {
       ? `<span class="edit-block-line-info">line ${result.estimated_line}</span>` 
       : '';
     
-    // Parse edit and repl sections to identify context vs changes
-    const { contextHtml, oldHtml, newHtml, contextLines } = this.formatEditSections(block.editLines, block.replLines);
+    // Compute unified diff
+    const diffHtml = this.formatUnifiedDiff(block.editLines, block.replLines);
     
-    // Use first non-empty context line, or first non-empty old line as search context
-    const allLines = [...contextLines, ...(block.editLines ? block.editLines.split('\n') : [])];
-    const searchContext = allLines.find(line => line.trim().length > 0) || '';
+    // Get search context from first non-empty line
+    const editLines = block.editLines ? block.editLines.split('\n') : [];
+    const searchContext = editLines.find(line => line.trim().length > 0) || '';
     const encodedContext = this.escapeHtml(searchContext).replace(/"/g, '&quot;');
     
     return `
@@ -460,9 +460,7 @@ export class CardMarkdown extends LitElement {
           </div>
         </div>
         <div class="edit-block-content">
-          ${contextHtml ? `<div class="edit-section-header">Context</div><div class="edit-section context">${contextHtml}</div>` : ''}
-          ${oldHtml ? `<div class="edit-section-header">Remove</div><div class="edit-section old-lines">${oldHtml}</div>` : ''}
-          ${newHtml ? `<div class="edit-section-header">Add</div><div class="edit-section new-lines">${newHtml}</div>` : ''}
+          ${diffHtml}
         </div>
         ${errorHtml}
       </div>
@@ -470,34 +468,26 @@ export class CardMarkdown extends LitElement {
   }
 
   /**
-   * Format edit sections by computing the common prefix (context).
+   * Format edit/repl content as unified diff HTML using LCS algorithm.
    */
-  formatEditSections(editContent, replContent) {
-    const editLines = editContent ? editContent.split('\n') : [];
-    const replLines = replContent ? replContent.split('\n') : [];
+  formatUnifiedDiff(editContent, replContent) {
+    const oldLines = editContent ? editContent.split('\n') : [];
+    const newLines = replContent ? replContent.split('\n') : [];
     
-    // Find common prefix (context lines)
-    let commonPrefixLength = 0;
-    const minLength = Math.min(editLines.length, replLines.length);
-    
-    for (let i = 0; i < minLength; i++) {
-      if (editLines[i] === replLines[i]) {
-        commonPrefixLength++;
-      } else {
-        break;
-      }
+    // Handle empty cases
+    if (oldLines.length === 0 && newLines.length === 0) {
+      return '';
     }
     
-    const contextLines = editLines.slice(0, commonPrefixLength);
-    const oldLines = editLines.slice(commonPrefixLength);
-    const newLines = replLines.slice(commonPrefixLength);
+    const diff = computeLineDiff(oldLines, newLines);
     
-    return {
-      contextHtml: contextLines.length > 0 ? this.escapeHtml(contextLines.join('\n')) : '',
-      oldHtml: oldLines.length > 0 ? this.escapeHtml(oldLines.join('\n')) : '',
-      newHtml: newLines.length > 0 ? this.escapeHtml(newLines.join('\n')) : '',
-      contextLines: contextLines
-    };
+    const lines = diff.map(entry => {
+      const prefix = entry.type === 'add' ? '+' : entry.type === 'remove' ? '-' : ' ';
+      const escapedLine = this.escapeHtml(entry.line);
+      return `<span class="diff-line ${entry.type}"><span class="diff-line-prefix">${prefix}</span>${escapedLine}</span>`;
+    });
+    
+    return lines.join('\n');
   }
 
   /**
