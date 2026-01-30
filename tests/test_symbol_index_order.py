@@ -5,8 +5,8 @@ import pytest
 from pathlib import Path
 
 from ac.symbol_index.symbol_index import SymbolIndex
-from ac.symbol_index.compact_format import to_compact, _is_test_file, _format_collapsed_test_file
-from ac.symbol_index.models import Symbol, Range
+from ac.symbol_index.compact_format import to_compact, _is_test_file, _format_collapsed_test_file, _format_cross_file_calls
+from ac.symbol_index.models import Symbol, Range, CallSite
 
 
 @pytest.fixture
@@ -704,6 +704,376 @@ class TestToCompactChunked:
         # Should create at most 2 chunks (one per file)
         assert len(chunks) <= 2
         assert len(chunks) > 0
+
+
+class TestCrossFileCallGraph:
+    """Test cross-file call graph resolution and formatting."""
+    
+    def _make_symbol(self, name, kind="function", line=1, children=None, call_sites=None):
+        """Helper to create a symbol with optional call sites."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+            children=children or [],
+            call_sites=call_sites or [],
+        )
+    
+    def _make_call_site(self, name, target_file=None, target_symbol=None, line=1):
+        """Helper to create a CallSite."""
+        from ac.symbol_index.models import CallSite
+        return CallSite(
+            name=name,
+            target_file=target_file,
+            target_symbol=target_symbol,
+            line=line,
+        )
+    
+    def test_format_cross_file_calls_basic(self):
+        """Cross-file calls should be formatted with file:symbol."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("get", target_file="cache.py"),
+            self._make_call_site("save", target_file="db.py"),
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert result == "→cache.py:get,db.py:save"
+    
+    def test_format_cross_file_calls_filters_same_file(self):
+        """Same-file calls should be filtered out."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("external", target_file="other.py"),
+            self._make_call_site("internal", target_file="main.py"),  # Same file
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert "internal" not in result
+        assert "other.py:external" in result
+    
+    def test_format_cross_file_calls_filters_unresolved(self):
+        """Calls without target_file should be filtered out."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("resolved", target_file="other.py"),
+            self._make_call_site("unresolved", target_file=None),
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert "unresolved" not in result
+        assert "other.py:resolved" in result
+    
+    def test_format_cross_file_calls_applies_aliases(self):
+        """Path aliases should be applied to target files."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("get", target_file="ac/url_handler/cache.py"),
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        aliases = {"ac/url_handler/": "@1/"}
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py", aliases=aliases)
+        
+        assert result == "→@1/cache.py:get"
+    
+    def test_format_cross_file_calls_dedupes(self):
+        """Duplicate file:symbol pairs should be deduplicated."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("get", target_file="cache.py", line=10),
+            self._make_call_site("get", target_file="cache.py", line=20),  # Duplicate
+            self._make_call_site("save", target_file="cache.py", line=30),
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        # Should have get and save, but only one get
+        assert result.count("cache.py:get") == 1
+        assert "cache.py:save" in result
+    
+    def test_format_cross_file_calls_limits_to_5(self):
+        """Should limit to 5 calls with +N overflow."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site(f"func{i}", target_file=f"file{i}.py")
+            for i in range(8)
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert "+3" in result
+        # Should have exactly 5 file:func pairs before +3
+        assert result.count(":func") == 5
+    
+    def test_format_cross_file_calls_strips_module_prefix(self):
+        """Module prefixes in call names should be stripped."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("module.submodule.func", target_file="other.py"),
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert result == "→other.py:func"
+    
+    def test_format_cross_file_calls_empty_when_no_calls(self):
+        """Should return empty string when no call sites."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        symbol = self._make_symbol("fetch", call_sites=[])
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert result == ""
+    
+    def test_format_cross_file_calls_empty_when_all_filtered(self):
+        """Should return empty when all calls are filtered out."""
+        from ac.symbol_index.compact_format import _format_cross_file_calls
+        
+        call_sites = [
+            self._make_call_site("internal", target_file="main.py"),  # Same file
+            self._make_call_site("unresolved", target_file=None),  # Unresolved
+        ]
+        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        
+        result = _format_cross_file_calls(symbol, current_file="main.py")
+        
+        assert result == ""
+    
+    def test_to_compact_includes_cross_file_calls_by_default(self):
+        """to_compact should include cross-file calls by default."""
+        call_sites = [
+            self._make_call_site("helper", target_file="utils.py"),
+        ]
+        symbols_by_file = {
+            "main.py": [self._make_symbol("process", call_sites=call_sites)],
+        }
+        
+        result = to_compact(symbols_by_file, include_legend=False)
+        
+        assert "→utils.py:helper" in result
+    
+    def test_to_compact_cross_file_calls_disabled(self):
+        """to_compact with include_cross_file_calls=False should not show calls."""
+        call_sites = [
+            self._make_call_site("helper", target_file="utils.py"),
+        ]
+        symbols_by_file = {
+            "main.py": [self._make_symbol("process", call_sites=call_sites)],
+        }
+        
+        result = to_compact(
+            symbols_by_file, 
+            include_legend=False,
+            include_cross_file_calls=False,
+        )
+        
+        assert "→utils.py:helper" not in result
+        assert "→" not in result
+
+
+class TestSymbolIndexCallResolution:
+    """Test SymbolIndex call target resolution."""
+    
+    def test_resolve_symbol_to_file(self, symbol_index, temp_repo):
+        """_resolve_symbol_to_file should resolve dotted paths."""
+        # Create a module structure
+        (temp_repo / "mypackage").mkdir()
+        (temp_repo / "mypackage" / "__init__.py").write_text("")
+        (temp_repo / "mypackage" / "utils.py").write_text("def helper(): pass")
+        
+        result = symbol_index._resolve_symbol_to_file("mypackage.utils.helper")
+        
+        assert result == "mypackage/utils.py"
+    
+    def test_resolve_symbol_to_file_not_found(self, symbol_index):
+        """_resolve_symbol_to_file returns None for unknown symbols."""
+        result = symbol_index._resolve_symbol_to_file("nonexistent.module.func")
+        
+        assert result is None
+    
+    def test_find_symbol_file_finds_function(self, symbol_index):
+        """_find_symbol_file should find functions by name."""
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        all_symbols = {
+            "utils.py": [Symbol(
+                name="helper",
+                kind="function",
+                file_path="utils.py",
+                range=r,
+                selection_range=r,
+            )],
+            "main.py": [],
+        }
+        
+        result = symbol_index._find_symbol_file("helper", all_symbols, exclude_file="main.py")
+        
+        assert result == "utils.py"
+    
+    def test_find_symbol_file_finds_method(self, symbol_index):
+        """_find_symbol_file should find methods in class children."""
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        method = Symbol(
+            name="process",
+            kind="method",
+            file_path="handler.py",
+            range=r,
+            selection_range=r,
+        )
+        class_sym = Symbol(
+            name="Handler",
+            kind="class",
+            file_path="handler.py",
+            range=r,
+            selection_range=r,
+            children=[method],
+        )
+        all_symbols = {
+            "handler.py": [class_sym],
+        }
+        
+        result = symbol_index._find_symbol_file("process", all_symbols)
+        
+        assert result == "handler.py"
+    
+    def test_find_symbol_file_excludes_current(self, symbol_index):
+        """_find_symbol_file should not match symbols in excluded file."""
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        all_symbols = {
+            "main.py": [Symbol(
+                name="helper",
+                kind="function",
+                file_path="main.py",
+                range=r,
+                selection_range=r,
+            )],
+        }
+        
+        result = symbol_index._find_symbol_file("helper", all_symbols, exclude_file="main.py")
+        
+        assert result is None
+    
+    def test_find_symbol_file_handles_qualified_names(self, symbol_index):
+        """_find_symbol_file should handle Class::method and module.func names."""
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        all_symbols = {
+            "utils.py": [Symbol(
+                name="helper",
+                kind="function",
+                file_path="utils.py",
+                range=r,
+                selection_range=r,
+            )],
+        }
+        
+        # Should strip :: prefix
+        result1 = symbol_index._find_symbol_file("SomeClass::helper", all_symbols)
+        assert result1 == "utils.py"
+        
+        # Should strip . prefix
+        result2 = symbol_index._find_symbol_file("module.helper", all_symbols)
+        assert result2 == "utils.py"
+    
+    def test_resolve_call_targets_populates_target_file(self, symbol_index, temp_repo):
+        """_resolve_call_targets should populate target_file on CallSites."""
+        from ac.symbol_index.models import CallSite
+        
+        # Create target file
+        (temp_repo / "utils.py").write_text("def helper(): pass")
+        
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        call_site = CallSite(name="helper", line=5)
+        symbol = Symbol(
+            name="main",
+            kind="function",
+            file_path="main.py",
+            range=r,
+            selection_range=r,
+            call_sites=[call_site],
+        )
+        
+        all_symbols = {
+            "main.py": [symbol],
+            "utils.py": [Symbol(
+                name="helper",
+                kind="function",
+                file_path="utils.py",
+                range=r,
+                selection_range=r,
+            )],
+        }
+        
+        symbol_index._resolve_call_targets("main.py", [symbol], all_symbols)
+        
+        assert call_site.target_file == "utils.py"
+    
+    def test_resolve_call_targets_skips_already_resolved(self, symbol_index):
+        """_resolve_call_targets should skip calls with existing target_file."""
+        from ac.symbol_index.models import CallSite
+        
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        call_site = CallSite(name="helper", target_file="preset.py", line=5)
+        symbol = Symbol(
+            name="main",
+            kind="function",
+            file_path="main.py",
+            range=r,
+            selection_range=r,
+            call_sites=[call_site],
+        )
+        
+        symbol_index._resolve_call_targets("main.py", [symbol], {})
+        
+        # Should not be changed
+        assert call_site.target_file == "preset.py"
+    
+    def test_resolve_call_targets_via_target_symbol(self, symbol_index, temp_repo):
+        """_resolve_call_targets should use target_symbol for resolution."""
+        from ac.symbol_index.models import CallSite
+        
+        # Create module structure
+        (temp_repo / "mymod").mkdir()
+        (temp_repo / "mymod" / "__init__.py").write_text("")
+        (temp_repo / "mymod" / "helpers.py").write_text("def do_thing(): pass")
+        
+        r = Range(start_line=1, start_col=0, end_line=1, end_col=10)
+        call_site = CallSite(
+            name="do_thing",
+            target_symbol="mymod.helpers.do_thing",
+            line=5,
+        )
+        symbol = Symbol(
+            name="main",
+            kind="function",
+            file_path="main.py",
+            range=r,
+            selection_range=r,
+            call_sites=[call_site],
+        )
+        
+        symbol_index._resolve_call_targets("main.py", [symbol], {})
+        
+        assert call_site.target_file == "mymod/helpers.py"
 
 
 class TestSymbolIndexToCompactChunked:
