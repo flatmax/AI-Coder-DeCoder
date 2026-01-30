@@ -1,6 +1,8 @@
 import { LitElement, html } from 'lit';
 import { historyBrowserStyles } from './HistoryBrowserStyles.js';
 import { renderHistoryBrowser } from './HistoryBrowserTemplate.js';
+import { formatTimestamp, truncateContent } from '../utils/formatters.js';
+import { extractResponse } from '../utils/rpc.js';
 
 export class HistoryBrowser extends LitElement {
   static properties = {
@@ -47,7 +49,7 @@ export class HistoryBrowser extends LitElement {
     this.isLoading = true;
     try {
       const response = await this._call('LiteLLM.history_list_sessions', 50);
-      this.sessions = this._extractResponse(response) || [];
+      this.sessions = extractResponse(response) || [];
     } catch (e) {
       console.error('Error loading sessions:', e);
       this.sessions = [];
@@ -60,7 +62,7 @@ export class HistoryBrowser extends LitElement {
     this.isLoading = true;
     try {
       const response = await this._call('LiteLLM.history_get_session', sessionId);
-      this.selectedSession = this._extractResponse(response) || [];
+      this.selectedSession = extractResponse(response) || [];
     } catch (e) {
       console.error('Error loading session:', e);
       this.selectedSession = [];
@@ -96,7 +98,7 @@ export class HistoryBrowser extends LitElement {
     
     try {
       const response = await this._call('LiteLLM.history_search', this.searchQuery, null, 100);
-      this.searchResults = this._extractResponse(response) || [];
+      this.searchResults = extractResponse(response) || [];
     } catch (e) {
       console.error('Error searching:', e);
       this.searchResults = [];
@@ -130,14 +132,11 @@ export class HistoryBrowser extends LitElement {
   }
 
   formatTimestamp(isoString) {
-    if (!isoString) return '';
-    const date = new Date(isoString);
-    return date.toLocaleString();
+    return formatTimestamp(isoString);
   }
 
   truncateContent(content, maxLength = 200) {
-    if (!content || content.length <= maxLength) return content;
-    return content.substring(0, maxLength) + '...';
+    return truncateContent(content, maxLength);
   }
 
   _call(method, ...args) {
@@ -146,16 +145,6 @@ export class HistoryBrowser extends LitElement {
       return this.rpcCall[method](...args);
     }
     return Promise.reject(new Error('RPC not available'));
-  }
-
-  _extractResponse(response) {
-    if (response && typeof response === 'object') {
-      const keys = Object.keys(response);
-      if (keys.length > 0) {
-        return response[keys[0]];
-      }
-    }
-    return response;
   }
 
   render() {

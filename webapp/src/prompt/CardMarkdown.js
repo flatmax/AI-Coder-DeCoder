@@ -76,11 +76,30 @@ export class CardMarkdown extends LitElement {
     }
 
     .files-summary-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       color: #8b949e;
       font-size: 11px;
       text-transform: uppercase;
       margin-bottom: 8px;
       font-weight: 600;
+    }
+
+    .select-all-btn {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      text-transform: none;
+    }
+
+    .select-all-btn:hover {
+      background: #2ea043;
     }
 
     .files-summary-list {
@@ -577,6 +596,9 @@ export class CardMarkdown extends LitElement {
       return '';
     }
 
+    const notInContextFiles = this._foundFiles.filter(f => !this.selectedFiles || !this.selectedFiles.includes(f));
+    const hasFilesToAdd = notInContextFiles.length > 1;
+
     const filesHtml = this._foundFiles.map(filePath => {
       const isInContext = this.selectedFiles && this.selectedFiles.includes(filePath);
       const chipClass = isInContext ? 'in-context' : 'not-in-context';
@@ -584,9 +606,13 @@ export class CardMarkdown extends LitElement {
       return `<span class="file-chip ${chipClass}" data-file="${this.escapeHtml(filePath)}"><span class="chip-icon">${icon}</span>${this.escapeHtml(filePath)}</span>`;
     }).join('');
 
+    const selectAllBtn = hasFilesToAdd 
+      ? `<button class="select-all-btn" data-files='${JSON.stringify(notInContextFiles)}'>+ Add All (${notInContextFiles.length})</button>`
+      : '';
+
     return `
       <div class="files-summary">
-        <div class="files-summary-header">📁 Files Referenced</div>
+        <div class="files-summary-header">📁 Files Referenced ${selectAllBtn}</div>
         <div class="files-summary-list">${filesHtml}</div>
       </div>
     `;
@@ -635,6 +661,24 @@ export class CardMarkdown extends LitElement {
           bubbles: true,
           composed: true
         }));
+      }
+    }
+
+    // Handle select all button click
+    const selectAllBtn = e.target.closest('.select-all-btn');
+    if (selectAllBtn) {
+      try {
+        const files = JSON.parse(selectAllBtn.dataset.files || '[]');
+        // Dispatch file-mention-click for each file (same as clicking individual chips)
+        for (const filePath of files) {
+          this.dispatchEvent(new CustomEvent('file-mention-click', {
+            detail: { path: filePath },
+            bubbles: true,
+            composed: true
+          }));
+        }
+      } catch (e) {
+        console.error('Failed to parse files:', e);
       }
     }
   }
