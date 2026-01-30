@@ -71,6 +71,8 @@ export class PromptView extends MixedBase {
     this.fetchedUrls = {};
     this.excludedUrls = new Set();
     this.activeLeftTab = 'files';
+    this._filePickerScrollTop = 0;
+    this._messagesScrollTop = 0;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
@@ -229,9 +231,34 @@ export class PromptView extends MixedBase {
    * Switch between tabs (files/search/context)
    */
   switchTab(tab) {
+    // Save scroll positions before switching away from files tab
+    if (this.activeLeftTab === 'files') {
+      const filePicker = this.shadowRoot?.querySelector('file-picker');
+      if (filePicker) {
+        this._filePickerScrollTop = filePicker.getScrollTop();
+      }
+      const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+      if (messagesContainer) {
+        this._messagesScrollTop = messagesContainer.scrollTop;
+      }
+    }
+
     this.activeLeftTab = tab;
-    
-    if (tab === 'search') {
+
+    // Restore scroll positions when switching back to files tab
+    if (tab === 'files') {
+      this.updateComplete.then(async () => {
+        const filePicker = this.shadowRoot?.querySelector('file-picker');
+        if (filePicker && this._filePickerScrollTop > 0) {
+          await filePicker.updateComplete;
+          filePicker.setScrollTop(this._filePickerScrollTop);
+        }
+        const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+        if (messagesContainer && this._messagesScrollTop > 0) {
+          messagesContainer.scrollTop = this._messagesScrollTop;
+        }
+      });
+    } else if (tab === 'search') {
       this.updateComplete.then(() => {
         const findInFiles = this.shadowRoot?.querySelector('find-in-files');
         if (findInFiles) {
