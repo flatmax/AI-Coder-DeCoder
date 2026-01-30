@@ -115,7 +115,7 @@ For now, use fixed thresholds: L1=3, L0=10.
 
 ## Implementation
 
-### Phase 1: Generic Stability Tracker
+### Phase 1: Generic Stability Tracker ✅ COMPLETE
 
 **New file: `ac/context/stability_tracker.py`**
 
@@ -343,14 +343,14 @@ class StabilityTracker:
             self._persistence_path.unlink()
 ```
 
-**Changes to `ac/context/__init__.py`:**
+**Changes to `ac/context/__init__.py`:** ✅
 - Export `StabilityTracker`, `StabilityInfo`
 
-**Changes to `ac/context/manager.py`:**
+**Changes to `ac/context/manager.py`:** ✅
 - Add `StabilityTracker` instance for file stability
 - Expose methods for streaming to query tiers
 
-### Phase 2: Message Building
+### Phase 2: Message Building ✅ COMPLETE
 
 **Changes to `ac/llm/streaming.py`:**
 
@@ -452,7 +452,7 @@ def _format_files_for_cache(self, file_paths: list[str], header: str) -> str:
     return "\n\n".join(parts)
 ```
 
-### Phase 3: Post-Response Updates
+### Phase 3: Post-Response Updates ✅ COMPLETE
 
 **Changes to `ac/llm/streaming.py`:**
 
@@ -570,19 +570,23 @@ def get_stable_file_order(self, file_paths: list[str]) -> list[str]:
 
 This ensures symbol map chunks have stable files at the start (cached prefix) and volatile files at the end (uncached suffix).
 
-## Future: Context Viewer Integration
+### Phase 5: Context Viewer UI
 
-Add cache tier visualization to the context viewer UI:
+**Goal:** Show cache tier badges on files in the context viewer so users can see what's cached.
+
+**Changes to `ac/llm/llm.py`:**
+- Update `get_context_breakdown()` to include tier info for each file
+
+**Changes to `webapp/src/context-viewer/ContextViewerTemplate.js`:**
+- Add tier badges (🔒 L0, 📌 L1, ✏️ active) to file items in the expanded files section
 
 ```javascript
 // Show tier badges on files
-renderFileItem(file) {
-    const tierBadge = {
-        'L0': '🔒',  // Cached, most stable
-        'L1': '📌',  // Cached, moderately stable  
-        'active': '✏️'  // Uncached, being edited
-    }[file.tier];
-    
-    return html`<span>${tierBadge} ${file.path} (${file.tokens} tokens)</span>`;
-}
+const tierBadge = {
+    'L0': '🔒',  // Cached, most stable
+    'L1': '📌',  // Cached, moderately stable  
+    'active': '✏️'  // Uncached, being edited
+}[item.tier] || '';
+
+return html`<span>${tierBadge} ${item.path} (${formatTokens(item.tokens)})</span>`;
 ```

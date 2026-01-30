@@ -5,10 +5,12 @@ Handles conversation history, token budgets, summarization triggers,
 and HUD (terminal output) for context status.
 """
 
+from pathlib import Path
 from typing import Optional
 
 from .token_counter import TokenCounter
 from .file_context import FileContext
+from .stability_tracker import StabilityTracker
 
 
 def _format_tokens(count: int) -> str:
@@ -54,6 +56,12 @@ class ContextManager:
         self.token_counter = TokenCounter(model_name)
         self.file_context = FileContext(repo_root)
         self.token_tracker = token_tracker
+        
+        # File stability tracker for cache tiering
+        self.file_stability: Optional[StabilityTracker] = None
+        if repo_root:
+            stability_path = Path(repo_root) / '.aicoder' / 'file_stability.json'
+            self.file_stability = StabilityTracker(persistence_path=stability_path)
         
         # Conversation history
         self._history: list[dict] = []
