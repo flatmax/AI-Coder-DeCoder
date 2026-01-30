@@ -997,26 +997,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     cached = fetcher.cache.get(url)
                     if cached:
                         # Build the URL content as it would appear in the prompt
-                        # (mirrors _build_streaming_messages URL handling)
-                        url_part = f"## {cached.url}\n"
-                        if cached.title:
-                            url_part += f"**{cached.title}**\n\n"
-                        
-                        # Use readme or content (truncated as in streaming)
-                        if cached.readme:
-                            readme = cached.readme
-                            if len(readme) > 4000:
-                                readme = readme[:4000] + "\n\n[truncated...]"
-                            url_part += f"{readme}\n"
-                        elif cached.content:
-                            content = cached.content
-                            if len(content) > 4000:
-                                content = content[:4000] + "\n\n[truncated...]"
-                            url_part += f"{content}\n"
-                        
-                        if cached.symbol_map:
-                            url_part += f"\n### Symbol Map\n```\n{cached.symbol_map}\n```\n"
-                        
+                        url_part = cached.format_for_prompt()
                         tokens = tc.count(url_part)
                         url_items.append({
                             "url": url,
