@@ -1,9 +1,9 @@
 import { LitElement, html } from 'lit';
 import { findInFilesStyles } from './FindInFilesStyles.js';
 import { renderFindInFiles } from './FindInFilesTemplate.js';
-import { extractResponse } from '../utils/rpc.js';
+import { extractResponse, RpcMixin, debounce } from '../utils/rpc.js';
 
-export class FindInFiles extends LitElement {
+export class FindInFiles extends RpcMixin(LitElement) {
   static properties = {
     query: { type: String },
     results: { type: Array },
@@ -29,7 +29,7 @@ export class FindInFiles extends LitElement {
     this.searchPerformed = false;
     this.error = null;
     this.expandedFiles = {};
-    this._searchDebounceTimer = null;
+    this._debouncedSearch = debounce(() => this.performSearch(), 300);
     this.focusedIndex = -1;
     this.hoveredIndex = -1;
     
@@ -69,13 +69,10 @@ export class FindInFiles extends LitElement {
     this.error = null;
     this.focusedIndex = -1;
     
-    if (this._searchDebounceTimer) {
-      clearTimeout(this._searchDebounceTimer);
-    }
-    
     if (this.query.trim()) {
-      this._searchDebounceTimer = setTimeout(() => this.performSearch(), 300);
+      this._debouncedSearch();
     } else {
+      this._debouncedSearch.cancel();
       this.results = [];
       this.searchPerformed = false;
       this.isSearching = false;
@@ -230,13 +227,6 @@ export class FindInFiles extends LitElement {
       input.focus();
       input.select();
     }
-  }
-
-  _call(method, ...args) {
-    if (this.rpcCall?.[method]) {
-      return this.rpcCall[method](...args);
-    }
-    return Promise.reject(new Error('RPC not available'));
   }
 
   render() {

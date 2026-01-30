@@ -1,7 +1,6 @@
 import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
-import { formatTokens } from '../utils/formatters.js';
 import { extractResponse } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
@@ -194,10 +193,6 @@ export class ContextViewer extends LitElement {
   closeSymbolMapModal() {
     this.showSymbolMapModal = false;
     this.symbolMapContent = null;
-  }
-
-  formatTokens(count) {
-    return formatTokens(count);
   }
 
   getUsagePercent() {

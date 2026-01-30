@@ -63,6 +63,41 @@ class URLContent:
     summary: Optional[str] = None
     summary_type: Optional[str] = None  # Store as string for serialization
     
+    def format_for_prompt(self, summary: Optional[str] = None, max_content_length: int = 4000) -> str:
+        """
+        Format URL content for inclusion in LLM prompt.
+        
+        Args:
+            summary: Optional summary to use instead of full content
+            max_content_length: Maximum length for readme/content before truncation
+            
+        Returns:
+            Formatted string for prompt inclusion
+        """
+        parts = [f"## {self.url}"]
+        
+        if self.title:
+            parts.append(f"**{self.title}**\n")
+        
+        # Prefer summary, then readme, then content
+        if summary:
+            parts.append(summary)
+        elif self.readme:
+            readme = self.readme
+            if len(readme) > max_content_length:
+                readme = readme[:max_content_length] + "\n\n[truncated...]"
+            parts.append(readme)
+        elif self.content:
+            content = self.content
+            if len(content) > max_content_length:
+                content = content[:max_content_length] + "\n\n[truncated...]"
+            parts.append(content)
+        
+        if self.symbol_map:
+            parts.append(f"\n### Symbol Map\n```\n{self.symbol_map}\n```")
+        
+        return "\n".join(parts)
+    
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {

@@ -1,4 +1,5 @@
 import { html } from 'lit';
+import { formatTokens } from '../utils/formatters.js';
 
 function renderSymbolMapButton(component) {
   return html`
@@ -24,7 +25,7 @@ function renderBudgetSection(component) {
       <div class="budget-header">
         <span class="budget-title">Token Budget</span>
         <span class="budget-value">
-          ${component.formatTokens(breakdown.used_tokens)} / ${component.formatTokens(breakdown.max_input_tokens)}
+          ${formatTokens(breakdown.used_tokens)} / ${formatTokens(breakdown.max_input_tokens)}
         </span>
       </div>
       <div class="budget-bar">
@@ -48,7 +49,7 @@ function renderCategoryRow(component, key, data, expandable = false) {
         ${expandable ? (expanded ? '▼' : '▶') : ''}
       </span>
       <span class="category-label">${data.label}</span>
-      <span class="category-tokens">${component.formatTokens(data.tokens)}</span>
+      <span class="category-tokens">${formatTokens(data.tokens)}</span>
       <div class="category-bar">
         <div class="category-bar-fill" style="width: ${barWidth}%"></div>
       </div>
@@ -64,7 +65,7 @@ function renderExpandedItems(component, key, data) {
         ${data.items.map(item => html`
           <div class="item-row">
             <span class="item-path" title="${item.path}">${item.path}</span>
-            <span class="item-tokens">${component.formatTokens(item.tokens)}</span>
+            <span class="item-tokens">${formatTokens(item.tokens)}</span>
           </div>
         `)}
       </div>
@@ -85,7 +86,7 @@ function renderExpandedItems(component, key, data) {
                 <div class="chunk-row ${chunk.cached ? 'cached' : 'uncached'}">
                   <span class="chunk-icon">${chunk.cached ? '🔒' : '📝'}</span>
                   <span class="chunk-label">Chunk ${chunk.index}</span>
-                  <span class="chunk-tokens">~${component.formatTokens(chunk.tokens)}</span>
+                  <span class="chunk-tokens">~${formatTokens(chunk.tokens)}</span>
                   <span class="chunk-file-count">${chunk.files?.length || 0} files</span>
                   <span class="chunk-status">${chunk.cached ? 'cached' : 'volatile'}</span>
                 </div>
@@ -145,7 +146,7 @@ function renderExpandedItems(component, key, data) {
                 title="${included ? 'Click to exclude from context' : 'Click to include in context'}"
               />
               <span class="item-path ${included ? '' : 'excluded'}" title="${url}">${urlData.title || url}</span>
-              <span class="item-tokens">${included ? component.formatTokens(urlData.tokens || 0) : '—'}</span>
+              <span class="item-tokens">${included ? formatTokens(urlData.tokens || 0) : '—'}</span>
               <div class="item-actions">
                 <button class="item-btn" @click=${(e) => { e.stopPropagation(); component.viewUrl(url); }}>
                   View
@@ -164,7 +165,7 @@ function renderExpandedItems(component, key, data) {
   if (key === 'history' && data.needs_summary) {
     return html`
       <div class="history-warning">
-        ⚠️ History exceeds budget (${component.formatTokens(data.tokens)} / ${component.formatTokens(data.max_tokens)}) - consider summarizing
+        ⚠️ History exceeds budget (${formatTokens(data.tokens)} / ${formatTokens(data.max_tokens)}) - consider summarizing
       </div>
     `;
   }
@@ -212,26 +213,26 @@ function renderBreakdownSection(component) {
           <div class="breakdown-title">Session Totals</div>
           <div class="session-row">
             <span class="session-label">Tokens In:</span>
-            <span class="session-value">${component.formatTokens(breakdown.session_totals.prompt_tokens)}</span>
+            <span class="session-value">${formatTokens(breakdown.session_totals.prompt_tokens)}</span>
           </div>
           <div class="session-row">
             <span class="session-label">Tokens Out:</span>
-            <span class="session-value">${component.formatTokens(breakdown.session_totals.completion_tokens)}</span>
+            <span class="session-value">${formatTokens(breakdown.session_totals.completion_tokens)}</span>
           </div>
           <div class="session-row total">
             <span class="session-label">Total:</span>
-            <span class="session-value">${component.formatTokens(breakdown.session_totals.total_tokens)}</span>
+            <span class="session-value">${formatTokens(breakdown.session_totals.total_tokens)}</span>
           </div>
           ${breakdown.session_totals.cache_hit_tokens ? html`
             <div class="session-row cache">
               <span class="session-label">Cache Reads:</span>
-              <span class="session-value">${component.formatTokens(breakdown.session_totals.cache_hit_tokens)}</span>
+              <span class="session-value">${formatTokens(breakdown.session_totals.cache_hit_tokens)}</span>
             </div>
           ` : ''}
           ${breakdown.session_totals.cache_write_tokens ? html`
             <div class="session-row cache">
               <span class="session-label">Cache Writes:</span>
-              <span class="session-value">${component.formatTokens(breakdown.session_totals.cache_write_tokens)}</span>
+              <span class="session-value">${formatTokens(breakdown.session_totals.cache_write_tokens)}</span>
             </div>
           ` : ''}
         </div>
