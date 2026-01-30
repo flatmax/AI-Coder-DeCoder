@@ -91,13 +91,23 @@ export class UrlService {
 1. ~~**Phase 1a:** Merge ImageHandlerMixin methods into InputHandlerMixin~~ ✅ DONE
 1. ~~**Phase 1b:** Update PromptView to remove ImageHandlerMixin from chain~~ ✅ DONE
 1. ~~**Phase 1c:** Delete ImageHandlerMixin.js~~ ✅ DONE
-2. **Phase 2a:** Create `UrlService.js` with extracted logic
-2. **Phase 2b:** Update PromptView to use service, remove UrlHandlerMixin
-2. **Phase 2c:** Delete UrlHandlerMixin.js
+2. ~~**Phase 2a:** Create `UrlService.js` with extracted logic~~ ✅ DONE
+2. ~~**Phase 2b:** Update PromptView to use service, remove UrlHandlerMixin~~ ✅ DONE
+2. ~~**Phase 2c:** Delete UrlHandlerMixin.js~~ ✅ DONE
 
 ## Current Status
 
-**Phase 1 Complete:** ImageHandlerMixin merged into InputHandlerMixin. PromptView now uses 6 mixins (down from 7).
+**Phase 1 & 2 Complete:** 
+- ImageHandlerMixin merged into InputHandlerMixin
+- URL handling extracted to `UrlService.js` service class
+- PromptView now uses 5 mixins (down from 7):
+  - `StreamingMixin`
+  - `WindowControlsMixin`
+  - `InputHandlerMixin`
+  - `ChatActionsMixin`
+  - `FileHandlerMixin`
+
+All success criteria met. This plan is **COMPLETE**.
 
 ## Success Criteria
 
