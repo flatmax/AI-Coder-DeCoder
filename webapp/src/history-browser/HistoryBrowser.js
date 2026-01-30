@@ -1,10 +1,9 @@
 import { LitElement, html } from 'lit';
 import { historyBrowserStyles } from './HistoryBrowserStyles.js';
 import { renderHistoryBrowser } from './HistoryBrowserTemplate.js';
-import { formatTimestamp, truncateContent } from '../utils/formatters.js';
-import { extractResponse } from '../utils/rpc.js';
+import { extractResponse, RpcMixin, debounce } from '../utils/rpc.js';
 
-export class HistoryBrowser extends LitElement {
+export class HistoryBrowser extends RpcMixin(LitElement) {
   static properties = {
     visible: { type: Boolean },
     sessions: { type: Array },
@@ -28,7 +27,7 @@ export class HistoryBrowser extends LitElement {
     this.searchResults = [];
     this.isSearching = false;
     this.isLoading = false;
-    this._searchDebounceTimer = null;
+    this._debouncedSearch = debounce(() => this.performSearch(), 300);
   }
 
   async show() {
@@ -73,14 +72,10 @@ export class HistoryBrowser extends LitElement {
   handleSearchInput(e) {
     this.searchQuery = e.target.value;
     
-    // Debounce search
-    if (this._searchDebounceTimer) {
-      clearTimeout(this._searchDebounceTimer);
-    }
-    
     if (this.searchQuery.trim()) {
-      this._searchDebounceTimer = setTimeout(() => this.performSearch(), 300);
+      this._debouncedSearch();
     } else {
+      this._debouncedSearch.cancel();
       this.searchResults = [];
       this.isSearching = false;
     }
@@ -129,22 +124,6 @@ export class HistoryBrowser extends LitElement {
       composed: true
     }));
     this.hide();
-  }
-
-  formatTimestamp(isoString) {
-    return formatTimestamp(isoString);
-  }
-
-  truncateContent(content, maxLength = 200) {
-    return truncateContent(content, maxLength);
-  }
-
-  _call(method, ...args) {
-    // This will be set by the parent component
-    if (this.rpcCall) {
-      return this.rpcCall[method](...args);
-    }
-    return Promise.reject(new Error('RPC not available'));
   }
 
   render() {
