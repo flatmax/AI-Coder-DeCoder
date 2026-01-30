@@ -1,5 +1,6 @@
 import { html } from 'lit';
 import '../prompt/CardMarkdown.js';
+import { formatTimestamp, truncateContent } from '../utils/formatters.js';
 
 function renderSessionsList(component) {
   if (component.isSearching && component.searchResults.length > 0) {
@@ -13,10 +14,10 @@ function renderSessionsList(component) {
           @click=${() => component.selectSession(msg.session_id)}
         >
           <div class="search-result-session">
-            ${component.formatTimestamp(msg.timestamp)} · ${msg.role}
+            ${formatTimestamp(msg.timestamp)} · ${msg.role}
           </div>
           <div class="search-result-content">
-            ${component.truncateContent(msg.content, 150)}
+            ${truncateContent(msg.content, 150)}
           </div>
         </div>
       `)}
@@ -37,7 +38,7 @@ function renderSessionsList(component) {
       class="session-item ${component.selectedSessionId === session.session_id ? 'selected' : ''}"
       @click=${() => component.selectSession(session.session_id)}
     >
-      <div class="session-date">${component.formatTimestamp(session.timestamp)}</div>
+      <div class="session-date">${formatTimestamp(session.timestamp)}</div>
       <div class="session-preview">${session.preview}</div>
       <div class="session-count">${session.message_count} messages</div>
     </div>
@@ -71,7 +72,7 @@ function renderMessages(component) {
     <div class="message-card ${msg.role}">
       <div class="message-header">
         <span class="message-role">${msg.role}</span>
-        <span class="message-time">${component.formatTimestamp(msg.timestamp)}</span>
+        <span class="message-time">${formatTimestamp(msg.timestamp)}</span>
       </div>
       <div class="message-content">
         ${msg.role === 'assistant' 
