@@ -35,7 +35,14 @@ class PythonExtractor(BaseExtractor):
     ):
         """Recursively extract symbols from a node."""
         
-        if node.type == 'class_definition':
+        # Handle function definitions (check for 'async' keyword child)
+        if node.type == 'function_definition':
+            is_async = any(child.type == 'async' for child in node.children)
+            symbol = self._extract_function(node, file_path, content, parent, is_async=is_async)
+            if symbol:
+                symbols.append(symbol)
+        
+        elif node.type == 'class_definition':
             symbol = self._extract_class(node, file_path, content, parent)
             if symbol:
                 symbols.append(symbol)
@@ -44,14 +51,9 @@ class PythonExtractor(BaseExtractor):
                 if body:
                     for child in body.children:
                         self._extract_from_node(
-                            child, file_path, content, 
+                            child, file_path, content,
                             symbol.children, parent=symbol.name
                         )
-        
-        elif node.type == 'function_definition':
-            symbol = self._extract_function(node, file_path, content, parent)
-            if symbol:
-                symbols.append(symbol)
         
         elif node.type == 'import_statement':
             symbol, imp = self._extract_import_statement(node, file_path, content)
@@ -154,7 +156,7 @@ class PythonExtractor(BaseExtractor):
         )
     
     def _extract_function(
-        self, node, file_path: str, content: bytes, parent: Optional[str]
+        self, node, file_path: str, content: bytes, parent: Optional[str], is_async: bool = False
     ) -> Optional[Symbol]:
         """Extract a function/method definition."""
         name_node = self._find_child(node, 'identifier')
@@ -191,6 +193,7 @@ class PythonExtractor(BaseExtractor):
             docstring=docstring,
             calls=calls,
             call_sites=call_sites,
+            is_async=is_async,
         )
     
     def _extract_parameters(self, params_node, content: bytes) -> List[Parameter]:
@@ -354,19 +357,6 @@ class PythonExtractor(BaseExtractor):
         )
         
         return symbol, imp
-    
-    def _update_import_map(self, imp: Import):
-        """Update the import map for call resolution."""
-        if imp.names:
-            # from foo import bar -> bar maps to foo.bar
-            for name in imp.names:
-                alias = imp.aliases.get(name, name)
-                self._import_map[alias] = f"{imp.module}.{name}" if imp.module else name
-        else:
-            # import foo or import foo as bar
-            module_name = imp.module.split('.')[0]
-            alias = imp.aliases.get(imp.module, module_name)
-            self._import_map[alias] = imp.module
     
     def _extract_assignment(
         self, node, file_path: str, content: bytes, parent: Optional[str]

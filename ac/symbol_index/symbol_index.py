@@ -5,7 +5,7 @@ import os
 from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
 
-from .models import Symbol
+from .models import Symbol, CallSite
 from .parser import get_parser
 from .extractors import get_extractor
 from .cache import SymbolCache
@@ -363,10 +363,117 @@ class SymbolIndex:
             if file_path in self._file_imports:
                 file_imports[file_path] = self._file_imports[file_path]
         
+        # Resolve call targets to file paths (cross-file calls)
+        self._resolve_all_call_targets(symbols_by_file)
+        
         # Get stable file order for prefix cache optimization
         file_order = self.get_ordered_files(list(symbols_by_file.keys()))
         
         return symbols_by_file, references, file_refs, file_imports, file_order
+    
+    def _resolve_all_call_targets(self, symbols_by_file: Dict[str, List[Symbol]]):
+        """Resolve call targets to file paths for all indexed files.
+        
+        This populates CallSite.target_file by resolving target_symbol
+        (set by extractors) to actual file paths using the import resolver.
+        For languages without import maps (C++), falls back to name-based lookup.
+        
+        Args:
+            symbols_by_file: Dict of file_path -> symbols (modified in place)
+        """
+        for file_path, symbols in symbols_by_file.items():
+            self._resolve_call_targets(file_path, symbols, symbols_by_file)
+    
+    def _resolve_call_targets(
+        self, 
+        file_path: str, 
+        symbols: List[Symbol], 
+        all_symbols: Dict[str, List[Symbol]]
+    ):
+        """Backfill target_file on CallSites after import resolution.
+        
+        Args:
+            file_path: Current file being processed
+            symbols: Symbols from this file
+            all_symbols: All indexed symbols (for name-based fallback)
+        """
+        for symbol in symbols:
+            for call_site in symbol.call_sites:
+                if call_site.target_file:
+                    continue  # Already resolved
+                
+                # Method 1: Resolve via target_symbol (Python/JS)
+                if call_site.target_symbol:
+                    resolved = self._resolve_symbol_to_file(call_site.target_symbol)
+                    if resolved:
+                        call_site.target_file = resolved
+                        continue
+                
+                # Method 2: Search all indexed symbols by name (C++ fallback)
+                resolved = self._find_symbol_file(call_site.name, all_symbols, exclude_file=file_path)
+                if resolved:
+                    call_site.target_file = resolved
+            
+            # Recurse into children (methods)
+            self._resolve_call_targets(file_path, symbol.children, all_symbols)
+    
+    def _resolve_symbol_to_file(self, target_symbol: str) -> Optional[str]:
+        """Resolve a dotted symbol path to a file path.
+        
+        e.g., "ac.url_handler.cache.URLCache" -> "ac/url_handler/cache.py"
+        
+        Args:
+            target_symbol: Dotted symbol path like "module.submodule.ClassName"
+            
+        Returns:
+            Relative file path if resolved, None otherwise
+        """
+        parts = target_symbol.split('.')
+        # Try progressively shorter prefixes as module path
+        for i in range(len(parts), 0, -1):
+            module = '.'.join(parts[:i])
+            # Try Python resolution
+            resolved = self._import_resolver.resolve_python_import(
+                module=module,
+                from_file='',
+                is_relative=False,
+                level=0,
+            )
+            if resolved:
+                return resolved
+        return None
+    
+    def _find_symbol_file(
+        self, 
+        name: str, 
+        all_symbols: Dict[str, List[Symbol]], 
+        exclude_file: str = None
+    ) -> Optional[str]:
+        """Find which file defines a symbol by name (for C++ etc).
+        
+        Args:
+            name: Symbol name to find
+            all_symbols: Dict of file_path -> symbols
+            exclude_file: Don't match symbols from this file
+            
+        Returns:
+            File path if found, None otherwise
+        """
+        # Handle qualified names like "ClassName::method" or "module.func"
+        search_name = name.split('::')[-1] if '::' in name else name
+        search_name = search_name.split('.')[-1] if '.' in search_name else search_name
+        
+        for fpath, symbols in all_symbols.items():
+            if fpath == exclude_file:
+                continue
+            for sym in symbols:
+                if sym.name == search_name and sym.kind in ('function', 'method', 'class'):
+                    return fpath
+                # Check children (methods)
+                for child in sym.children:
+                    if child.name == search_name and child.kind in ('function', 'method'):
+                        return fpath
+        return None
     
     def to_compact(
         self, 

@@ -4,6 +4,58 @@ from typing import List, Dict, Optional, Set, Union
 from .models import Symbol, CallSite
 
 
+def format_file_tree(tree_data: dict, include_lines: bool = False) -> str:
+    """Format repository file tree as a flat list for LLM context.
+    
+    Args:
+        tree_data: Tree dict from Repo.get_file_tree() with 'tree' key
+        include_lines: Whether to include line counts [N]
+        
+    Returns:
+        Formatted string with one file per line, sorted by path
+    """
+    if not tree_data or 'tree' not in tree_data:
+        return ""
+    
+    # Collect all files from the tree
+    files = []
+    _collect_files(tree_data['tree'], files)
+    
+    if not files:
+        return ""
+    
+    # Sort by path for consistency
+    files.sort(key=lambda x: x[0])
+    
+    # Format as flat list
+    lines = [f"# File Tree ({len(files)} files)", ""]
+    for path, line_count in files:
+        if include_lines and line_count > 0:
+            lines.append(f"{path} [{line_count}]")
+        else:
+            lines.append(path)
+    
+    return "\n".join(lines)
+
+
+def _collect_files(node: dict, files: list, current_path: str = ""):
+    """Recursively collect files from tree structure.
+    
+    Args:
+        node: Tree node dict
+        files: List to append (path, lines) tuples to
+        current_path: Current directory path
+    """
+    # Files have 'path' but no 'children'
+    if 'path' in node and 'children' not in node:
+        files.append((node['path'], node.get('lines', 0)))
+        return
+    
+    # Process children
+    for child in node.get('children', []):
+        _collect_files(child, files, current_path)
+
+
 # Single-letter kind prefixes
 KIND_PREFIX = {
     'class': 'c',
@@ -12,6 +64,8 @@ KIND_PREFIX = {
     'variable': 'v',
     'import': 'i',
     'property': 'p',
+    'async_method': 'am',
+    'async_function': 'af',
 }
 
 # Conditional marker
@@ -19,12 +73,99 @@ CONDITIONAL_MARKER = '?'
 
 
 # Legend for compact format (path aliases appended dynamically)
-LEGEND_BASE = "# c=class m=method f=function v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←=refs →=calls +N=more ″=ditto"
+LEGEND_BASE = "# c=class m=method f=function af=async func am=async method v=var p=property i=import i→=local\n# :N=line(s) ->T=returns ?=optional ←N=refs →=calls +N=more ″=ditto Nc/Nm=test summary"
 
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count using ~4 chars per token heuristic."""
     return len(text) // 4 + 1
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Check if a file is a test file based on path/name conventions."""
+    path_lower = file_path.lower()
+    # Check common test file patterns
+    if '/test_' in path_lower or '\\test_' in path_lower:
+        return True
+    if path_lower.startswith('test_'):
+        return True
+    if path_lower.startswith('tests/') or '\\tests\\' in path_lower:
+        return True
+    if '/tests/' in path_lower:
+        return True
+    if '_test.py' in path_lower or '_test.js' in path_lower:
+        return True
+    if '.test.' in path_lower or '.spec.' in path_lower:
+        return True
+    return False
+
+
+def _format_collapsed_test_file(
+    file_path: str,
+    symbols: List[Symbol],
+    file_imports: Optional[Dict[str, Set[str]]],
+    aliases: Dict[str, str] = None,
+) -> List[str]:
+    """Format a test file as a collapsed summary.
+    
+    Instead of listing every test method, shows:
+    - Import dependencies (important for understanding what's being tested)
+    - Summary counts of test classes and methods
+    """
+    lines = []
+    lines.append(f"{file_path}:")
+    
+    aliases = aliases or {}
+    
+    # Still show imports - these reveal what's being tested
+    imports = [s for s in symbols if s.kind == 'import']
+    if imports:
+        import_names = _extract_import_names(imports)
+        if import_names:
+            lines.append(f"i {','.join(import_names)}")
+    
+    # Show in-repo imports (critical - shows test dependencies)
+    if file_imports and file_path in file_imports:
+        in_repo_imports = sorted(file_imports[file_path])
+        if in_repo_imports:
+            lines.append(f"i→ {','.join(in_repo_imports)}")
+    
+    # Count test classes and methods
+    test_classes = []
+    test_functions = 0
+    fixture_functions = []
+    
+    for s in symbols:
+        if s.kind == 'class':
+            method_count = len([c for c in s.children if c.kind in ('method', 'async_method')])
+            test_classes.append((s.name, method_count))
+        elif s.kind in ('function', 'async_function'):
+            name_lower = s.name.lower()
+            if name_lower.startswith('test_'):
+                test_functions += 1
+            elif not name_lower.startswith('_'):
+                # Likely a fixture or helper
+                fixture_functions.append(s.name)
+    
+    # Format summary
+    parts = []
+    if test_classes:
+        total_methods = sum(m for _, m in test_classes)
+        parts.append(f"{len(test_classes)}c/{total_methods}m")
+    if test_functions:
+        parts.append(f"{test_functions}f")
+    if fixture_functions:
+        # Show fixture names (often important: conftest fixtures, factories)
+        if len(fixture_functions) <= 3:
+            parts.append(f"fixtures:{','.join(fixture_functions)}")
+        else:
+            parts.append(f"{len(fixture_functions)} fixtures")
+    
+    if parts:
+        lines.append(f"# {' '.join(parts)}")
+    
+    lines.append("")  # Blank line between files
+    return lines
 
 
 def _compute_path_aliases(
@@ -101,7 +242,7 @@ def _compute_path_aliases(
     
     aliases = {}
     for i, (prefix, count, savings) in enumerate(selected):
-        aliases[prefix] = f"@{i + 1}"
+        aliases[prefix] = f"@{i + 1}/"
     
     return aliases
 
@@ -151,6 +292,8 @@ def _format_file_block(
     include_instance_vars: bool,
     include_calls: bool,
     aliases: Dict[str, str] = None,
+    collapse_tests: bool = True,
+    include_cross_file_calls: bool = True,
 ) -> List[str]:
     """Format a single file's symbols into lines.
     
@@ -161,8 +304,10 @@ def _format_file_block(
         file_refs: Optional dict of file -> set of files that reference it
         file_imports: Optional dict of file -> set of in-repo files it imports
         include_instance_vars: Whether to include instance variables
-        include_calls: Whether to include call information
+        include_calls: Whether to include call information (all calls by name)
         aliases: Optional dict mapping path prefixes to short aliases
+        collapse_tests: Whether to collapse test files to summaries
+        include_cross_file_calls: Whether to include cross-file call annotations
         
     Returns:
         List of formatted lines for this file
@@ -171,7 +316,20 @@ def _format_file_block(
         return []
     
     lines = []
-    lines.append(f"{file_path}:")
+    
+    # Check if this is a test file that should be collapsed
+    is_test_file = _is_test_file(file_path)
+    if is_test_file and collapse_tests:
+        return _format_collapsed_test_file(file_path, symbols, file_imports, aliases)
+    
+    # Calculate file weight (total incoming references)
+    file_weight = len(file_refs.get(file_path, set())) if file_refs else 0
+    
+    # Format header with weight if significant
+    if file_weight > 0:
+        lines.append(f"{file_path}: ←{file_weight}")
+    else:
+        lines.append(f"{file_path}:")
     
     # Get references for this file if available
     file_references = references.get(file_path, {}) if references else {}
@@ -229,6 +387,8 @@ def _format_file_block(
             include_calls=include_calls,
             use_ditto_refs=use_ditto,
             aliases=aliases,
+            current_file=file_path,
+            include_cross_file_calls=include_cross_file_calls,
         ))
         
         if refs_str:
@@ -244,6 +404,8 @@ def _format_file_block(
                 include_instance_vars=include_instance_vars,
                 include_calls=include_calls,
                 aliases=aliases,
+                current_file=file_path,
+                include_cross_file_calls=include_cross_file_calls,
             ))
         else:
             # Multiple variables with same name - consolidate line numbers
@@ -289,6 +451,8 @@ def to_compact(
     include_calls: bool = False,
     include_legend: bool = True,
     file_order: Optional[List[str]] = None,
+    collapse_tests: bool = True,
+    include_cross_file_calls: bool = True,
 ) -> str:
     """Generate compact format suitable for LLM context.
     
@@ -312,6 +476,13 @@ def to_compact(
     │←refs: other.py,test.py,main.py
     ```
     
+    With cross-file calls:
+    ```
+    file.py:
+    │c ClassName:10
+    │  m method_name(...)->str:15 →@2/cache.py:get,@2/db.py:query
+    ```
+    
     Path aliases are automatically computed for frequently-referenced directories:
     ```
     # @1=ac/llm/ @2=tests/
@@ -327,6 +498,8 @@ def to_compact(
         include_legend: Whether to include the legend at the top
         file_order: Optional list specifying file output order (for prefix cache optimization).
                    If None, files are sorted alphabetically.
+        collapse_tests: Whether to collapse test files to summary lines (default: True)
+        include_cross_file_calls: Whether to show cross-file call annotations (default: True)
         
     Returns:
         Compact string representation
@@ -359,6 +532,8 @@ def to_compact(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             aliases=aliases,
+            collapse_tests=collapse_tests,
+            include_cross_file_calls=include_cross_file_calls,
         )
         if file_lines:
             lines.extend(file_lines)
@@ -378,6 +553,8 @@ def to_compact_chunked(
     min_chunk_tokens: int = 1024,
     num_chunks: int = None,
     return_metadata: bool = False,
+    collapse_tests: bool = True,
+    include_cross_file_calls: bool = True,
 ) -> Union[List[str], List[dict]]:
     """Generate compact format as cacheable chunks.
     
@@ -391,12 +568,14 @@ def to_compact_chunked(
         file_refs: Optional dict of file -> set of files that reference it
         file_imports: Optional dict of file -> set of in-repo files it imports
         include_instance_vars: Whether to include instance variables
-        include_calls: Whether to include call information
+        include_calls: Whether to include call information (all calls by name)
         include_legend: Whether to include the legend in the first chunk
         file_order: Optional list specifying file output order
         min_chunk_tokens: Minimum tokens per chunk (default 1024 for Anthropic cache)
         num_chunks: If specified, split into exactly this many chunks
         return_metadata: If True, return list of dicts with content, files, tokens, cached
+        collapse_tests: Whether to collapse test files to summary lines (default: True)
+        include_cross_file_calls: Whether to show cross-file call annotations (default: True)
         
     Returns:
         List of chunk strings (or dicts if return_metadata=True)
@@ -426,6 +605,8 @@ def to_compact_chunked(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             aliases=aliases,
+            collapse_tests=collapse_tests,
+            include_cross_file_calls=include_cross_file_calls,
         )
         if file_lines:
             all_file_blocks.append(file_lines)
@@ -634,6 +815,8 @@ def _format_symbol(
     include_calls: bool = False,
     use_ditto_refs: bool = False,
     aliases: Dict[str, str] = None,
+    current_file: str = None,
+    include_cross_file_calls: bool = True,
 ) -> List[str]:
     """Format a single symbol and its children.
     
@@ -643,19 +826,31 @@ def _format_symbol(
         refs: List of locations referencing this symbol
         parent_refs: Dict of child_name -> [locations] for children
         include_instance_vars: Whether to include instance variables
-        include_calls: Whether to include call information
+        include_calls: Whether to include call information (all calls by name)
         use_ditto_refs: If True, use ″ instead of full ref list (same as previous)
         aliases: Optional dict mapping path prefixes to short aliases
+        current_file: Current file path (for filtering same-file calls)
+        include_cross_file_calls: Whether to show cross-file call annotations
     """
     lines = []
-    prefix = KIND_PREFIX.get(symbol.kind, '?')
+    
+    # Determine prefix, using async variants if applicable
+    if symbol.is_async and symbol.kind == 'function':
+        prefix = 'af'
+    elif symbol.is_async and symbol.kind == 'method':
+        prefix = 'am'
+    else:
+        prefix = KIND_PREFIX.get(symbol.kind, '?')
+    
     indent_str = "  " * indent
     
     # Build the symbol line
     line_parts = [f"{indent_str}{prefix} {symbol.name}"]
     
-    # Add bases for classes
+    # Add bases for classes (with method counts if available)
     if symbol.bases:
+        # Just show base names - method counts would require cross-file lookup
+        # which isn't available at this level
         line_parts.append(f"({','.join(symbol.bases)})")
     
     # Add parameters for functions/methods
@@ -680,11 +875,17 @@ def _format_symbol(
     # Add line number
     line_parts.append(f":{symbol.range.start_line}")
     
-    # Add call annotations if enabled (now with conditional markers)
+    # Add call annotations if enabled
     if include_calls:
+        # include_calls shows all calls by name (for debugging)
         call_str = _format_calls(symbol)
         if call_str:
             line_parts.append(f" →{call_str}")
+    elif include_cross_file_calls:
+        # Cross-file calls show only calls to other files with file paths
+        call_str = _format_cross_file_calls(symbol, current_file, aliases)
+        if call_str:
+            line_parts.append(f" {call_str}")
     
     # Add reference annotations if available
     if refs:
@@ -712,6 +913,8 @@ def _format_symbol(
             include_instance_vars=include_instance_vars,
             include_calls=include_calls,
             aliases=aliases,
+            current_file=current_file,
+            include_cross_file_calls=include_cross_file_calls,
         ))
     
     return lines
@@ -752,6 +955,63 @@ def _format_calls(symbol: Symbol) -> str:
             return ','.join(symbol.calls[:5]) + f",+{len(symbol.calls)-5}"
     
     return ''
+
+
+def _format_cross_file_calls(
+    symbol: Symbol,
+    current_file: str = None,
+    aliases: Dict[str, str] = None,
+) -> str:
+    """Format cross-file calls only (calls to other files).
+    
+    Shows calls with resolved target files, filtering out:
+    - Same-file calls (visible in file context anyway)
+    - Unresolved calls (no target_file)
+    
+    Args:
+        symbol: Symbol with call_sites
+        current_file: Current file path (to filter out same-file calls)
+        aliases: Path aliases for compression
+    
+    Returns:
+        String like "→@4/cache.py:get,@4/summarizer.py:summarize" or empty
+    """
+    if not symbol.call_sites:
+        return ''
+    
+    aliases = aliases or {}
+    calls = []
+    seen = set()
+    
+    for site in symbol.call_sites:
+        # Skip if no resolved target or same file
+        if not site.target_file:
+            continue
+        if current_file and site.target_file == current_file:
+            continue
+        
+        # Get just the function/method name (strip module prefix)
+        symbol_name = site.name.split('.')[-1]
+        
+        # Dedupe by file:symbol
+        key = f"{site.target_file}:{symbol_name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        
+        # Format with alias
+        aliased_path = _apply_path_alias(site.target_file, aliases)
+        calls.append(f"{aliased_path}:{symbol_name}")
+    
+    if not calls:
+        return ''
+    
+    # Limit to 5 calls to keep output compact
+    max_calls = 5
+    if len(calls) <= max_calls:
+        return '→' + ','.join(calls)
+    else:
+        return '→' + ','.join(calls[:max_calls]) + f",+{len(calls)-max_calls}"
 
 
 def _format_refs(locations: List, aliases: Dict[str, str] = None) -> str:
