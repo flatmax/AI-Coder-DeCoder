@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from ac.symbol_index.symbol_index import SymbolIndex
-from ac.symbol_index.compact_format import to_compact, _is_test_file, _format_collapsed_test_file, _format_cross_file_calls
+from ac.symbol_index.compact_format import to_compact, _is_test_file, _format_collapsed_test_file, _format_cross_file_calls, compute_file_block_hash
 from ac.symbol_index.models import Symbol, Range, CallSite
 
 
@@ -704,6 +704,284 @@ class TestToCompactChunked:
         # Should create at most 2 chunks (one per file)
         assert len(chunks) <= 2
         assert len(chunks) > 0
+
+
+class TestComputeFileBlockHash:
+    """Test the compute_file_block_hash function."""
+    
+    def _make_symbol(self, name, kind="function", line=1, children=None, parameters=None):
+        """Helper to create a symbol."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+            children=children or [],
+            parameters=parameters or [],
+        )
+    
+    def test_hash_is_deterministic(self):
+        """Same inputs should produce same hash."""
+        symbols = [self._make_symbol("foo", line=10)]
+        
+        hash1 = compute_file_block_hash("test.py", symbols)
+        hash2 = compute_file_block_hash("test.py", symbols)
+        
+        assert hash1 == hash2
+    
+    def test_hash_changes_with_file_path(self):
+        """Different file paths should produce different hashes."""
+        symbols = [self._make_symbol("foo")]
+        
+        hash1 = compute_file_block_hash("a.py", symbols)
+        hash2 = compute_file_block_hash("b.py", symbols)
+        
+        assert hash1 != hash2
+    
+    def test_hash_changes_with_symbol_name(self):
+        """Different symbol names should produce different hashes."""
+        symbols1 = [self._make_symbol("foo")]
+        symbols2 = [self._make_symbol("bar")]
+        
+        hash1 = compute_file_block_hash("test.py", symbols1)
+        hash2 = compute_file_block_hash("test.py", symbols2)
+        
+        assert hash1 != hash2
+    
+    def test_hash_changes_with_line_number(self):
+        """Different line numbers should produce different hashes."""
+        symbols1 = [self._make_symbol("foo", line=10)]
+        symbols2 = [self._make_symbol("foo", line=20)]
+        
+        hash1 = compute_file_block_hash("test.py", symbols1)
+        hash2 = compute_file_block_hash("test.py", symbols2)
+        
+        assert hash1 != hash2
+    
+    def test_hash_changes_with_kind(self):
+        """Different kinds should produce different hashes."""
+        symbols1 = [self._make_symbol("foo", kind="function")]
+        symbols2 = [self._make_symbol("foo", kind="method")]
+        
+        hash1 = compute_file_block_hash("test.py", symbols1)
+        hash2 = compute_file_block_hash("test.py", symbols2)
+        
+        assert hash1 != hash2
+    
+    def test_hash_includes_children(self):
+        """Hash should include child symbols."""
+        child = self._make_symbol("method", kind="method", line=15)
+        symbols1 = [self._make_symbol("Class", kind="class", children=[])]
+        symbols2 = [self._make_symbol("Class", kind="class", children=[child])]
+        
+        hash1 = compute_file_block_hash("test.py", symbols1)
+        hash2 = compute_file_block_hash("test.py", symbols2)
+        
+        assert hash1 != hash2
+    
+    def test_hash_is_compact(self):
+        """Hash should be 16 characters (truncated SHA256)."""
+        symbols = [self._make_symbol("foo")]
+        
+        hash_val = compute_file_block_hash("test.py", symbols)
+        
+        assert len(hash_val) == 16
+        assert all(c in '0123456789abcdef' for c in hash_val)
+    
+    def test_empty_symbols_produces_hash(self):
+        """Empty symbol list should still produce a valid hash."""
+        hash_val = compute_file_block_hash("test.py", [])
+        
+        assert len(hash_val) == 16
+
+
+class TestGetLegend:
+    """Test the get_legend function."""
+    
+    def test_legend_without_aliases(self):
+        """Legend without aliases should include base syntax guide."""
+        from ac.symbol_index.compact_format import get_legend
+        
+        legend = get_legend()
+        
+        assert "c=class" in legend
+        assert "m=method" in legend
+        assert "f=function" in legend
+        assert "←N=refs" in legend
+    
+    def test_legend_with_aliases(self):
+        """Legend with aliases should include alias definitions."""
+        from ac.symbol_index.compact_format import get_legend
+        
+        aliases = {"ac/llm/": "@1/", "tests/": "@2/"}
+        legend = get_legend(aliases)
+        
+        assert "@1/=ac/llm/" in legend
+        assert "@2/=tests/" in legend
+
+
+class TestFormatFileSymbolBlock:
+    """Test the format_file_symbol_block function."""
+    
+    def _make_symbol(self, name, kind="function", line=1, children=None):
+        """Helper to create a symbol."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+            children=children or [],
+        )
+    
+    def test_formats_single_file(self):
+        """Should format a single file's symbols."""
+        from ac.symbol_index.compact_format import format_file_symbol_block
+        
+        symbols = [self._make_symbol("foo", line=10)]
+        
+        result = format_file_symbol_block("src/utils.py", symbols)
+        
+        assert "src/utils.py:" in result
+        assert "f foo:10" in result
+    
+    def test_includes_class_methods(self):
+        """Should include class methods as children."""
+        from ac.symbol_index.compact_format import format_file_symbol_block
+        
+        method = self._make_symbol("process", kind="method", line=15)
+        cls = self._make_symbol("Handler", kind="class", line=10, children=[method])
+        
+        result = format_file_symbol_block("handler.py", [cls])
+        
+        assert "c Handler:10" in result
+        assert "m process:15" in result
+    
+    def test_applies_aliases(self):
+        """Should apply path aliases to references."""
+        from ac.symbol_index.compact_format import format_file_symbol_block
+        
+        symbols = [self._make_symbol("foo")]
+        file_refs = {"test.py": {"ac/llm/streaming.py", "ac/llm/chat.py"}}
+        aliases = {"ac/llm/": "@1/"}
+        
+        result = format_file_symbol_block(
+            "test.py", symbols,
+            file_refs=file_refs,
+            aliases=aliases
+        )
+        
+        assert "@1/" in result
+
+
+class TestFormatSymbolBlocksByTier:
+    """Test the format_symbol_blocks_by_tier function."""
+    
+    def _make_symbol(self, name, kind="function", line=1):
+        """Helper to create a symbol."""
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path="test.py",
+            range=r,
+            selection_range=r,
+        )
+    
+    def test_groups_by_tier(self):
+        """Should group symbols by their tier."""
+        from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
+        
+        symbols_by_file = {
+            "stable.py": [self._make_symbol("stable_func")],
+            "active.py": [self._make_symbol("active_func")],
+        }
+        file_tiers = {
+            "L0": ["stable.py"],
+            "active": ["active.py"],
+        }
+        
+        result = format_symbol_blocks_by_tier(symbols_by_file, file_tiers)
+        
+        assert "stable.py:" in result["L0"]
+        assert "stable_func" in result["L0"]
+        assert "active.py:" in result["active"]
+        assert "active_func" in result["active"]
+    
+    def test_excludes_specified_files(self):
+        """Should exclude files in exclude_files set."""
+        from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
+        
+        symbols_by_file = {
+            "a.py": [self._make_symbol("a_func")],
+            "b.py": [self._make_symbol("b_func")],
+        }
+        file_tiers = {
+            "L0": ["a.py", "b.py"],
+        }
+        
+        result = format_symbol_blocks_by_tier(
+            symbols_by_file, file_tiers,
+            exclude_files={"b.py"}
+        )
+        
+        assert "a.py:" in result["L0"]
+        assert "b.py:" not in result["L0"]
+    
+    def test_empty_tier_returns_empty_string(self):
+        """Empty tiers should return empty strings."""
+        from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
+        
+        symbols_by_file = {
+            "a.py": [self._make_symbol("a_func")],
+        }
+        file_tiers = {
+            "L0": ["a.py"],
+            "L1": [],
+            "active": [],
+        }
+        
+        result = format_symbol_blocks_by_tier(symbols_by_file, file_tiers)
+        
+        assert result["L0"] != ""
+        assert result["L1"] == ""
+        assert result["active"] == ""
+    
+    def test_handles_missing_files_gracefully(self):
+        """Should skip files not in symbols_by_file."""
+        from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
+        
+        symbols_by_file = {
+            "exists.py": [self._make_symbol("func")],
+        }
+        file_tiers = {
+            "L0": ["exists.py", "missing.py"],
+        }
+        
+        result = format_symbol_blocks_by_tier(symbols_by_file, file_tiers)
+        
+        assert "exists.py:" in result["L0"]
+        assert "missing.py" not in result["L0"]
+    
+    def test_all_tiers_present_in_result(self):
+        """Result should have keys for all tiers in file_tiers."""
+        from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
+        
+        symbols_by_file = {"a.py": [self._make_symbol("func")]}
+        file_tiers = {
+            "L0": ["a.py"],
+            "L1": [],
+            "L2": [],
+            "L3": [],
+            "active": [],
+        }
+        
+        result = format_symbol_blocks_by_tier(symbols_by_file, file_tiers)
+        
+        assert set(result.keys()) == {"L0", "L1", "L2", "L3", "active"}
 
 
 class TestCrossFileCallGraph:
