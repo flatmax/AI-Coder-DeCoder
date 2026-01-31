@@ -8,6 +8,7 @@ from ac.url_handler.cache import URLCache
 from ac.url_handler.config import URLConfig, URLCacheConfig
 from ac.url_handler.fetcher import URLFetcher
 from ac.url_handler.models import URLContent, URLType
+from ac.context.stability_tracker import StabilityTracker, StabilityInfo
 
 
 # ========== URL Handler Fixtures ==========
@@ -61,3 +62,63 @@ def sample_web_content():
         content="Page content here",
         fetched_at=datetime.now(),
     )
+
+
+# ========== Stability Tracker Fixtures ==========
+
+@pytest.fixture
+def stability_path(tmp_path):
+    """Create path for stability tracker persistence."""
+    return tmp_path / "stability.json"
+
+
+@pytest.fixture
+def stability_tracker(stability_path):
+    """Create StabilityTracker with 4-tier Bedrock config."""
+    return StabilityTracker(
+        persistence_path=stability_path,
+        thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+    )
+
+
+@pytest.fixture
+def make_stability_info():
+    """Factory for StabilityInfo objects."""
+    def _make(content_hash="test", n_value=0, tier='active'):
+        return StabilityInfo(
+            content_hash=content_hash,
+            n_value=n_value,
+            tier=tier
+        )
+    return _make
+
+
+@pytest.fixture
+def tracker_with_items(stability_tracker, make_stability_info):
+    """Factory to create tracker with pre-set items.
+    
+    Usage:
+        tracker = tracker_with_items({
+            "a.py": (5, 'L3'),  # n_value=5, tier='L3'
+            "b.py": (8, 'L2'),
+        })
+    """
+    def _create(items_config, last_active=None):
+        for path, (n_value, tier) in items_config.items():
+            stability_tracker._stability[path] = make_stability_info(
+                content_hash=path, n_value=n_value, tier=tier
+            )
+        if last_active is not None:
+            stability_tracker._last_active_items = set(last_active)
+        return stability_tracker
+    return _create
+
+
+@pytest.fixture
+def make_url_content():
+    """Factory for URLContent with sensible defaults."""
+    def _make(url="https://example.com", url_type=URLType.GENERIC_WEB, **kwargs):
+        if 'fetched_at' not in kwargs:
+            kwargs['fetched_at'] = datetime.now()
+        return URLContent(url=url, url_type=url_type, **kwargs)
+    return _make
