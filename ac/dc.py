@@ -86,11 +86,11 @@ async def main_starter_async(args):
         # preview mode builds first, dev mode just runs start
         await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port, args.preview)
 
-    if not args.no_browser:
-        open_browser(actual_server_port, actual_webapp_port, local_mode)
-
     print('starting server...')
     await server.start()
+
+    if not args.no_browser:
+        open_browser(actual_server_port, actual_webapp_port, local_mode)
 
     # Keep the server running
     await server.server.serve_forever()
