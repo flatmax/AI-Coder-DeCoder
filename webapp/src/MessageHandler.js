@@ -11,9 +11,8 @@ export class MessageHandler extends JRPCClient {
     super();
     this.messageHistory = [];
     this._messageId = 0;
-    this._autoScrollPaused = false;
+    this._userHasScrolledUp = false;
     this._showScrollButton = false;
-    this._boundHandleScroll = this._handleScroll.bind(this);
   }
 
   connectedCallback() {
@@ -23,29 +22,31 @@ export class MessageHandler extends JRPCClient {
     }
   }
 
-  firstUpdated() {
-    super.firstUpdated?.();
-    const container = this.shadowRoot?.querySelector('#messages-container');
-    if (container) {
-      // Use capture: false to only handle scroll events from the container itself
-      container.addEventListener('scroll', this._boundHandleScroll, { passive: true });
+  handleWheel(event) {
+    // User scrolled up with mouse wheel - pause auto-scroll
+    if (event.deltaY < 0) {
+      this._userHasScrolledUp = true;
+      this._showScrollButton = true;
+    }
+    
+    // User scrolled down - check if at bottom
+    if (event.deltaY > 0) {
+      const container = this.shadowRoot?.querySelector('#messages-container');
+      if (container) {
+        // Small delay to let scroll complete
+        setTimeout(() => {
+          const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+          if (distanceFromBottom < 50) {
+            this._userHasScrolledUp = false;
+            this._showScrollButton = false;
+          }
+        }, 50);
+      }
     }
   }
 
-  _handleScroll(event) {
-    // Ignore scroll events from child elements (like code blocks)
-    const container = this.shadowRoot?.querySelector('#messages-container');
-    if (!container || event.target !== container) return;
-    
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    const isAtBottom = distanceFromBottom < 50; // 50px threshold
-    
-    this._autoScrollPaused = !isAtBottom;
-    this._showScrollButton = !isAtBottom;
-  }
-
   scrollToBottomNow() {
-    this._autoScrollPaused = false;
+    this._userHasScrolledUp = false;
     this._showScrollButton = false;
     const container = this.shadowRoot?.querySelector('#messages-container');
     if (container) {
@@ -70,7 +71,6 @@ export class MessageHandler extends JRPCClient {
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     
     if (lastMessage && lastMessage.role === role && !lastMessage.final) {
-      // Only update content if chunk is non-empty (preserve existing content on final)
       if (chunk) {
         lastMessage.content = chunk;
       }
@@ -84,21 +84,17 @@ export class MessageHandler extends JRPCClient {
       if (editResults && editResults.length > 0) {
         newMessage.editResults = editResults;
       }
-      this.messageHistory = [
-        ...this.messageHistory,
-        newMessage
-      ];
+      this.messageHistory = [...this.messageHistory, newMessage];
     }
     this._scrollToBottom();
   }
 
   _scrollToBottom() {
-    if (this._autoScrollPaused) return;
+    if (this._userHasScrolledUp) return;
     
     this.updateComplete.then(() => {
       const container = this.shadowRoot?.querySelector('#messages-container');
       if (container) {
-        // Use requestAnimationFrame to ensure DOM has fully rendered
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight;
         });
@@ -108,5 +104,7 @@ export class MessageHandler extends JRPCClient {
 
   clearHistory() {
     this.messageHistory = [];
+    this._userHasScrolledUp = false;
+    this._showScrollButton = false;
   }
 }

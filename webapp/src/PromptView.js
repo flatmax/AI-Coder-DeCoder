@@ -73,6 +73,7 @@ export class PromptView extends MixedBase {
     this.activeLeftTab = 'files';
     this._filePickerScrollTop = 0;
     this._messagesScrollTop = 0;
+    this._wasScrolledUp = false;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
@@ -240,6 +241,8 @@ export class PromptView extends MixedBase {
       const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
       if (messagesContainer) {
         this._messagesScrollTop = messagesContainer.scrollTop;
+        // Save whether user had scrolled up
+        this._wasScrolledUp = this._userHasScrolledUp;
       }
     }
 
@@ -254,8 +257,18 @@ export class PromptView extends MixedBase {
           filePicker.setScrollTop(this._filePickerScrollTop);
         }
         const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-        if (messagesContainer && this._messagesScrollTop > 0) {
-          messagesContainer.scrollTop = this._messagesScrollTop;
+        if (messagesContainer) {
+          if (this._wasScrolledUp) {
+            // User was scrolled up - restore their position
+            messagesContainer.scrollTop = this._messagesScrollTop;
+            this._userHasScrolledUp = true;
+            this._showScrollButton = true;
+          } else {
+            // User was at bottom - scroll to bottom
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            this._userHasScrolledUp = false;
+            this._showScrollButton = false;
+          }
         }
       });
     } else if (tab === 'search') {
