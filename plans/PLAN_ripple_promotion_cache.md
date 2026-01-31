@@ -285,10 +285,23 @@ class StabilityTracker:
 
 ## Rollout
 
-1. Implement with comprehensive tests
+1. ✅ Implement with comprehensive tests (DONE - 29 tests passing)
 2. Add logging to track tier movements during real usage
 3. Monitor cache hit rates in production
 4. Tune thresholds if needed (entry_n and promotion_threshold values)
+
+## Implementation Status
+
+### Completed
+- ✅ Phase 1: Updated StabilityInfo model with `n_value` and explicit `tier`
+- ✅ Phase 2: Implemented ripple promotion logic in `_process_tier_entries()`
+- ✅ Phase 3: Public API unchanged, callers (streaming.py, llm.py) compatible
+- ✅ Phase 4: All tests updated and passing
+
+### Remaining (Optional Enhancements)
+- [ ] Initialize tiers from `←refs` counts on first run (currently items start active→L3)
+- [ ] Add detailed logging for tier movements in production
+- [ ] Monitor and tune thresholds based on cache hit rates
 
 ## Success Metrics
 
