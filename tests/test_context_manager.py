@@ -229,17 +229,18 @@ class TestContextManagerCacheStability:
         
         assert thresholds == {'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
     
-    def test_cache_stability_initial_tier_is_l3(self, tmp_path):
-        """New items start in L3 tier."""
+    def test_cache_stability_initial_tier_is_active(self, tmp_path):
+        """New items in Active context start as 'active' tier."""
         mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
         
-        # Track a new item
+        # Track a new item - items in Active context start as 'active'
         mgr.cache_stability.update_after_response(
             items=["test.py"],
             get_content=lambda x: "print('hello')"
         )
         
-        assert mgr.cache_stability.get_tier("test.py") == 'L3'
+        assert mgr.cache_stability.get_tier("test.py") == 'active'
+        assert mgr.cache_stability.get_n_value("test.py") == 0
     
     def test_cache_stability_persists_to_file(self, tmp_path):
         """Stability data is persisted to .aicoder/cache_stability.json."""
@@ -257,9 +258,19 @@ class TestContextManagerCacheStability:
         """Symbol entries use 'symbol:' prefix to distinguish from files."""
         mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
         
-        # Track both a file and a symbol entry
+        # Track both a file and a symbol entry - they start as active
         mgr.cache_stability.update_after_response(
             items=["test.py", "symbol:test.py"],
+            get_content=lambda x: "content" if x == "test.py" else "symbol_hash_123"
+        )
+        
+        # Items in Active context start as 'active' tier
+        assert mgr.cache_stability.get_tier("test.py") == 'active'
+        assert mgr.cache_stability.get_tier("symbol:test.py") == 'active'
+        
+        # When they leave Active, they move to L3
+        mgr.cache_stability.update_after_response(
+            items=[],  # Both items leave Active
             get_content=lambda x: "content" if x == "test.py" else "symbol_hash_123"
         )
         
@@ -270,7 +281,7 @@ class TestContextManagerCacheStability:
         """get_items_by_tier returns items grouped by stability tier."""
         mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
         
-        # Track items
+        # Track items - they start as active
         mgr.cache_stability.update_after_response(
             items=["a.py", "b.py"],
             get_content=lambda x: f"content_{x}"
@@ -283,6 +294,16 @@ class TestContextManagerCacheStability:
         assert 'L2' in tiers
         assert 'L3' in tiers
         assert 'active' in tiers
+        # Items in Active context are in 'active' tier
+        assert set(tiers['active']) == {"a.py", "b.py"}
+        
+        # After they leave Active, they move to L3
+        mgr.cache_stability.update_after_response(
+            items=[],  # Both items leave Active
+            get_content=lambda x: f"content_{x}"
+        )
+        
+        tiers = mgr.cache_stability.get_items_by_tier(["a.py", "b.py"])
         assert set(tiers['L3']) == {"a.py", "b.py"}
 
 

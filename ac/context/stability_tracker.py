@@ -16,7 +16,7 @@ import hashlib
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Optional
 
 
 # Type alias for tier names
@@ -398,6 +398,78 @@ class StabilityTracker:
             self._stability = {}
             self._response_count = 0
             self._last_active_items = set()
+    
+    def initialize_from_refs(
+        self,
+        files_with_refs: list[tuple[str, int]],
+        exclude_active: Optional[set[str]] = None
+    ) -> dict[str, str]:
+        """
+        Initialize tier placement based on reference counts (heuristic).
+        
+        Only runs if stability data is empty (fresh start). Uses ←refs counts
+        to distribute files across tiers based on structural importance:
+        - Top 20% by refs → L1 (N=9) - core/central files
+        - Next 30% → L2 (N=6) - moderately referenced
+        - Bottom 50% → L3 (N=3) - leaf files, tests, utilities
+        
+        L0 is never assigned heuristically - must be earned through stability.
+        
+        Args:
+            files_with_refs: List of (file_path, ref_count) tuples, need not be sorted
+            exclude_active: Files currently in Active context (will be skipped)
+        
+        Returns:
+            Dict mapping file paths to their assigned tiers
+        """
+        # Only initialize if we have no existing data
+        if self._stability:
+            return {}
+        
+        if not files_with_refs:
+            return {}
+        
+        exclude = exclude_active or set()
+        
+        # Sort by ref count descending
+        sorted_files = sorted(files_with_refs, key=lambda x: x[1], reverse=True)
+        
+        # Filter out active files
+        sorted_files = [(f, r) for f, r in sorted_files if f not in exclude]
+        
+        if not sorted_files:
+            return {}
+        
+        total = len(sorted_files)
+        top_20_cutoff = total // 5
+        top_50_cutoff = total // 2
+        
+        tier_assignments = {}
+        
+        for i, (file_path, ref_count) in enumerate(sorted_files):
+            if i < top_20_cutoff:
+                tier, n_value = 'L1', 9
+            elif i < top_50_cutoff:
+                tier, n_value = 'L2', 6
+            else:
+                tier, n_value = 'L3', 3
+            
+            # Compute a placeholder hash - will be updated on first real access
+            content_hash = f"heuristic:{file_path}"
+            
+            self._stability[file_path] = StabilityInfo(
+                content_hash=content_hash,
+                n_value=n_value,
+                tier=tier
+            )
+            tier_assignments[file_path] = tier
+        
+        self.save()
+        return tier_assignments
+    
+    def is_initialized(self) -> bool:
+        """Check if the tracker has any stability data."""
+        return bool(self._stability)
     
     def clear(self) -> None:
         """Clear all stability data."""

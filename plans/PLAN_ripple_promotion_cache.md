@@ -142,15 +142,16 @@ TIER_CONFIG = {
 
 **Fresh start (no persistence file):**
 
-On first run, we use reference counts to distribute files across cache tiers:
+On first run, we use reference counts from the symbol index to distribute ALL trackable files across cache tiers based on their structural importance:
 
 1. Collect all trackable files and their `←refs` counts from the symbol index
 2. Sort files by ref count (descending)
-3. Split evenly into three groups:
-   - Top third → L1 (N=9) - most referenced files
-   - Middle third → L2 (N=6) - moderately referenced  
-   - Bottom third → L3 (N=3) - least referenced / leaf files
+3. Distribute across tiers based on ref count percentiles:
+   - Top 20% by refs → L1 (N=9) - core/central files
+   - Next 30% → L2 (N=6) - moderately referenced
+   - Bottom 50% → L3 (N=3) - leaf files, tests, utilities
 4. L0 is empty initially - files must earn their way there through stability
+5. Files in Active context at startup → Stay Active (N=0), their heuristic tier is used when they become inactive
 
 ```python
 def compute_initial_tiers(files_with_refs: list[tuple[str, int]]) -> dict[str, tuple[str, int]]:
@@ -160,13 +161,14 @@ def compute_initial_tiers(files_with_refs: list[tuple[str, int]]) -> dict[str, t
     files_with_refs: [(file_path, ref_count), ...] sorted by ref_count desc
     """
     total = len(files_with_refs)
-    third = total // 3
+    top_20 = total // 5
+    next_30 = total // 2  # cumulative 50%
     
     result = {}
     for i, (file_path, ref_count) in enumerate(files_with_refs):
-        if i < third:
+        if i < top_20:
             result[file_path] = ('L1', 9)
-        elif i < 2 * third:
+        elif i < next_30:
             result[file_path] = ('L2', 6)
         else:
             result[file_path] = ('L3', 3)
@@ -174,17 +176,31 @@ def compute_initial_tiers(files_with_refs: list[tuple[str, int]]) -> dict[str, t
     return result
 ```
 
-**Note**: Files currently in Active context are not placed in cache tiers - they stay Active with N=0.
+**Files added to Active context at startup:**
+- Files explicitly in Active context stay Active with N=0
+- When they become inactive, they move to their heuristic-determined tier (not necessarily L3)
+- This means a core file like `ac/llm/llm.py` (high refs) that's in Active context will go to L1 when inactive, not L3
+
+**Newly created files during a session:**
+- Files created during the editing session (not in symbol index) start with N=0 in Active
+- When they become inactive, they go to L3 (N=3) since they have no refs yet
+- As the codebase evolves and they gain refs, future sessions will place them higher
 
 **Loading from persistence:**
 - Each item's tier and N value are restored from the saved state
-- Items not in the saved state use the heuristic above if refs data is available, otherwise default to L3 (N=3)
+- Items not in the saved state: use heuristic placement based on current refs
+- Items in persistence but with significantly changed refs: keep persisted tier (usage patterns trump structure)
 
 **Edge case - item in persistence but file deleted:**
 - Remove from tracking on next update
 
 **Edge case - item in persistence with tier but not in current context:**
 - Keep in tracking (it's cached), will be used if file is referenced again
+
+**Edge case - new file created this session:**
+- Not in symbol index yet, no refs → starts Active (N=0)
+- On becoming inactive → L3 (N=3)
+- Next session after indexing → heuristic placement based on actual refs
 
 ## Implementation
 
@@ -298,8 +314,10 @@ class StabilityTracker:
 - ✅ Phase 3: Public API unchanged, callers (streaming.py, llm.py) compatible
 - ✅ Phase 4: All tests updated and passing
 
-### Remaining (Optional Enhancements)
-- [ ] Initialize tiers from `←refs` counts on first run (currently items start active→L3)
+### Remaining
+- [x] Initialize tiers from `←refs` counts on fresh start (heuristic distribution) - DONE via `initialize_from_refs()`
+- [x] Track newly created files (N=0) vs existing files (heuristic placement) - DONE (new files start active, move to L3 when inactive)
+- [ ] Call `initialize_from_refs()` from `streaming.py` when stability tracker is fresh
 - [ ] Add detailed logging for tier movements in production
 - [ ] Monitor and tune thresholds based on cache hit rates
 
