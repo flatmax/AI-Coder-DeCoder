@@ -586,6 +586,191 @@ class TestStabilityTrackerPersistence:
         assert tracker.get_n_value("test.py") == 7
 
 
+class TestStabilityTrackerHeuristicInit:
+    """Tests for heuristic initialization from refs."""
+    
+    def test_initialize_from_refs_empty_tracker(self, tmp_path):
+        """Heuristic init distributes files across tiers by ref count."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # 10 files with varying ref counts
+        files_with_refs = [
+            ("core/models.py", 20),      # Top 20% -> L1
+            ("core/utils.py", 15),       # Top 20% -> L1
+            ("lib/handler.py", 10),      # Next 30% -> L2
+            ("lib/parser.py", 8),        # Next 30% -> L2
+            ("lib/formatter.py", 6),     # Next 30% -> L2
+            ("features/a.py", 4),        # Bottom 50% -> L3
+            ("features/b.py", 3),        # Bottom 50% -> L3
+            ("tests/test_a.py", 1),      # Bottom 50% -> L3
+            ("tests/test_b.py", 0),      # Bottom 50% -> L3
+            ("scripts/run.py", 0),       # Bottom 50% -> L3
+        ]
+        
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # Top 20% (2 files) -> L1
+        assert assignments["core/models.py"] == 'L1'
+        assert assignments["core/utils.py"] == 'L1'
+        assert tracker.get_n_value("core/models.py") == 9
+        
+        # Next 30% (3 files) -> L2
+        assert assignments["lib/handler.py"] == 'L2'
+        assert assignments["lib/parser.py"] == 'L2'
+        assert assignments["lib/formatter.py"] == 'L2'
+        assert tracker.get_n_value("lib/handler.py") == 6
+        
+        # Bottom 50% (5 files) -> L3
+        assert assignments["features/a.py"] == 'L3'
+        assert assignments["tests/test_a.py"] == 'L3'
+        assert tracker.get_n_value("tests/test_a.py") == 3
+    
+    def test_initialize_from_refs_skips_if_data_exists(self, tmp_path):
+        """Heuristic init is skipped if tracker already has data."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # Pre-populate with some data
+        tracker._stability["existing.py"] = StabilityInfo(
+            content_hash="abc", n_value=5, tier='L3'
+        )
+        
+        files_with_refs = [("new.py", 100)]
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # Should return empty - no initialization happened
+        assert assignments == {}
+        assert "new.py" not in tracker._stability
+    
+    def test_initialize_from_refs_excludes_active(self, tmp_path):
+        """Active files are excluded from heuristic placement."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        files_with_refs = [
+            ("a.py", 10),
+            ("b.py", 5),
+            ("c.py", 1),
+        ]
+        
+        assignments = tracker.initialize_from_refs(
+            files_with_refs,
+            exclude_active={"a.py"}
+        )
+        
+        assert "a.py" not in assignments
+        assert "b.py" in assignments
+        assert "c.py" in assignments
+    
+    def test_initialize_from_refs_persists(self, tmp_path):
+        """Heuristic initialization is persisted to disk."""
+        path = tmp_path / "stability.json"
+        
+        tracker1 = StabilityTracker(
+            persistence_path=path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # Need enough files for meaningful percentile distribution
+        files_with_refs = [
+            ("core.py", 100),
+            ("mid1.py", 50),
+            ("mid2.py", 25),
+            ("leaf1.py", 5),
+            ("leaf2.py", 0),
+        ]
+        tracker1.initialize_from_refs(files_with_refs)
+        
+        # Create new tracker from same path
+        tracker2 = StabilityTracker(
+            persistence_path=path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # Top 20% (1 file) -> L1
+        assert tracker2.get_tier("core.py") == 'L1'
+        # Bottom 50% -> L3
+        assert tracker2.get_tier("leaf2.py") == 'L3'
+    
+    def test_initialize_from_refs_empty_list(self, tmp_path):
+        """Empty file list returns empty assignments."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        assignments = tracker.initialize_from_refs([])
+        assert assignments == {}
+    
+    def test_initialize_from_refs_unsorted_input(self, tmp_path):
+        """Input need not be sorted - method sorts internally."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # Deliberately unsorted - need 5+ files for top 20% to get L1
+        files_with_refs = [
+            ("low.py", 1),
+            ("high.py", 100),
+            ("mid.py", 10),
+            ("leaf1.py", 0),
+            ("leaf2.py", 0),
+        ]
+        
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # High refs should be L1 regardless of input order (top 20% of 5 = 1 file)
+        assert assignments["high.py"] == 'L1'
+    
+    def test_initialize_no_l0_assignment(self, tmp_path):
+        """L0 is never assigned heuristically."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        # Create enough files to have meaningful distribution
+        files_with_refs = [
+            ("super_core.py", 1000),
+            ("core.py", 500),
+            ("mid1.py", 100),
+            ("mid2.py", 50),
+            ("leaf1.py", 10),
+            ("leaf2.py", 5),
+            ("leaf3.py", 1),
+            ("leaf4.py", 0),
+            ("leaf5.py", 0),
+            ("leaf6.py", 0),
+        ]
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # Highest refs file should be L1 (top 20%), never L0
+        assert assignments["super_core.py"] == 'L1'
+        # L0 should never be assigned heuristically
+        assert 'L0' not in assignments.values()
+    
+    def test_is_initialized(self, tmp_path):
+        """is_initialized reflects whether tracker has data."""
+        tracker = StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        
+        assert tracker.is_initialized() is False
+        
+        tracker.initialize_from_refs([("a.py", 5)])
+        
+        assert tracker.is_initialized() is True
+
+
 class TestStabilityTrackerScenarios:
     """Integration tests for realistic scenarios."""
     
@@ -680,9 +865,12 @@ class TestStabilityTrackerScenarios:
             get_content=lambda x: content[x]
         )
         
-        # Per the plan example: items enter sequentially
-        # new1.py enters L3: existing.py gets N++ -> N=4
-        # new2.py enters L3: existing.py gets N++ -> N=5, new1.py gets N++ -> N=4
+        # Per the plan: items enter sequentially, each triggers N++ for existing items
+        # existing.py gets N++ twice (once for each entering item): N=3 -> N=5
         assert tracker.get_n_value("existing.py") == 5
-        assert tracker.get_n_value("new1.py") == 4
-        assert tracker.get_n_value("new2.py") == 3
+        
+        # The two new items enter L3 with N=3 (entry_n)
+        # One of them gets N++ when the other enters (order is non-deterministic due to set)
+        # So we should have one with N=4 and one with N=3
+        n_values = {tracker.get_n_value("new1.py"), tracker.get_n_value("new2.py")}
+        assert n_values == {3, 4}, f"Expected {{3, 4}}, got {n_values}"

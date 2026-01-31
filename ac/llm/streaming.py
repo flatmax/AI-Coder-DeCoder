@@ -345,21 +345,20 @@ class StreamingMixin:
             if self._context_manager and self._context_manager.cache_stability:
                 stability = self._context_manager.cache_stability
                 
-                # Collect all items to track: files + symbol entries
-                all_items = []
+                # Collect items currently in Active context:
+                # - Files explicitly in file_paths
+                # - Symbol entries ONLY for files in file_paths (not all indexed files)
+                # 
+                # Symbol entries for files NOT in active context should NOT be in items list.
+                # They were registered during _build_streaming_messages and will "leave" Active
+                # when not included here, triggering ripple promotion.
+                active_items = []
                 
-                # Add file paths
+                # Add file paths that are in active context
                 if file_paths:
-                    all_items.extend(file_paths)
-                
-                # Add symbol entry keys for all indexed files
-                if self.repo:
-                    try:
-                        all_files = self._get_all_trackable_files()
-                        symbol_items = [f"symbol:{f}" for f in all_files]
-                        all_items.extend(symbol_items)
-                    except Exception:
-                        pass
+                    active_items.extend(file_paths)
+                    # Add symbol entries only for files in active context
+                    active_items.extend([f"symbol:{f}" for f in file_paths])
                 
                 def get_item_content(item):
                     """Get content for stability hashing - files or symbol blocks."""
@@ -383,8 +382,12 @@ class StreamingMixin:
                 # Symbol entries for modified files are also considered modified
                 modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
                 
+                # Pass only active context items - the tracker will:
+                # 1. Keep these items as 'active' with N=0
+                # 2. Move previously-active items that aren't in this list to L3
+                # 3. Trigger ripple promotions for existing L3/L2/L1 items
                 tier_changes = stability.update_after_response(
-                    items=all_items,
+                    items=active_items,
                     get_content=get_item_content,
                     modified=modified_items
                 )
@@ -593,6 +596,28 @@ class StreamingMixin:
                         file_refs[f] = ref_index.get_files_referencing(f)
                         file_imports[f] = ref_index.get_file_dependencies(f)
                         references[f] = ref_index.get_references_to_file(f)
+                
+                # Initialize stability tracker from refs if fresh start
+                if stability and not stability.is_initialized():
+                    # Build files_with_refs from file_refs counts
+                    files_with_refs = [
+                        (f, len(file_refs.get(f, set())))
+                        for f in all_files
+                    ]
+                    # Also include symbol entries
+                    symbol_refs = [
+                        (f"symbol:{f}", len(file_refs.get(f, set())))
+                        for f in symbols_by_file.keys()
+                    ]
+                    files_with_refs.extend(symbol_refs)
+                    
+                    # Exclude currently active context files
+                    tier_assignments = stability.initialize_from_refs(
+                        files_with_refs,
+                        exclude_active=active_context_files
+                    )
+                    if tier_assignments:
+                        print(f"📊 Initialized {len(tier_assignments)} items from ref counts")
                 
                 # Compute path aliases for the legend
                 aliases = _compute_path_aliases(references, file_refs)
