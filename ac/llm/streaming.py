@@ -423,6 +423,12 @@ class StreamingMixin:
                 # Include context breakdown if available
                 if hud_breakdown:
                     result["token_usage"].update(hud_breakdown)
+                
+                # Include promotions/demotions from stability tracker
+                if self._context_manager and self._context_manager.cache_stability:
+                    stability = self._context_manager.cache_stability
+                    result["token_usage"]["promotions"] = stability.get_last_promotions()
+                    result["token_usage"]["demotions"] = stability.get_last_demotions()
             
             await self._send_stream_complete(request_id, result)
             
