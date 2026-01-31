@@ -90,7 +90,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  async _loadFileIntoDiff(file, replace = false) {
+  async _loadFileIntoDiff(file, replace = true) {
     const existing = this.diffFiles.find(f => f.path === file);
     if (existing && !replace) {
       return true; // Already loaded
