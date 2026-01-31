@@ -367,6 +367,17 @@ export class PromptView extends MixedBase {
 
   async setupDone() {
     this.isConnected = true;
+    
+    // Ensure call object is available (may have slight delay from JRPC)
+    if (!this.call) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    if (!this.call) {
+      console.warn('setupDone called but this.call is not available yet');
+      return;
+    }
+    
     await this.loadFileTree();
     await this.loadLastSession();
   }

@@ -53,6 +53,11 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
   }
 
   async loadFileTree() {
+    if (!this.call) {
+      console.warn('loadFileTree called but RPC not ready');
+      return;
+    }
+    
     try {
       const response = await this.call['Repo.get_file_tree']();
       const data = this.extractResponse(response);

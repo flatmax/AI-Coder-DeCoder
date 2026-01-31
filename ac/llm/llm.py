@@ -966,6 +966,26 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     legend = get_legend(aliases)
                     legend_tokens = tc.count(legend) if legend else 0
                     
+                    # Initialize stability tracker from refs if fresh start
+                    # (same logic as _build_streaming_messages in streaming.py)
+                    if stability and not stability.is_initialized():
+                        files_with_refs = [
+                            (f, len(file_refs.get(f, set())))
+                            for f in all_files
+                        ]
+                        symbol_refs = [
+                            (f"symbol:{f}", len(file_refs.get(f, set())))
+                            for f in symbols_by_file.keys()
+                        ]
+                        files_with_refs.extend(symbol_refs)
+                        
+                        tier_assignments = stability.initialize_from_refs(
+                            files_with_refs,
+                            exclude_active=set(file_paths) if file_paths else set()
+                        )
+                        if tier_assignments:
+                            print(f"📊 Cache viewer initialized {len(tier_assignments)} items from ref counts")
+                    
                     # Get symbol tiers
                     symbol_items = [f"symbol:{f}" for f in symbols_by_file.keys()]
                     symbol_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
