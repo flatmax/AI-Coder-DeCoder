@@ -39,6 +39,9 @@ export class CacheViewer extends RpcMixin(LitElement) {
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
     excludedUrls: { type: Object },
+    
+    // Search/filter
+    searchQuery: { type: String },
   };
 
   static styles = cacheViewerStyles;
@@ -66,6 +69,8 @@ export class CacheViewer extends RpcMixin(LitElement) {
     this.selectedFiles = [];
     this.fetchedUrls = [];
     this.excludedUrls = new Set();
+    
+    this.searchQuery = '';
   }
 
   onRpcReady() {
@@ -285,6 +290,62 @@ export class CacheViewer extends RpcMixin(LitElement) {
       'active': '#fb923c' // Orange
     };
     return colors[tier] || '#888';
+  }
+
+  // ========== Search/Filter ==========
+
+  handleSearchInput(e) {
+    this.searchQuery = e.target.value;
+  }
+
+  clearSearch() {
+    this.searchQuery = '';
+  }
+
+  /**
+   * Fuzzy match a query against a string.
+   * Returns true if all characters in query appear in order in str.
+   */
+  fuzzyMatch(query, str) {
+    if (!query) return true;
+    query = query.toLowerCase();
+    str = str.toLowerCase();
+    
+    let qi = 0;
+    for (let si = 0; si < str.length && qi < query.length; si++) {
+      if (str[si] === query[qi]) {
+        qi++;
+      }
+    }
+    return qi === query.length;
+  }
+
+  /**
+   * Filter items in a content group based on search query.
+   */
+  filterItems(items, type) {
+    if (!this.searchQuery || !items) return items;
+    
+    return items.filter(item => {
+      const searchStr = type === 'urls' 
+        ? (item.title || item.url || '')
+        : (item.path || '');
+      return this.fuzzyMatch(this.searchQuery, searchStr);
+    });
+  }
+
+  /**
+   * Check if a tier has any matching items after filtering.
+   */
+  tierHasMatches(block) {
+    if (!this.searchQuery) return true;
+    if (!block.contents) return false;
+    
+    return block.contents.some(content => {
+      if (!content.items) return false;
+      const filtered = this.filterItems(content.items, content.type);
+      return filtered && filtered.length > 0;
+    });
   }
 
   render() {
