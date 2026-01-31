@@ -288,13 +288,19 @@ def _build_streaming_messages(self, ...):
 - ✅ Uses 4-tier thresholds with `file_stability` tracker
 - ⏳ Rename to `cache_stability` and extend for symbol map entries (Phase 3)
 
-### Phase 2: Per-File Symbol Map Entries ← CURRENT
+### Phase 2: Per-File Symbol Map Entries ✅ COMPLETE
 
 **Changes to `ac/symbol_index/compact_format.py`:**
-- Add `format_legend(aliases) -> str` - returns legend/header block (goes in L0)
-- Add `format_file_symbol_block(file_path, symbols, aliases) -> str` - returns single file's symbol entry
-- Add `compute_file_block_hash(file_path, symbols) -> str` - hash for stability tracking
-- Add `format_symbol_blocks_by_tier(symbols_by_file, tiers, aliases) -> dict[str, str]` - format blocks grouped by tier
+- ✅ `get_legend(aliases) -> str` - returns legend/header block (goes in L0)
+- ✅ `format_file_symbol_block(file_path, symbols, aliases) -> str` - returns single file's symbol entry
+- ✅ `compute_file_block_hash(file_path, symbols) -> str` - hash for stability tracking
+- ✅ `format_symbol_blocks_by_tier(symbols_by_file, tiers, aliases) -> dict[str, str]` - format blocks grouped by tier
+
+**Tests:** `tests/test_symbol_index_order.py`
+- ✅ `TestComputeFileBlockHash` - 9 tests for hash stability and change detection
+- ✅ `TestGetLegend` - 2 tests for legend extraction with/without aliases
+- ✅ `TestFormatFileSymbolBlock` - 3 tests for single file formatting
+- ✅ `TestFormatSymbolBlocksByTier` - 5 tests for tier-based grouping
 
 ### Phase 3: Unified Message Building
 
