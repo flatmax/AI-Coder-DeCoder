@@ -1,6 +1,25 @@
 import { html } from 'lit';
 import { formatTokens } from '../utils/formatters.js';
 
+// ========== Search Box ==========
+
+function renderSearchBox(component) {
+  return html`
+    <div class="search-box">
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Filter items... (fuzzy search)"
+        .value=${component.searchQuery}
+        @input=${(e) => component.handleSearchInput(e)}
+      />
+      ${component.searchQuery ? html`
+        <button class="search-clear" @click=${() => component.clearSearch()}>✕</button>
+      ` : ''}
+    </div>
+  `;
+}
+
 // ========== Helper Functions ==========
 
 function formatPath(path) {
@@ -74,18 +93,23 @@ function renderStabilityBar(item, tier) {
 
 function renderSymbolsGroup(component, tier, content) {
   const expanded = component.isGroupExpanded(tier, 'symbols');
+  const filteredItems = component.filterItems(content.items, 'symbols');
+  const matchCount = filteredItems?.length || 0;
+  
+  // Hide group if no matches
+  if (component.searchQuery && matchCount === 0) return '';
   
   return html`
     <div class="content-group">
       <div class="content-row" @click=${() => component.toggleGroup(tier, 'symbols')}>
         <span class="content-expand">${expanded ? '▼' : '▶'}</span>
         <span class="content-icon">📦</span>
-        <span class="content-label">Symbols (${content.count} files)</span>
+        <span class="content-label">Symbols (${component.searchQuery ? `${matchCount}/` : ''}${content.count} files)</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${expanded ? html`
         <div class="item-list">
-          ${(content.items || []).map(item => html`
+          ${(filteredItems || []).map(item => html`
             <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
               <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
               ${renderStabilityBar(item, tier)}
@@ -99,18 +123,23 @@ function renderSymbolsGroup(component, tier, content) {
 
 function renderFilesGroup(component, tier, content) {
   const expanded = component.isGroupExpanded(tier, 'files');
+  const filteredItems = component.filterItems(content.items, 'files');
+  const matchCount = filteredItems?.length || 0;
+  
+  // Hide group if no matches
+  if (component.searchQuery && matchCount === 0) return '';
   
   return html`
     <div class="content-group">
       <div class="content-row" @click=${() => component.toggleGroup(tier, 'files')}>
         <span class="content-expand">${expanded ? '▼' : '▶'}</span>
         <span class="content-icon">📄</span>
-        <span class="content-label">Files (${content.count})</span>
+        <span class="content-label">Files (${component.searchQuery ? `${matchCount}/` : ''}${content.count})</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${expanded ? html`
         <div class="item-list">
-          ${(content.items || []).map(item => html`
+          ${(filteredItems || []).map(item => html`
             <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
               <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
               <span class="item-tokens">${formatTokens(item.tokens)}</span>
@@ -125,19 +154,24 @@ function renderFilesGroup(component, tier, content) {
 
 function renderUrlsGroup(component, tier, content) {
   const expanded = component.isGroupExpanded(tier, 'urls');
+  const filteredItems = component.filterItems(content.items, 'urls');
+  const matchCount = filteredItems?.length || 0;
   const urlCount = content.items?.length || 0;
+  
+  // Hide group if no matches
+  if (component.searchQuery && matchCount === 0) return '';
   
   return html`
     <div class="content-group">
       <div class="content-row" @click=${() => component.toggleGroup(tier, 'urls')}>
         <span class="content-expand">${expanded ? '▼' : '▶'}</span>
         <span class="content-icon">🔗</span>
-        <span class="content-label">URLs (${urlCount})</span>
+        <span class="content-label">URLs (${component.searchQuery ? `${matchCount}/` : ''}${urlCount})</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${expanded ? html`
         <div class="item-list">
-          ${(content.items || []).map(item => {
+          ${(filteredItems || []).map(item => {
             const included = component.isUrlIncluded(item.url);
             return html`
               <div class="url-row">
@@ -219,6 +253,11 @@ function renderTierBlock(component, block) {
   const expanded = component.expandedTiers[block.tier];
   const isEmpty = block.tokens === 0;
   const tierColor = component.getTierColor(block.tier);
+  
+  // Hide tier if searching and no matches
+  if (component.searchQuery && !component.tierHasMatches(block)) {
+    return '';
+  }
   
   return html`
     <div class="tier-block ${isEmpty ? 'empty' : ''}" style="--tier-color: ${tierColor}">
@@ -367,18 +406,27 @@ export function renderCacheViewer(component) {
     return html`
       <div class="cache-container">
         ${renderPerformanceHeader(component)}
+        ${renderSearchBox(component)}
         <div class="loading">No cache blocks available. Send a message to populate cache tiers.</div>
         ${renderFooter(component)}
       </div>
     `;
   }
 
+  // Check if search has no results
+  const hasSearchResults = !component.searchQuery || 
+    blocks.some(block => component.tierHasMatches(block));
+
   return html`
     <div class="cache-container">
       ${renderPerformanceHeader(component)}
+      ${renderSearchBox(component)}
       ${renderRecentChanges(component)}
       
-      ${blocks.map(block => renderTierBlock(component, block))}
+      ${hasSearchResults 
+        ? blocks.map(block => renderTierBlock(component, block))
+        : html`<div class="no-results">No items match "${component.searchQuery}"</div>`
+      }
       
       ${renderFooter(component)}
       ${renderSessionTotals(component)}

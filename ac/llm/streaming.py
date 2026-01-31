@@ -543,7 +543,8 @@ class StreamingMixin:
             stability = self._context_manager.cache_stability
         
         # Determine which files are in active context (full content will be included)
-        active_context_files = set(file_paths) if file_paths else set()
+        # Normalize paths to ensure consistent matching
+        active_context_files = set(str(p).replace('\\', '/') for p in file_paths) if file_paths else set()
         
         # Get file tiers from stability tracker
         file_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}

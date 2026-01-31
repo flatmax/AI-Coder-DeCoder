@@ -27,6 +27,57 @@ export const cacheViewerStyles = css`
     color: #e94560;
   }
 
+  /* ========== Search Box ========== */
+  .search-box {
+    position: relative;
+    margin-bottom: 12px;
+  }
+
+  .search-input {
+    width: 100%;
+    padding: 10px 36px 10px 12px;
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    color: #eee;
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .search-input:focus {
+    border-color: #4ade80;
+    box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.2);
+  }
+
+  .search-input::placeholder {
+    color: #666;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .search-clear:hover {
+    color: #fff;
+  }
+
+  .no-results {
+    text-align: center;
+    color: #888;
+    padding: 20px;
+    font-style: italic;
+  }
+
   /* ========== Cache Performance Header ========== */
   .cache-performance {
     background: #16213e;
