@@ -66,9 +66,6 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Lazy-loaded URL fetcher
         self._url_fetcher = None
-        
-        # Auto-save symbol map on startup
-        self._auto_save_symbol_map()
     
     def set_model(self, model):
         """Set the LLM model to use."""

@@ -600,16 +600,3 @@ class StabilityTracker:
             'next_threshold': next_threshold,
             'progress': progress,
         }
-    
-    # Legacy compatibility method
-    def _compute_tier(self, stable_count: int) -> str:
-        """Compute tier based on stability count (legacy compatibility).
-        
-        In ripple mode, tiers are explicitly tracked, not computed.
-        This is kept for legacy 2-tier mode compatibility.
-        """
-        result_tier = 'active'
-        for tier in self._tier_order:
-            if stable_count >= self._thresholds[tier]:
-                result_tier = tier
-        return result_tier

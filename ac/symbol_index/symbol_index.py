@@ -202,6 +202,8 @@ class SymbolIndex:
         self._cache.invalidate(file_path)
         # Also invalidate references since they may be stale
         self._references_built = False
+        # Clear cached imports for this file
+        self._file_imports.pop(file_path, None)
     
     def _load_order(self) -> List[str]:
         """Load persisted file order for stable symbol map generation."""
