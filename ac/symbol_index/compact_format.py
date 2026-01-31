@@ -1,5 +1,6 @@
 """Compact format for LLM context."""
 
+import hashlib
 from typing import List, Dict, Optional, Set, Union
 from .models import Symbol, CallSite
 
@@ -79,6 +80,179 @@ LEGEND_BASE = "# c=class m=method f=function af=async func am=async method v=var
 def _estimate_tokens(text: str) -> int:
     """Estimate token count using ~4 chars per token heuristic."""
     return len(text) // 4 + 1
+
+
+def compute_file_block_hash(file_path: str, symbols: List[Symbol]) -> str:
+    """Compute a stable hash for a file's symbol block.
+    
+    Used by StabilityTracker to detect when a file's symbols have changed.
+    The hash includes the file path and all symbol signatures (name, kind,
+    line number, parameters, return type, bases, children).
+    
+    Args:
+        file_path: Path to the file
+        symbols: List of symbols in the file
+        
+    Returns:
+        SHA256 hash string (first 16 chars for compactness)
+    """
+    parts = [file_path]
+    
+    def _symbol_signature(sym: Symbol, depth: int = 0) -> str:
+        """Create a stable signature for a symbol."""
+        sig_parts = [
+            str(depth),
+            sym.kind,
+            sym.name,
+            str(sym.range.start_line),
+            sym.return_type or '',
+            ','.join(sym.bases) if sym.bases else '',
+            ','.join(p.name for p in sym.parameters) if sym.parameters else '',
+            ','.join(sym.instance_vars) if sym.instance_vars else '',
+        ]
+        result = '|'.join(sig_parts)
+        # Recursively add children
+        for child in sym.children:
+            result += '\n' + _symbol_signature(child, depth + 1)
+        return result
+    
+    for sym in symbols:
+        parts.append(_symbol_signature(sym))
+    
+    content = '\n'.join(parts)
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def get_legend(aliases: Dict[str, str] = None) -> str:
+    """Get the legend/header block for the symbol map.
+    
+    This is the static portion that goes in L0 cache block.
+    
+    Args:
+        aliases: Optional dict mapping path prefixes to short aliases
+        
+    Returns:
+        Legend string with syntax guide and path aliases
+    """
+    return _format_legend(aliases or {})
+
+
+def format_file_symbol_block(
+    file_path: str,
+    symbols: List[Symbol],
+    references: Optional[Dict[str, Dict[str, List]]] = None,
+    file_refs: Optional[Dict[str, Set[str]]] = None,
+    file_imports: Optional[Dict[str, Set[str]]] = None,
+    aliases: Dict[str, str] = None,
+    include_instance_vars: bool = True,
+    include_cross_file_calls: bool = True,
+    collapse_tests: bool = True,
+) -> str:
+    """Format a single file's symbol block.
+    
+    Used for per-file stability tracking - each file's symbols can be
+    independently cached and tracked for changes.
+    
+    Args:
+        file_path: Path to the file
+        symbols: List of symbols in the file
+        references: Optional dict of file -> symbol -> [locations]
+        file_refs: Optional dict of file -> set of files that reference it
+        file_imports: Optional dict of file -> set of in-repo files it imports
+        aliases: Optional dict mapping path prefixes to short aliases
+        include_instance_vars: Whether to include instance variables
+        include_cross_file_calls: Whether to show cross-file call annotations
+        collapse_tests: Whether to collapse test files to summaries
+        
+    Returns:
+        Formatted symbol block string for this file
+    """
+    lines = _format_file_block(
+        file_path=file_path,
+        symbols=symbols,
+        references=references,
+        file_refs=file_refs,
+        file_imports=file_imports,
+        include_instance_vars=include_instance_vars,
+        include_calls=False,
+        aliases=aliases,
+        collapse_tests=collapse_tests,
+        include_cross_file_calls=include_cross_file_calls,
+    )
+    return '\n'.join(lines)
+
+
+def format_symbol_blocks_by_tier(
+    symbols_by_file: Dict[str, List[Symbol]],
+    file_tiers: Dict[str, List[str]],
+    references: Optional[Dict[str, Dict[str, List]]] = None,
+    file_refs: Optional[Dict[str, Set[str]]] = None,
+    file_imports: Optional[Dict[str, Set[str]]] = None,
+    aliases: Dict[str, str] = None,
+    exclude_files: Set[str] = None,
+    include_instance_vars: bool = True,
+    include_cross_file_calls: bool = True,
+    collapse_tests: bool = True,
+) -> Dict[str, str]:
+    """Format symbol blocks grouped by cache tier.
+    
+    Returns a dict mapping tier names to formatted symbol block strings.
+    Files in exclude_files (e.g., files with full content in active context)
+    are omitted from all tiers.
+    
+    Args:
+        symbols_by_file: Dict mapping file paths to their symbols
+        file_tiers: Dict mapping tier names ('L0', 'L1', 'L2', 'L3', 'active')
+                   to lists of file paths in that tier
+        references: Optional dict of file -> symbol -> [locations]
+        file_refs: Optional dict of file -> set of files that reference it
+        file_imports: Optional dict of file -> set of in-repo files it imports
+        aliases: Optional dict mapping path prefixes to short aliases
+        exclude_files: Set of file paths to exclude (e.g., active context files)
+        include_instance_vars: Whether to include instance variables
+        include_cross_file_calls: Whether to show cross-file call annotations
+        collapse_tests: Whether to collapse test files to summaries
+        
+    Returns:
+        Dict mapping tier names to formatted symbol block strings.
+        Empty tiers return empty strings.
+    """
+    exclude_files = exclude_files or set()
+    result = {}
+    
+    for tier, files in file_tiers.items():
+        tier_lines = []
+        
+        for file_path in files:
+            # Skip files that are excluded (full content in active context)
+            if file_path in exclude_files:
+                continue
+            
+            # Skip files not in symbols_by_file
+            if file_path not in symbols_by_file:
+                continue
+            
+            symbols = symbols_by_file[file_path]
+            if not symbols:
+                continue
+            
+            file_lines = _format_file_block(
+                file_path=file_path,
+                symbols=symbols,
+                references=references,
+                file_refs=file_refs,
+                file_imports=file_imports,
+                include_instance_vars=include_instance_vars,
+                include_calls=False,
+                aliases=aliases,
+                collapse_tests=collapse_tests,
+                include_cross_file_calls=include_cross_file_calls,
+            )
+            tier_lines.extend(file_lines)
+        
+        result[tier] = '\n'.join(tier_lines) if tier_lines else ''
+    
+    return result
 
 
 def _is_test_file(file_path: str) -> bool:
