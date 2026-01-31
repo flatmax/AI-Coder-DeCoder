@@ -28,6 +28,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this.isSearching = false;
     this.isLoading = false;
     this._debouncedSearch = debounce(() => this.performSearch(), 300);
+    this._messagesScrollTop = 0;
+    this._sessionsScrollTop = 0;
   }
 
   onRpcReady() {
@@ -40,15 +42,25 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   async show() {
     this.visible = true;
     await this.loadSessions();
+    
+    // Restore scroll positions after render
+    await this.updateComplete;
+    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+    if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
+    if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
   }
 
   hide() {
+    // Save scroll positions before hiding
+    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+    if (messagesPanel) this._messagesScrollTop = messagesPanel.scrollTop;
+    if (sessionsPanel) this._sessionsScrollTop = sessionsPanel.scrollTop;
+    
     this.visible = false;
-    this.selectedSessionId = null;
-    this.selectedSession = [];
-    this.searchQuery = '';
-    this.searchResults = [];
-    this.isSearching = false;
+    // Keep selectedSessionId, selectedSession, searchQuery, searchResults, isSearching
+    // so reopening preserves state
   }
 
   async loadSessions() {

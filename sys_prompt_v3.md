@@ -194,7 +194,7 @@ This is especially critical when editing files that contain backticks, as nested
 ### Before You Edit
 
 **STOP.** Before proposing any edit block, verify:
-- Is the file **fully present** in the chat context? The Symbol Map shows structure, not full content. If you only see the map entry (not the complete file), request the file first.
+- Is the file **fully present** in the chat context? The Symbol Map shows structure, not full content. If you only see the map entry (not the complete file), **ask the user to add the file first** (e.g., "Please add `path/to/file.py` to the chat so I can edit it.").
 - Do you have enough information? If the Symbol Map is insufficient, state what additional files you need and why.
 - Have you traced dependencies? Check `←refs` to understand the blast radius.
 - Read the actual content carefully. Do not assume what the code looks like—verify against what is shown.
