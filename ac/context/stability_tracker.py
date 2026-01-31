@@ -10,7 +10,11 @@ import hashlib
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Union
+
+
+# Type alias for tier names
+TierName = Literal['active', 'L3', 'L2', 'L1', 'L0']
 
 
 @dataclass
@@ -18,7 +22,7 @@ class StabilityInfo:
     """Stability tracking data for a single item."""
     content_hash: str           # SHA256 of content
     stable_count: int           # Consecutive unchanged responses
-    current_tier: Literal['active', 'L1', 'L0']
+    current_tier: str           # 'active', 'L3', 'L2', 'L1', or 'L0'
     tier_entry_response: int    # Response number when entered current tier
 
 
@@ -30,37 +34,55 @@ class StabilityTracker:
     based on how long they've remained unchanged. Designed for reuse
     across file caching, symbol map ordering, and other use cases.
     
-    Tiers:
-    - L0: Most stable content (N >= l0_threshold), cached first
-    - L1: Moderately stable (N >= l1_threshold), cached second
+    Default tiers (Bedrock 4-cache-block optimized):
+    - L0: Most stable content (N >= 12), cached first
+    - L1: Very stable (N >= 9), cached second
+    - L2: Stable (N >= 6), cached third
+    - L3: Moderately stable (N >= 3), cached fourth
     - active: Recently changed content, not cached
     
-    New items start in L1 (greedy) for immediate cache benefits.
+    New items start in the initial_tier (default: L3) for immediate cache benefits.
     """
     
     def __init__(
         self,
         persistence_path: Path,
+        thresholds: dict[str, int] = None,
         l1_threshold: int = 3,
         l0_threshold: int = 5,
         reorg_interval: int = 10,
         reorg_drift_threshold: float = 0.2,
-        initial_tier: str = 'L1'
+        initial_tier: str = 'L3'
     ):
         """
         Initialize stability tracker.
         
         Args:
             persistence_path: Path to JSON file for persistence
-            l1_threshold: Stable count needed for L1 tier (default: 3)
-            l0_threshold: Stable count needed for L0 tier (default: 10)
+            thresholds: Dict mapping tier names to stability thresholds.
+                       Default: {'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+                       Legacy l1_threshold/l0_threshold used if thresholds not provided.
+            l1_threshold: (Legacy) Stable count needed for L1 tier
+            l0_threshold: (Legacy) Stable count needed for L0 tier
             reorg_interval: Minimum responses between reorganizations
             reorg_drift_threshold: Fraction of misplaced items to trigger reorg
-            initial_tier: Starting tier for new items ('L1' or 'active')
+            initial_tier: Starting tier for new items ('L3', 'L1', or 'active')
         """
         self._persistence_path = Path(persistence_path)
-        self._l1_threshold = l1_threshold
-        self._l0_threshold = l0_threshold
+        
+        # Support both new thresholds dict and legacy 2-tier params
+        if thresholds:
+            self._thresholds = thresholds
+        else:
+            # Legacy 2-tier mode for backwards compatibility
+            self._thresholds = {'L1': l1_threshold, 'L0': l0_threshold}
+        
+        # Sort thresholds by value ascending for tier computation
+        self._tier_order = sorted(
+            self._thresholds.keys(),
+            key=lambda t: self._thresholds[t]
+        )
+        
         self._reorg_interval = reorg_interval
         self._reorg_drift_threshold = reorg_drift_threshold
         self._initial_tier = initial_tier
@@ -68,6 +90,10 @@ class StabilityTracker:
         self._stability: dict[str, StabilityInfo] = {}
         self._response_count: int = 0
         self._last_reorg_response: int = 0
+        
+        # Track promotions/demotions for the last update (for notifications)
+        self._last_promotions: list[tuple[str, str]] = []  # [(item, new_tier), ...]
+        self._last_demotions: list[tuple[str, str]] = []   # [(item, new_tier), ...]
         
         self.load()
     
@@ -96,6 +122,10 @@ class StabilityTracker:
         modified_set = set(modified or [])
         tier_changes = {}
         
+        # Reset promotion/demotion tracking for this update
+        self._last_promotions = []
+        self._last_demotions = []
+        
         for item in items:
             try:
                 content = get_content(item)
@@ -112,6 +142,7 @@ class StabilityTracker:
                 continue
             
             info = self._stability[item]
+            old_tier = info.current_tier
             
             if item in modified_set or info.content_hash != new_hash:
                 # Content changed - demote to active
@@ -121,6 +152,7 @@ class StabilityTracker:
                     info.current_tier = 'active'
                     info.tier_entry_response = self._response_count
                     tier_changes[item] = 'active'
+                    self._last_demotions.append((item, 'active'))
             else:
                 # Content unchanged - increment stability
                 info.stable_count += 1
@@ -129,6 +161,11 @@ class StabilityTracker:
                     info.current_tier = new_tier
                     info.tier_entry_response = self._response_count
                     tier_changes[item] = new_tier
+                    # Track promotion (moving to a higher-threshold tier)
+                    if self._is_promotion(old_tier, new_tier):
+                        self._last_promotions.append((item, new_tier))
+                    else:
+                        self._last_demotions.append((item, new_tier))
         
         # Check for reorganization
         if self._should_reorganize():
@@ -137,10 +174,37 @@ class StabilityTracker:
         self.save()
         return tier_changes
     
+    def _is_promotion(self, old_tier: str, new_tier: str) -> bool:
+        """Check if moving from old_tier to new_tier is a promotion.
+        
+        A promotion means moving to a tier with a higher threshold (more stable).
+        """
+        if old_tier == 'active':
+            return new_tier != 'active'
+        if new_tier == 'active':
+            return False
+        
+        old_threshold = self._thresholds.get(old_tier, 0)
+        new_threshold = self._thresholds.get(new_tier, 0)
+        return new_threshold > old_threshold
+    
     def _initialize_item(self, item: str, content_hash: str) -> StabilityInfo:
-        """Greedily initialize new items in L1."""
-        initial_count = self._l1_threshold if self._initial_tier == 'L1' else 0
-        initial_tier = self._initial_tier if self._initial_tier in ('L1', 'active') else 'L1'
+        """Greedily initialize new items in the initial tier.
+        
+        Sets stable_count to the tier's threshold so items can promote naturally.
+        """
+        if self._initial_tier == 'active':
+            initial_count = 0
+            initial_tier = 'active'
+        elif self._initial_tier in self._thresholds:
+            initial_count = self._thresholds[self._initial_tier]
+            initial_tier = self._initial_tier
+        else:
+            # Fallback to lowest cached tier
+            lowest_tier = self._tier_order[0] if self._tier_order else 'active'
+            initial_count = self._thresholds.get(lowest_tier, 0)
+            initial_tier = lowest_tier
+        
         return StabilityInfo(
             content_hash=content_hash,
             stable_count=initial_count,
@@ -149,12 +213,16 @@ class StabilityTracker:
         )
     
     def _compute_tier(self, stable_count: int) -> str:
-        """Compute tier based on stability count."""
-        if stable_count >= self._l0_threshold:
-            return 'L0'
-        elif stable_count >= self._l1_threshold:
-            return 'L1'
-        return 'active'
+        """Compute tier based on stability count.
+        
+        Iterates through tiers in ascending threshold order,
+        returning the highest tier whose threshold is met.
+        """
+        result_tier = 'active'
+        for tier in self._tier_order:
+            if stable_count >= self._thresholds[tier]:
+                result_tier = tier
+        return result_tier
     
     def get_tier(self, item: str) -> str:
         """Get current tier for an item."""
@@ -176,15 +244,21 @@ class StabilityTracker:
             items: Filter to these items only. If None, return all tracked items.
         
         Returns:
-            Dict with keys 'L0', 'L1', 'active' mapping to item lists,
+            Dict with tier names as keys mapping to item lists,
             sorted by stable_count descending within each tier.
+            Always includes 'active' plus all configured tiers.
         """
-        result = {'L0': [], 'L1': [], 'active': []}
+        # Initialize with all configured tiers plus active
+        result = {'active': []}
+        for tier in self._tier_order:
+            result[tier] = []
         
         check_items = items if items is not None else list(self._stability.keys())
         
         for item in check_items:
             tier = self.get_tier(item)
+            if tier not in result:
+                result[tier] = []
             result[tier].append(item)
         
         # Sort within tiers by stable_count descending
@@ -194,16 +268,18 @@ class StabilityTracker:
         return result
     
     def _should_reorganize(self) -> bool:
-        """Check if L0/L1 boundary should be recomputed."""
+        """Check if tier boundaries should be recomputed."""
         if self._response_count - self._last_reorg_response < self._reorg_interval:
             return False
         
-        # Count misplaced items
+        # Count misplaced items (items not in their computed tier)
         misplaced = 0
         total_cached = 0
         
+        cached_tiers = set(self._tier_order)  # All non-active tiers
+        
         for info in self._stability.values():
-            if info.current_tier in ('L0', 'L1'):
+            if info.current_tier in cached_tiers:
                 total_cached += 1
                 expected_tier = self._compute_tier(info.stable_count)
                 if expected_tier != info.current_tier:
@@ -260,5 +336,39 @@ class StabilityTracker:
         self._stability = {}
         self._response_count = 0
         self._last_reorg_response = 0
+        self._last_promotions = []
+        self._last_demotions = []
         if self._persistence_path.exists():
             self._persistence_path.unlink()
+    
+    def get_last_promotions(self) -> list[tuple[str, str]]:
+        """Get items promoted in the last update.
+        
+        Returns:
+            List of (item, new_tier) tuples
+        """
+        return self._last_promotions.copy()
+    
+    def get_last_demotions(self) -> list[tuple[str, str]]:
+        """Get items demoted in the last update.
+        
+        Returns:
+            List of (item, new_tier) tuples
+        """
+        return self._last_demotions.copy()
+    
+    def get_thresholds(self) -> dict[str, int]:
+        """Get the tier thresholds.
+        
+        Returns:
+            Dict mapping tier names to stability count thresholds
+        """
+        return self._thresholds.copy()
+    
+    def get_tier_order(self) -> list[str]:
+        """Get tiers in ascending threshold order.
+        
+        Returns:
+            List of tier names from lowest to highest threshold
+        """
+        return self._tier_order.copy()
