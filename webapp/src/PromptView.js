@@ -416,7 +416,7 @@ export class PromptView extends MixedBase {
         if (messages && messages.length > 0) {
           // Load messages into chat history
           for (const msg of messages) {
-            this.addMessage(msg.role, msg.content, msg.images || null);
+            this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
           console.log(`📜 Loaded ${messages.length} messages from last session`);
         }

@@ -51,7 +51,8 @@ class HistoryMixin:
     def store_assistant_message(
         self,
         content: str,
-        files_modified: Optional[list] = None
+        files_modified: Optional[list] = None,
+        edit_results: Optional[list] = None
     ) -> Optional[dict]:
         """
         Store an assistant message in history.
@@ -59,6 +60,7 @@ class HistoryMixin:
         Args:
             content: The message content
             files_modified: Optional list of files that were modified
+            edit_results: Optional list of edit results with status info
             
         Returns:
             The stored message dict, or None if no history store
@@ -69,7 +71,8 @@ class HistoryMixin:
         return self._history_store.append(
             role='assistant',
             content=content,
-            files_modified=files_modified
+            files_modified=files_modified,
+            edit_results=edit_results
         )
     
     def history_search(self, query: str, role: Optional[str] = None, limit: int = 100) -> list:
