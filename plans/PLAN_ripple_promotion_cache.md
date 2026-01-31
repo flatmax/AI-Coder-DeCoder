@@ -317,9 +317,13 @@ class StabilityTracker:
 ### Remaining
 - [x] Initialize tiers from `←refs` counts on fresh start (heuristic distribution) - DONE via `initialize_from_refs()`
 - [x] Track newly created files (N=0) vs existing files (heuristic placement) - DONE (new files start active, move to L3 when inactive)
-- [ ] Call `initialize_from_refs()` from `streaming.py` when stability tracker is fresh
-- [ ] Add detailed logging for tier movements in production
-- [ ] Monitor and tune thresholds based on cache hit rates
+- [x] Call `initialize_from_refs()` from `streaming.py` when stability tracker is fresh - DONE (lines 488-503)
+- [x] Add detailed logging for tier movements in production - DONE (promotion/demotion logging in streaming.py lines 304-316)
+- [ ] Monitor and tune thresholds based on cache hit rates - Ongoing operational task
+
+## Status: COMPLETE
+
+All implementation work is done. The only remaining item is ongoing operational monitoring to tune thresholds if needed based on real-world cache hit rates.
 
 ## Success Metrics
 
