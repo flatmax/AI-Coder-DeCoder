@@ -22,6 +22,7 @@ The symbol map includes a legend explaining its syntax. Key usage notes:
 
 ## 3. CONTEXT MANAGEMENT
 
+- **Full Files vs. Symbol Map:** When a file is added to the chat as full content, its symbol map entry is excluded. This prevents stale symbol data—edits to the full file would make its symbol map entry outdated. The symbol map only shows files *not* currently in the active context.
 - **Read-Only vs. Edit:** You can ask to see files to read them. Only request to add files to the chat if you intend to edit them or need their full content for deep analysis.
 - **Don't Overload:** Do not ask for the whole repo. Use the map to target specific files.
 - **Polyglot Awareness:** The map covers multiple languages (e.g., Python in `ac/`, JavaScript in `webapp/`). Be aware of the language context when suggesting files. Module resolution differs by language:
