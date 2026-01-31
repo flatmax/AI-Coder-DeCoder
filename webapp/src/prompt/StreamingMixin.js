@@ -88,7 +88,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
       
       let errorContent = `⚠️ **Error:** ${result.error}`;
       if (filesToDeselect.length > 0) {
-        errorContent += `\n\n*The problematic files have been deselected. You can send your message again.*`;
+        errorContent += `\n\n*The file(s) have been deselected. You can send your message again.*`;
       }
       
       if (lastMessage && lastMessage.role === 'assistant') {
