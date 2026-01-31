@@ -214,16 +214,14 @@ class StabilityTracker:
         tier_changes: dict[str, str]
     ) -> None:
         """
-        Process items entering a tier one at a time, triggering ripple promotions.
+        Process items entering a tier as a batch, triggering ripple promotions.
         
-        When each item enters a tier:
-        1. Set its N to the tier's entry_n value
-        2. Increment N for all OTHER items already in that tier
-        3. Check for promotions (N >= promotion_threshold)
-        4. Recursively process promotions into the next tier
-        
-        Items are processed sequentially - each entry can trigger N++ for
-        items that entered earlier in the same batch.
+        When items enter a tier:
+        1. Snapshot existing items in the tier BEFORE any changes
+        2. Set each entering item's N to the tier's entry_n value
+        3. Increment N once for all existing items (not once per entering item)
+        4. Check for promotions (N >= promotion_threshold)
+        5. Recursively process promotions into the next tier
         
         Args:
             entering_items: Items entering this tier
@@ -237,20 +235,18 @@ class StabilityTracker:
         entry_n = config['entry_n']
         promotion_threshold = config['promotion_threshold']
         
-        # Process each entering item sequentially
+        # Snapshot existing items BEFORE processing any entries
+        # This ensures we only N++ once per batch, not once per entering item
+        existing_in_tier = [
+            item for item, info in self._stability.items()
+            if info.tier == tier and item not in entering_items
+        ]
+        
+        # Move all entering items to this tier with entry_n
         for item in entering_items:
             if item not in self._stability:
-                # Item must exist in stability tracking to enter a tier
                 continue
             
-            # Find items currently in this tier (before this item enters)
-            # This includes items that entered earlier in this same batch
-            existing_in_tier = [
-                other for other, info in self._stability.items()
-                if info.tier == tier and other != item
-            ]
-            
-            # Move this item to the tier with entry_n
             info = self._stability[item]
             old_tier = info.tier
             info.tier = tier
@@ -258,22 +254,22 @@ class StabilityTracker:
             tier_changes[item] = tier
             if self._is_promotion(old_tier, tier):
                 self._last_promotions.append((item, tier))
+        
+        # Increment N once for all existing items (batch operation)
+        items_to_promote = []
+        for existing_item in existing_in_tier:
+            existing_info = self._stability[existing_item]
+            existing_info.n_value += 1
             
-            # Increment N for all existing items in this tier
-            items_to_promote = []
-            for existing_item in existing_in_tier:
-                existing_info = self._stability[existing_item]
-                existing_info.n_value += 1
-                
-                # Check if this item should promote
-                if promotion_threshold and existing_info.n_value >= promotion_threshold:
-                    items_to_promote.append(existing_item)
-            
-            # Process promotions to next tier (cascade)
-            if items_to_promote:
-                next_tier = self._get_next_tier(tier)
-                if next_tier:
-                    self._process_tier_entries(items_to_promote, next_tier, tier_changes)
+            # Check if this item should promote
+            if promotion_threshold and existing_info.n_value >= promotion_threshold:
+                items_to_promote.append(existing_item)
+        
+        # Process promotions to next tier (cascade)
+        if items_to_promote:
+            next_tier = self._get_next_tier(tier)
+            if next_tier:
+                self._process_tier_entries(items_to_promote, next_tier, tier_changes)
     
     def _get_next_tier(self, tier: str) -> str | None:
         """Get the next tier in promotion order, or None if at L0."""
