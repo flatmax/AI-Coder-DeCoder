@@ -79,4 +79,47 @@ export const RpcMixin = (superClass) => class extends superClass {
   _call(method, ...args) {
     return this._rpc(method, ...args);
   }
+
+  /**
+   * Call an RPC method and extract the response.
+   * Handles the common pattern of calling RPC + extracting result.
+   * @param {string} method - The RPC method name
+   * @param {...*} args - Arguments to pass to the method
+   * @returns {Promise<*>} Extracted response value
+   */
+  async _rpcExtract(method, ...args) {
+    const response = await this._rpc(method, ...args);
+    return extractResponse(response);
+  }
+
+  /**
+   * Call an RPC method with loading/error state management.
+   * Sets isLoading=true before call, false after. Sets error on failure.
+   * @param {string} method - The RPC method name
+   * @param {Object} [options] - Options
+   * @param {string} [options.loadingProp='isLoading'] - Property name for loading state
+   * @param {string} [options.errorProp='error'] - Property name for error state
+   * @param {...*} args - Arguments to pass to the method
+   * @returns {Promise<*>} Extracted response value or null on error
+   */
+  async _rpcWithState(method, options = {}, ...args) {
+    const { loadingProp = 'isLoading', errorProp = 'error' } = options;
+    
+    this[loadingProp] = true;
+    this[errorProp] = null;
+    
+    try {
+      const result = await this._rpcExtract(method, ...args);
+      if (result?.error) {
+        this[errorProp] = result.error;
+        return null;
+      }
+      return result;
+    } catch (e) {
+      this[errorProp] = e.message || `${method} failed`;
+      return null;
+    } finally {
+      this[loadingProp] = false;
+    }
+  }
 };
