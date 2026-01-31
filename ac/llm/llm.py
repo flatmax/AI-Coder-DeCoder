@@ -241,6 +241,8 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             return None
         
         try:
+            from ..symbol_index import filter_supported_files
+            
             # Get all trackable files from repo
             tree_result = self.repo.get_file_tree()
             if not tree_result or 'error' in tree_result:
@@ -249,16 +251,9 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             if not tree:
                 return None
             
-            # Collect all file paths
+            # Collect all file paths and filter to supported extensions
             file_paths = self._collect_file_paths(tree)
-            
-            # Filter to supported extensions (must match parser.py EXTENSION_MAP)
-            supported_extensions = {
-                '.py', '.js', '.mjs', '.jsx', '.ts', '.tsx',
-                '.cpp', '.cc', '.cxx', '.c++', '.C',
-                '.hpp', '.hh', '.hxx', '.h++', '.H', '.h'
-            }
-            file_paths = [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
+            file_paths = filter_supported_files(file_paths)
             
             if not file_paths:
                 return None
@@ -388,19 +383,14 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         if not self.repo:
             return []
         
+        from ..symbol_index import filter_supported_files
+        
         tree_result = self.repo.get_file_tree()
         if not tree_result or 'tree' not in tree_result:
             return []
         
         file_paths = self._collect_file_paths(tree_result['tree'])
-        
-        # Filter to supported extensions (must match parser.py EXTENSION_MAP)
-        supported_extensions = {
-            '.py', '.js', '.mjs', '.jsx', '.ts', '.tsx',
-            '.cpp', '.cc', '.cxx', '.c++', '.C',
-            '.hpp', '.hh', '.hxx', '.h++', '.H', '.h'
-        }
-        return [f for f in file_paths if any(f.endswith(ext) for ext in supported_extensions)]
+        return filter_supported_files(file_paths)
     
     def get_context_map(self, chat_files=None, include_references=True):
         """

@@ -8,16 +8,9 @@ and HUD (terminal output) for context status.
 from pathlib import Path
 from typing import Optional
 
-from .token_counter import TokenCounter
+from .token_counter import TokenCounter, format_tokens
 from .file_context import FileContext
 from .stability_tracker import StabilityTracker
-
-
-def _format_tokens(count: int) -> str:
-    """Format token count with K suffix for readability."""
-    if count >= 1000:
-        return f"{count / 1000:.1f}K"
-    return str(count)
 
 
 def _progress_bar(used: int, total: int, width: int = 20) -> str:
@@ -228,7 +221,7 @@ class ContextManager:
         print("\n" + "=" * 60)
         print(f"📊 CONTEXT HUD - {self.model_name}")
         print("=" * 60)
-        print(f"Max Input: {_format_tokens(max_input)} | Max Output: {_format_tokens(max_output)}")
+        print(f"Max Input: {format_tokens(max_input)} | Max Output: {format_tokens(max_output)}")
         print("-" * 60)
         
         # Token breakdown
@@ -264,18 +257,18 @@ class ContextManager:
                 print(f"Last: {', '.join(parts)}")
             
             # Session totals
-            prompt = _format_tokens(usage.get('prompt_tokens', 0))
-            completion = _format_tokens(usage.get('completion_tokens', 0))
-            total = _format_tokens(usage.get('total_tokens', 0))
+            prompt = format_tokens(usage.get('prompt_tokens', 0))
+            completion = format_tokens(usage.get('completion_tokens', 0))
+            total = format_tokens(usage.get('total_tokens', 0))
             
             session_parts = [f"{prompt} prompt", f"{completion} completion", f"{total} total"]
             
             cache_hit = usage.get('cache_hit_tokens', 0)
             cache_write = usage.get('cache_write_tokens', 0)
             if cache_hit:
-                session_parts.append(f"{_format_tokens(cache_hit)} cache hit")
+                session_parts.append(f"{format_tokens(cache_hit)} cache hit")
             if cache_write:
-                session_parts.append(f"{_format_tokens(cache_write)} cache write")
+                session_parts.append(f"{format_tokens(cache_write)} cache write")
             
             print(f"Session: {', '.join(session_parts)}")
         
@@ -295,9 +288,9 @@ class ContextManager:
             usage = self.token_tracker.get_token_usage()
             total = usage.get('total_tokens', 0)
             if total:
-                session_info = f" | Session: {_format_tokens(total)}"
+                session_info = f" | Session: {format_tokens(total)}"
         
-        print(f"📊 History: {_format_tokens(history_tokens)}/{_format_tokens(self.max_history_tokens)} ({pct}%) | Msgs: {len(self._history)}{session_info}{history_warn}")
+        print(f"📊 History: {format_tokens(history_tokens)}/{format_tokens(self.max_history_tokens)} ({pct}%) | Msgs: {len(self._history)}{session_info}{history_warn}")
     
     # ========== Token Report ==========
     

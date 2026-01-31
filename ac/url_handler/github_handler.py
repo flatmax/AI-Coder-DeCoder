@@ -26,9 +26,6 @@ class GitHubHandler:
         'Readme.md',
     ]
     
-    # Supported extensions for symbol map
-    SUPPORTED_EXTENSIONS = {'.py', '.js', '.mjs', '.jsx', '.ts', '.tsx'}
-    
     def __init__(self, cache_path: Optional[Path] = None):
         """
         Initialize GitHub handler.
@@ -299,10 +296,12 @@ class GitHubHandler:
         Returns:
             List of relative file paths
         """
+        from ..symbol_index import SUPPORTED_EXTENSIONS
+        
         files = []
         repo_path = Path(repo_dir)
         
-        for ext in self.SUPPORTED_EXTENSIONS:
+        for ext in SUPPORTED_EXTENSIONS:
             for file_path in repo_path.rglob(f'*{ext}'):
                 # Skip hidden directories and node_modules
                 parts = file_path.relative_to(repo_path).parts
