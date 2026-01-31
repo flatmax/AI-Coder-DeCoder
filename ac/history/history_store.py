@@ -64,7 +64,8 @@ class HistoryStore:
         content: str,
         images: Optional[list] = None,
         files: Optional[list] = None,
-        files_modified: Optional[list] = None
+        files_modified: Optional[list] = None,
+        edit_results: Optional[list] = None
     ) -> dict:
         """
         Append a message to the history.
@@ -98,6 +99,9 @@ class HistoryStore:
         
         if files_modified:
             message["files_modified"] = files_modified
+        
+        if edit_results:
+            message["edit_results"] = edit_results
         
         # Append to file
         self._ensure_directory()

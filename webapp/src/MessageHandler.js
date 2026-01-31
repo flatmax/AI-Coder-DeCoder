@@ -54,10 +54,13 @@ export class MessageHandler extends JRPCClient {
     }
   }
 
-  addMessage(role, content, images = null) {
-    const message = { id: this._messageId++, role, content };
+  addMessage(role, content, images = null, editResults = null) {
+    const message = { id: this._messageId++, role, content, final: true };
     if (images) {
       message.images = images;
+    }
+    if (editResults) {
+      message.editResults = editResults;
     }
     this.messageHistory = [...this.messageHistory, message];
     this._scrollToBottom();

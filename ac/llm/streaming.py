@@ -340,9 +340,11 @@ class StreamingMixin:
             # Store assistant message in history
             # Handle both new format (files_modified list) and legacy format (passed tuples)
             files_modified = result.get("files_modified") or [edit[0] for edit in result.get("passed", [])]
+            edit_results = result.get("edit_results")
             self.store_assistant_message(
                 content=full_content,
-                files_modified=files_modified if files_modified else None
+                files_modified=files_modified if files_modified else None,
+                edit_results=edit_results if edit_results else None
             )
             
             # Update cache stability tracking after response (files AND symbol entries)
