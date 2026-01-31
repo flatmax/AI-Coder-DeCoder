@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { historyBrowserStyles } from './HistoryBrowserStyles.js';
 import { renderHistoryBrowser } from './HistoryBrowserTemplate.js';
-import { extractResponse, RpcMixin, debounce } from '../utils/rpc.js';
+import { RpcMixin, debounce } from '../utils/rpc.js';
 
 export class HistoryBrowser extends RpcMixin(LitElement) {
   static properties = {
@@ -64,30 +64,16 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   }
 
   async loadSessions() {
-    this.isLoading = true;
-    try {
-      const response = await this._call('LiteLLM.history_list_sessions', 50);
-      this.sessions = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error loading sessions:', e);
-      this.sessions = [];
-    }
-    this.isLoading = false;
+    const result = await this._rpcWithState('LiteLLM.history_list_sessions', {}, 50);
+    this.sessions = result || [];
   }
 
   async selectSession(sessionId, messageId = null) {
     // Only reload if switching sessions
     if (this.selectedSessionId !== sessionId) {
       this.selectedSessionId = sessionId;
-      this.isLoading = true;
-      try {
-        const response = await this._call('LiteLLM.history_get_session', sessionId);
-        this.selectedSession = extractResponse(response) || [];
-      } catch (e) {
-        console.error('Error loading session:', e);
-        this.selectedSession = [];
-      }
-      this.isLoading = false;
+      const result = await this._rpcWithState('LiteLLM.history_get_session', {}, sessionId);
+      this.selectedSession = result || [];
     }
     
     // Scroll to specific message if provided
@@ -128,17 +114,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     
     this.isSearching = true;
-    this.isLoading = true;
-    
-    try {
-      const response = await this._call('LiteLLM.history_search', this.searchQuery, null, 100);
-      this.searchResults = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error searching:', e);
-      this.searchResults = [];
-    }
-    
-    this.isLoading = false;
+    const result = await this._rpcWithState('LiteLLM.history_search', {}, this.searchQuery, null, 100);
+    this.searchResults = result || [];
   }
 
   copyToClipboard(content) {

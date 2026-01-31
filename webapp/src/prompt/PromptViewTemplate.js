@@ -6,15 +6,14 @@ import './SpeechToText.js';
 import '../find-in-files/FindInFiles.js';
 import '../context-viewer/ContextViewer.js';
 import '../context-viewer/CacheViewer.js';
+import { formatTokens } from '../utils/formatters.js';
+import { TIER_THRESHOLDS, getTierColor } from '../utils/tierConfig.js';
 
 function renderCacheTiers(data) {
   const tierInfo = data.tier_info;
   if (!tierInfo) return '';
   
-  const formatNum = (n) => n?.toLocaleString() ?? '0';
   const tiers = ['L0', 'L1', 'L2', 'L3', 'active'];
-  const thresholds = { L0: 12, L1: 9, L2: 6, L3: 3 };
-  const tierColors = { L0: '#7ec699', L1: '#4a9eff', L2: '#f0a500', L3: '#e94560', active: '#888' };
   
   // Calculate cache hit percentage
   const totalTokens = data.prompt_tokens || 0;
@@ -46,10 +45,10 @@ function renderCacheTiers(data) {
     const tierLabel = tier === 'active' ? 'active' : `${tier}`;
     
     return html`
-      <div class="hud-tier-row" style="--tier-color: ${tierColors[tier]}">
+      <div class="hud-tier-row" style="--tier-color: ${getTierColor(tier)}">
         <span class="hud-tier-label">${tierLabel}</span>
         <span class="hud-tier-contents">${contentsStr}</span>
-        <span class="hud-tier-tokens">${formatNum(tokens)}</span>
+        <span class="hud-tier-tokens">${formatTokens(tokens)}</span>
         ${isCached ? html`<span class="hud-tier-cached">●</span>` : html`<span class="hud-tier-uncached">○</span>`}
       </div>
     `;
@@ -73,15 +72,12 @@ function renderPromotions(data) {
   const tierInfo = data.tier_info;
   if (!tierInfo) return '';
   
-  // Check for promotions/demotions in the response
-  // These would be passed from the backend if available
   const promotions = data.promotions || [];
   const demotions = data.demotions || [];
   
   if (promotions.length === 0 && demotions.length === 0) return '';
   
   const formatItem = (item) => {
-    // Strip symbol: prefix and shorten path
     const clean = item.replace('symbol:', '📦 ');
     const parts = clean.split('/');
     return parts.length > 2 ? '...' + parts.slice(-2).join('/') : clean;
@@ -111,7 +107,6 @@ function renderHud(component) {
   }
   
   const data = component._hudData;
-  const formatNum = (n) => n?.toLocaleString() ?? '0';
   
   // Calculate cache hit percentage for prominent display
   const totalTokens = data.prompt_tokens || 0;
@@ -134,23 +129,23 @@ function renderHud(component) {
         <div class="hud-section-title">Context Breakdown</div>
         <div class="hud-row">
           <span class="hud-label">System:</span>
-          <span class="hud-value">${formatNum(data.system_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.system_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">Symbol Map:</span>
-          <span class="hud-value">${formatNum(data.symbol_map_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.symbol_map_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">Files:</span>
-          <span class="hud-value">${formatNum(data.file_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.file_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">History:</span>
-          <span class="hud-value">${formatNum(data.history_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.history_tokens)}</span>
         </div>
         <div class="hud-row total">
           <span class="hud-label">Context:</span>
-          <span class="hud-value">${formatNum(data.context_total_tokens)} / ${formatNum(data.max_input_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.context_total_tokens)} / ${formatTokens(data.max_input_tokens)}</span>
         </div>
       ` : ''}
       ${renderCacheTiers(data)}
@@ -158,26 +153,26 @@ function renderHud(component) {
       <div class="hud-section-title">This Request</div>
       <div class="hud-row">
         <span class="hud-label">Prompt:</span>
-        <span class="hud-value">${formatNum(data.prompt_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.prompt_tokens)}</span>
       </div>
       <div class="hud-row">
         <span class="hud-label">Response:</span>
-        <span class="hud-value">${formatNum(data.completion_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.completion_tokens)}</span>
       </div>
       <div class="hud-row total">
         <span class="hud-label">Total:</span>
-        <span class="hud-value">${formatNum(data.total_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.total_tokens)}</span>
       </div>
       ${data.cache_hit_tokens ? html`
         <div class="hud-row cache">
           <span class="hud-label">Cache hit:</span>
-          <span class="hud-value">${formatNum(data.cache_hit_tokens)} (${cachePercent}%)</span>
+          <span class="hud-value">${formatTokens(data.cache_hit_tokens)} (${cachePercent}%)</span>
         </div>
       ` : ''}
       ${data.cache_write_tokens ? html`
         <div class="hud-row cache-write">
           <span class="hud-label">Cache write:</span>
-          <span class="hud-value">${formatNum(data.cache_write_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.cache_write_tokens)}</span>
         </div>
       ` : ''}
       ${renderPromotions(data)}
@@ -186,15 +181,15 @@ function renderHud(component) {
         <div class="hud-section-title">Session Total</div>
         <div class="hud-row cumulative">
           <span class="hud-label">In:</span>
-          <span class="hud-value">${formatNum(data.session_prompt_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_prompt_tokens)}</span>
         </div>
         <div class="hud-row cumulative">
           <span class="hud-label">Out:</span>
-          <span class="hud-value">${formatNum(data.session_completion_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_completion_tokens)}</span>
         </div>
         <div class="hud-row cumulative total">
           <span class="hud-label">Total:</span>
-          <span class="hud-value">${formatNum(data.session_total_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_total_tokens)}</span>
         </div>
       ` : ''}
     </div>

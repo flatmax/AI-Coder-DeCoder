@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
-import { extractResponse, RpcMixin } from '../utils/rpc.js';
+import { RpcMixin } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -65,25 +65,15 @@ export class ContextViewer extends RpcMixin(LitElement) {
       return;
     }
     
-    this.isLoading = true;
-    this.error = null;
+    const result = await this._rpcWithState(
+      'LiteLLM.get_context_breakdown',
+      {},
+      this.selectedFiles || [],
+      this.getIncludedUrls()
+    );
     
-    try {
-      const response = await this._rpc('LiteLLM.get_context_breakdown',
-        this.selectedFiles || [],
-        this.getIncludedUrls()
-      );
-      const result = extractResponse(response);
-      
-      if (result?.error) {
-        this.error = result.error;
-      } else {
-        this.breakdown = result;
-      }
-    } catch (e) {
-      this.error = e.message || 'Failed to load context breakdown';
-    } finally {
-      this.isLoading = false;
+    if (result) {
+      this.breakdown = result;
     }
   }
 
