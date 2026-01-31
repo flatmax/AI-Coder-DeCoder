@@ -492,7 +492,10 @@ export class CardMarkdown extends LitElement {
    */
   getEditResultForFile(filePath) {
     if (!this.editResults || this.editResults.length === 0) return null;
-    return this.editResults.find(r => r.file_path === filePath);
+    // Normalize paths for comparison (handle ./ prefix, backslashes, etc.)
+    const normalize = (p) => p?.replace(/^\.\//, '').replace(/\\/g, '/').trim();
+    const normalizedSearch = normalize(filePath);
+    return this.editResults.find(r => normalize(r.file_path) === normalizedSearch);
   }
 
   /**
