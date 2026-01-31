@@ -317,13 +317,16 @@ def _build_streaming_messages(self, ...):
 
 **Note:** Initial greedy population deferred - items naturally start in L3 and promote over time.
 
-### Phase 4: Unified Terminal HUD
+### Phase 4: Unified Terminal HUD ✅ COMPLETE
 
 **Changes to `ac/llm/streaming.py`:**
-- Add `_print_cache_blocks()` method
-- Show tier breakdown with token counts
-- Calculate and display cache hit percentage
-- Append to existing HUD output
+- ✅ Add `_print_cache_blocks()` method
+- ✅ Track per-tier token counts and content summaries in `tier_info` dict
+- ✅ Show tier breakdown with token counts and cached status
+- ✅ Calculate and display cache hit percentage
+- ✅ Track empty tiers per-request and per-session
+- ✅ Return `tier_info` from `_build_streaming_messages()` for HUD use
+- ✅ Append cache blocks display to existing HUD output
 
 ### Phase 5: Clean Context Breakdown API
 
