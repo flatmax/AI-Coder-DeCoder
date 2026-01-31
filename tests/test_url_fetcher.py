@@ -9,18 +9,19 @@ from ac.url_handler.config import URLConfig, URLCacheConfig
 from ac.url_handler.models import URLContent, URLType, URLResult, SummaryType
 
 
+# Use shared fixtures from conftest.py:
+# - cache_dir, url_config, url_cache, url_fetcher, sample_url_content
+
 @pytest.fixture
-def config(tmp_path):
-    """Create config with temp cache directory."""
-    return URLConfig(
-        cache=URLCacheConfig(path=str(tmp_path / "url_cache"), ttl_hours=24)
-    )
+def config(url_config):
+    """Alias for backward compatibility."""
+    return url_config
 
 
 @pytest.fixture
-def fetcher(config):
-    """Create fetcher with temp cache."""
-    return URLFetcher(config=config)
+def fetcher(url_fetcher):
+    """Alias for backward compatibility."""
+    return url_fetcher
 
 
 class TestURLFetcherInit:

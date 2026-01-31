@@ -125,17 +125,17 @@ class TestStabilityTrackerRippleBasics:
         assert tracker.get_tier("b.py") == 'active'
         assert tracker.get_n_value("b.py") == 0
     
-    def test_legacy_compute_tier_still_works(self, tmp_path):
-        """Legacy _compute_tier method works for backwards compatibility."""
+    def test_compute_tier_from_n(self, tmp_path):
+        """_compute_tier_from_n correctly maps N values to tiers."""
         tracker = StabilityTracker(
             persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
         )
-        assert tracker._compute_tier(0) == 'active'
-        assert tracker._compute_tier(3) == 'L3'
-        assert tracker._compute_tier(6) == 'L2'
-        assert tracker._compute_tier(9) == 'L1'
-        assert tracker._compute_tier(12) == 'L0'
+        assert tracker._compute_tier_from_n(0) == 'active'
+        assert tracker._compute_tier_from_n(3) == 'L3'
+        assert tracker._compute_tier_from_n(6) == 'L2'
+        assert tracker._compute_tier_from_n(9) == 'L1'
+        assert tracker._compute_tier_from_n(12) == 'L0'
 
 
 class TestStabilityTrackerRipplePromotion:
