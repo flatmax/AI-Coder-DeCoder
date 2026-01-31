@@ -63,17 +63,37 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this.isLoading = false;
   }
 
-  async selectSession(sessionId) {
-    this.selectedSessionId = sessionId;
-    this.isLoading = true;
-    try {
-      const response = await this._call('LiteLLM.history_get_session', sessionId);
-      this.selectedSession = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error loading session:', e);
-      this.selectedSession = [];
+  async selectSession(sessionId, messageId = null) {
+    // Only reload if switching sessions
+    if (this.selectedSessionId !== sessionId) {
+      this.selectedSessionId = sessionId;
+      this.isLoading = true;
+      try {
+        const response = await this._call('LiteLLM.history_get_session', sessionId);
+        this.selectedSession = extractResponse(response) || [];
+      } catch (e) {
+        console.error('Error loading session:', e);
+        this.selectedSession = [];
+      }
+      this.isLoading = false;
     }
-    this.isLoading = false;
+    
+    // Scroll to specific message if provided
+    if (messageId) {
+      this._scrollToMessage(messageId);
+    }
+  }
+
+  _scrollToMessage(messageId) {
+    // Wait for render, then scroll
+    this.updateComplete.then(() => {
+      const msgEl = this.shadowRoot?.querySelector(`[data-message-id="${messageId}"]`);
+      if (msgEl) {
+        msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        msgEl.classList.add('highlight');
+        setTimeout(() => msgEl.classList.remove('highlight'), 2000);
+      }
+    });
   }
 
   handleSearchInput(e) {

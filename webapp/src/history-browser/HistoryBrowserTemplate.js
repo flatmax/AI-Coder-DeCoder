@@ -11,7 +11,7 @@ function renderSessionsList(component) {
       ${component.searchResults.map(msg => html`
         <div 
           class="search-result-item"
-          @click=${() => component.selectSession(msg.session_id)}
+          @click=${() => component.selectSession(msg.session_id, msg.id)}
         >
           <div class="search-result-session">
             ${formatTimestamp(msg.timestamp)} · ${msg.role}
@@ -69,7 +69,7 @@ function renderMessages(component) {
   }
 
   return component.selectedSession.map(msg => html`
-    <div class="message-card ${msg.role}">
+    <div class="message-card ${msg.role}" data-message-id="${msg.id}">
       <div class="message-header">
         <span class="message-role">${msg.role}</span>
         <span class="message-time">${formatTimestamp(msg.timestamp)}</span>
