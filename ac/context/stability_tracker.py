@@ -2,14 +2,18 @@
 Ripple promotion stability tracker for content caching tiers.
 
 Implements a "ripple promotion" policy where:
-1. Files in Active context are not cached (N=0)
-2. When a file becomes inactive, it moves to L3 with N=3 (entry threshold)
-3. When an item enters a cache tier, all existing items in that tier get N++
-4. When N reaches a tier's promotion threshold, the item promotes to the next tier
-5. Promotions cascade: entering L2 triggers N++ in L2, which may cause more promotions
+1. Files in Active context start with N=0
+2. Edited files reset to N=0
+3. Veteran files (in Active, not edited) get N++ each response
+4. When N reaches 3, the file enters L3 (or when leaving Active context)
+5. When items enter a tier, veterans (existing items in that tier) get N++ once
+6. When a veteran's N reaches the tier's promotion threshold, it promotes
+7. Promoted items become direct entries for the next tier, triggering ripple there
+8. If no veterans promote in a tier, higher tiers remain unchanged (ripple stops)
 
-This approach ensures that frequently-used-together files promote together,
-and only active context changes trigger cache reorganization.
+Each tier's computation is independent - it only depends on direct entries to that tier.
+This ensures stable files gradually move to higher cache tiers while keeping
+the promotion logic predictable and testable.
 """
 
 import hashlib
@@ -47,11 +51,15 @@ class StabilityTracker:
     """
     Ripple promotion stability tracker for cache tier management.
     
-    Uses a ripple promotion policy:
-    - Items enter L3 when they leave Active context
-    - When items enter a tier, existing items in that tier get N++
-    - Items promote when N reaches the tier's promotion threshold
-    - Promotions cascade through tiers
+    Uses a ripple promotion policy where each tier is computed independently:
+    - Items in Active context have N=0
+    - Veteran items in Active (not edited) get N++ each response
+    - When N reaches 3, the item enters L3 (or when it leaves Active context)
+    - When items enter a tier, veterans (existing items) in that tier get N++ once
+    - If a veteran reaches the tier's promotion threshold, it promotes to the next tier
+    - Promoted items become direct entries for the next tier, triggering ripple there
+    - If no promotions occur in a tier, higher tiers remain unchanged
+    - Edited items reset to N=0 and return to Active
     
     Tiers (Bedrock 4-cache-block optimized):
     - L0: Most stable content (N >= 12), cached first
@@ -175,29 +183,38 @@ class StabilityTracker:
                 # Check if content changed or item was modified
                 if item in modified_set or info.content_hash != new_hash:
                     info.content_hash = new_hash
+                    # Reset N and demote to active
+                    info.n_value = 0
                     if old_tier != 'active':
-                        # Demote from cache tier to active
-                        info.n_value = 0
                         info.tier = 'active'
                         tier_changes[item] = 'active'
                         self._last_demotions.append((item, 'active'))
-                elif old_tier != 'active':
-                    # Item was cached but is now in Active context
-                    # It stays cached until it would be modified
-                    # Actually, per the plan: items in Active have N=0
-                    # But we don't demote cached items just for being accessed
-                    pass
+                else:
+                    # Veteran active file, not edited - reward stability with N++
+                    info.n_value += 1
         
-        # Phase 2: Handle items leaving Active context (entering L3)
+        # Phase 2: Handle items entering L3
+        # This includes:
+        # - Items that left Active context (not in current items list)
+        # - Veteran items that reached N=3 threshold while in Active
+        items_leaving_active = self._last_active_items - current_active
         items_entering_l3 = []
-        for item in self._last_active_items:
-            if item not in current_active and item in self._stability:
+        
+        # Items leaving Active context
+        for item in items_leaving_active:
+            if item in self._stability:
                 info = self._stability[item]
                 if info.tier == 'active':
-                    # Item left Active - enters L3
                     items_entering_l3.append(item)
         
-        # Phase 3: Process entries into L3 and handle cascading promotions
+        # Veteran items that reached L3 threshold (N >= 3) while still in Active
+        for item in current_active:
+            if item in self._stability:
+                info = self._stability[item]
+                if info.tier == 'active' and info.n_value >= TIER_CONFIG['L3']['entry_n']:
+                    items_entering_l3.append(item)
+        
+        # Process all items entering L3 as a batch (triggers ripple promotions)
         if items_entering_l3:
             self._process_tier_entries(items_entering_l3, 'L3', tier_changes)
         
@@ -209,67 +226,72 @@ class StabilityTracker:
     
     def _process_tier_entries(
         self,
-        entering_items: list[str],
-        tier: str,
+        initial_entering_items: list[str],
+        initial_tier: str,
         tier_changes: dict[str, str]
     ) -> None:
         """
-        Process items entering a tier as a batch, triggering ripple promotions.
+        Process items entering cache tiers with ripple promotion.
         
-        When items enter a tier:
-        1. Snapshot existing items in the tier BEFORE any changes
-        2. Set each entering item's N to the tier's entry_n value
-        3. Increment N once for all existing items (not once per entering item)
-        4. Check for promotions (N >= promotion_threshold)
-        5. Recursively process promotions into the next tier
+        Ripple promotion is computed independently per tier:
+        1. Items entering a tier get that tier's entry_n value
+        2. Veterans (items already in that tier) get N++ once per cycle
+        3. If any veteran reaches promotion_threshold, they promote to the next tier
+        4. Promoted items become direct entries for the next tier
+        5. If no promotions occur, higher tiers remain unchanged
+        
+        Each tier's computation depends only on direct entries to that tier,
+        not on activity in other tiers.
         
         Args:
-            entering_items: Items entering this tier
-            tier: The tier being entered ('L3', 'L2', 'L1', or 'L0')
+            initial_entering_items: Items initially entering (from Active leaving or threshold)
+            initial_tier: The first tier being entered (typically 'L3')
             tier_changes: Dict to record tier changes (mutated)
         """
-        if not entering_items or tier not in TIER_CONFIG:
+        if not initial_entering_items or initial_tier not in TIER_CONFIG:
             return
         
-        config = TIER_CONFIG[tier]
-        entry_n = config['entry_n']
-        promotion_threshold = config['promotion_threshold']
+        # Process tiers in order, starting from initial_tier
+        current_tier = initial_tier
+        entering_items = list(initial_entering_items)
         
-        # Snapshot existing items BEFORE processing any entries
-        # This ensures we only N++ once per batch, not once per entering item
-        existing_in_tier = [
-            item for item, info in self._stability.items()
-            if info.tier == tier and item not in entering_items
-        ]
-        
-        # Move all entering items to this tier with entry_n
-        for item in entering_items:
-            if item not in self._stability:
-                continue
+        while entering_items and current_tier and current_tier in TIER_CONFIG:
+            config = TIER_CONFIG[current_tier]
+            entry_n = config['entry_n']
+            promotion_threshold = config['promotion_threshold']
             
-            info = self._stability[item]
-            old_tier = info.tier
-            info.tier = tier
-            info.n_value = entry_n
-            tier_changes[item] = tier
-            if self._is_promotion(old_tier, tier):
-                self._last_promotions.append((item, tier))
-        
-        # Increment N once for all existing items (batch operation)
-        items_to_promote = []
-        for existing_item in existing_in_tier:
-            existing_info = self._stability[existing_item]
-            existing_info.n_value += 1
+            # Snapshot veterans (items already in this tier before this cycle)
+            veterans_in_tier = [
+                item for item, info in self._stability.items()
+                if info.tier == current_tier and item not in entering_items
+            ]
             
-            # Check if this item should promote
-            if promotion_threshold and existing_info.n_value >= promotion_threshold:
-                items_to_promote.append(existing_item)
-        
-        # Process promotions to next tier (cascade)
-        if items_to_promote:
-            next_tier = self._get_next_tier(tier)
-            if next_tier:
-                self._process_tier_entries(items_to_promote, next_tier, tier_changes)
+            # Move all entering items to this tier with entry_n
+            for item in entering_items:
+                if item not in self._stability:
+                    continue
+                
+                info = self._stability[item]
+                old_tier = info.tier
+                info.tier = current_tier
+                info.n_value = entry_n
+                tier_changes[item] = current_tier
+                if self._is_promotion(old_tier, current_tier):
+                    self._last_promotions.append((item, current_tier))
+            
+            # Veterans get N++ once per cycle (only if there are direct entries)
+            items_to_promote = []
+            for veteran_item in veterans_in_tier:
+                veteran_info = self._stability[veteran_item]
+                veteran_info.n_value += 1
+                
+                # Check if this veteran should promote
+                if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
+                    items_to_promote.append(veteran_item)
+            
+            # Promoted veterans become direct entries for the next tier
+            entering_items = items_to_promote
+            current_tier = self._get_next_tier(current_tier)
     
     def _get_next_tier(self, tier: str) -> str | None:
         """Get the next tier in promotion order, or None if at L0."""
@@ -280,6 +302,27 @@ class StabilityTracker:
         except ValueError:
             pass
         return None
+    
+    def _compute_tier_from_n(self, n_value: int) -> str:
+        """Compute the appropriate tier based on N value.
+        
+        Uses entry_n thresholds from TIER_CONFIG:
+        - N < 3: 'active'
+        - N >= 3 and N < 6: 'L3'
+        - N >= 6 and N < 9: 'L2'
+        - N >= 9 and N < 12: 'L1'
+        - N >= 12: 'L0'
+        """
+        if n_value >= TIER_CONFIG['L0']['entry_n']:
+            return 'L0'
+        elif n_value >= TIER_CONFIG['L1']['entry_n']:
+            return 'L1'
+        elif n_value >= TIER_CONFIG['L2']['entry_n']:
+            return 'L2'
+        elif n_value >= TIER_CONFIG['L3']['entry_n']:
+            return 'L3'
+        else:
+            return 'active'
     
     def _is_promotion(self, old_tier: str, new_tier: str) -> bool:
         """Check if moving from old_tier to new_tier is a promotion.

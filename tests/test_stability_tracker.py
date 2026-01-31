@@ -181,48 +181,37 @@ class TestStabilityTrackerRipplePromotion:
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
         )
         
-        content = {f"{i}.py": str(i) for i in range(10)}
+        # Use manual setup to avoid complexity of Active N++ behavior
+        # Set up: 0.py is veteran in L3 with N=5 (one away from promotion)
+        #         1.py is veteran in L3 with N=4
+        #         trigger.py is in Active, will leave and enter L3
+        tracker._stability = {
+            "0.py": StabilityInfo(content_hash="0", n_value=5, tier='L3'),
+            "1.py": StabilityInfo(content_hash="1", n_value=4, tier='L3'),
+            "trigger.py": StabilityInfo(content_hash="t", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"trigger.py"}
         
-        # Round 1: All in Active
+        content = {"0.py": "0", "1.py": "1", "trigger.py": "t", "other.py": "o"}
+        
+        # trigger.py leaves Active, enters L3
+        # Veterans (0.py, 1.py) get N++
+        # 0.py: N=6 -> reaches threshold, promotes to L2
+        # 1.py: N=5
         tracker.update_after_response(
-            items=list(content.keys()),
+            items=["other.py"],
             get_content=lambda x: content[x]
         )
         
-        # Round 2: 0.py leaves, enters L3 with N=3
-        tracker.update_after_response(
-            items=[f"{i}.py" for i in range(1, 10)],
-            get_content=lambda x: content[x]
-        )
-        assert tracker.get_tier("0.py") == 'L3'
-        assert tracker.get_n_value("0.py") == 3
-        
-        # Rounds 3-4: More items leave, triggering N++ for 0.py
-        # After 3 entries, 0.py should have N=6 and promote to L2
-        tracker.update_after_response(
-            items=[f"{i}.py" for i in range(2, 10)],
-            get_content=lambda x: content[x]
-        )
-        # 1.py enters L3, 0.py gets N++ -> N=4
-        assert tracker.get_n_value("0.py") == 4
-        
-        tracker.update_after_response(
-            items=[f"{i}.py" for i in range(3, 10)],
-            get_content=lambda x: content[x]
-        )
-        # 2.py enters L3, 0.py and 1.py get N++ -> 0.py N=5, 1.py N=4
-        assert tracker.get_n_value("0.py") == 5
-        
-        tracker.update_after_response(
-            items=[f"{i}.py" for i in range(4, 10)],
-            get_content=lambda x: content[x]
-        )
-        # 3.py enters L3, 0.py N=6 -> promotes to L2
         assert tracker.get_tier("0.py") == 'L2'
         assert tracker.get_n_value("0.py") == 6
+        assert tracker.get_tier("1.py") == 'L3'
+        assert tracker.get_n_value("1.py") == 5
+        assert tracker.get_tier("trigger.py") == 'L3'
+        assert tracker.get_n_value("trigger.py") == 3
     
     def test_cascade_promotion(self, tmp_path):
-        """Promotions cascade through tiers."""
+        """Promotions cascade through tiers when veterans reach thresholds."""
         tracker = StabilityTracker(
             persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
@@ -240,10 +229,10 @@ class TestStabilityTrackerRipplePromotion:
         
         content = {"trigger.py": "trigger", "other.py": "other"}
         
-        # Round: trigger.py leaves Active, enters L3
-        # This should cause: l3_item N=6 -> promotes to L2
-        # Then: l2_item N=9 -> promotes to L1 (plus l3_item enters L2)
-        # Then: l1_item N=12 -> promotes to L0 (plus others enter L1)
+        # Round: trigger.py leaves Active, enters L3 with N=3
+        # - l3_item is veteran in L3, gets N++ -> N=6, promotes to L2
+        # - l3_item entering L2 makes l2_item a veteran, gets N++ -> N=9, promotes to L1
+        # - l2_item entering L1 makes l1_item a veteran, gets N++ -> N=12, promotes to L0
         tracker.update_after_response(
             items=["other.py"],
             get_content=lambda x: content.get(x, "")
@@ -251,9 +240,16 @@ class TestStabilityTrackerRipplePromotion:
         
         # Check cascade results
         assert tracker.get_tier("trigger.py") == 'L3'
+        assert tracker.get_n_value("trigger.py") == 3
+        
         assert tracker.get_tier("l3_item.py") == 'L2'
+        assert tracker.get_n_value("l3_item.py") == 6
+        
         assert tracker.get_tier("l2_item.py") == 'L1'
+        assert tracker.get_n_value("l2_item.py") == 9
+        
         assert tracker.get_tier("l1_item.py") == 'L0'
+        assert tracker.get_n_value("l1_item.py") == 12
 
 
 class TestStabilityTrackerUpdate:
@@ -791,31 +787,37 @@ class TestStabilityTrackerScenarios:
         assert tracker.get_tier("A") == 'active'
         assert tracker.get_tier("B") == 'active'
         assert tracker.get_tier("C") == 'active'
+        assert tracker.get_n_value("A") == 0
+        assert tracker.get_n_value("B") == 0
+        assert tracker.get_n_value("C") == 0
         
-        # Round 2: User only references A (B, C become inactive)
+        # Round 2: User only references A (B, C leave Active, enter L3)
         tracker.update_after_response(
             items=["A"],
             get_content=lambda x: content[x]
         )
         assert tracker.get_tier("A") == 'active'
+        assert tracker.get_n_value("A") == 1  # Veteran in Active, gets N++
         assert tracker.get_tier("B") == 'L3'
         assert tracker.get_tier("C") == 'L3'
-        # One entered first (N=3), second entered (first gets N++)
-        # Order is non-deterministic (set iteration), so check the sum
-        # One should have N=4, one should have N=3
-        n_values = {tracker.get_n_value("B"), tracker.get_n_value("C")}
-        assert n_values == {3, 4}, f"Expected {{3, 4}}, got {n_values}"
+        # Both B and C enter L3 this cycle with entry_n=3
+        # Neither is a veteran in L3 yet (they just entered), so N=3
+        assert tracker.get_n_value("B") == 3
+        assert tracker.get_n_value("C") == 3
         
-        # Round 3: User references A, model edits B
+        # Round 3: User references A, model edits B (B returns to Active)
         content["B"] = "b modified"
         tracker.update_after_response(
             items=["A", "B"],
             get_content=lambda x: content[x],
             modified=["B"]
         )
+        assert tracker.get_tier("A") == 'active'
+        assert tracker.get_n_value("A") == 2  # Still veteran in Active, N++
         assert tracker.get_tier("B") == 'active'
-        assert tracker.get_n_value("B") == 0
-        assert tracker.get_tier("C") == 'L3'  # C stays in L3
+        assert tracker.get_n_value("B") == 0  # Reset due to modification
+        assert tracker.get_tier("C") == 'L3'  # C stays in L3, no entries so no N++
+        assert tracker.get_n_value("C") == 3  # No change - no items entered L3 this round
     
     def test_demote_from_l0_to_active(self, tmp_path):
         """Modified L0 item drops to active."""
@@ -843,7 +845,7 @@ class TestStabilityTrackerScenarios:
         assert ("test.py", "active") in demotions
     
     def test_multiple_items_entering_same_tier(self, tmp_path):
-        """Multiple items entering a tier sequentially - each triggers N++ for existing."""
+        """Multiple items entering a tier - veterans get N++ once per cycle."""
         tracker = StabilityTracker(
             persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
@@ -859,18 +861,20 @@ class TestStabilityTrackerScenarios:
         }
         tracker._last_active_items = {"new1.py", "new2.py"}
         
-        # Both new1.py and new2.py leave Active, enter L3 sequentially
+        # Both new1.py and new2.py leave Active, enter L3
         tracker.update_after_response(
             items=["other.py"],
             get_content=lambda x: content[x]
         )
         
-        # Per the plan: items enter sequentially, each triggers N++ for existing items
-        # existing.py gets N++ twice (once for each entering item): N=3 -> N=5
-        assert tracker.get_n_value("existing.py") == 5
+        # Veterans get N++ once per cycle (not once per entering item)
+        # existing.py is the only veteran in L3, gets N++ once: N=3 -> N=4
+        assert tracker.get_tier("existing.py") == 'L3'
+        assert tracker.get_n_value("existing.py") == 4
         
         # The two new items enter L3 with N=3 (entry_n)
-        # One of them gets N++ when the other enters (order is non-deterministic due to set)
-        # So we should have one with N=4 and one with N=3
-        n_values = {tracker.get_n_value("new1.py"), tracker.get_n_value("new2.py")}
-        assert n_values == {3, 4}, f"Expected {{3, 4}}, got {n_values}"
+        # They are not veterans this cycle (they just entered), so N stays at entry_n
+        assert tracker.get_tier("new1.py") == 'L3'
+        assert tracker.get_n_value("new1.py") == 3
+        assert tracker.get_tier("new2.py") == 'L3'
+        assert tracker.get_n_value("new2.py") == 3
