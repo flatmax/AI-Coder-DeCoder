@@ -63,6 +63,7 @@ export class ContextViewer extends LitElement {
 
   async refreshBreakdown() {
     if (!this._call) {
+      console.debug('ContextViewer.refreshBreakdown: RPC not ready yet');
       return;
     }
     
