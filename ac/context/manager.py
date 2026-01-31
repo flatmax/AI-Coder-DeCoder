@@ -57,11 +57,12 @@ class ContextManager:
         self.file_context = FileContext(repo_root)
         self.token_tracker = token_tracker
         
-        # File stability tracker for cache tiering (4-tier for Bedrock compatibility)
-        self.file_stability: Optional[StabilityTracker] = None
+        # Unified cache stability tracker for files AND symbol map entries
+        # (4-tier for Bedrock compatibility: L0-L3 cached, active uncached)
+        self.cache_stability: Optional[StabilityTracker] = None
         if repo_root:
-            stability_path = Path(repo_root) / '.aicoder' / 'file_stability.json'
-            self.file_stability = StabilityTracker(
+            stability_path = Path(repo_root) / '.aicoder' / 'cache_stability.json'
+            self.cache_stability = StabilityTracker(
                 persistence_path=stability_path,
                 thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
                 initial_tier='L3'

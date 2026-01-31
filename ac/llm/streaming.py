@@ -8,6 +8,12 @@ import litellm as _litellm
 
 from ..prompts import build_system_prompt
 from ..edit_parser import EditParser, EditStatus
+from ..symbol_index.compact_format import (
+    get_legend,
+    format_symbol_blocks_by_tier,
+    compute_file_block_hash,
+    _compute_path_aliases,
+)
 
 
 REPO_MAP_HEADER = """# Repository Structure
@@ -329,13 +335,52 @@ class StreamingMixin:
                 files_modified=files_modified if files_modified else None
             )
             
-            # Update file stability tracking after response
-            if file_paths and self._context_manager and self._context_manager.file_stability:
-                stability = self._context_manager.file_stability
+            # Update cache stability tracking after response (files AND symbol entries)
+            if self._context_manager and self._context_manager.cache_stability:
+                stability = self._context_manager.cache_stability
+                
+                # Collect all items to track: files + symbol entries
+                all_items = []
+                
+                # Add file paths
+                if file_paths:
+                    all_items.extend(file_paths)
+                
+                # Add symbol entry keys for all indexed files
+                if self.repo:
+                    try:
+                        all_files = self._get_all_trackable_files()
+                        symbol_items = [f"symbol:{f}" for f in all_files]
+                        all_items.extend(symbol_items)
+                    except Exception:
+                        pass
+                
+                def get_item_content(item):
+                    """Get content for stability hashing - files or symbol blocks."""
+                    if item.startswith("symbol:"):
+                        # Symbol entry - compute hash from symbols
+                        file_path = item.replace("symbol:", "")
+                        try:
+                            indexer = self._get_indexer()
+                            symbols = indexer._get_symbol_index().get_symbols(file_path)
+                            if symbols:
+                                return compute_file_block_hash(file_path, symbols)
+                        except Exception:
+                            pass
+                        return None
+                    else:
+                        # Regular file
+                        return self.repo.get_file_content(item, version='working')
+                
+                # Determine modified items (files that were edited)
+                modified_items = list(files_modified) if files_modified else []
+                # Symbol entries for modified files are also considered modified
+                modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
+                
                 tier_changes = stability.update_after_response(
-                    items=file_paths,
-                    get_content=lambda p: self.repo.get_file_content(p, version='working'),
-                    modified=files_modified
+                    items=all_items,
+                    get_content=get_item_content,
+                    modified=modified_items
                 )
                 
                 # Log promotions and demotions
@@ -343,12 +388,19 @@ class StreamingMixin:
                 demotions = stability.get_last_demotions()
                 
                 if promotions:
-                    promoted_items = [f"{item}→{tier}" for item, tier in promotions]
-                    print(f"📈 Promoted: {', '.join(promoted_items)}")
+                    # Format nicely, stripping symbol: prefix for display
+                    promoted_display = []
+                    for item, tier in promotions:
+                        display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                        promoted_display.append(f"{display_name}→{tier}")
+                    print(f"📈 Promoted: {', '.join(promoted_display)}")
                 
                 if demotions:
-                    demoted_items = [f"{item}→{tier}" for item, tier in demotions]
-                    print(f"📉 Demoted: {', '.join(demoted_items)}")
+                    demoted_display = []
+                    for item, tier in demotions:
+                        display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                        demoted_display.append(f"{display_name}→{tier}")
+                    print(f"📉 Demoted: {', '.join(demoted_display)}")
             
             # Add last request token usage for the HUD (not cumulative)
             if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
@@ -430,10 +482,17 @@ class StreamingMixin:
     
     def _build_streaming_messages(self, user_prompt, file_paths, images, use_repo_map, url_context=None):
         """
-        Build messages for streaming using symbol map for context.
+        Build messages for streaming using unified cache stability tracking.
         
-        Uses tiered file caching: L0 (most stable) and L1 (moderately stable) files
-        get cache_control for better prompt caching, while active files are uncached.
+        Uses a single StabilityTracker for both symbol map entries AND context files.
+        Content is organized into 5 tiers:
+        - L0: Most stable (12+ responses unchanged) - cached
+        - L1: Very stable (9+ responses unchanged) - cached  
+        - L2: Stable (6+ responses unchanged) - cached
+        - L3: Moderately stable (3+ responses unchanged) - cached
+        - active: Recently changed - not cached
+        
+        Symbol map entries for files in active context are excluded (full content replaces them).
         
         Args:
             user_prompt: The user's message
@@ -448,10 +507,18 @@ class StreamingMixin:
         messages = []
         context_map_tokens = 0
         
+        # Get stability tracker
+        stability = None
+        if self._context_manager:
+            stability = self._context_manager.cache_stability
+        
+        # Determine which files are in active context (full content will be included)
+        active_context_files = set(file_paths) if file_paths else set()
+        
         # Get file tiers from stability tracker
         file_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
-        if file_paths and self._context_manager and self._context_manager.file_stability:
-            file_tiers = self._context_manager.file_stability.get_items_by_tier(file_paths)
+        if file_paths and stability:
+            file_tiers = stability.get_items_by_tier(file_paths)
             # Ensure all tier keys exist
             for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
                 if tier not in file_tiers:
@@ -467,7 +534,7 @@ class StreamingMixin:
             # No stability tracker - all files are active
             file_tiers['active'] = list(file_paths)
         
-        # Log tier distribution
+        # Log tier distribution for files
         if file_paths:
             tier_counts = []
             for tier in ['L0', 'L1', 'L2', 'L3']:
@@ -480,79 +547,227 @@ class StreamingMixin:
             if tier_counts:
                 print(f"📁 Files: {', '.join(tier_counts)}")
         
-        # System prompt with edit instructions
-        # Use cache_control for providers that support prompt caching (Anthropic, Bedrock)
+        # Build system prompt
         system_text = build_system_prompt()
-
-        # Get symbol map chunks - we'll combine first chunk with system prompt
-        # Block allocation (4 total):
-        #   Block 1: system + symbol map part 1 (cached)
-        #   Block 2: symbol map part 2 (cached)
-        #   Block 3: L0 files (cached)
-        #   Block 4: L1 files (cached)
-        context_map_chunks = []
+        
+        # Get symbol map data with per-file stability tracking
+        symbol_map_content = {}  # tier -> content string
+        legend = ""
+        
         if use_repo_map and self.repo:
-            context_map_chunks = self.get_context_map_chunked(
-                chat_files=file_paths,
-                include_references=True,
-                num_chunks=2,  # 2 chunks: first goes in system, second in user message
-                return_metadata=True
-            )
-            if context_map_chunks:
-                # Diagnostic: show chunk info
-                print(f"📦 Symbol map: {len(context_map_chunks)} chunks")
-                for i, chunk in enumerate(context_map_chunks):
-                    content = chunk['content']
-                    file_count = len(chunk['files'])
-                    lines = content.count('\n')
-                    cached = "🔒"  # Both chunks end up cached
-                    print(f"  {cached} Chunk {i}: {len(content):,} chars, ~{len(content)//4:,} tokens, {lines} lines, {file_count} files")
-
-        # Combine system prompt with first symbol map chunk (Block 1)
-        system_and_map1 = system_text
-        if context_map_chunks:
-            system_and_map1 += "\n\n" + REPO_MAP_HEADER + context_map_chunks[0]['content']
-            if self._context_manager:
-                try:
-                    context_map_tokens += self._context_manager.count_tokens(context_map_chunks[0]['content'])
-                except Exception:
-                    pass
-
+            # Get all trackable files and their symbols
+            all_files = self._get_all_trackable_files()
+            if all_files:
+                indexer = self._get_indexer()
+                symbols_by_file = indexer.index_files(all_files)
+                
+                # Build references for cross-file information
+                indexer.build_references(all_files)
+                symbol_index = indexer._get_symbol_index()
+                
+                # Get reference data
+                file_refs = {}
+                file_imports = {}
+                references = {}
+                if hasattr(symbol_index, '_reference_index') and symbol_index._reference_index:
+                    ref_index = symbol_index._reference_index
+                    for f in all_files:
+                        file_refs[f] = ref_index.get_files_referencing(f)
+                        file_imports[f] = ref_index.get_file_dependencies(f)
+                        references[f] = ref_index.get_references_to_file(f)
+                
+                # Compute path aliases for the legend
+                aliases = _compute_path_aliases(references, file_refs)
+                
+                # Get legend (goes in L0, static)
+                legend = get_legend(aliases)
+                
+                # Get symbol entry tiers from stability tracker
+                # Symbol entries use "symbol:" prefix to distinguish from file paths
+                symbol_items = [f"symbol:{f}" for f in symbols_by_file.keys()]
+                symbol_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
+                
+                if stability:
+                    # Update stability for symbol entries based on content hash
+                    for file_path, symbols in symbols_by_file.items():
+                        item_key = f"symbol:{file_path}"
+                        content_hash = compute_file_block_hash(file_path, symbols)
+                        # Register/update in tracker (will be processed in update_after_response)
+                    
+                    symbol_tiers = stability.get_items_by_tier(symbol_items)
+                    for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
+                        if tier not in symbol_tiers:
+                            symbol_tiers[tier] = []
+                    
+                    # Any symbols not yet tracked go to L3 (initial tier)
+                    tracked = set()
+                    for tier_items in symbol_tiers.values():
+                        tracked.update(tier_items)
+                    for item in symbol_items:
+                        if item not in tracked:
+                            symbol_tiers['L3'].append(item)
+                else:
+                    # No stability tracker - all symbols go to L3
+                    symbol_tiers['L3'] = symbol_items
+                
+                # Convert symbol item keys back to file paths for formatting
+                symbol_files_by_tier = {}
+                for tier, items in symbol_tiers.items():
+                    symbol_files_by_tier[tier] = [
+                        item.replace("symbol:", "") for item in items
+                        if item.startswith("symbol:")
+                    ]
+                
+                # Exclude symbol entries for files that are in active context
+                # (their full content will be included instead)
+                for tier in symbol_files_by_tier:
+                    symbol_files_by_tier[tier] = [
+                        f for f in symbol_files_by_tier[tier]
+                        if f not in active_context_files
+                    ]
+                
+                # Format symbol blocks by tier
+                symbol_map_content = format_symbol_blocks_by_tier(
+                    symbols_by_file=symbols_by_file,
+                    file_tiers=symbol_files_by_tier,
+                    references=references,
+                    file_refs=file_refs,
+                    file_imports=file_imports,
+                    aliases=aliases,
+                    exclude_files=active_context_files,
+                )
+                
+                # Log symbol tier distribution
+                tier_counts = []
+                for tier in ['L0', 'L1', 'L2', 'L3']:
+                    count = len(symbol_files_by_tier.get(tier, []))
+                    if count > 0:
+                        tier_counts.append(f"{count} {tier}")
+                if tier_counts:
+                    print(f"📦 Symbol map: {', '.join(tier_counts)}")
+        
+        # Build cache blocks by tier
+        # Block 1 (L0): system + legend + L0 symbols + L0 files (cached)
+        l0_content = system_text
+        if legend:
+            l0_content += "\n\n" + REPO_MAP_HEADER + legend + "\n"
+        if symbol_map_content.get('L0'):
+            l0_content += "\n" + symbol_map_content['L0']
+        
+        # Count tokens for symbol map
+        if self._context_manager and legend:
+            try:
+                context_map_tokens += self._context_manager.count_tokens(legend)
+            except Exception:
+                pass
+        if self._context_manager and symbol_map_content.get('L0'):
+            try:
+                context_map_tokens += self._context_manager.count_tokens(symbol_map_content['L0'])
+            except Exception:
+                pass
+        
+        # Add L0 files to the L0 block
+        if file_tiers.get('L0'):
+            l0_files_content = self._format_files_for_cache(file_tiers['L0'], FILES_L0_HEADER)
+            if l0_files_content:
+                l0_content += "\n\n" + l0_files_content
+        
         messages.append({
             "role": "system",
             "content": [
                 {
                     "type": "text",
-                    "text": system_and_map1,
+                    "text": l0_content,
                     "cache_control": {"type": "ephemeral"}
                 }
             ]
         })
-
-        # Add second symbol map chunk as separate user message (Block 2)
-        if len(context_map_chunks) > 1:
-            map_content = REPO_MAP_CONTINUATION + context_map_chunks[1]['content']
+        
+        # Block 2 (L1): L1 symbols + L1 files (cached)
+        l1_parts = []
+        if symbol_map_content.get('L1'):
+            l1_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
+            if self._context_manager:
+                try:
+                    context_map_tokens += self._context_manager.count_tokens(symbol_map_content['L1'])
+                except Exception:
+                    pass
+        if file_tiers.get('L1'):
+            l1_files = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
+            if l1_files:
+                l1_parts.append(l1_files)
+        
+        if l1_parts:
+            l1_content = "\n\n".join(l1_parts)
             messages.append({
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": map_content,
+                        "text": l1_content,
                         "cache_control": {"type": "ephemeral"}
                     }
                 ]
             })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok."
-            })
+            messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Block 3 (L2): L2 symbols + L2 files (cached)
+        l2_parts = []
+        if symbol_map_content.get('L2'):
+            l2_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
             if self._context_manager:
                 try:
-                    context_map_tokens += self._context_manager.count_tokens(map_content)
+                    context_map_tokens += self._context_manager.count_tokens(symbol_map_content['L2'])
                 except Exception:
                     pass
+        if file_tiers.get('L2'):
+            l2_files = self._format_files_for_cache(file_tiers['L2'], FILES_L2_HEADER)
+            if l2_files:
+                l2_parts.append(l2_files)
         
-        # Add file tree (uncached - changes more frequently than symbol map)
+        if l2_parts:
+            l2_content = "\n\n".join(l2_parts)
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": l2_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+            messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Block 4 (L3): L3 symbols + L3 files (cached)
+        l3_parts = []
+        if symbol_map_content.get('L3'):
+            l3_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
+            if self._context_manager:
+                try:
+                    context_map_tokens += self._context_manager.count_tokens(symbol_map_content['L3'])
+                except Exception:
+                    pass
+        if file_tiers.get('L3'):
+            l3_files = self._format_files_for_cache(file_tiers['L3'], FILES_L3_HEADER)
+            if l3_files:
+                l3_parts.append(l3_files)
+        
+        if l3_parts:
+            l3_content = "\n\n".join(l3_parts)
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": l3_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+            messages.append({"role": "assistant", "content": "Ok."})
+        
+        # Add file tree (in active block for now - could be stability tracked later)
         if use_repo_map and self.repo:
             file_tree = self.get_file_tree_for_context()
             if file_tree:
@@ -560,7 +775,7 @@ class StreamingMixin:
                 messages.append({"role": "user", "content": tree_content})
                 messages.append({"role": "assistant", "content": "Ok."})
         
-        # Add URL context if provided
+        # Add URL context if provided (active, not cached)
         if url_context:
             url_parts = []
             for result in url_context:
@@ -574,71 +789,6 @@ class StreamingMixin:
                 url_message = URL_CONTEXT_HEADER + "\n---\n".join(url_parts)
                 messages.append({"role": "user", "content": url_message})
                 messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
-        
-        # Add tiered file contents
-        # L0 files (most stable, 12+ responses unchanged) - cached
-        if file_tiers.get('L0'):
-            l0_content = self._format_files_for_cache(file_tiers['L0'], FILES_L0_HEADER)
-            if l0_content:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": l0_content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                })
-                messages.append({"role": "assistant", "content": "Ok."})
-        
-        # L1 files (very stable, 9+ responses unchanged) - cached
-        if file_tiers.get('L1'):
-            l1_content = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
-            if l1_content:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": l1_content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                })
-                messages.append({"role": "assistant", "content": "Ok."})
-        
-        # L2 files (stable, 6+ responses unchanged) - cached
-        if file_tiers.get('L2'):
-            l2_content = self._format_files_for_cache(file_tiers['L2'], FILES_L2_HEADER)
-            if l2_content:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": l2_content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                })
-                messages.append({"role": "assistant", "content": "Ok."})
-        
-        # L3 files (moderately stable, 3+ responses unchanged) - cached
-        if file_tiers.get('L3'):
-            l3_content = self._format_files_for_cache(file_tiers['L3'], FILES_L3_HEADER)
-            if l3_content:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": l3_content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                })
-                messages.append({"role": "assistant", "content": "Ok."})
         
         # Active files (recently changed) - not cached
         if file_tiers.get('active'):

@@ -302,13 +302,20 @@ def _build_streaming_messages(self, ...):
 - ✅ `TestFormatFileSymbolBlock` - 3 tests for single file formatting
 - ✅ `TestFormatSymbolBlocksByTier` - 5 tests for tier-based grouping
 
-### Phase 3: Unified Message Building
+### Phase 3: Unified Message Building ✅ COMPLETE
 
 **Changes to `ac/llm/streaming.py`:**
-- Refactor `_build_streaming_messages()` to use tier-based block allocation
-- Implement initial greedy population on first prompt
-- Update stability tracker after each response
-- Print promotion/demotion notifications
+- ✅ Refactor `_build_streaming_messages()` to use tier-based block allocation
+- ✅ Symbol entries tracked with `symbol:` prefix alongside files
+- ✅ Exclude symbol entries for files in active context (full content replaces them)
+- ✅ Update stability tracker after each response (files AND symbol entries)
+- ✅ Print promotion/demotion notifications with 📦 prefix for symbol entries
+
+**Changes to `tests/test_context_manager.py`:**
+- ✅ Added `TestContextManagerCacheStability` test class
+- ✅ Tests for 4-tier thresholds, symbol entry tracking, get_items_by_tier
+
+**Note:** Initial greedy population deferred - items naturally start in L3 and promote over time.
 
 ### Phase 4: Unified Terminal HUD
 
