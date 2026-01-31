@@ -313,8 +313,6 @@ export class PromptView extends MixedBase {
       bubbles: true,
       composed: true
     }));
-    // Switch back to files tab to see the result
-    this.switchTab('files');
   }
 
   /**
