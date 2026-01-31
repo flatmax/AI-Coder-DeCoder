@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
-import { extractResponse } from '../utils/rpc.js';
+import { extractResponse, RpcMixin } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -11,7 +11,7 @@ import './SymbolMapModal.js';
  * Displays how tokens are allocated across system prompt, symbol map,
  * files, URLs, and history. Allows viewing/managing URLs in context.
  */
-export class ContextViewer extends LitElement {
+export class ContextViewer extends RpcMixin(LitElement) {
   static properties = {
     visible: { type: Boolean },
     breakdown: { type: Object },
@@ -51,9 +51,8 @@ export class ContextViewer extends LitElement {
     this.excludedUrls = new Set();
   }
 
-  connectedCallback() {
-    super.connectedCallback();
-    // Initial load will happen when rpcCall is set
+  onRpcReady() {
+    this.refreshBreakdown();
   }
 
   getIncludedUrls() {
@@ -62,8 +61,7 @@ export class ContextViewer extends LitElement {
   }
 
   async refreshBreakdown() {
-    if (!this._call) {
-      console.debug('ContextViewer.refreshBreakdown: RPC not ready yet');
+    if (!this.rpcCall) {
       return;
     }
     
@@ -71,7 +69,7 @@ export class ContextViewer extends LitElement {
     this.error = null;
     
     try {
-      const response = await this._call['LiteLLM.get_context_breakdown'](
+      const response = await this._rpc('LiteLLM.get_context_breakdown',
         this.selectedFiles || [],
         this.getIncludedUrls()
       );
@@ -89,21 +87,10 @@ export class ContextViewer extends LitElement {
     }
   }
 
-  set rpcCall(call) {
-    this._call = call;
-    if (call) {
-      this.refreshBreakdown();
-    }
-  }
-
-  get rpcCall() {
-    return this._call;
-  }
-
   willUpdate(changedProperties) {
     // Refresh when files or URLs change
     if (changedProperties.has('selectedFiles') || changedProperties.has('fetchedUrls')) {
-      if (this._call) {
+      if (this.rpcCall) {
         this.refreshBreakdown();
       }
     }
@@ -117,14 +104,14 @@ export class ContextViewer extends LitElement {
   }
 
   async viewUrl(url) {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.selectedUrl = url;
     this.showUrlModal = true;
     this.urlContent = null;
     
     try {
-      const response = await this._call['LiteLLM.get_url_content'](url);
+      const response = await this._rpc('LiteLLM.get_url_content', url);
       this.urlContent = extractResponse(response);
     } catch (e) {
       this.urlContent = { error: e.message };
@@ -176,7 +163,7 @@ export class ContextViewer extends LitElement {
   }
 
   async viewSymbolMap() {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.isLoadingSymbolMap = true;
     this.showSymbolMapModal = true;
@@ -185,7 +172,7 @@ export class ContextViewer extends LitElement {
     try {
       // Use get_context_map which fetches all trackable files and includes references
       // Pass null for chat_files to include ALL files in the map
-      const response = await this._call['LiteLLM.get_context_map'](
+      const response = await this._rpc('LiteLLM.get_context_map',
         null,  // Don't exclude any files
         true   // include_references
       );

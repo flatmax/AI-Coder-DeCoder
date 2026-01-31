@@ -30,6 +30,13 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._debouncedSearch = debounce(() => this.performSearch(), 300);
   }
 
+  onRpcReady() {
+    // Auto-load sessions when RPC becomes available and visible
+    if (this.visible) {
+      this.loadSessions();
+    }
+  }
+
   async show() {
     this.visible = true;
     await this.loadSessions();

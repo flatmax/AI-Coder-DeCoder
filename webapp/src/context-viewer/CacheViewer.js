@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
-import { extractResponse } from '../utils/rpc.js';
+import { extractResponse, RpcMixin } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -11,7 +11,7 @@ import './SymbolMapModal.js';
  * Shows how content is organized for LLM prompt caching, with stability
  * indicators showing progress toward promotion to higher cache tiers.
  */
-export class CacheViewer extends LitElement {
+export class CacheViewer extends RpcMixin(LitElement) {
   static properties = {
     visible: { type: Boolean },
     breakdown: { type: Object },
@@ -39,9 +39,6 @@ export class CacheViewer extends LitElement {
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
     excludedUrls: { type: Object },
-    
-    // RPC call - using attribute: false since it's an object passed via property
-    rpcCall: { attribute: false },
   };
 
   static styles = cacheViewerStyles;
@@ -71,12 +68,8 @@ export class CacheViewer extends LitElement {
     this.excludedUrls = new Set();
   }
 
-  connectedCallback() {
-    super.connectedCallback();
-    // Refresh if rpcCall was set before connection
-    if (this._call) {
-      this.refreshBreakdown();
-    }
+  onRpcReady() {
+    this.refreshBreakdown();
   }
 
   // ========== Data Fetching ==========
@@ -87,7 +80,7 @@ export class CacheViewer extends LitElement {
   }
 
   async refreshBreakdown() {
-    if (!this._call) {
+    if (!this.rpcCall) {
       return;
     }
     
@@ -95,7 +88,7 @@ export class CacheViewer extends LitElement {
     this.error = null;
     
     try {
-      const response = await this._call['LiteLLM.get_context_breakdown'](
+      const response = await this._rpc('LiteLLM.get_context_breakdown',
         this.selectedFiles || [],
         this.getIncludedUrls()
       );
@@ -132,25 +125,12 @@ export class CacheViewer extends LitElement {
     ].slice(0, 10);
   }
 
-  set rpcCall(call) {
-    const oldCall = this._call;
-    this._call = call;
-    // Only refresh if call changed and is now set
-    if (call && call !== oldCall) {
-      this.refreshBreakdown();
-    }
-  }
-
-  get rpcCall() {
-    return this._call;
-  }
-
   willUpdate(changedProperties) {
     // Refresh when files, URLs, or exclusions change
     if (changedProperties.has('selectedFiles') || 
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
-      if (this._call) {
+      if (this.rpcCall) {
         this.refreshBreakdown();
       }
     }
@@ -180,14 +160,14 @@ export class CacheViewer extends LitElement {
   // ========== URL Management ==========
 
   async viewUrl(url) {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.selectedUrl = url;
     this.showUrlModal = true;
     this.urlContent = null;
     
     try {
-      const response = await this._call['LiteLLM.get_url_content'](url);
+      const response = await this._rpc('LiteLLM.get_url_content', url);
       this.urlContent = extractResponse(response);
     } catch (e) {
       this.urlContent = { error: e.message };
@@ -238,14 +218,14 @@ export class CacheViewer extends LitElement {
   // ========== Symbol Map Modal ==========
 
   async viewSymbolMap() {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.isLoadingSymbolMap = true;
     this.showSymbolMapModal = true;
     this.symbolMapContent = null;
     
     try {
-      const response = await this._call['LiteLLM.get_context_map'](null, true);
+      const response = await this._rpc('LiteLLM.get_context_map', null, true);
       this.symbolMapContent = extractResponse(response);
     } catch (e) {
       this.symbolMapContent = `Error loading symbol map: ${e.message}`;
