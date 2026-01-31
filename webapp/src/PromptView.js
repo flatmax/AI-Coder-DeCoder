@@ -44,7 +44,7 @@ export class PromptView extends MixedBase {
     fetchingUrls: { type: Object },
     fetchedUrls: { type: Object },
     excludedUrls: { type: Object },  // Set of URLs excluded from context
-    activeLeftTab: { type: String }  // 'files' | 'search' | 'context'
+    activeLeftTab: { type: String }  // 'files' | 'search' | 'context' | 'cache'
   };
 
   static styles = promptViewStyles;
@@ -269,6 +269,10 @@ export class PromptView extends MixedBase {
       this.updateComplete.then(() => {
         this._refreshContextViewer();
       });
+    } else if (tab === 'cache') {
+      this.updateComplete.then(() => {
+        this._refreshCacheViewer();
+      });
     }
   }
 
@@ -287,6 +291,20 @@ export class PromptView extends MixedBase {
   }
 
   /**
+   * Refresh the cache viewer with current state
+   */
+  _refreshCacheViewer() {
+    const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
+    if (cacheViewer && this.call) {
+      cacheViewer.rpcCall = this.call;
+      cacheViewer.selectedFiles = this.selectedFiles || [];
+      cacheViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
+      cacheViewer.excludedUrls = this.excludedUrls;
+      cacheViewer.refreshBreakdown();
+    }
+  }
+
+  /**
    * Handle search result selection - bubble up to AppShell
    */
   handleSearchResultSelected(e) {
@@ -295,8 +313,6 @@ export class PromptView extends MixedBase {
       bubbles: true,
       composed: true
     }));
-    // Switch back to files tab to see the result
-    this.switchTab('files');
   }
 
   /**

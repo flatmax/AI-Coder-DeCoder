@@ -579,12 +579,17 @@ export const promptViewStyles = css`
     opacity: 1;
     transform: translateY(0);
     animation: hud-fade-out 8s ease-in-out forwards;
+    pointer-events: auto;
+  }
+
+  .token-hud.visible:hover {
+    animation-play-state: paused;
   }
 
   @keyframes hud-fade-out {
     0% { opacity: 1; transform: translateY(0); }
-    70% { opacity: 1; transform: translateY(0); }
-    100% { opacity: 0; transform: translateY(-10px); }
+    50% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-5px); }
   }
 
   .hud-title {
@@ -639,6 +644,109 @@ export const promptViewStyles = css`
 
   .hud-row.cumulative .hud-value {
     color: #4a9eff;
+  }
+
+  /* HUD header with cache badge */
+  .hud-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .hud-header .hud-title {
+    margin-bottom: 0;
+  }
+
+  .hud-cache-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 8px;
+    background: rgba(126, 198, 153, 0.2);
+    color: var(--cache-color, #7ec699);
+    border: 1px solid var(--cache-color, #7ec699);
+  }
+
+  /* Cache tiers section */
+  .hud-cache-header {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 6px;
+  }
+
+  .hud-cache-percent {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--cache-percent-color, #7ec699);
+  }
+
+  .hud-tier-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .hud-tier-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .hud-tier-label {
+    font-weight: 600;
+    color: var(--tier-color, #888);
+    min-width: 36px;
+  }
+
+  .hud-tier-contents {
+    flex: 1;
+    color: #888;
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hud-tier-tokens {
+    color: #ddd;
+    min-width: 50px;
+    text-align: right;
+  }
+
+  .hud-tier-cached {
+    color: #7ec699;
+    font-size: 8px;
+  }
+
+  .hud-tier-uncached {
+    color: #666;
+    font-size: 8px;
+  }
+
+  /* Promotion/demotion rows */
+  .hud-row.promotion .hud-value {
+    color: #7ec699;
+  }
+
+  .hud-row.demotion .hud-value {
+    color: #f0a500;
+  }
+
+  .hud-row.cache-write .hud-value {
+    color: #4a9eff;
+  }
+
+  .hud-changes {
+    font-size: 10px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
 `;

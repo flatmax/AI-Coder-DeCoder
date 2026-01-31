@@ -88,7 +88,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
       
       let errorContent = `⚠️ **Error:** ${result.error}`;
       if (filesToDeselect.length > 0) {
-        errorContent += `\n\n*The problematic files have been deselected. You can send your message again.*`;
+        errorContent += `\n\n*The file(s) have been deselected. You can send your message again.*`;
       }
       
       if (lastMessage && lastMessage.role === 'assistant') {
@@ -166,11 +166,37 @@ export const StreamingMixin = (superClass) => class extends superClass {
     
     this._hudData = tokenUsage;
     this._hudVisible = true;
+    this._hudHovered = false;
     
-    // Auto-hide after 8 seconds
+    // Auto-hide after 8 seconds (unless hovered)
+    this._startHudTimeout();
+  }
+
+  _startHudTimeout() {
+    if (this._hudTimeout) {
+      clearTimeout(this._hudTimeout);
+    }
+    this._hudTimeout = setTimeout(() => {
+      if (!this._hudHovered) {
+        this._hudVisible = false;
+      }
+    }, 8000);
+  }
+
+  _onHudMouseEnter() {
+    this._hudHovered = true;
+    if (this._hudTimeout) {
+      clearTimeout(this._hudTimeout);
+      this._hudTimeout = null;
+    }
+  }
+
+  _onHudMouseLeave() {
+    this._hudHovered = false;
+    // Start a shorter timeout after mouse leaves
     this._hudTimeout = setTimeout(() => {
       this._hudVisible = false;
-    }, 8000);
+    }, 2000);
   }
 
   /**
