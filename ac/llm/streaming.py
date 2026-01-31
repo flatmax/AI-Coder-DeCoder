@@ -23,9 +23,6 @@ Use this to understand the codebase structure and find relevant code.
 
 """
 
-# Session-level tracking for empty tier statistics
-_session_empty_tier_count = 0
-
 REPO_MAP_CONTINUATION = """# Repository Structure (continued)
 
 """
@@ -325,6 +322,13 @@ class StreamingMixin:
                     }
                     for r in apply_result.results
                 ]
+                
+                # Invalidate symbol index cache for modified files so references get rebuilt
+                if apply_result.files_modified:
+                    indexer = self._get_indexer()
+                    symbol_index = indexer._get_symbol_index()
+                    for modified_file in apply_result.files_modified:
+                        symbol_index.invalidate_file(modified_file)
             else:
                 result["passed"] = []
                 result["failed"] = []
@@ -637,12 +641,6 @@ class StreamingMixin:
                 symbol_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
                 
                 if stability:
-                    # Update stability for symbol entries based on content hash
-                    for file_path, symbols in symbols_by_file.items():
-                        item_key = f"symbol:{file_path}"
-                        content_hash = compute_file_block_hash(file_path, symbols)
-                        # Register/update in tracker (will be processed in update_after_response)
-                    
                     symbol_tiers = stability.get_items_by_tier(symbol_items)
                     for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
                         if tier not in symbol_tiers:
