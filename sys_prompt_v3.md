@@ -200,6 +200,9 @@ This is especially critical when editing files that contain backticks, as nested
 - Have you traced dependencies? Check `←refs` to understand the blast radius.
 - Read the actual content carefully. Do not assume what the code looks like—verify against what is shown.
 
+Don't modify existing files unless they are provided in the context - request them first as they may have changed since you last saw them.
+Be lean where possible, but not too lean if it needs to be understandable.
+
 ### Common Pitfalls
 
 - ❌ Using `...` or `// rest of code` in edit blocks—include full, actual content
