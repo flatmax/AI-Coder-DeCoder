@@ -276,19 +276,19 @@ def _build_streaming_messages(self, ...):
 
 ## Implementation
 
-### Phase 1: Extend StabilityTracker for 4 Tiers
+### Phase 1: Extend StabilityTracker for 4 Tiers ✅ COMPLETE
 
 **Changes to `ac/context/stability_tracker.py`:**
-- Add configurable thresholds dict: `{'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}`
-- Update `_compute_tier()` to handle 4 tiers (L0 now includes most stable items)
-- Add `initial_tier` parameter for greedy initial population
-- Add promotion/demotion tracking for notifications
+- ✅ Add configurable thresholds dict: `{'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}`
+- ✅ Update `_compute_tier()` to handle 4 tiers (L0 now includes most stable items)
+- ✅ Add `initial_tier` parameter for greedy initial population
+- ✅ Add promotion/demotion tracking for notifications
 
 **Changes to `ac/context/manager.py`:**
-- Replace separate `file_stability` with unified `cache_stability`
-- Add method to get items by tier with type discrimination (symbol vs file)
+- ✅ Uses 4-tier thresholds with `file_stability` tracker
+- ⏳ Rename to `cache_stability` and extend for symbol map entries (Phase 3)
 
-### Phase 2: Per-File Symbol Map Entries
+### Phase 2: Per-File Symbol Map Entries ← CURRENT
 
 **Changes to `ac/symbol_index/compact_format.py`:**
 - Add `format_legend(aliases) -> str` - returns legend/header block (goes in L0)
