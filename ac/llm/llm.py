@@ -1012,6 +1012,19 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         system_prompt = build_system_prompt()
         system_tokens = tc.count(system_prompt)
         
+        # Helper to get stability info for items
+        def get_item_stability(item_key):
+            """Get stability info for a file or symbol item."""
+            if stability:
+                return stability.get_item_info(item_key)
+            return {
+                'current_tier': 'active',
+                'stable_count': 0,
+                'next_tier': 'L3',
+                'next_threshold': 3,
+                'progress': 0.0,
+            }
+        
         # Build L0 block
         l0_contents = []
         l0_tokens = system_tokens
@@ -1023,21 +1036,43 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         if symbol_map_content.get('L0'):
             sym_tokens = tc.count(symbol_map_content['L0'])
+            symbol_items = []
+            for f in symbol_files_by_tier.get('L0', []):
+                item_info = get_item_stability(f"symbol:{f}")
+                symbol_items.append({
+                    "path": f,
+                    "stable_count": item_info['stable_count'],
+                    "next_tier": item_info['next_tier'],
+                    "next_threshold": item_info['next_threshold'],
+                    "progress": item_info['progress'],
+                })
             l0_contents.append({
                 "type": "symbols",
                 "count": len(symbol_files_by_tier.get('L0', [])),
                 "tokens": sym_tokens,
-                "files": symbol_files_by_tier.get('L0', [])
+                "files": symbol_files_by_tier.get('L0', []),
+                "items": symbol_items
             })
             l0_tokens += sym_tokens
         
         if file_tiers.get('L0'):
             file_tokens = 0
+            file_items = []
             for path in file_tiers['L0']:
                 try:
                     content = self.repo.get_file_content(path)
                     if content and not (isinstance(content, dict) and 'error' in content):
-                        file_tokens += tc.count(f"{path}\n```\n{content}\n```\n")
+                        path_tokens = tc.count(f"{path}\n```\n{content}\n```\n")
+                        file_tokens += path_tokens
+                        item_info = get_item_stability(path)
+                        file_items.append({
+                            "path": path,
+                            "tokens": path_tokens,
+                            "stable_count": item_info['stable_count'],
+                            "next_tier": item_info['next_tier'],
+                            "next_threshold": item_info['next_threshold'],
+                            "progress": item_info['progress'],
+                        })
                 except Exception:
                     pass
             if file_tokens:
@@ -1045,7 +1080,8 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     "type": "files",
                     "count": len(file_tiers['L0']),
                     "tokens": file_tokens,
-                    "files": file_tiers['L0']
+                    "files": file_tiers['L0'],
+                    "items": file_items
                 })
                 l0_tokens += file_tokens
         
@@ -1067,21 +1103,43 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             
             if symbol_map_content.get(tier):
                 sym_tokens = tc.count(symbol_map_content[tier])
+                symbol_items = []
+                for f in symbol_files_by_tier.get(tier, []):
+                    item_info = get_item_stability(f"symbol:{f}")
+                    symbol_items.append({
+                        "path": f,
+                        "stable_count": item_info['stable_count'],
+                        "next_tier": item_info['next_tier'],
+                        "next_threshold": item_info['next_threshold'],
+                        "progress": item_info['progress'],
+                    })
                 tier_contents.append({
                     "type": "symbols",
                     "count": len(symbol_files_by_tier.get(tier, [])),
                     "tokens": sym_tokens,
-                    "files": symbol_files_by_tier.get(tier, [])
+                    "files": symbol_files_by_tier.get(tier, []),
+                    "items": symbol_items
                 })
                 tier_tokens += sym_tokens
             
             if file_tiers.get(tier):
                 file_tokens = 0
+                file_items = []
                 for path in file_tiers[tier]:
                     try:
                         content = self.repo.get_file_content(path)
                         if content and not (isinstance(content, dict) and 'error' in content):
-                            file_tokens += tc.count(f"{path}\n```\n{content}\n```\n")
+                            path_tokens = tc.count(f"{path}\n```\n{content}\n```\n")
+                            file_tokens += path_tokens
+                            item_info = get_item_stability(path)
+                            file_items.append({
+                                "path": path,
+                                "tokens": path_tokens,
+                                "stable_count": item_info['stable_count'],
+                                "next_tier": item_info['next_tier'],
+                                "next_threshold": item_info['next_threshold'],
+                                "progress": item_info['progress'],
+                            })
                     except Exception:
                         pass
                 if file_tokens:
@@ -1089,7 +1147,8 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                         "type": "files",
                         "count": len(file_tiers[tier]),
                         "tokens": file_tokens,
-                        "files": file_tiers[tier]
+                        "files": file_tiers[tier],
+                        "items": file_items
                     })
                     tier_tokens += file_tokens
             
@@ -1111,11 +1170,22 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         # Active files
         if file_tiers.get('active'):
             file_tokens = 0
+            file_items = []
             for path in file_tiers['active']:
                 try:
                     content = self.repo.get_file_content(path)
                     if content and not (isinstance(content, dict) and 'error' in content):
-                        file_tokens += tc.count(f"{path}\n```\n{content}\n```\n")
+                        path_tokens = tc.count(f"{path}\n```\n{content}\n```\n")
+                        file_tokens += path_tokens
+                        item_info = get_item_stability(path)
+                        file_items.append({
+                            "path": path,
+                            "tokens": path_tokens,
+                            "stable_count": item_info['stable_count'],
+                            "next_tier": item_info['next_tier'],
+                            "next_threshold": item_info['next_threshold'],
+                            "progress": item_info['progress'],
+                        })
                 except Exception:
                     pass
             if file_tokens:
@@ -1123,7 +1193,8 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                     "type": "files",
                     "count": len(file_tiers['active']),
                     "tokens": file_tokens,
-                    "files": file_tiers['active']
+                    "files": file_tiers['active'],
+                    "items": file_items
                 })
                 active_tokens += file_tokens
         

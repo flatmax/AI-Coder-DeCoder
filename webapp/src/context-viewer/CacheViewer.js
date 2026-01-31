@@ -1,32 +1,47 @@
 import { LitElement, html } from 'lit';
-import { contextViewerStyles } from './ContextViewerStyles.js';
-import { renderContextViewer } from './ContextViewerTemplate.js';
+import { cacheViewerStyles } from './CacheViewerStyles.js';
+import { renderCacheViewer } from './CacheViewerTemplate.js';
 import { extractResponse } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
-import './CacheViewer.js';
 
-export class ContextViewer extends LitElement {
+/**
+ * CacheViewer - Visualizes the 4-tier cache system (L0-L3 + active)
+ * 
+ * Shows how content is organized for LLM prompt caching, with stability
+ * indicators showing progress toward promotion to higher cache tiers.
+ */
+export class CacheViewer extends LitElement {
   static properties = {
     visible: { type: Boolean },
     breakdown: { type: Object },
     isLoading: { type: Boolean },
     error: { type: String },
-    expandedSections: { type: Object },
+    
+    // Tier expansion state
+    expandedTiers: { type: Object },      // { L0: true, L1: false, ... }
+    expandedGroups: { type: Object },     // { 'L0-symbols': true, ... }
+    
+    // Recent changes for notifications
+    recentChanges: { type: Array },
+    
+    // URL modal state
     selectedUrl: { type: String },
     showUrlModal: { type: Boolean },
     urlContent: { type: Object },
+    
     // Symbol map modal
     showSymbolMapModal: { type: Boolean },
     symbolMapContent: { type: String },
     isLoadingSymbolMap: { type: Boolean },
-    // These come from parent
+    
+    // From parent
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
-    excludedUrls: { type: Object }, // Set of URLs to exclude from context
+    excludedUrls: { type: Object },
   };
 
-  static styles = contextViewerStyles;
+  static styles = cacheViewerStyles;
 
   constructor() {
     super();
@@ -34,13 +49,20 @@ export class ContextViewer extends LitElement {
     this.breakdown = null;
     this.isLoading = false;
     this.error = null;
-    this.expandedSections = { files: false, urls: false, history: false, symbol_map: false };
+    
+    // Default: L0 expanded, others collapsed
+    this.expandedTiers = { L0: true, L1: false, L2: false, L3: false, active: true };
+    this.expandedGroups = {};
+    
+    this.recentChanges = [];
+    
     this.selectedUrl = null;
     this.showUrlModal = false;
     this.urlContent = null;
     this.showSymbolMapModal = false;
     this.symbolMapContent = null;
     this.isLoadingSymbolMap = false;
+    
     this.selectedFiles = [];
     this.fetchedUrls = [];
     this.excludedUrls = new Set();
@@ -48,8 +70,9 @@ export class ContextViewer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Initial load will happen when rpcCall is set
   }
+
+  // ========== Data Fetching ==========
 
   getIncludedUrls() {
     if (!this.fetchedUrls) return [];
@@ -74,6 +97,10 @@ export class ContextViewer extends LitElement {
       if (result?.error) {
         this.error = result.error;
       } else {
+        // Track promotions/demotions for notifications
+        if (result.promotions?.length || result.demotions?.length) {
+          this._addRecentChanges(result.promotions, result.demotions);
+        }
         this.breakdown = result;
       }
     } catch (e) {
@@ -81,6 +108,21 @@ export class ContextViewer extends LitElement {
     } finally {
       this.isLoading = false;
     }
+  }
+
+  _addRecentChanges(promotions = [], demotions = []) {
+    const now = Date.now();
+    const newChanges = [
+      ...promotions.map(item => ({ item, type: 'promotion', time: now })),
+      ...demotions.map(item => ({ item, type: 'demotion', time: now })),
+    ];
+    
+    // Keep last 10 changes, remove ones older than 30 seconds
+    const cutoff = now - 30000;
+    this.recentChanges = [
+      ...newChanges,
+      ...this.recentChanges.filter(c => c.time > cutoff)
+    ].slice(0, 10);
   }
 
   set rpcCall(call) {
@@ -95,7 +137,6 @@ export class ContextViewer extends LitElement {
   }
 
   willUpdate(changedProperties) {
-    // Refresh when files or URLs change
     if (changedProperties.has('selectedFiles') || changedProperties.has('fetchedUrls')) {
       if (this._call) {
         this.refreshBreakdown();
@@ -103,12 +144,28 @@ export class ContextViewer extends LitElement {
     }
   }
 
-  toggleSection(section) {
-    this.expandedSections = {
-      ...this.expandedSections,
-      [section]: !this.expandedSections[section]
+  // ========== Tier/Group Expansion ==========
+
+  toggleTier(tier) {
+    this.expandedTiers = {
+      ...this.expandedTiers,
+      [tier]: !this.expandedTiers[tier]
     };
   }
+
+  toggleGroup(tier, group) {
+    const key = `${tier}-${group}`;
+    this.expandedGroups = {
+      ...this.expandedGroups,
+      [key]: !this.expandedGroups[key]
+    };
+  }
+
+  isGroupExpanded(tier, group) {
+    return this.expandedGroups[`${tier}-${group}`] || false;
+  }
+
+  // ========== URL Management ==========
 
   async viewUrl(url) {
     if (!this._call) return;
@@ -140,14 +197,12 @@ export class ContextViewer extends LitElement {
     }
     this.excludedUrls = newExcluded;
     
-    // Notify parent of the change
     this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
       detail: { url, included: !newExcluded.has(url), includedUrls: this.getIncludedUrls() },
       bubbles: true,
       composed: true
     }));
     
-    // Refresh breakdown with updated included URLs
     this.refreshBreakdown();
   }
 
@@ -156,7 +211,6 @@ export class ContextViewer extends LitElement {
   }
 
   removeUrl(url) {
-    // Also remove from excluded set if present
     if (this.excludedUrls.has(url)) {
       const newExcluded = new Set(this.excludedUrls);
       newExcluded.delete(url);
@@ -169,6 +223,8 @@ export class ContextViewer extends LitElement {
     }));
   }
 
+  // ========== Symbol Map Modal ==========
+
   async viewSymbolMap() {
     if (!this._call) return;
     
@@ -177,12 +233,7 @@ export class ContextViewer extends LitElement {
     this.symbolMapContent = null;
     
     try {
-      // Use get_context_map which fetches all trackable files and includes references
-      // Pass null for chat_files to include ALL files in the map
-      const response = await this._call['LiteLLM.get_context_map'](
-        null,  // Don't exclude any files
-        true   // include_references
-      );
+      const response = await this._call['LiteLLM.get_context_map'](null, true);
       this.symbolMapContent = extractResponse(response);
     } catch (e) {
       this.symbolMapContent = `Error loading symbol map: ${e.message}`;
@@ -196,21 +247,55 @@ export class ContextViewer extends LitElement {
     this.symbolMapContent = null;
   }
 
-  getUsagePercent() {
-    if (!this.breakdown) return 0;
-    const { used_tokens, max_input_tokens } = this.breakdown;
-    if (!max_input_tokens) return 0;
-    return Math.min(100, Math.round((used_tokens / max_input_tokens) * 100));
+  // ========== File Navigation ==========
+
+  viewFile(path) {
+    this.dispatchEvent(new CustomEvent('file-selected', {
+      detail: { path },
+      bubbles: true,
+      composed: true
+    }));
   }
 
-  getBarWidth(tokens) {
-    if (!this.breakdown || !this.breakdown.used_tokens) return 0;
-    return Math.round((tokens / this.breakdown.used_tokens) * 100);
+  // ========== Computed Values ==========
+
+  getCacheHitPercent() {
+    if (!this.breakdown) return 0;
+    const rate = this.breakdown.cache_hit_rate || 0;
+    return Math.round(rate * 100);
+  }
+
+  getTotalTokens() {
+    if (!this.breakdown) return 0;
+    return this.breakdown.total_tokens || 0;
+  }
+
+  getCachedTokens() {
+    if (!this.breakdown) return 0;
+    return this.breakdown.cached_tokens || 0;
+  }
+
+  getUsagePercent() {
+    if (!this.breakdown) return 0;
+    const { total_tokens, max_input_tokens } = this.breakdown;
+    if (!max_input_tokens) return 0;
+    return Math.min(100, Math.round((total_tokens / max_input_tokens) * 100));
+  }
+
+  getTierColor(tier) {
+    const colors = {
+      'L0': '#4ade80',  // Green
+      'L1': '#2dd4bf',  // Teal
+      'L2': '#60a5fa',  // Blue
+      'L3': '#fbbf24',  // Yellow
+      'active': '#fb923c' // Orange
+    };
+    return colors[tier] || '#888';
   }
 
   render() {
-    return renderContextViewer(this);
+    return renderCacheViewer(this);
   }
 }
 
-customElements.define('context-viewer', ContextViewer);
+customElements.define('cache-viewer', CacheViewer);

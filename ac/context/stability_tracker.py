@@ -372,3 +372,46 @@ class StabilityTracker:
             List of tier names from lowest to highest threshold
         """
         return self._tier_order.copy()
+    
+    def get_item_info(self, item: str) -> dict:
+        """Get detailed stability info for an item.
+        
+        Returns:
+            Dict with current_tier, stable_count, next_tier, next_threshold, progress
+        """
+        current_tier = self.get_tier(item)
+        stable_count = self.get_stable_count(item)
+        
+        # Find next tier (the one with the next higher threshold)
+        next_tier = None
+        next_threshold = None
+        
+        if current_tier == 'active':
+            # Next tier is the lowest threshold tier
+            if self._tier_order:
+                next_tier = self._tier_order[0]
+                next_threshold = self._thresholds[next_tier]
+        elif current_tier in self._thresholds:
+            # Find the tier with the next higher threshold
+            current_threshold = self._thresholds[current_tier]
+            for tier in self._tier_order:
+                if self._thresholds[tier] > current_threshold:
+                    next_tier = tier
+                    next_threshold = self._thresholds[tier]
+                    break
+        
+        # Calculate progress toward next tier
+        progress = 0.0
+        if next_threshold is not None and next_threshold > 0:
+            progress = min(1.0, stable_count / next_threshold)
+        elif current_tier == self._tier_order[-1] if self._tier_order else False:
+            # Already at highest tier
+            progress = 1.0
+        
+        return {
+            'current_tier': current_tier,
+            'stable_count': stable_count,
+            'next_tier': next_tier,
+            'next_threshold': next_threshold,
+            'progress': progress,
+        }
