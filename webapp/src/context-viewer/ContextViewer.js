@@ -4,8 +4,13 @@ import { renderContextViewer } from './ContextViewerTemplate.js';
 import { extractResponse } from '../utils/rpc.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
-import './CacheViewer.js';
 
+/**
+ * ContextViewer - Shows token budget breakdown and usage
+ * 
+ * Displays how tokens are allocated across system prompt, symbol map,
+ * files, URLs, and history. Allows viewing/managing URLs in context.
+ */
 export class ContextViewer extends LitElement {
   static properties = {
     visible: { type: Boolean },

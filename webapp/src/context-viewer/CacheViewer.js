@@ -39,6 +39,9 @@ export class CacheViewer extends LitElement {
     selectedFiles: { type: Array },
     fetchedUrls: { type: Array },
     excludedUrls: { type: Object },
+    
+    // RPC call - using attribute: false since it's an object passed via property
+    rpcCall: { attribute: false },
   };
 
   static styles = cacheViewerStyles;
@@ -70,6 +73,10 @@ export class CacheViewer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Refresh if rpcCall was set before connection
+    if (this._call) {
+      this.refreshBreakdown();
+    }
   }
 
   // ========== Data Fetching ==========
@@ -126,8 +133,10 @@ export class CacheViewer extends LitElement {
   }
 
   set rpcCall(call) {
+    const oldCall = this._call;
     this._call = call;
-    if (call) {
+    // Only refresh if call changed and is now set
+    if (call && call !== oldCall) {
       this.refreshBreakdown();
     }
   }
@@ -137,7 +146,10 @@ export class CacheViewer extends LitElement {
   }
 
   willUpdate(changedProperties) {
-    if (changedProperties.has('selectedFiles') || changedProperties.has('fetchedUrls')) {
+    // Refresh when files, URLs, or exclusions change
+    if (changedProperties.has('selectedFiles') || 
+        changedProperties.has('fetchedUrls') ||
+        changedProperties.has('excludedUrls')) {
       if (this._call) {
         this.refreshBreakdown();
       }
@@ -250,8 +262,10 @@ export class CacheViewer extends LitElement {
   // ========== File Navigation ==========
 
   viewFile(path) {
+    // Strip "symbol:" prefix if present (from symbol entries)
+    const filePath = path.startsWith('symbol:') ? path.slice(7) : path;
     this.dispatchEvent(new CustomEvent('file-selected', {
-      detail: { path },
+      detail: { path: filePath },
       bubbles: true,
       composed: true
     }));

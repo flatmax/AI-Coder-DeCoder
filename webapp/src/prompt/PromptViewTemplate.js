@@ -5,6 +5,7 @@ import './AssistantCard.js';
 import './SpeechToText.js';
 import '../find-in-files/FindInFiles.js';
 import '../context-viewer/ContextViewer.js';
+import '../context-viewer/CacheViewer.js';
 
 function renderHud(component) {
   if (!component._hudVisible || !component._hudData) {
@@ -192,7 +193,8 @@ export function renderPromptView(component) {
         <div class="header-section header-left" @click=${component.toggleMinimize}>
           <span>${component.activeLeftTab === 'files' ? '💬 Chat' : 
                   component.activeLeftTab === 'search' ? '🔍 Search' : 
-                  '📊 Context'}</span>
+                  component.activeLeftTab === 'context' ? '📊 Context' :
+                  '🗄️ Cache'}</span>
         </div>
         <div class="header-section header-tabs">
           <button 
@@ -208,8 +210,13 @@ export function renderPromptView(component) {
           <button 
             class="header-tab ${component.activeLeftTab === 'context' ? 'active' : ''}"
             @click=${(e) => { e.stopPropagation(); component.switchTab('context'); }}
-            title="Context"
+            title="Context Budget"
           >📊</button>
+          <button 
+            class="header-tab ${component.activeLeftTab === 'cache' ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab('cache'); }}
+            title="Cache Tiers"
+          >🗄️</button>
         </div>
         <div class="header-section header-git">
           ${!component.minimized && component.activeLeftTab === 'files' ? html`
@@ -312,7 +319,7 @@ export function renderPromptView(component) {
                 @file-selected=${(e) => component.handleSearchFileSelected(e)}
               ></find-in-files>
             </div>
-          ` : html`
+          ` : component.activeLeftTab === 'context' ? html`
             <div class="embedded-panel">
               <context-viewer
                 .rpcCall=${component.call}
@@ -322,6 +329,18 @@ export function renderPromptView(component) {
                 @remove-url=${(e) => component.handleContextRemoveUrl(e)}
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
               ></context-viewer>
+            </div>
+          ` : html`
+            <div class="embedded-panel">
+              <cache-viewer
+                .rpcCall=${component.call}
+                .selectedFiles=${component.selectedFiles || []}
+                .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
+                .excludedUrls=${component.excludedUrls}
+                @remove-url=${(e) => component.handleContextRemoveUrl(e)}
+                @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
+                @file-selected=${(e) => component.handleFileMentionClick(e)}
+              ></cache-viewer>
             </div>
           `}
         </div>
