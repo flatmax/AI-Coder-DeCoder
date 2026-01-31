@@ -300,12 +300,11 @@ export function renderPromptView(component) {
   
   return html`
     ${renderHud(component)}
-    ${component.showHistoryBrowser ? html`
-      <history-browser
-        @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}
-        @load-session=${(e) => component.handleLoadSession(e)}
-      ></history-browser>
-    ` : ''}
+    <history-browser
+      .visible=${component.showHistoryBrowser}
+      @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}
+      @load-session=${(e) => component.handleLoadSession(e)}
+    ></history-browser>
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''} ${isDragged ? 'dragged' : ''}"
          style=${dialogStyle}>
       ${renderResizeHandles(component)}
