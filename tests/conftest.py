@@ -122,3 +122,50 @@ def make_url_content():
             kwargs['fetched_at'] = datetime.now()
         return URLContent(url=url, url_type=url_type, **kwargs)
     return _make
+
+
+# ========== Symbol Index Test Fixtures ==========
+
+from ac.symbol_index.models import Symbol, Range, CallSite
+
+
+@pytest.fixture
+def make_symbol():
+    """Factory for Symbol objects with sensible defaults.
+    
+    Usage:
+        symbol = make_symbol("foo")
+        symbol = make_symbol("MyClass", kind="class", children=[...])
+        symbol = make_symbol("fetch", call_sites=[...])
+    """
+    def _make(name, kind="function", line=1, file_path="test.py", 
+              children=None, call_sites=None, parameters=None):
+        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
+        return Symbol(
+            name=name,
+            kind=kind,
+            file_path=file_path,
+            range=r,
+            selection_range=r,
+            children=children or [],
+            call_sites=call_sites or [],
+            parameters=parameters or [],
+        )
+    return _make
+
+
+@pytest.fixture
+def make_call_site():
+    """Factory for CallSite objects.
+    
+    Usage:
+        call = make_call_site("helper", target_file="utils.py")
+    """
+    def _make(name, target_file=None, target_symbol=None, line=1):
+        return CallSite(
+            name=name,
+            target_file=target_file,
+            target_symbol=target_symbol,
+            line=line,
+        )
+    return _make
