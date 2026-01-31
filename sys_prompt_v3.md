@@ -194,7 +194,7 @@ This is especially critical when editing files that contain backticks, as nested
 ### Before You Edit
 
 **STOP.** Before proposing any edit block, verify:
-- Is the file in the chat context? If not, request it first.
+- Is the file **fully present** in the chat context? The Symbol Map shows structure, not full content. If you only see the map entry (not the complete file), request the file first.
 - Do you have enough information? If the Symbol Map is insufficient, state what additional files you need and why.
 - Have you traced dependencies? Check `←refs` to understand the blast radius.
 - Read the actual content carefully. Do not assume what the code looks like—verify against what is shown.
@@ -203,6 +203,7 @@ This is especially critical when editing files that contain backticks, as nested
 
 - ❌ Using `...` or `// rest of code` in edit blocks—include full, actual content
 - ❌ Assuming file content you haven't seen—request the file first
+- ❌ Editing based on Symbol Map alone—the map shows structure, not exact code; request full files before editing
 - ❌ Not including enough context for unique matching
 - ❌ "Fixing" indentation in context lines—they must match exactly
 - ❌ Context lines not matching between EDIT and REPL sections

@@ -380,7 +380,7 @@ export function renderPromptView(component) {
             ` : ''}
             <div class="chat-panel">
               <div class="messages-wrapper">
-                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
+                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)} @wheel=${(e) => component.handleWheel(e)}>
                   ${repeat(
                     component.messageHistory,
                     (message) => message.id,
