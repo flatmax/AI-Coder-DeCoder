@@ -45,6 +45,18 @@ These files are included for reference:
 
 """
 
+FILES_L2_HEADER = """# Reference Files (L2)
+
+These files are included for reference:
+
+"""
+
+FILES_L3_HEADER = """# Reference Files (L3)
+
+These files are included for reference:
+
+"""
+
 FILES_ACTIVE_HEADER = """# Working Files
 
 Here are the files:
@@ -319,16 +331,24 @@ class StreamingMixin:
             
             # Update file stability tracking after response
             if file_paths and self._context_manager and self._context_manager.file_stability:
-                tier_changes = self._context_manager.file_stability.update_after_response(
+                stability = self._context_manager.file_stability
+                tier_changes = stability.update_after_response(
                     items=file_paths,
                     get_content=lambda p: self.repo.get_file_content(p, version='working'),
                     modified=files_modified
                 )
-                # Log tier changes for debugging
-                if tier_changes:
-                    for file_path, new_tier in tier_changes.items():
-                        tier_icon = {'L0': '🔒', 'L1': '📌', 'active': '✏️'}.get(new_tier, '?')
-                        print(f"  {tier_icon} {file_path} → {new_tier}")
+                
+                # Log promotions and demotions
+                promotions = stability.get_last_promotions()
+                demotions = stability.get_last_demotions()
+                
+                if promotions:
+                    promoted_items = [f"{item}→{tier}" for item, tier in promotions]
+                    print(f"📈 Promoted: {', '.join(promoted_items)}")
+                
+                if demotions:
+                    demoted_items = [f"{item}→{tier}" for item, tier in demotions]
+                    print(f"📉 Demoted: {', '.join(demoted_items)}")
             
             # Add last request token usage for the HUD (not cumulative)
             if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
@@ -429,11 +449,17 @@ class StreamingMixin:
         context_map_tokens = 0
         
         # Get file tiers from stability tracker
-        file_tiers = {'L0': [], 'L1': [], 'active': []}
+        file_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
         if file_paths and self._context_manager and self._context_manager.file_stability:
             file_tiers = self._context_manager.file_stability.get_items_by_tier(file_paths)
+            # Ensure all tier keys exist
+            for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
+                if tier not in file_tiers:
+                    file_tiers[tier] = []
             # Any files not yet tracked go to active
-            tracked = set(file_tiers['L0'] + file_tiers['L1'] + file_tiers['active'])
+            tracked = set()
+            for tier_files in file_tiers.values():
+                tracked.update(tier_files)
             for path in file_paths:
                 if path not in tracked:
                     file_tiers['active'].append(path)
@@ -443,10 +469,16 @@ class StreamingMixin:
         
         # Log tier distribution
         if file_paths:
-            l0_count = len(file_tiers['L0'])
-            l1_count = len(file_tiers['L1'])
-            active_count = len(file_tiers['active'])
-            print(f"📁 Files: {l0_count} L0 (cached), {l1_count} L1 (cached), {active_count} active")
+            tier_counts = []
+            for tier in ['L0', 'L1', 'L2', 'L3']:
+                count = len(file_tiers.get(tier, []))
+                if count > 0:
+                    tier_counts.append(f"{count} {tier}")
+            active_count = len(file_tiers.get('active', []))
+            if active_count > 0:
+                tier_counts.append(f"{active_count} active")
+            if tier_counts:
+                print(f"📁 Files: {', '.join(tier_counts)}")
         
         # System prompt with edit instructions
         # Use cache_control for providers that support prompt caching (Anthropic, Bedrock)
@@ -544,8 +576,8 @@ class StreamingMixin:
                 messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
         
         # Add tiered file contents
-        # L0 files (most stable) - cached
-        if file_tiers['L0']:
+        # L0 files (most stable, 12+ responses unchanged) - cached
+        if file_tiers.get('L0'):
             l0_content = self._format_files_for_cache(file_tiers['L0'], FILES_L0_HEADER)
             if l0_content:
                 messages.append({
@@ -560,8 +592,8 @@ class StreamingMixin:
                 })
                 messages.append({"role": "assistant", "content": "Ok."})
         
-        # L1 files (moderately stable) - cached
-        if file_tiers['L1']:
+        # L1 files (very stable, 9+ responses unchanged) - cached
+        if file_tiers.get('L1'):
             l1_content = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
             if l1_content:
                 messages.append({
@@ -576,8 +608,40 @@ class StreamingMixin:
                 })
                 messages.append({"role": "assistant", "content": "Ok."})
         
+        # L2 files (stable, 6+ responses unchanged) - cached
+        if file_tiers.get('L2'):
+            l2_content = self._format_files_for_cache(file_tiers['L2'], FILES_L2_HEADER)
+            if l2_content:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": l2_content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                })
+                messages.append({"role": "assistant", "content": "Ok."})
+        
+        # L3 files (moderately stable, 3+ responses unchanged) - cached
+        if file_tiers.get('L3'):
+            l3_content = self._format_files_for_cache(file_tiers['L3'], FILES_L3_HEADER)
+            if l3_content:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": l3_content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                })
+                messages.append({"role": "assistant", "content": "Ok."})
+        
         # Active files (recently changed) - not cached
-        if file_tiers['active']:
+        if file_tiers.get('active'):
             active_content = self._format_files_for_cache(file_tiers['active'], FILES_ACTIVE_HEADER)
             if active_content:
                 messages.append({"role": "user", "content": active_content})
