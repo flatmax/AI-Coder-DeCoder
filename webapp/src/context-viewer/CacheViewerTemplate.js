@@ -125,14 +125,14 @@ function renderFilesGroup(component, tier, content) {
 
 function renderUrlsGroup(component, tier, content) {
   const expanded = component.isGroupExpanded(tier, 'urls');
-  const allUrls = component.fetchedUrls || [];
+  const urlCount = content.items?.length || 0;
   
   return html`
     <div class="content-group">
       <div class="content-row" @click=${() => component.toggleGroup(tier, 'urls')}>
         <span class="content-expand">${expanded ? '▼' : '▶'}</span>
         <span class="content-icon">🔗</span>
-        <span class="content-label">URLs (${allUrls.length})</span>
+        <span class="content-label">URLs (${urlCount})</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${expanded ? html`
@@ -361,6 +361,17 @@ export function renderCacheViewer(component) {
   }
 
   const blocks = component.breakdown.blocks || [];
+  
+  // If no blocks, show a message
+  if (blocks.length === 0) {
+    return html`
+      <div class="cache-container">
+        ${renderPerformanceHeader(component)}
+        <div class="loading">No cache blocks available. Send a message to populate cache tiers.</div>
+        ${renderFooter(component)}
+      </div>
+    `;
+  }
 
   return html`
     <div class="cache-container">
