@@ -1,7 +1,8 @@
 import { LitElement, html } from 'lit';
 import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
-import { extractResponse, RpcMixin } from '../utils/rpc.js';
+import { RpcMixin } from '../utils/rpc.js';
+import { getTierColor } from '../utils/tierConfig.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -89,29 +90,19 @@ export class CacheViewer extends RpcMixin(LitElement) {
       return;
     }
     
-    this.isLoading = true;
-    this.error = null;
+    const result = await this._rpcWithState(
+      'LiteLLM.get_context_breakdown',
+      {},
+      this.selectedFiles || [],
+      this.getIncludedUrls()
+    );
     
-    try {
-      const response = await this._rpc('LiteLLM.get_context_breakdown',
-        this.selectedFiles || [],
-        this.getIncludedUrls()
-      );
-      const result = extractResponse(response);
-      
-      if (result?.error) {
-        this.error = result.error;
-      } else {
-        // Track promotions/demotions for notifications
-        if (result.promotions?.length || result.demotions?.length) {
-          this._addRecentChanges(result.promotions, result.demotions);
-        }
-        this.breakdown = result;
+    if (result) {
+      // Track promotions/demotions for notifications
+      if (result.promotions?.length || result.demotions?.length) {
+        this._addRecentChanges(result.promotions, result.demotions);
       }
-    } catch (e) {
-      this.error = e.message || 'Failed to load context breakdown';
-    } finally {
-      this.isLoading = false;
+      this.breakdown = result;
     }
   }
 
@@ -282,14 +273,7 @@ export class CacheViewer extends RpcMixin(LitElement) {
   }
 
   getTierColor(tier) {
-    const colors = {
-      'L0': '#4ade80',  // Green
-      'L1': '#2dd4bf',  // Teal
-      'L2': '#60a5fa',  // Blue
-      'L3': '#fbbf24',  // Yellow
-      'active': '#fb923c' // Orange
-    };
-    return colors[tier] || '#888';
+    return getTierColor(tier);
   }
 
   // ========== Search/Filter ==========

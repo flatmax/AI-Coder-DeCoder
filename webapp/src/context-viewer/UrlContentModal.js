@@ -1,164 +1,79 @@
-import { LitElement, html, css } from 'lit';
+import { html, css } from 'lit';
+import { ModalBase, modalBaseStyles } from './ModalBase.js';
 import { formatTokens, formatRelativeTime } from '../utils/formatters.js';
 
-export class UrlContentModal extends LitElement {
+export class UrlContentModal extends ModalBase {
   static properties = {
-    open: { type: Boolean },
+    ...ModalBase.properties,
     url: { type: String },
     content: { type: Object },
     showFullContent: { type: Boolean },
   };
 
-  static styles = css`
-    :host {
-      display: block;
-    }
+  static styles = [
+    modalBaseStyles,
+    css`
+      .modal {
+        width: 90%;
+        max-width: 800px;
+        max-height: 80vh;
+      }
 
-    .overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.7);
-      z-index: 2000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
+      .modal-meta {
+        padding: 12px 20px;
+        background: #16213e;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 20px;
+        font-size: 12px;
+        color: #888;
+      }
 
-    .modal {
-      background: #1a1a2e;
-      border-radius: 12px;
-      width: 90%;
-      max-width: 800px;
-      max-height: 80vh;
-      display: flex;
-      flex-direction: column;
-      border: 1px solid #0f3460;
-    }
+      .meta-item {
+        display: flex;
+        gap: 6px;
+      }
 
-    .modal-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 20px;
-      border-bottom: 1px solid #0f3460;
-    }
+      .meta-label {
+        color: #666;
+      }
 
-    .modal-title {
-      font-weight: 600;
-      color: #fff;
-      font-size: 14px;
-    }
+      .meta-value {
+        color: #aaa;
+      }
 
-    .close-btn {
-      background: none;
-      border: none;
-      color: #888;
-      font-size: 20px;
-      cursor: pointer;
-      padding: 0;
-      line-height: 1;
-    }
+      .content-section {
+        margin-bottom: 20px;
+      }
 
-    .close-btn:hover {
-      color: #fff;
-    }
+      .content-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        color: #666;
+        margin-bottom: 8px;
+      }
 
-    .modal-meta {
-      padding: 12px 20px;
-      background: #16213e;
-      display: flex;
-      gap: 20px;
-      font-size: 12px;
-      color: #888;
-    }
+      .content-box {
+        background: #0f3460;
+        border-radius: 8px;
+        padding: 16px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #ccc;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 300px;
+        overflow-y: auto;
+      }
 
-    .meta-item {
-      display: flex;
-      gap: 6px;
-    }
-
-    .meta-label {
-      color: #666;
-    }
-
-    .meta-value {
-      color: #aaa;
-    }
-
-    .modal-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-    }
-
-    .content-section {
-      margin-bottom: 20px;
-    }
-
-    .content-label {
-      font-size: 11px;
-      text-transform: uppercase;
-      color: #666;
-      margin-bottom: 8px;
-    }
-
-    .content-box {
-      background: #0f3460;
-      border-radius: 8px;
-      padding: 16px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #ccc;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 300px;
-      overflow-y: auto;
-    }
-
-    .content-box.full {
-      max-height: none;
-    }
-
-    .modal-footer {
-      padding: 12px 20px;
-      border-top: 1px solid #0f3460;
-      display: flex;
-      gap: 8px;
-    }
-
-    .footer-btn {
-      background: #0f3460;
-      border: none;
-      border-radius: 6px;
-      color: #ccc;
-      padding: 8px 16px;
-      font-size: 12px;
-      cursor: pointer;
-    }
-
-    .footer-btn:hover {
-      background: #1a4a7a;
-      color: #fff;
-    }
-
-    .loading {
-      text-align: center;
-      padding: 40px;
-      color: #888;
-    }
-
-    .error {
-      color: #e94560;
-      padding: 20px;
-    }
-  `;
+      .content-box.full {
+        max-height: none;
+      }
+    `
+  ];
 
   constructor() {
     super();
-    this.open = false;
     this.url = '';
     this.content = null;
     this.showFullContent = false;
@@ -167,16 +82,6 @@ export class UrlContentModal extends LitElement {
   updated(changedProperties) {
     if (changedProperties.has('open') && this.open) {
       this.showFullContent = false;
-    }
-  }
-
-  _close() {
-    this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
-  }
-
-  _handleOverlayClick(e) {
-    if (e.target === e.currentTarget) {
-      this._close();
     }
   }
 
