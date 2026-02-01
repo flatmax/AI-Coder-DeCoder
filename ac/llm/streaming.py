@@ -14,6 +14,7 @@ from ..symbol_index.compact_format import (
     compute_file_block_hash,
     _compute_path_aliases,
 )
+from .context_builder import TIER_THRESHOLDS, TIER_ORDER, CACHE_TIERS
 
 
 REPO_MAP_HEADER = """# Repository Structure
@@ -146,12 +147,34 @@ class StreamingMixin:
         try:
             model = self.smaller_model if use_smaller_model else self.model
             
-            # Check/handle summarization using new context manager
+            # Check/handle history compaction using new context manager
+            compaction_result = None
             summarized = False
-            if self._context_manager and self._context_manager.history_needs_summary():
-                summary_result = self.summarize_history()
-                if summary_result.get("status") == "summarized":
+            if self._context_manager:
+                # Check if compaction is needed before running it
+                if self._context_manager.should_compact():
+                    # Notify frontend that compaction is starting
+                    loop = asyncio.get_running_loop()
+                    await self._send_compaction_event(request_id, {
+                        'type': 'compaction_start',
+                        'message': '🗜️ Compacting history...'
+                    }, loop)
+                
+                compaction_result = self._context_manager.compact_history_if_needed_sync()
+                if compaction_result and compaction_result.case != "none":
                     summarized = True
+                    print(f"📝 History compacted: {compaction_result.case} "
+                          f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
+                    
+                    # Notify frontend of compaction result
+                    loop = asyncio.get_running_loop()
+                    await self._send_compaction_event(request_id, {
+                        'type': 'compaction_complete',
+                        'case': compaction_result.case,
+                        'tokens_before': compaction_result.tokens_before,
+                        'tokens_after': compaction_result.tokens_after,
+                        'tokens_saved': compaction_result.tokens_before - compaction_result.tokens_after,
+                    }, loop)
             
             # Load files into context manager
             if self._context_manager:
@@ -340,14 +363,17 @@ class StreamingMixin:
             # Store assistant message in history
             # Handle both new format (files_modified list) and legacy format (passed tuples)
             files_modified = result.get("files_modified") or [edit[0] for edit in result.get("passed", [])]
+            edit_results = result.get("edit_results")
             self.store_assistant_message(
                 content=full_content,
-                files_modified=files_modified if files_modified else None
+                files_modified=files_modified if files_modified else None,
+                edit_results=edit_results if edit_results else None
             )
             
             # Update cache stability tracking after response (files AND symbol entries)
             if self._context_manager and self._context_manager.cache_stability:
                 stability = self._context_manager.cache_stability
+                tc = self._context_manager.token_counter
                 
                 # Collect items currently in Active context:
                 # - Files explicitly in file_paths
@@ -381,6 +407,48 @@ class StreamingMixin:
                         # Regular file
                         return self.repo.get_file_content(item, version='working')
                 
+                def get_item_tokens(item):
+                    """Get token count for an item - files or symbol blocks."""
+                    if item.startswith("symbol:"):
+                        # Symbol entry - count tokens in formatted block
+                        file_path = item.replace("symbol:", "")
+                        try:
+                            indexer = self._get_indexer()
+                            symbol_index = indexer._get_symbol_index()
+                            symbols = symbol_index.get_symbols(file_path)
+                            if symbols:
+                                from ..symbol_index.compact_format import format_file_symbol_block
+                                # Get reference data for formatting
+                                ref_index = getattr(symbol_index, '_reference_index', None)
+                                file_refs_data = {}
+                                file_imports_data = {}
+                                references_data = {}
+                                if ref_index:
+                                    file_refs_data[file_path] = ref_index.get_files_referencing(file_path)
+                                    file_imports_data[file_path] = ref_index.get_file_dependencies(file_path)
+                                    references_data[file_path] = ref_index.get_references_to_file(file_path)
+                                
+                                block = format_file_symbol_block(
+                                    file_path=file_path,
+                                    symbols=symbols,
+                                    references=references_data,
+                                    file_refs=file_refs_data,
+                                    file_imports=file_imports_data,
+                                )
+                                return tc.count(block) if block else 0
+                        except Exception:
+                            pass
+                        return 0
+                    else:
+                        # Regular file - count tokens in formatted content
+                        try:
+                            content = self.repo.get_file_content(item, version='working')
+                            if content and not (isinstance(content, dict) and 'error' in content):
+                                return tc.count(f"{item}\n```\n{content}\n```\n")
+                        except Exception:
+                            pass
+                        return 0
+                
                 # Determine modified items (files that were edited)
                 modified_items = list(files_modified) if files_modified else []
                 # Symbol entries for modified files are also considered modified
@@ -390,10 +458,12 @@ class StreamingMixin:
                 # 1. Keep these items as 'active' with N=0
                 # 2. Move previously-active items that aren't in this list to L3
                 # 3. Trigger ripple promotions for existing L3/L2/L1 items
+                # 4. With cache_target_tokens > 0: use threshold-aware promotion
                 tier_changes = stability.update_after_response(
                     items=active_items,
                     get_content=get_item_content,
-                    modified=modified_items
+                    modified=modified_items,
+                    get_tokens=get_item_tokens,
                 )
                 
                 # Log promotions and demotions
@@ -427,6 +497,14 @@ class StreamingMixin:
                 # Include context breakdown if available
                 if hud_breakdown:
                     result["token_usage"].update(hud_breakdown)
+                
+                # Add history token info for HUD
+                if self._context_manager:
+                    history_tokens = self._context_manager.history_token_count()
+                    compaction_config = self.get_compaction_config() if hasattr(self, 'get_compaction_config') else {}
+                    trigger_threshold = compaction_config.get('compaction_trigger_tokens', 6000)
+                    result["token_usage"]["history_tokens"] = history_tokens
+                    result["token_usage"]["history_threshold"] = trigger_threshold
                 
                 # Include promotions/demotions from stability tracker
                 if self._context_manager and self._context_manager.cache_stability:
@@ -528,46 +606,22 @@ class StreamingMixin:
         context_map_tokens = 0
         
         # Track per-tier information for HUD
-        tier_info = {
-            'L0': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_system': False, 'has_legend': False, 'has_tree': False},
-            'L1': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'L2': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'L3': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'active': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False, 'has_urls': False, 'has_history': False},
-            'empty_tiers': 0,
-        }
+        tier_info = self._make_tier_info()
         
         # Get stability tracker
-        stability = None
-        if self._context_manager:
-            stability = self._context_manager.cache_stability
+        stability = self._get_stability_tracker()
         
         # Determine which files are in active context (full content will be included)
-        active_context_files = set(file_paths) if file_paths else set()
+        # Normalize paths to ensure consistent matching
+        active_context_files = set(str(p).replace('\\', '/') for p in file_paths) if file_paths else set()
         
-        # Get file tiers from stability tracker
-        file_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
-        if file_paths and stability:
-            file_tiers = stability.get_items_by_tier(file_paths)
-            # Ensure all tier keys exist
-            for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
-                if tier not in file_tiers:
-                    file_tiers[tier] = []
-            # Any files not yet tracked go to active
-            tracked = set()
-            for tier_files in file_tiers.values():
-                tracked.update(tier_files)
-            for path in file_paths:
-                if path not in tracked:
-                    file_tiers['active'].append(path)
-        elif file_paths:
-            # No stability tracker - all files are active
-            file_tiers['active'] = list(file_paths)
+        # Get file tiers from stability tracker (use mixin method)
+        file_tiers = self._get_file_tiers(file_paths)
         
         # Log tier distribution for files
         if file_paths:
             tier_counts = []
-            for tier in ['L0', 'L1', 'L2', 'L3']:
+            for tier in CACHE_TIERS:
                 count = len(file_tiers.get(tier, []))
                 if count > 0:
                     tier_counts.append(f"{count} {tier}")
@@ -580,150 +634,40 @@ class StreamingMixin:
         # Build system prompt
         system_text = build_system_prompt()
         
-        # Get symbol map data with per-file stability tracking
-        symbol_map_content = {}  # tier -> content string
-        legend = ""
-        symbol_files_by_tier = {}  # tier -> list of file paths
+        # Get symbol map data using shared mixin method
+        symbol_map_content, symbol_files_by_tier, legend, _ = self._get_symbol_map_data(
+            active_context_files, file_paths
+        )
         
-        if use_repo_map and self.repo:
-            # Get all trackable files and their symbols
-            all_files = self._get_all_trackable_files()
-            if all_files:
-                indexer = self._get_indexer()
-                symbols_by_file = indexer.index_files(all_files)
-                
-                # Build references for cross-file information
-                indexer.build_references(all_files)
-                symbol_index = indexer._get_symbol_index()
-                
-                # Get reference data
-                file_refs = {}
-                file_imports = {}
-                references = {}
-                if hasattr(symbol_index, '_reference_index') and symbol_index._reference_index:
-                    ref_index = symbol_index._reference_index
-                    for f in all_files:
-                        file_refs[f] = ref_index.get_files_referencing(f)
-                        file_imports[f] = ref_index.get_file_dependencies(f)
-                        references[f] = ref_index.get_references_to_file(f)
-                
-                # Initialize stability tracker from refs if fresh start
-                if stability and not stability.is_initialized():
-                    # Build files_with_refs from file_refs counts
-                    files_with_refs = [
-                        (f, len(file_refs.get(f, set())))
-                        for f in all_files
-                    ]
-                    # Also include symbol entries
-                    symbol_refs = [
-                        (f"symbol:{f}", len(file_refs.get(f, set())))
-                        for f in symbols_by_file.keys()
-                    ]
-                    files_with_refs.extend(symbol_refs)
-                    
-                    # Exclude currently active context files
-                    tier_assignments = stability.initialize_from_refs(
-                        files_with_refs,
-                        exclude_active=active_context_files
-                    )
-                    if tier_assignments:
-                        print(f"📊 Initialized {len(tier_assignments)} items from ref counts")
-                
-                # Compute path aliases for the legend
-                aliases = _compute_path_aliases(references, file_refs)
-                
-                # Get legend (goes in L0, static)
-                legend = get_legend(aliases)
-                
-                # Get symbol entry tiers from stability tracker
-                # Symbol entries use "symbol:" prefix to distinguish from file paths
-                symbol_items = [f"symbol:{f}" for f in symbols_by_file.keys()]
-                symbol_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
-                
-                if stability:
-                    symbol_tiers = stability.get_items_by_tier(symbol_items)
-                    for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
-                        if tier not in symbol_tiers:
-                            symbol_tiers[tier] = []
-                    
-                    # Any symbols not yet tracked go to L3 (initial tier)
-                    tracked = set()
-                    for tier_items in symbol_tiers.values():
-                        tracked.update(tier_items)
-                    for item in symbol_items:
-                        if item not in tracked:
-                            symbol_tiers['L3'].append(item)
-                else:
-                    # No stability tracker - all symbols go to L3
-                    symbol_tiers['L3'] = symbol_items
-                
-                # Convert symbol item keys back to file paths for formatting
-                symbol_files_by_tier = {}
-                for tier, items in symbol_tiers.items():
-                    symbol_files_by_tier[tier] = [
-                        item.replace("symbol:", "") for item in items
-                        if item.startswith("symbol:")
-                    ]
-                
-                # Exclude symbol entries for files that are in active context
-                # (their full content will be included instead)
-                for tier in symbol_files_by_tier:
-                    symbol_files_by_tier[tier] = [
-                        f for f in symbol_files_by_tier[tier]
-                        if f not in active_context_files
-                    ]
-                
-                # Format symbol blocks by tier
-                symbol_map_content = format_symbol_blocks_by_tier(
-                    symbols_by_file=symbols_by_file,
-                    file_tiers=symbol_files_by_tier,
-                    references=references,
-                    file_refs=file_refs,
-                    file_imports=file_imports,
-                    aliases=aliases,
-                    exclude_files=active_context_files,
-                )
-                
-                # Log symbol tier distribution
-                tier_counts = []
-                for tier in ['L0', 'L1', 'L2', 'L3']:
-                    count = len(symbol_files_by_tier.get(tier, []))
-                    if count > 0:
-                        tier_counts.append(f"{count} {tier}")
-                if tier_counts:
-                    print(f"📦 Symbol map: {', '.join(tier_counts)}")
+        # Log symbol tier distribution
+        if symbol_files_by_tier:
+            tier_counts = []
+            for tier in CACHE_TIERS:
+                count = len(symbol_files_by_tier.get(tier, []))
+                if count > 0:
+                    tier_counts.append(f"{count} {tier}")
+            if tier_counts:
+                print(f"📦 Symbol map: {', '.join(tier_counts)}")
         
         # Build cache blocks by tier
         # Block 1 (L0): system + legend + L0 symbols + L0 files (cached)
         l0_content = system_text
         tier_info['L0']['has_system'] = True
-        if self._context_manager:
-            try:
-                tier_info['L0']['tokens'] += self._context_manager.count_tokens(system_text)
-            except Exception:
-                pass
+        tier_info['L0']['tokens'] += self._safe_count_tokens(system_text)
         
         if legend:
             l0_content += "\n\n" + REPO_MAP_HEADER + legend + "\n"
             tier_info['L0']['has_legend'] = True
-            if self._context_manager:
-                try:
-                    legend_tokens = self._context_manager.count_tokens(REPO_MAP_HEADER + legend)
-                    tier_info['L0']['tokens'] += legend_tokens
-                    context_map_tokens += legend_tokens
-                except Exception:
-                    pass
+            legend_tokens = self._safe_count_tokens(REPO_MAP_HEADER + legend)
+            tier_info['L0']['tokens'] += legend_tokens
+            context_map_tokens += legend_tokens
         
         if symbol_map_content.get('L0'):
             l0_content += "\n" + symbol_map_content['L0']
             tier_info['L0']['symbols'] = len(symbol_files_by_tier.get('L0', []))
-            if self._context_manager:
-                try:
-                    l0_symbol_tokens = self._context_manager.count_tokens(symbol_map_content['L0'])
-                    tier_info['L0']['tokens'] += l0_symbol_tokens
-                    context_map_tokens += l0_symbol_tokens
-                except Exception:
-                    pass
+            l0_symbol_tokens = self._safe_count_tokens(symbol_map_content['L0'])
+            tier_info['L0']['tokens'] += l0_symbol_tokens
+            context_map_tokens += l0_symbol_tokens
         
         # Add L0 files to the L0 block
         if file_tiers.get('L0'):
@@ -731,11 +675,7 @@ class StreamingMixin:
             if l0_files_content:
                 l0_content += "\n\n" + l0_files_content
                 tier_info['L0']['files'] = len(file_tiers['L0'])
-                if self._context_manager:
-                    try:
-                        tier_info['L0']['tokens'] += self._context_manager.count_tokens(l0_files_content)
-                    except Exception:
-                        pass
+                tier_info['L0']['tokens'] += self._safe_count_tokens(l0_files_content)
         
         messages.append({
             "role": "system",
@@ -753,23 +693,15 @@ class StreamingMixin:
         if symbol_map_content.get('L1'):
             l1_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
             tier_info['L1']['symbols'] = len(symbol_files_by_tier.get('L1', []))
-            if self._context_manager:
-                try:
-                    l1_symbol_tokens = self._context_manager.count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
-                    tier_info['L1']['tokens'] += l1_symbol_tokens
-                    context_map_tokens += l1_symbol_tokens
-                except Exception:
-                    pass
+            l1_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
+            tier_info['L1']['tokens'] += l1_symbol_tokens
+            context_map_tokens += l1_symbol_tokens
         if file_tiers.get('L1'):
             l1_files = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
             if l1_files:
                 l1_parts.append(l1_files)
                 tier_info['L1']['files'] = len(file_tiers['L1'])
-                if self._context_manager:
-                    try:
-                        tier_info['L1']['tokens'] += self._context_manager.count_tokens(l1_files)
-                    except Exception:
-                        pass
+                tier_info['L1']['tokens'] += self._safe_count_tokens(l1_files)
         
         if l1_parts:
             l1_content = "\n\n".join(l1_parts)
@@ -792,23 +724,15 @@ class StreamingMixin:
         if symbol_map_content.get('L2'):
             l2_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
             tier_info['L2']['symbols'] = len(symbol_files_by_tier.get('L2', []))
-            if self._context_manager:
-                try:
-                    l2_symbol_tokens = self._context_manager.count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
-                    tier_info['L2']['tokens'] += l2_symbol_tokens
-                    context_map_tokens += l2_symbol_tokens
-                except Exception:
-                    pass
+            l2_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
+            tier_info['L2']['tokens'] += l2_symbol_tokens
+            context_map_tokens += l2_symbol_tokens
         if file_tiers.get('L2'):
             l2_files = self._format_files_for_cache(file_tiers['L2'], FILES_L2_HEADER)
             if l2_files:
                 l2_parts.append(l2_files)
                 tier_info['L2']['files'] = len(file_tiers['L2'])
-                if self._context_manager:
-                    try:
-                        tier_info['L2']['tokens'] += self._context_manager.count_tokens(l2_files)
-                    except Exception:
-                        pass
+                tier_info['L2']['tokens'] += self._safe_count_tokens(l2_files)
         
         if l2_parts:
             l2_content = "\n\n".join(l2_parts)
@@ -831,23 +755,15 @@ class StreamingMixin:
         if symbol_map_content.get('L3'):
             l3_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
             tier_info['L3']['symbols'] = len(symbol_files_by_tier.get('L3', []))
-            if self._context_manager:
-                try:
-                    l3_symbol_tokens = self._context_manager.count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
-                    tier_info['L3']['tokens'] += l3_symbol_tokens
-                    context_map_tokens += l3_symbol_tokens
-                except Exception:
-                    pass
+            l3_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
+            tier_info['L3']['tokens'] += l3_symbol_tokens
+            context_map_tokens += l3_symbol_tokens
         if file_tiers.get('L3'):
             l3_files = self._format_files_for_cache(file_tiers['L3'], FILES_L3_HEADER)
             if l3_files:
                 l3_parts.append(l3_files)
                 tier_info['L3']['files'] = len(file_tiers['L3'])
-                if self._context_manager:
-                    try:
-                        tier_info['L3']['tokens'] += self._context_manager.count_tokens(l3_files)
-                    except Exception:
-                        pass
+                tier_info['L3']['tokens'] += self._safe_count_tokens(l3_files)
         
         if l3_parts:
             l3_content = "\n\n".join(l3_parts)
@@ -888,11 +804,7 @@ class StreamingMixin:
                 messages.append({"role": "user", "content": url_message})
                 messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
                 tier_info['active']['has_urls'] = True
-                if self._context_manager:
-                    try:
-                        tier_info['active']['tokens'] += self._context_manager.count_tokens(url_message)
-                    except Exception:
-                        pass
+                tier_info['active']['tokens'] += self._safe_count_tokens(url_message)
         
         # Active files (recently changed) - not cached
         if file_tiers.get('active'):
@@ -901,21 +813,13 @@ class StreamingMixin:
                 messages.append({"role": "user", "content": active_content})
                 messages.append({"role": "assistant", "content": "Ok."})
                 tier_info['active']['files'] = len(file_tiers['active'])
-                if self._context_manager:
-                    try:
-                        tier_info['active']['tokens'] += self._context_manager.count_tokens(active_content)
-                    except Exception:
-                        pass
+                tier_info['active']['tokens'] += self._safe_count_tokens(active_content)
         
         # Add conversation history
         if self.conversation_history:
             tier_info['active']['has_history'] = True
-            if self._context_manager:
-                try:
-                    for msg in self.conversation_history:
-                        tier_info['active']['tokens'] += self._context_manager.count_tokens(msg.get('content', ''))
-                except Exception:
-                    pass
+            for msg in self.conversation_history:
+                tier_info['active']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
         
         for msg in self.conversation_history:
             messages.append(msg)
@@ -1101,11 +1005,8 @@ class StreamingMixin:
             cache_hit_tokens: Tokens that hit the cache
             total_tokens: Total tokens in the request
         """
-        # Tier thresholds for display
-        thresholds = {'L0': 12, 'L1': 9, 'L2': 6, 'L3': 3}
-        
         # Calculate totals
-        cached_tokens = sum(tier_info[t]['tokens'] for t in ['L0', 'L1', 'L2', 'L3'])
+        cached_tokens = sum(tier_info[t]['tokens'] for t in CACHE_TIERS)
         
         # Calculate cache hit percentage
         cache_pct = 0
@@ -1116,7 +1017,7 @@ class StreamingMixin:
         print(f"\n╭─ Cache Blocks {'─' * 38}╮")
         
         # Print each tier
-        for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
+        for tier in TIER_ORDER:
             info = tier_info[tier]
             tokens = info['tokens']
             
@@ -1144,7 +1045,7 @@ class StreamingMixin:
                 tier_label = "active"
                 cached_str = ""
             else:
-                threshold = thresholds[tier]
+                threshold = TIER_THRESHOLDS[tier]
                 tier_label = f"{tier} ({threshold}+)"
                 cached_str = " [cached]"
             
@@ -1167,7 +1068,7 @@ class StreamingMixin:
         print(f"├{'─' * 53}┤")
         
         # Calculate total and show cache hit info
-        all_tokens = sum(tier_info[t]['tokens'] for t in ['L0', 'L1', 'L2', 'L3', 'active'])
+        all_tokens = sum(tier_info[t]['tokens'] for t in TIER_ORDER)
         print(f"│ Total: {all_tokens:,} tokens | Cache hit: {cache_pct}%{' ' * (24 - len(str(all_tokens)) - len(str(cache_pct)))}│")
         
         # Show empty tiers if any
@@ -1178,6 +1079,16 @@ class StreamingMixin:
         
         print(f"╰{'─' * 53}╯")
     
+    async def _send_compaction_event(self, request_id, event, loop):
+        """Send compaction event to the client."""
+        try:
+            if hasattr(self, 'get_call'):
+                call = self.get_call()
+                if call and 'PromptView.compactionEvent' in call:
+                    await call['PromptView.compactionEvent'](request_id, event)
+        except Exception as e:
+            print(f"Error sending compaction event: {e}")
+
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
         try:

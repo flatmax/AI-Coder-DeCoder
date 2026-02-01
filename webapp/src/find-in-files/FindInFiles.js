@@ -14,7 +14,6 @@ export class FindInFiles extends RpcMixin(LitElement) {
     useRegex: { type: Boolean },
     wholeWord: { type: Boolean },
     expandedFiles: { type: Object },
-    rpcCall: { type: Object },
     focusedIndex: { type: Number },
     hoveredIndex: { type: Number }
   };

@@ -10,37 +10,25 @@ from ac.url_handler.config import URLConfig, URLCacheConfig
 from ac.url_handler.models import URLContent, URLType
 
 
-@pytest.fixture
-def cache_dir(tmp_path):
-    """Create a temporary cache directory."""
-    return tmp_path / "url_cache"
-
+# Use shared fixtures from conftest.py:
+# - cache_dir, url_config, url_cache, sample_url_content
 
 @pytest.fixture
-def config(cache_dir):
-    """Create config with temp cache directory."""
-    return URLConfig(
-        cache=URLCacheConfig(path=str(cache_dir), ttl_hours=24)
-    )
+def config(url_config):
+    """Alias for backward compatibility."""
+    return url_config
 
 
 @pytest.fixture
-def cache(config):
-    """Create cache instance with temp directory."""
-    return URLCache(config)
+def cache(url_cache):
+    """Alias for backward compatibility."""
+    return url_cache
 
 
 @pytest.fixture
-def sample_content():
-    """Create sample URLContent for testing."""
-    return URLContent(
-        url="https://github.com/owner/repo",
-        url_type=URLType.GITHUB_REPO,
-        title="Test Repo",
-        description="A test repository",
-        content="README content here",
-        fetched_at=datetime.now(),
-    )
+def sample_content(sample_url_content):
+    """Alias for backward compatibility."""
+    return sample_url_content
 
 
 class TestURLCacheInit:

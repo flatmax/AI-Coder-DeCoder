@@ -1,0 +1,2 @@
+prompt : All tests passed, can you confirm the tests are testing what you intended to test ?
+prompt : Great! Does the code look good for committing (I can generate the commit messaages) ? can you update the plan first ? What will be next ?

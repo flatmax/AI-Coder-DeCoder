@@ -296,4 +296,19 @@ export const historyBrowserStyles = css`
     padding: 0 2px;
     border-radius: 2px;
   }
+
+  .message-card.highlight {
+    animation: highlight-pulse 2s ease-out;
+  }
+
+  @keyframes highlight-pulse {
+    0% {
+      box-shadow: 0 0 0 3px #e94560;
+      background: #2a1a3e;
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+      background: #16213e;
+    }
+  }
 `;

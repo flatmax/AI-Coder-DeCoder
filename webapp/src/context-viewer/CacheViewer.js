@@ -1,7 +1,8 @@
 import { LitElement, html } from 'lit';
 import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
-import { extractResponse } from '../utils/rpc.js';
+import { RpcMixin } from '../utils/rpc.js';
+import { getTierColor } from '../utils/tierConfig.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -11,7 +12,7 @@ import './SymbolMapModal.js';
  * Shows how content is organized for LLM prompt caching, with stability
  * indicators showing progress toward promotion to higher cache tiers.
  */
-export class CacheViewer extends LitElement {
+export class CacheViewer extends RpcMixin(LitElement) {
   static properties = {
     visible: { type: Boolean },
     breakdown: { type: Object },
@@ -40,8 +41,8 @@ export class CacheViewer extends LitElement {
     fetchedUrls: { type: Array },
     excludedUrls: { type: Object },
     
-    // RPC call - using attribute: false since it's an object passed via property
-    rpcCall: { attribute: false },
+    // Search/filter
+    searchQuery: { type: String },
   };
 
   static styles = cacheViewerStyles;
@@ -69,14 +70,12 @@ export class CacheViewer extends LitElement {
     this.selectedFiles = [];
     this.fetchedUrls = [];
     this.excludedUrls = new Set();
+    
+    this.searchQuery = '';
   }
 
-  connectedCallback() {
-    super.connectedCallback();
-    // Refresh if rpcCall was set before connection
-    if (this._call) {
-      this.refreshBreakdown();
-    }
+  onRpcReady() {
+    this.refreshBreakdown();
   }
 
   // ========== Data Fetching ==========
@@ -87,33 +86,23 @@ export class CacheViewer extends LitElement {
   }
 
   async refreshBreakdown() {
-    if (!this._call) {
+    if (!this.rpcCall) {
       return;
     }
     
-    this.isLoading = true;
-    this.error = null;
+    const result = await this._rpcWithState(
+      'LiteLLM.get_context_breakdown',
+      {},
+      this.selectedFiles || [],
+      this.getIncludedUrls()
+    );
     
-    try {
-      const response = await this._call['LiteLLM.get_context_breakdown'](
-        this.selectedFiles || [],
-        this.getIncludedUrls()
-      );
-      const result = extractResponse(response);
-      
-      if (result?.error) {
-        this.error = result.error;
-      } else {
-        // Track promotions/demotions for notifications
-        if (result.promotions?.length || result.demotions?.length) {
-          this._addRecentChanges(result.promotions, result.demotions);
-        }
-        this.breakdown = result;
+    if (result) {
+      // Track promotions/demotions for notifications
+      if (result.promotions?.length || result.demotions?.length) {
+        this._addRecentChanges(result.promotions, result.demotions);
       }
-    } catch (e) {
-      this.error = e.message || 'Failed to load context breakdown';
-    } finally {
-      this.isLoading = false;
+      this.breakdown = result;
     }
   }
 
@@ -132,25 +121,12 @@ export class CacheViewer extends LitElement {
     ].slice(0, 10);
   }
 
-  set rpcCall(call) {
-    const oldCall = this._call;
-    this._call = call;
-    // Only refresh if call changed and is now set
-    if (call && call !== oldCall) {
-      this.refreshBreakdown();
-    }
-  }
-
-  get rpcCall() {
-    return this._call;
-  }
-
   willUpdate(changedProperties) {
     // Refresh when files, URLs, or exclusions change
     if (changedProperties.has('selectedFiles') || 
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
-      if (this._call) {
+      if (this.rpcCall) {
         this.refreshBreakdown();
       }
     }
@@ -180,14 +156,14 @@ export class CacheViewer extends LitElement {
   // ========== URL Management ==========
 
   async viewUrl(url) {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.selectedUrl = url;
     this.showUrlModal = true;
     this.urlContent = null;
     
     try {
-      const response = await this._call['LiteLLM.get_url_content'](url);
+      const response = await this._rpc('LiteLLM.get_url_content', url);
       this.urlContent = extractResponse(response);
     } catch (e) {
       this.urlContent = { error: e.message };
@@ -238,14 +214,14 @@ export class CacheViewer extends LitElement {
   // ========== Symbol Map Modal ==========
 
   async viewSymbolMap() {
-    if (!this._call) return;
+    if (!this.rpcCall) return;
     
     this.isLoadingSymbolMap = true;
     this.showSymbolMapModal = true;
     this.symbolMapContent = null;
     
     try {
-      const response = await this._call['LiteLLM.get_context_map'](null, true);
+      const response = await this._rpc('LiteLLM.get_context_map', null, true);
       this.symbolMapContent = extractResponse(response);
     } catch (e) {
       this.symbolMapContent = `Error loading symbol map: ${e.message}`;
@@ -297,14 +273,63 @@ export class CacheViewer extends LitElement {
   }
 
   getTierColor(tier) {
-    const colors = {
-      'L0': '#4ade80',  // Green
-      'L1': '#2dd4bf',  // Teal
-      'L2': '#60a5fa',  // Blue
-      'L3': '#fbbf24',  // Yellow
-      'active': '#fb923c' // Orange
-    };
-    return colors[tier] || '#888';
+    return getTierColor(tier);
+  }
+
+  // ========== Search/Filter ==========
+
+  handleSearchInput(e) {
+    this.searchQuery = e.target.value;
+  }
+
+  clearSearch() {
+    this.searchQuery = '';
+  }
+
+  /**
+   * Fuzzy match a query against a string.
+   * Returns true if all characters in query appear in order in str.
+   */
+  fuzzyMatch(query, str) {
+    if (!query) return true;
+    query = query.toLowerCase();
+    str = str.toLowerCase();
+    
+    let qi = 0;
+    for (let si = 0; si < str.length && qi < query.length; si++) {
+      if (str[si] === query[qi]) {
+        qi++;
+      }
+    }
+    return qi === query.length;
+  }
+
+  /**
+   * Filter items in a content group based on search query.
+   */
+  filterItems(items, type) {
+    if (!this.searchQuery || !items) return items;
+    
+    return items.filter(item => {
+      const searchStr = type === 'urls' 
+        ? (item.title || item.url || '')
+        : (item.path || '');
+      return this.fuzzyMatch(this.searchQuery, searchStr);
+    });
+  }
+
+  /**
+   * Check if a tier has any matching items after filtering.
+   */
+  tierHasMatches(block) {
+    if (!this.searchQuery) return true;
+    if (!block.contents) return false;
+    
+    return block.contents.some(content => {
+      if (!content.items) return false;
+      const filtered = this.filterItems(content.items, content.type);
+      return filtered && filtered.length > 0;
+    });
   }
 
   render() {

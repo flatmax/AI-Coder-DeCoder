@@ -90,7 +90,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  async _loadFileIntoDiff(file, replace = false) {
+  async _loadFileIntoDiff(file, replace = true) {
     const existing = this.diffFiles.find(f => f.path === file);
     if (existing && !replace) {
       return true; // Already loaded
@@ -172,16 +172,25 @@ export class AppShell extends LitElement {
   }
 
   async handleNavigateToEdit(e) {
-    const { path, line, searchContext } = e.detail;
+    const { path, line, searchContext, status } = e.detail;
     this.viewingFile = path;
     
-    // Load the file if not already in diff viewer
+    // Check if the file is already in diff viewer with a real diff
     const alreadyLoaded = this.diffFiles.find(f => f.path === path);
-    if (!alreadyLoaded) {
-      const loaded = await this._loadFileIntoDiff(path);
+    const hasDiff = alreadyLoaded && alreadyLoaded.original !== alreadyLoaded.modified;
+    
+    if (hasDiff) {
+      // Already have a good diff, just navigate to it
+    } else if (status === 'applied') {
+      // For applied edits, reconstruct diff from HEAD vs working copy
+      const loaded = await this._loadDiffFromHead(path);
       if (!loaded) {
-        return;
+        // Fallback to read-only view
+        await this._loadFileIntoDiff(path);
       }
+    } else if (!alreadyLoaded) {
+      // For failed/pending edits or unknown, load read-only
+      await this._loadFileIntoDiff(path);
     }
     
     await this.updateComplete;
@@ -192,7 +201,6 @@ export class AppShell extends LitElement {
       setTimeout(() => {
         diffViewer.selectFile(path);
         setTimeout(() => {
-          // Try to find line by searching for context, fall back to line number
           const targetLine = searchContext 
             ? diffViewer._findLineByContent(searchContext) || line
             : line;
@@ -201,6 +209,53 @@ export class AppShell extends LitElement {
           }
         }, 150);
       }, 100);
+    }
+  }
+
+  /**
+   * Load a file diff by comparing HEAD (committed) vs working copy.
+   * Used for viewing applied edits from history.
+   */
+  async _loadDiffFromHead(file) {
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) {
+      return false;
+    }
+    
+    try {
+      // Get committed version from HEAD
+      const headResponse = await promptView.call['Repo.get_file_content'](file, 'HEAD');
+      const headResult = headResponse ? Object.values(headResponse)[0] : null;
+      const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? null);
+      
+      // Get current working copy
+      const workingResponse = await promptView.call['Repo.get_file_content'](file);
+      const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
+      const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? null);
+      
+      if (original === null || modified === null) {
+        return false;
+      }
+      
+      // Only show diff if there are actual changes
+      if (original === modified) {
+        // No uncommitted changes - file may have been committed already
+        // Fall back to read-only view
+        return false;
+      }
+      
+      this.diffFiles = [{
+        path: file,
+        original: original,
+        modified: modified,
+        isNew: false,
+        isReadOnly: false
+      }];
+      
+      return true;
+    } catch (err) {
+      console.error('Failed to load diff from HEAD:', err);
+      return false;
     }
   }
 

@@ -6,7 +6,7 @@ export class AssistantCard extends LitElement {
     content: { type: String },
     mentionedFiles: { type: Array },
     selectedFiles: { type: Array },  // Files currently in context
-    editResults: { type: Array }  // Results from edit operations
+    editResults: { type: Array }  // Results from edit operations (passed from message or loaded from history)
   };
 
   static styles = css`

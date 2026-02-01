@@ -7,6 +7,20 @@ Provides a simple interface for counting tokens across different LLM models.
 import litellm as _litellm
 
 
+def format_tokens(count: int) -> str:
+    """Format token count with K suffix for readability.
+    
+    Args:
+        count: Token count to format
+        
+    Returns:
+        Formatted string like "1.5K" or "500"
+    """
+    if count >= 1000:
+        return f"{count / 1000:.1f}K"
+    return str(count)
+
+
 class TokenCounter:
     """
     Token counter for LLM context management.

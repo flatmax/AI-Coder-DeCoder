@@ -6,15 +6,14 @@ import './SpeechToText.js';
 import '../find-in-files/FindInFiles.js';
 import '../context-viewer/ContextViewer.js';
 import '../context-viewer/CacheViewer.js';
+import { formatTokens } from '../utils/formatters.js';
+import { TIER_THRESHOLDS, getTierColor } from '../utils/tierConfig.js';
 
 function renderCacheTiers(data) {
   const tierInfo = data.tier_info;
   if (!tierInfo) return '';
   
-  const formatNum = (n) => n?.toLocaleString() ?? '0';
   const tiers = ['L0', 'L1', 'L2', 'L3', 'active'];
-  const thresholds = { L0: 12, L1: 9, L2: 6, L3: 3 };
-  const tierColors = { L0: '#7ec699', L1: '#4a9eff', L2: '#f0a500', L3: '#e94560', active: '#888' };
   
   // Calculate cache hit percentage
   const totalTokens = data.prompt_tokens || 0;
@@ -46,10 +45,10 @@ function renderCacheTiers(data) {
     const tierLabel = tier === 'active' ? 'active' : `${tier}`;
     
     return html`
-      <div class="hud-tier-row" style="--tier-color: ${tierColors[tier]}">
+      <div class="hud-tier-row" style="--tier-color: ${getTierColor(tier)}">
         <span class="hud-tier-label">${tierLabel}</span>
         <span class="hud-tier-contents">${contentsStr}</span>
-        <span class="hud-tier-tokens">${formatNum(tokens)}</span>
+        <span class="hud-tier-tokens">${formatTokens(tokens)}</span>
         ${isCached ? html`<span class="hud-tier-cached">●</span>` : html`<span class="hud-tier-uncached">○</span>`}
       </div>
     `;
@@ -73,15 +72,12 @@ function renderPromotions(data) {
   const tierInfo = data.tier_info;
   if (!tierInfo) return '';
   
-  // Check for promotions/demotions in the response
-  // These would be passed from the backend if available
   const promotions = data.promotions || [];
   const demotions = data.demotions || [];
   
   if (promotions.length === 0 && demotions.length === 0) return '';
   
   const formatItem = (item) => {
-    // Strip symbol: prefix and shorten path
     const clean = item.replace('symbol:', '📦 ');
     const parts = clean.split('/');
     return parts.length > 2 ? '...' + parts.slice(-2).join('/') : clean;
@@ -111,7 +107,6 @@ function renderHud(component) {
   }
   
   const data = component._hudData;
-  const formatNum = (n) => n?.toLocaleString() ?? '0';
   
   // Calculate cache hit percentage for prominent display
   const totalTokens = data.prompt_tokens || 0;
@@ -134,23 +129,23 @@ function renderHud(component) {
         <div class="hud-section-title">Context Breakdown</div>
         <div class="hud-row">
           <span class="hud-label">System:</span>
-          <span class="hud-value">${formatNum(data.system_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.system_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">Symbol Map:</span>
-          <span class="hud-value">${formatNum(data.symbol_map_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.symbol_map_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">Files:</span>
-          <span class="hud-value">${formatNum(data.file_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.file_tokens)}</span>
         </div>
         <div class="hud-row">
           <span class="hud-label">History:</span>
-          <span class="hud-value">${formatNum(data.history_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.history_tokens)}</span>
         </div>
         <div class="hud-row total">
           <span class="hud-label">Context:</span>
-          <span class="hud-value">${formatNum(data.context_total_tokens)} / ${formatNum(data.max_input_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.context_total_tokens)} / ${formatTokens(data.max_input_tokens)}</span>
         </div>
       ` : ''}
       ${renderCacheTiers(data)}
@@ -158,26 +153,33 @@ function renderHud(component) {
       <div class="hud-section-title">This Request</div>
       <div class="hud-row">
         <span class="hud-label">Prompt:</span>
-        <span class="hud-value">${formatNum(data.prompt_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.prompt_tokens)}</span>
       </div>
       <div class="hud-row">
         <span class="hud-label">Response:</span>
-        <span class="hud-value">${formatNum(data.completion_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.completion_tokens)}</span>
       </div>
       <div class="hud-row total">
         <span class="hud-label">Total:</span>
-        <span class="hud-value">${formatNum(data.total_tokens)}</span>
+        <span class="hud-value">${formatTokens(data.total_tokens)}</span>
       </div>
       ${data.cache_hit_tokens ? html`
         <div class="hud-row cache">
           <span class="hud-label">Cache hit:</span>
-          <span class="hud-value">${formatNum(data.cache_hit_tokens)} (${cachePercent}%)</span>
+          <span class="hud-value">${formatTokens(data.cache_hit_tokens)} (${cachePercent}%)</span>
         </div>
       ` : ''}
       ${data.cache_write_tokens ? html`
         <div class="hud-row cache-write">
           <span class="hud-label">Cache write:</span>
-          <span class="hud-value">${formatNum(data.cache_write_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.cache_write_tokens)}</span>
+        </div>
+      ` : ''}
+      ${data.history_tokens !== undefined ? html`
+        <div class="hud-divider"></div>
+        <div class="hud-row history ${data.history_tokens > data.history_threshold * 0.95 ? 'critical' : data.history_tokens > data.history_threshold * 0.8 ? 'warning' : ''}">
+          <span class="hud-label">History:</span>
+          <span class="hud-value">${formatTokens(data.history_tokens)} / ${formatTokens(data.history_threshold)}</span>
         </div>
       ` : ''}
       ${renderPromotions(data)}
@@ -186,15 +188,15 @@ function renderHud(component) {
         <div class="hud-section-title">Session Total</div>
         <div class="hud-row cumulative">
           <span class="hud-label">In:</span>
-          <span class="hud-value">${formatNum(data.session_prompt_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_prompt_tokens)}</span>
         </div>
         <div class="hud-row cumulative">
           <span class="hud-label">Out:</span>
-          <span class="hud-value">${formatNum(data.session_completion_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_completion_tokens)}</span>
         </div>
         <div class="hud-row cumulative total">
           <span class="hud-label">Total:</span>
-          <span class="hud-value">${formatNum(data.session_total_tokens)}</span>
+          <span class="hud-value">${formatTokens(data.session_total_tokens)}</span>
         </div>
       ` : ''}
     </div>
@@ -290,6 +292,60 @@ function renderResizeHandles(component) {
   `;
 }
 
+function renderPanelResizer(component) {
+  if (component.minimized) return '';
+  
+  return html`
+    <div class="panel-resizer">
+      <div class="panel-resizer-handle" @mousedown=${(e) => component._handlePanelResizeStart(e)}></div>
+      <button class="panel-collapse-btn" @click=${() => component.toggleLeftPanel()} title="${component.leftPanelCollapsed ? 'Expand panel' : 'Collapse panel'}">
+        ${component.leftPanelCollapsed ? '▶' : '◀'}
+      </button>
+    </div>
+  `;
+}
+
+function renderSnippetButtons(component) {
+  if (!component.promptSnippets || component.promptSnippets.length === 0) {
+    return '';
+  }
+  
+  return html`
+    <div class="snippet-drawer ${component.snippetDrawerOpen ? 'open' : ''}">
+      <button 
+        class="snippet-drawer-toggle ${component.snippetDrawerOpen ? 'open' : ''}" 
+        @click=${() => component.toggleSnippetDrawer()}
+        title="${component.snippetDrawerOpen ? 'Close snippets' : 'Open snippets'}"
+      >📋</button>
+      <div class="snippet-drawer-content">
+        ${component.promptSnippets.map(snippet => html`
+          <button 
+            class="snippet-btn" 
+            @click=${() => component.appendSnippet(snippet.message)}
+            title="${snippet.tooltip}"
+          >${snippet.icon}</button>
+        `)}
+      </div>
+    </div>
+  `;
+}
+
+function renderHistoryBar(component) {
+  const historyTokens = component._hudData?.history_tokens || 0;
+  const historyThreshold = component._hudData?.history_threshold || 9000;
+  
+  if (historyThreshold <= 0) return '';
+  
+  const percent = Math.min(100, (historyTokens / historyThreshold) * 100);
+  const statusClass = percent > 95 ? 'critical' : percent > 80 ? 'warning' : '';
+  
+  return html`
+    <div class="history-bar ${statusClass}" title="History: ${formatTokens(historyTokens)} / ${formatTokens(historyThreshold)} (${Math.round(percent)}%)">
+      <div class="history-bar-fill" style="width: ${percent}%"></div>
+    </div>
+  `;
+}
+
 export function renderPromptView(component) {
   const isDragged = component.dialogX !== null && component.dialogY !== null;
   const positionStyle = isDragged 
@@ -300,12 +356,11 @@ export function renderPromptView(component) {
   
   return html`
     ${renderHud(component)}
-    ${component.showHistoryBrowser ? html`
-      <history-browser
-        @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}
-        @load-session=${(e) => component.handleLoadSession(e)}
-      ></history-browser>
-    ` : ''}
+    <history-browser
+      .visible=${component.showHistoryBrowser}
+      @copy-to-prompt=${(e) => component.handleHistoryCopyToPrompt(e)}
+      @load-session=${(e) => component.handleLoadSession(e)}
+    ></history-browser>
     <div class="dialog ${component.minimized ? 'minimized' : ''} ${component.showFilePicker ? 'with-picker' : ''} ${isDragged ? 'dragged' : ''}"
          style=${dialogStyle}>
       ${renderResizeHandles(component)}
@@ -363,8 +418,8 @@ export function renderPromptView(component) {
       ${component.minimized ? '' : html`
         <div class="main-content">
           ${component.activeLeftTab === 'files' ? html`
-            ${component.showFilePicker ? html`
-              <div class="picker-panel">
+            ${component.showFilePicker && !component.leftPanelCollapsed ? html`
+              <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
                   .tree=${component.fileTree}
                   .modified=${component.modifiedFiles}
@@ -372,15 +427,19 @@ export function renderPromptView(component) {
                   .untracked=${component.untrackedFiles}
                   .diffStats=${component.diffStats}
                   .viewingFile=${component.viewingFile}
+                  .selected=${component._getSelectedObject()}
                   @selection-change=${component.handleSelectionChange}
                   @file-view=${component.handleFileView}
                   @copy-path-to-prompt=${component.handleCopyPathToPrompt}
                 ></file-picker>
               </div>
+              ${renderPanelResizer(component)}
+            ` : component.showFilePicker && component.leftPanelCollapsed ? html`
+              ${renderPanelResizer(component)}
             ` : ''}
             <div class="chat-panel">
               <div class="messages-wrapper">
-                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)}>
+                <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)} @wheel=${(e) => component.handleWheel(e)}>
                   ${repeat(
                     component.messageHistory,
                     (message) => message.id,
@@ -414,9 +473,7 @@ export function renderPromptView(component) {
               <div class="input-area">
                 <div class="input-buttons-stack">
                   <speech-to-text @transcript=${(e) => component.handleSpeechTranscript(e)}></speech-to-text>
-                  <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
-                    📁 ${component.selectedFiles.length || ''}
-                  </button>
+                  ${renderSnippetButtons(component)}
                 </div>
                 <textarea
                   placeholder="Type a message... (paste images with Ctrl+V)"
@@ -465,6 +522,7 @@ export function renderPromptView(component) {
           `}
         </div>
       `}
+      ${renderHistoryBar(component)}
     </div>
   `;
 }
