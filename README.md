@@ -30,7 +30,7 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **Streaming Responses** — Real-time streaming of AI responses with stop capability
 - **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns and automatic prompt caching optimization
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
-- **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
+- **Conversation History** — Persistent history with search, session browsing, and automatic compaction when context grows too large (summarizes old messages to stay within token limits)
 - **Find in Files** — Search across the codebase with regex support and context preview
 - **Voice Input** — Speech-to-text for hands-free prompt dictation with continuous auto-transcribe mode
 
