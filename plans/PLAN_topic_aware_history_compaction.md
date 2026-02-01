@@ -715,9 +715,10 @@ Result:
 - `ac/llm/config.py` - Add compaction config loading ✅ DONE
 - `ac-dc.json` - Add history_compaction configuration block ✅ DONE
 - `tests/test_context_manager.py` - Add compaction integration tests ✅ DONE
-- `ac/llm/llm.py` - Pass compaction config to ContextManager (Phase 4)
-- `ac/llm/streaming.py` - Call compaction before streaming, send UI events (Phase 4)
-- `ac/llm/chat.py` - Deprecate old `summarize_history()` (Phase 4)
+- `ac/llm/llm.py` - Pass compaction config to ContextManager ✅ DONE (Phase 4)
+- `ac/llm/streaming.py` - Call compaction before streaming, return compaction info ✅ DONE (Phase 4)
+- `ac/llm/chat.py` - Deprecate old `summarize_history()` ✅ DONE (Phase 4)
+- `tests/test_llm_history.py` - Add LiteLLM compaction config tests ✅ DONE (Phase 4)
 - `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages (Phase 5)
 - `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD (Phase 5)
 - `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states (Phase 5)

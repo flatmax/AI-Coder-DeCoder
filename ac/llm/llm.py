@@ -49,12 +49,14 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         # Context manager for history, files, and token tracking
         self._context_manager = None
         cache_target = self.get_cache_target_tokens()
+        compaction_config = self.get_compaction_config() if self.is_compaction_enabled() else None
         if repo:
             self._context_manager = ContextManager(
                 model_name=self.model,
                 repo_root=repo.get_repo_root(),
                 token_tracker=self,
                 cache_target_tokens=cache_target,
+                compaction_config=compaction_config,
             )
         else:
             # Create context manager without repo for basic history tracking
@@ -63,6 +65,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
                 repo_root=None,
                 token_tracker=self,
                 cache_target_tokens=cache_target,
+                compaction_config=compaction_config,
             )
         
         # Lazy-loaded indexer
