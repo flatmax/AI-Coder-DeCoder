@@ -1073,6 +1073,47 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             }
         }
     
+    def get_prompt_snippets(self):
+        """
+        Load prompt snippets from prompt-snippets.json in repo root.
+        
+        Returns:
+            List of snippet dicts with icon, tooltip, message fields.
+            Empty list if file doesn't exist or is invalid.
+        """
+        if not self.repo:
+            return []
+        
+        try:
+            import json
+            from pathlib import Path
+            
+            repo_root = self.repo.get_repo_root()
+            snippets_path = Path(repo_root) / 'prompt-snippets.json'
+            
+            if not snippets_path.exists():
+                return []
+            
+            with open(snippets_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            snippets = data.get('snippets', [])
+            
+            # Validate each snippet has required fields
+            valid_snippets = []
+            for s in snippets:
+                if isinstance(s, dict) and 'icon' in s and 'message' in s:
+                    valid_snippets.append({
+                        'icon': s.get('icon', '📝'),
+                        'tooltip': s.get('tooltip', s.get('message', '')[:50]),
+                        'message': s.get('message', '')
+                    })
+            
+            return valid_snippets
+        except Exception as e:
+            print(f"⚠️ Failed to load prompt snippets: {e}")
+            return []
+    
     def get_url_content(self, url):
         """
         Get cached content for a URL.
