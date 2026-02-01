@@ -35,7 +35,8 @@ class ContextManager:
         self,
         model_name: str,
         repo_root: str = None,
-        token_tracker=None
+        token_tracker=None,
+        cache_target_tokens: int = 0,
     ):
         """
         Initialize context manager.
@@ -44,6 +45,8 @@ class ContextManager:
             model_name: LLM model identifier for token counting
             repo_root: Repository root for file context
             token_tracker: Optional object with get_token_usage() for session totals
+            cache_target_tokens: Target tokens per cache block (0 = disabled).
+                                Used for threshold-aware tier promotion.
         """
         self.model_name = model_name
         self.token_counter = TokenCounter(model_name)
@@ -58,7 +61,8 @@ class ContextManager:
             self.cache_stability = StabilityTracker(
                 persistence_path=stability_path,
                 thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
-                initial_tier='L3'
+                initial_tier='L3',
+                cache_target_tokens=cache_target_tokens,
             )
         
         # Conversation history

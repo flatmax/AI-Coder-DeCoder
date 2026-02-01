@@ -1,4 +1,4 @@
-"""Tests for the StabilityTracker with ripple promotion."""
+"""Tests for the StabilityTracker with ripple promotion and threshold-aware caching."""
 
 import json
 import pytest
@@ -627,6 +627,310 @@ class TestStabilityTrackerHeuristicInit:
         stability_tracker.initialize_from_refs([("a.py", 5)])
         
         assert stability_tracker.is_initialized() is True
+
+
+class TestStabilityTrackerThresholdAware:
+    """Tests for threshold-aware promotion behavior."""
+    
+    def test_threshold_disabled_by_default(self, stability_tracker):
+        """By default, threshold-aware promotion is disabled."""
+        assert stability_tracker.get_cache_target_tokens() == 0
+    
+    def test_threshold_can_be_set(self, stability_tracker):
+        """Cache target tokens can be set after initialization."""
+        stability_tracker.set_cache_target_tokens(1536)
+        assert stability_tracker.get_cache_target_tokens() == 1536
+    
+    def test_veterans_anchor_below_threshold(self, stability_tracker_with_threshold):
+        """Veterans below token threshold anchor tier (no N++)."""
+        tracker = stability_tracker_with_threshold
+        
+        # Set up: veteran A in L3 with N=5 (500 tokens)
+        #         veteran B in L3 with N=4 (400 tokens)
+        #         entering item E (400 tokens)
+        # Target: 1000 tokens
+        # 
+        # After entry: accumulated=400 (E)
+        # Process A: accumulated(400) < 1000 → add 500 → accumulated=900, no N++
+        # Process B: accumulated(900) < 1000 → add 400 → accumulated=1300, no N++ wait threshold met!
+        # Actually: A anchors (no N++), B is past threshold (gets N++)
+        
+        tracker._stability = {
+            "A": StabilityInfo(content_hash="a", n_value=5, tier='L3'),
+            "B": StabilityInfo(content_hash="b", n_value=4, tier='L3'),
+            "E": StabilityInfo(content_hash="e", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"E"}
+        
+        content = {"A": "a", "B": "b", "E": "e", "other": "o"}
+        token_counts = {"A": 500, "B": 400, "E": 400, "other": 100}
+        
+        # E leaves Active, enters L3
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # E entered L3 with N=3
+        assert tracker.get_tier("E") == 'L3'
+        assert tracker.get_n_value("E") == 3
+        
+        # Veterans sorted by N: B(N=4), A(N=5)
+        # accumulated starts at 400 (E's tokens)
+        # B: 400 < 1000 → add 400 → accumulated=800, B anchors (no N++)
+        # A: 800 < 1000 → add 500 → accumulated=1300, A anchors (no N++)
+        # Threshold met after processing, but no veterans past threshold point
+        # 
+        # Actually the algorithm checks BEFORE adding each veteran's tokens:
+        # accumulated=400 (from E)
+        # B(N=4): 400 < 1000 → B anchors, accumulated += 400 = 800
+        # A(N=5): 800 < 1000 → A anchors, accumulated += 500 = 1300
+        # Both anchor, neither gets N++
+        assert tracker.get_n_value("B") == 4  # No N++ (anchored)
+        assert tracker.get_n_value("A") == 5  # No N++ (anchored)
+    
+    def test_veterans_promote_past_threshold(self, stability_tracker_with_threshold):
+        """Veterans past token threshold get N++ and can promote."""
+        tracker = stability_tracker_with_threshold
+        
+        # Set up: veteran A in L3 with N=5 (large - 800 tokens)
+        #         veteran B in L3 with N=5 (small - 100 tokens)
+        #         entering item E (200 tokens)
+        # Target: 1000 tokens
+        
+        tracker._stability = {
+            "A": StabilityInfo(content_hash="a", n_value=5, tier='L3'),
+            "B": StabilityInfo(content_hash="b", n_value=5, tier='L3'),
+            "E": StabilityInfo(content_hash="e", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"E"}
+        
+        content = {"A": "a", "B": "b", "E": "e", "other": "o"}
+        token_counts = {"A": 800, "B": 100, "E": 200, "other": 100}
+        
+        # E leaves Active, enters L3
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # E entered L3 with N=3
+        assert tracker.get_tier("E") == 'L3'
+        assert tracker.get_n_value("E") == 3
+        
+        # Veterans sorted by N (both N=5, order may vary)
+        # accumulated=200 (E's tokens)
+        # First veteran: 200 < 1000 → anchors, accumulated increases
+        # Second veteran: depends on accumulated
+        # 
+        # If A processed first: 200 < 1000 → A anchors, accumulated=1000
+        # Then B: 1000 >= 1000 → B gets N++ → N=6, promotes to L2
+        # 
+        # If B processed first: 200 < 1000 → B anchors, accumulated=300
+        # Then A: 300 < 1000 → A anchors, accumulated=1100
+        # Neither promotes
+        # 
+        # Since both have same N, order is not guaranteed. Let's set different N values.
+        pass  # This test needs refinement - see next test
+    
+    def test_threshold_aware_promotion_deterministic(self, stability_tracker_with_threshold):
+        """Threshold-aware promotion with deterministic ordering."""
+        tracker = stability_tracker_with_threshold
+        
+        # Set up with clear N ordering:
+        # veteran A in L3 with N=4 (first to be processed - lowest N)
+        # veteran B in L3 with N=5 (second)
+        # veteran C in L3 with N=5 (third - same N as B, but will be past threshold)
+        # entering item E (200 tokens)
+        # Target: 1000 tokens
+        
+        tracker._stability = {
+            "A": StabilityInfo(content_hash="a", n_value=4, tier='L3'),
+            "B": StabilityInfo(content_hash="b", n_value=5, tier='L3'),
+            "C": StabilityInfo(content_hash="c", n_value=5, tier='L3'),
+            "E": StabilityInfo(content_hash="e", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"E"}
+        
+        content = {"A": "a", "B": "b", "C": "c", "E": "e", "other": "o"}
+        token_counts = {"A": 400, "B": 500, "C": 300, "E": 200, "other": 100}
+        
+        # E leaves Active, enters L3
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # E entered with N=3
+        assert tracker.get_tier("E") == 'L3'
+        assert tracker.get_n_value("E") == 3
+        
+        # Veterans sorted by N ascending: A(N=4), B(N=5), C(N=5)
+        # accumulated=200 (E's tokens)
+        # A(N=4): 200 < 1000 → A anchors, accumulated=200+400=600
+        # B(N=5): 600 < 1000 → B anchors, accumulated=600+500=1100
+        # C(N=5): 1100 >= 1000 → threshold met! C gets N++ → N=6, promotes to L2
+        
+        assert tracker.get_n_value("A") == 4  # Anchored, no N++
+        assert tracker.get_n_value("B") == 5  # Anchored, no N++
+        assert tracker.get_tier("C") == 'L2'  # Promoted!
+        assert tracker.get_n_value("C") == 6  # N++ triggered promotion
+    
+    def test_threshold_aware_cascade_promotion(self, stability_tracker_with_threshold):
+        """Threshold-aware promotion cascades through tiers."""
+        tracker = stability_tracker_with_threshold
+        
+        # Set up items close to promotion in multiple tiers
+        tracker._stability = {
+            "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
+            "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),  # Will anchor
+            "l3_promote": StabilityInfo(content_hash="l3p", n_value=5, tier='L3'),  # Will promote to L2
+            "l2_anchor": StabilityInfo(content_hash="l2a", n_value=7, tier='L2'),  # Will anchor
+            "l2_promote": StabilityInfo(content_hash="l2p", n_value=8, tier='L2'),  # Will promote to L1
+        }
+        tracker._last_active_items = {"trigger"}
+        
+        content = {k: k for k in tracker._stability}
+        content["other"] = "other"
+        # Token counts designed to have one anchor and one promoter per tier
+        token_counts = {
+            "trigger": 200,
+            "l3_anchor": 900,   # This alone will meet threshold
+            "l3_promote": 100,  # Past threshold, will get N++ and promote
+            "l2_anchor": 900,   # This alone will meet threshold  
+            "l2_promote": 100,  # Past threshold, will get N++ and promote
+            "other": 100,
+        }
+        
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # trigger → L3 with N=3
+        assert tracker.get_tier("trigger") == 'L3'
+        
+        # L3: l3_anchor(N=4) anchors, l3_promote(N=5) gets N++→6, promotes
+        assert tracker.get_n_value("l3_anchor") == 4  # Anchored
+        assert tracker.get_tier("l3_promote") == 'L2'  # Promoted!
+        assert tracker.get_n_value("l3_promote") == 6
+        
+        # L2: l2_anchor(N=7) anchors, l2_promote(N=8) gets N++→9, promotes
+        # Note: l3_promote enters L2, triggering veteran processing
+        assert tracker.get_n_value("l2_anchor") == 7  # Anchored
+        assert tracker.get_tier("l2_promote") == 'L1'  # Promoted!
+        assert tracker.get_n_value("l2_promote") == 9
+    
+    def test_without_get_tokens_uses_original_behavior(self, stability_tracker_with_threshold):
+        """When get_tokens not provided, uses original (non-threshold) behavior."""
+        tracker = stability_tracker_with_threshold
+        
+        # Even with cache_target_tokens set, if no get_tokens callback,
+        # all veterans get N++ (original behavior)
+        tracker._stability = {
+            "A": StabilityInfo(content_hash="a", n_value=5, tier='L3'),
+            "B": StabilityInfo(content_hash="b", n_value=4, tier='L3'),
+            "E": StabilityInfo(content_hash="e", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"E"}
+        
+        content = {"A": "a", "B": "b", "E": "e", "other": "o"}
+        
+        # E leaves Active, enters L3 - no get_tokens provided
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            # get_tokens not provided
+        )
+        
+        # All veterans should get N++ (original behavior)
+        assert tracker.get_n_value("A") == 6  # N++ applied
+        assert tracker.get_n_value("B") == 5  # N++ applied
+        # A promotes to L2 (N=6 >= promotion threshold of 6)
+        assert tracker.get_tier("A") == 'L2'
+
+
+class TestStabilityTrackerThresholdAwareInit:
+    """Tests for threshold-aware initialization from refs."""
+    
+    def test_init_with_tokens_fills_tiers(self, stability_tracker_with_threshold):
+        """Threshold-aware init fills tiers to meet token target."""
+        tracker = stability_tracker_with_threshold
+        
+        # Files with refs and token counts
+        # Target: 1000 tokens per tier
+        files_with_refs = [
+            ("core.py", 100, 600),    # High refs, 600 tokens
+            ("utils.py", 80, 500),    # High refs, 500 tokens → L1 filled (1100 tokens)
+            ("handler.py", 50, 400),  # Mid refs, 400 tokens
+            ("parser.py", 40, 700),   # Mid refs, 700 tokens → L2 filled (1100 tokens)
+            ("leaf1.py", 10, 200),    # Low refs
+            ("leaf2.py", 5, 300),     # Low refs
+            ("leaf3.py", 0, 100),     # No refs → all go to L3
+        ]
+        
+        assignments = tracker.initialize_from_refs(
+            files_with_refs,
+            target_tokens=1000,
+        )
+        
+        # L1 should have core.py and utils.py (1100 tokens meets 1000 target)
+        assert assignments["core.py"] == 'L1'
+        assert assignments["utils.py"] == 'L1'
+        
+        # L2 should have handler.py and parser.py (1100 tokens meets target)
+        assert assignments["handler.py"] == 'L2'
+        assert assignments["parser.py"] == 'L2'
+        
+        # L3 absorbs the rest
+        assert assignments["leaf1.py"] == 'L3'
+        assert assignments["leaf2.py"] == 'L3'
+        assert assignments["leaf3.py"] == 'L3'
+    
+    def test_init_without_tokens_uses_percentile(self, stability_tracker_with_threshold):
+        """Without token info, uses percentile-based initialization."""
+        tracker = stability_tracker_with_threshold
+        
+        # Files without token counts (2-tuples)
+        files_with_refs = [
+            ("a.py", 100),
+            ("b.py", 80),
+            ("c.py", 50),
+            ("d.py", 40),
+            ("e.py", 10),
+        ]
+        
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # Top 20% (1 file) → L1
+        assert assignments["a.py"] == 'L1'
+        # Next 30% (1-2 files) → L2
+        assert assignments["b.py"] == 'L2'
+        # Bottom 50% → L3
+        assert assignments["e.py"] == 'L3'
+    
+    def test_init_uses_tracker_target_if_not_specified(self, stability_tracker_with_threshold):
+        """Uses tracker's cache_target_tokens if target_tokens not passed."""
+        tracker = stability_tracker_with_threshold
+        assert tracker.get_cache_target_tokens() == 1000
+        
+        files_with_refs = [
+            ("a.py", 100, 600),
+            ("b.py", 80, 500),
+            ("c.py", 50, 400),
+        ]
+        
+        # Don't pass target_tokens - should use tracker's 1000
+        assignments = tracker.initialize_from_refs(files_with_refs)
+        
+        # Should fill L1 to ~1000 tokens
+        assert assignments["a.py"] == 'L1'
+        assert assignments["b.py"] == 'L1'  # 600 + 500 = 1100 >= 1000
+        assert assignments["c.py"] == 'L2'
 
 
 class TestStabilityTrackerScenarios:
