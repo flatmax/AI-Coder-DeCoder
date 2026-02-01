@@ -57,6 +57,8 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (event.type === 'compaction_start') {
       // Add a system message indicating compaction is starting
       this.addMessage('assistant', event.message);
+      // Disable input during compaction (same as streaming)
+      this.isStreaming = true;
     } else if (event.type === 'compaction_complete') {
       // Handle compaction completion by rebuilding the message history
       const tokensSaved = event.tokens_saved.toLocaleString();
@@ -116,6 +118,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
       // Replace the entire message history
       this.messageHistory = newHistory;
       
+      // Re-enable input after compaction
+      this.isStreaming = false;
+      
       console.log(`📋 History compacted: ${event.case}, now showing ${newHistory.length} messages`);
     } else if (event.type === 'compaction_error') {
       // Handle compaction failure
@@ -132,6 +137,8 @@ export const StreamingMixin = (superClass) => class extends superClass {
           updatedMessage
         ];
       }
+      // Re-enable input after compaction error
+      this.isStreaming = false;
     }
   }
 
