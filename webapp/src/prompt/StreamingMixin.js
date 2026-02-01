@@ -58,26 +58,65 @@ export const StreamingMixin = (superClass) => class extends superClass {
       // Add a system message indicating compaction is starting
       this.addMessage('assistant', event.message);
     } else if (event.type === 'compaction_complete') {
-      // Update the compaction message with results
+      // Handle compaction completion by rebuilding the message history
+      const tokensSaved = event.tokens_saved.toLocaleString();
+      const tokensBefore = event.tokens_before.toLocaleString();
+      const tokensAfter = event.tokens_after.toLocaleString();
+      
+      if (event.case === 'none') {
+        // Compaction wasn't actually needed - just remove the "Compacting..." message
+        const lastMessage = this.messageHistory[this.messageHistory.length - 1];
+        if (lastMessage && lastMessage.role === 'assistant' && lastMessage.content.includes('Compacting')) {
+          this.messageHistory = this.messageHistory.slice(0, -1);
+        }
+        return;
+      }
+      
+      // Build the new message history from compacted messages
+      const newHistory = [];
+      
+      // Add a system notification about compaction
+      let compactionNotice;
+      if (event.case === 'summarize') {
+        compactionNotice = `📋 **History Compacted**\n\n${event.truncated_count} older messages were summarized to preserve context.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+      } else if (event.case === 'truncate_only') {
+        const topicInfo = event.topic_detected ? `\n\n**Topic change detected:** ${event.topic_detected}` : '';
+        compactionNotice = `✂️ **History Truncated**\n\n${event.truncated_count} older messages from previous topic removed.${topicInfo}\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+      } else {
+        compactionNotice = `🗜️ **History Compacted** (${event.case})\n\n${event.truncated_count} messages processed.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+      }
+      
+      // Add the compaction notice as a system-style assistant message
+      newHistory.push({
+        role: 'assistant',
+        content: compactionNotice,
+        final: true,
+        isCompactionNotice: true
+      });
+      
+      // Add all the compacted messages from the backend
+      if (event.compacted_messages && event.compacted_messages.length > 0) {
+        for (const msg of event.compacted_messages) {
+          newHistory.push({
+            role: msg.role,
+            content: msg.content,
+            final: true
+          });
+        }
+      }
+      
+      // Replace the entire message history
+      this.messageHistory = newHistory;
+      
+      console.log(`📋 History compacted: ${event.case}, now showing ${newHistory.length} messages`);
+    } else if (event.type === 'compaction_error') {
+      // Handle compaction failure
       const lastMessage = this.messageHistory[this.messageHistory.length - 1];
       if (lastMessage && lastMessage.role === 'assistant' && lastMessage.content.includes('Compacting')) {
-        const tokensSaved = event.tokens_saved.toLocaleString();
-        const tokensBefore = event.tokens_before.toLocaleString();
-        const tokensAfter = event.tokens_after.toLocaleString();
-        
-        let resultMessage;
-        if (event.case === 'summarized') {
-          resultMessage = `📋 **History Compacted**\n\nOlder conversation summarized to preserve context.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
-        } else if (event.case === 'truncated') {
-          resultMessage = `✂️ **History Truncated**\n\nOlder messages from previous topic removed.\nCurrent topic context preserved.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
-        } else {
-          resultMessage = `🗜️ **History Compacted** (${event.case})\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
-        }
-        
-        // Replace the "Compacting..." message with the result
+        const errorMessage = `⚠️ **Compaction Failed**\n\n${event.error}\n\n_Continuing without compaction..._`;
         const updatedMessage = {
           ...lastMessage,
-          content: resultMessage,
+          content: errorMessage,
           final: true
         };
         this.messageHistory = [

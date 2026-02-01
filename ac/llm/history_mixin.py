@@ -156,6 +156,7 @@ class HistoryMixin:
             List of messages from the session
         """
         messages = self.history_get_session(session_id)
+        print(f"🔍 load_session_into_context: session={session_id}, messages={len(messages) if messages else 0}")
         
         if messages and self._context_manager:
             # Clear existing history and populate with loaded messages
@@ -165,6 +166,7 @@ class HistoryMixin:
                 content = msg.get('content', '')
                 if role and content:
                     self._context_manager.add_message(role, content)
+            print(f"🔍 load_session_into_context: loaded {len(self._context_manager.get_history())} messages into context manager")
         
         # Set current session ID so new messages continue in this session
         if self._history_store and session_id:
