@@ -82,6 +82,16 @@ def stability_tracker(stability_path):
 
 
 @pytest.fixture
+def stability_tracker_with_threshold(stability_path):
+    """Create StabilityTracker with threshold-aware promotion enabled."""
+    return StabilityTracker(
+        persistence_path=stability_path,
+        thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+        cache_target_tokens=1000,  # 1000 tokens target for testing
+    )
+
+
+@pytest.fixture
 def make_stability_info():
     """Factory for StabilityInfo objects."""
     def _make(content_hash="test", n_value=0, tier='active'):

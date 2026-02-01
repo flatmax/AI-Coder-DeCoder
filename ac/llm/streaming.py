@@ -350,6 +350,7 @@ class StreamingMixin:
             # Update cache stability tracking after response (files AND symbol entries)
             if self._context_manager and self._context_manager.cache_stability:
                 stability = self._context_manager.cache_stability
+                tc = self._context_manager.token_counter
                 
                 # Collect items currently in Active context:
                 # - Files explicitly in file_paths
@@ -383,6 +384,48 @@ class StreamingMixin:
                         # Regular file
                         return self.repo.get_file_content(item, version='working')
                 
+                def get_item_tokens(item):
+                    """Get token count for an item - files or symbol blocks."""
+                    if item.startswith("symbol:"):
+                        # Symbol entry - count tokens in formatted block
+                        file_path = item.replace("symbol:", "")
+                        try:
+                            indexer = self._get_indexer()
+                            symbol_index = indexer._get_symbol_index()
+                            symbols = symbol_index.get_symbols(file_path)
+                            if symbols:
+                                from ..symbol_index.compact_format import format_file_symbol_block
+                                # Get reference data for formatting
+                                ref_index = getattr(symbol_index, '_reference_index', None)
+                                file_refs_data = {}
+                                file_imports_data = {}
+                                references_data = {}
+                                if ref_index:
+                                    file_refs_data[file_path] = ref_index.get_files_referencing(file_path)
+                                    file_imports_data[file_path] = ref_index.get_file_dependencies(file_path)
+                                    references_data[file_path] = ref_index.get_references_to_file(file_path)
+                                
+                                block = format_file_symbol_block(
+                                    file_path=file_path,
+                                    symbols=symbols,
+                                    references=references_data,
+                                    file_refs=file_refs_data,
+                                    file_imports=file_imports_data,
+                                )
+                                return tc.count(block) if block else 0
+                        except Exception:
+                            pass
+                        return 0
+                    else:
+                        # Regular file - count tokens in formatted content
+                        try:
+                            content = self.repo.get_file_content(item, version='working')
+                            if content and not (isinstance(content, dict) and 'error' in content):
+                                return tc.count(f"{item}\n```\n{content}\n```\n")
+                        except Exception:
+                            pass
+                        return 0
+                
                 # Determine modified items (files that were edited)
                 modified_items = list(files_modified) if files_modified else []
                 # Symbol entries for modified files are also considered modified
@@ -392,10 +435,12 @@ class StreamingMixin:
                 # 1. Keep these items as 'active' with N=0
                 # 2. Move previously-active items that aren't in this list to L3
                 # 3. Trigger ripple promotions for existing L3/L2/L1 items
+                # 4. With cache_target_tokens > 0: use threshold-aware promotion
                 tier_changes = stability.update_after_response(
                     items=active_items,
                     get_content=get_item_content,
-                    modified=modified_items
+                    modified=modified_items,
+                    get_tokens=get_item_tokens,
                 )
                 
                 # Log promotions and demotions
@@ -612,22 +657,47 @@ class StreamingMixin:
                 
                 # Initialize stability tracker from refs if fresh start
                 if stability and not stability.is_initialized():
-                    # Build files_with_refs from file_refs counts
-                    files_with_refs = [
-                        (f, len(file_refs.get(f, set())))
-                        for f in all_files
-                    ]
-                    # Also include symbol entries
-                    symbol_refs = [
-                        (f"symbol:{f}", len(file_refs.get(f, set())))
-                        for f in symbols_by_file.keys()
-                    ]
-                    files_with_refs.extend(symbol_refs)
+                    # Build files_with_refs from file_refs counts with token information
+                    # Format: (path, ref_count, tokens)
+                    tc = self._context_manager.token_counter
+                    
+                    files_with_refs = []
+                    for f in all_files:
+                        ref_count = len(file_refs.get(f, set()))
+                        # Estimate tokens for file (will be refined on first access)
+                        try:
+                            content = self.repo.get_file_content(f, version='working')
+                            if content and not (isinstance(content, dict) and 'error' in content):
+                                tokens = tc.count(f"{f}\n```\n{content}\n```\n")
+                            else:
+                                tokens = 0
+                        except Exception:
+                            tokens = 0
+                        files_with_refs.append((f, ref_count, tokens))
+                    
+                    # Also include symbol entries with their formatted block tokens
+                    for f in symbols_by_file.keys():
+                        ref_count = len(file_refs.get(f, set()))
+                        try:
+                            from ..symbol_index.compact_format import format_file_symbol_block
+                            block = format_file_symbol_block(
+                                file_path=f,
+                                symbols=symbols_by_file[f],
+                                references=references,
+                                file_refs=file_refs,
+                                file_imports=file_imports,
+                                aliases=aliases,
+                            )
+                            tokens = tc.count(block) if block else 0
+                        except Exception:
+                            tokens = 0
+                        files_with_refs.append((f"symbol:{f}", ref_count, tokens))
                     
                     # Exclude currently active context files
                     tier_assignments = stability.initialize_from_refs(
                         files_with_refs,
-                        exclude_active=active_context_files
+                        exclude_active=active_context_files,
+                        target_tokens=stability.get_cache_target_tokens(),
                     )
                     if tier_assignments:
                         print(f"📊 Initialized {len(tier_assignments)} items from ref counts")

@@ -47,18 +47,21 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Context manager for history, files, and token tracking
         self._context_manager = None
+        cache_target = self.get_cache_target_tokens()
         if repo:
             self._context_manager = ContextManager(
                 model_name=self.model,
                 repo_root=repo.get_repo_root(),
-                token_tracker=self
+                token_tracker=self,
+                cache_target_tokens=cache_target,
             )
         else:
             # Create context manager without repo for basic history tracking
             self._context_manager = ContextManager(
                 model_name=self.model,
                 repo_root=None,
-                token_tracker=self
+                token_tracker=self,
+                cache_target_tokens=cache_target,
             )
         
         # Lazy-loaded indexer
