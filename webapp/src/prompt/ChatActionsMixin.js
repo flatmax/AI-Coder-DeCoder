@@ -68,6 +68,39 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
     }
   }
 
+  async copyGitDiff() {
+    try {
+      // Get diff from HEAD (includes both staged and unstaged changes)
+      const diffResponse = await this.call['Repo.get_unstaged_diff']();
+      const stagedResponse = await this.call['Repo.get_staged_diff']();
+      
+      const unstagedDiff = this.extractResponse(diffResponse) || '';
+      const stagedDiff = this.extractResponse(stagedResponse) || '';
+      
+      // Combine both diffs
+      let fullDiff = '';
+      if (stagedDiff && typeof stagedDiff === 'string') {
+        fullDiff += stagedDiff;
+      }
+      if (unstagedDiff && typeof unstagedDiff === 'string') {
+        if (fullDiff) fullDiff += '\n';
+        fullDiff += unstagedDiff;
+      }
+      
+      if (!fullDiff.trim()) {
+        this.addMessage('assistant', 'No changes to copy (working tree is clean).');
+        return;
+      }
+      
+      await navigator.clipboard.writeText(fullDiff);
+      this.addMessage('assistant', `📋 Copied diff to clipboard (${fullDiff.split('\n').length} lines)`);
+      
+    } catch (e) {
+      console.error('Error copying git diff:', e);
+      this.addMessage('assistant', `Error copying diff: ${e.message}`);
+    }
+  }
+
   async handleCommit() {
     try {
       // First, stage all changes
