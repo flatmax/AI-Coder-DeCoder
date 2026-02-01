@@ -63,6 +63,14 @@ export const StreamingMixin = (superClass) => class extends superClass {
       const tokensBefore = event.tokens_before.toLocaleString();
       const tokensAfter = event.tokens_after.toLocaleString();
       
+      // Update the HUD data with new token count so history bar reflects compaction
+      if (this._hudData) {
+        this._hudData = {
+          ...this._hudData,
+          history_tokens: event.tokens_after
+        };
+      }
+      
       if (event.case === 'none') {
         // Compaction wasn't actually needed - just remove the "Compacting..." message
         const lastMessage = this.messageHistory[this.messageHistory.length - 1];
