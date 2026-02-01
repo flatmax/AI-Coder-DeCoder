@@ -137,8 +137,15 @@ Create or modify `config/app.json` in **your project's repository root** (not th
 ```json
 {
   "url_cache": {
-    "path": "/tmp/ac-dc_url_cache",
+    "path": "/tmp/ac_url_cache",
     "ttl_hours": 24
+  },
+  "history_compaction": {
+    "enabled": true,
+    "compaction_trigger_tokens": 12000,
+    "verbatim_window_tokens": 3000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2
   }
 }
 ```
@@ -147,6 +154,13 @@ Create or modify `config/app.json` in **your project's repository root** (not th
 |---------|---------|-------------|
 | `url_cache.path` | `/tmp/ac_url_cache` | Directory for caching fetched URL content |
 | `url_cache.ttl_hours` | `24` | How long cached URLs remain valid (hours) |
+| `history_compaction.enabled` | `true` | Enable automatic history compaction |
+| `history_compaction.compaction_trigger_tokens` | `12000` | Token threshold to trigger compaction |
+| `history_compaction.verbatim_window_tokens` | `3000` | Tokens to keep verbatim (recent messages) |
+| `history_compaction.summary_budget_tokens` | `500` | Max tokens for the summary |
+| `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges to preserve |
+
+> **Note:** The JSON example above shows sample values. The table shows the code defaults used when settings are omitted.
 
 ## Usage
 

@@ -2,5 +2,12 @@
   "url_cache": {
     "path": "/tmp/ac-dc_url_cache",
     "ttl_hours": 24
+  },
+  "history_compaction": {
+    "enabled": true,
+    "compaction_trigger_tokens": 12000,
+    "verbatim_window_tokens": 3000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2
   }
 }
