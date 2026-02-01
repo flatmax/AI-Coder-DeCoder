@@ -13,7 +13,6 @@ DEFAULT_COMPACTION_CONFIG = {
     "verbatim_window_tokens": 3000,
     "summary_budget_tokens": 500,
     "min_verbatim_exchanges": 2,
-    "detection_model": "anthropic/claude-3-haiku-20240307",
 }
 
 

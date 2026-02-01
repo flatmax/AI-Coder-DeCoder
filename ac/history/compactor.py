@@ -24,9 +24,6 @@ class CompactionConfig:
     # Safety minimums
     min_verbatim_exchanges: int = 2         # Always keep at least N user/assistant pairs
     min_confidence: float = 0.5             # Minimum confidence to trust boundary
-    
-    # Model for detection
-    detection_model: str = "anthropic/claude-3-haiku-20240307"
 
 
 @dataclass
@@ -61,7 +58,8 @@ class HistoryCompactor:
         self,
         config: Optional[CompactionConfig] = None,
         token_counter: Optional[TokenCounter] = None,
-        model_name: str = "gpt-4o"
+        model_name: str = "gpt-4o",
+        detection_model: Optional[str] = None
     ):
         """
         Initialize the compactor.
@@ -70,10 +68,13 @@ class HistoryCompactor:
             config: Compaction configuration (uses defaults if None)
             token_counter: Token counter for accurate counting (creates one if None)
             model_name: Model name for token counting
+            detection_model: Model to use for topic detection (required)
         """
+        if not detection_model:
+            raise ValueError("detection_model is required for HistoryCompactor")
         self.config = config or CompactionConfig()
         self.token_counter = token_counter or TokenCounter(model_name)
-        self.topic_detector = TopicDetector(model=self.config.detection_model)
+        self.topic_detector = TopicDetector(model=detection_model)
     
     def should_compact(self, messages: list[dict]) -> bool:
         """

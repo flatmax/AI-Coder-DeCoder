@@ -66,8 +66,8 @@ class TestHistoryCompactorInit:
     """Tests for HistoryCompactor initialization."""
     
     def test_default_init(self):
-        """Can initialize with defaults."""
-        compactor = HistoryCompactor()
+        """Can initialize with detection_model."""
+        compactor = HistoryCompactor(detection_model="gpt-4o-mini")
         assert compactor.config is not None
         assert compactor.token_counter is not None
         assert compactor.topic_detector is not None
@@ -75,8 +75,13 @@ class TestHistoryCompactorInit:
     def test_custom_config(self):
         """Can initialize with custom config."""
         config = CompactionConfig(compaction_trigger_tokens=8000)
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         assert compactor.config.compaction_trigger_tokens == 8000
+    
+    def test_detection_model_required(self):
+        """detection_model is required."""
+        with pytest.raises(ValueError, match="detection_model is required"):
+            HistoryCompactor()
 
 
 class TestShouldCompact:
@@ -84,13 +89,13 @@ class TestShouldCompact:
     
     def test_empty_messages(self):
         """Empty messages don't need compaction."""
-        compactor = HistoryCompactor()
+        compactor = HistoryCompactor(detection_model="gpt-4o-mini")
         assert compactor.should_compact([]) is False
     
     def test_below_threshold(self):
         """Messages below threshold don't need compaction."""
         config = CompactionConfig(compaction_trigger_tokens=10000)
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Short messages, well under threshold
         messages = [
@@ -102,7 +107,7 @@ class TestShouldCompact:
     def test_above_threshold(self):
         """Messages above threshold need compaction."""
         config = CompactionConfig(compaction_trigger_tokens=100)  # Very low threshold
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Messages that exceed 100 tokens (use words - each word is ~1 token)
         messages = [
@@ -117,13 +122,13 @@ class TestFindVerbatimWindowStart:
     
     def test_empty_messages(self):
         """Empty messages returns 0."""
-        compactor = HistoryCompactor()
+        compactor = HistoryCompactor(detection_model="gpt-4o-mini")
         assert compactor._find_verbatim_window_start([]) == 0
     
     def test_all_messages_fit(self):
         """When all messages fit in window, returns 0."""
         config = CompactionConfig(verbatim_window_tokens=10000)
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         messages = [
             {"role": "user", "content": "Hello"},
@@ -134,7 +139,7 @@ class TestFindVerbatimWindowStart:
     def test_window_boundary(self):
         """Window boundary is calculated correctly."""
         config = CompactionConfig(verbatim_window_tokens=50)  # Very small window
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Each message ~30 tokens, total ~120 tokens, window of 50 fits ~1-2 messages
         messages = [
@@ -156,7 +161,7 @@ class TestCompact:
     def test_no_compaction_needed(self):
         """Returns original messages if under threshold."""
         config = CompactionConfig(compaction_trigger_tokens=10000)
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         messages = [
             {"role": "user", "content": "Hello"},
@@ -171,7 +176,7 @@ class TestCompact:
     
     def test_empty_messages(self):
         """Empty messages returns empty result."""
-        compactor = HistoryCompactor()
+        compactor = HistoryCompactor(detection_model="gpt-4o-mini")
         result = compactor.compact_sync([])
         
         assert result.compacted_messages == []
@@ -185,7 +190,7 @@ class TestCompact:
             min_confidence=0.5,
             min_verbatim_exchanges=1        # Allow keeping just 1 exchange
         )
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Create messages with known token counts (~40 tokens each, total ~160)
         messages = [
@@ -229,7 +234,7 @@ class TestCompact:
             verbatim_window_tokens=10,      # Tiny window - only last ~1 message fits
             min_confidence=0.5
         )
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # All messages ~40 tokens each except last two which are short
         # Total well over 50 tokens to trigger compaction
@@ -273,7 +278,7 @@ class TestCompact:
             verbatim_window_tokens=60,      # Small verbatim window
             min_confidence=0.8              # High confidence threshold
         )
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Create messages totaling > 100 tokens (~160 total)
         messages = [
@@ -315,7 +320,7 @@ class TestMinExchanges:
             verbatim_window_tokens=200,  # Large window to trigger truncate_only
             min_verbatim_exchanges=3     # Require 3 exchanges
         )
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # 4 exchanges total
         messages = [
@@ -368,7 +373,7 @@ class TestNoBoundaryDetected:
             verbatim_window_tokens=60,
             min_confidence=0.5
         )
-        compactor = HistoryCompactor(config=config)
+        compactor = HistoryCompactor(config=config, detection_model="gpt-4o-mini")
         
         # Create messages exceeding trigger threshold
         messages = [
@@ -407,7 +412,7 @@ class TestCreateSummaryMessage:
     
     def test_summary_format(self):
         """Summary message has correct format."""
-        compactor = HistoryCompactor()
+        compactor = HistoryCompactor(detection_model="gpt-4o-mini")
         
         summary_msg = compactor._create_summary_message(
             "Discussed authentication and fixed login bug.",

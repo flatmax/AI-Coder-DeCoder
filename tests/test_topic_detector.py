@@ -138,11 +138,10 @@ class TestLoadCompactionPrompt:
 class TestTopicDetectorInit:
     """Tests for TopicDetector initialization."""
     
-    def test_default_model(self):
-        """Default model is set."""
-        detector = TopicDetector()
-        assert detector.model is not None
-        assert "claude" in detector.model or "gpt" in detector.model or "anthropic" in detector.model
+    def test_model_required(self):
+        """Model parameter is required."""
+        with pytest.raises(ValueError, match="model is required"):
+            TopicDetector(model=None)
     
     def test_custom_model(self):
         """Custom model can be specified."""
@@ -151,7 +150,7 @@ class TestTopicDetectorInit:
     
     def test_prompt_loaded(self):
         """Compaction prompt is loaded on init."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         assert detector._prompt is not None
         assert len(detector._prompt) > 100
 
@@ -161,7 +160,7 @@ class TestTopicDetectorFindBoundary:
     
     def test_empty_messages(self):
         """Empty message list returns no boundary."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         result = detector.find_topic_boundary_sync([])
         
         assert result.boundary_index is None
@@ -170,7 +169,7 @@ class TestTopicDetectorFindBoundary:
     
     def test_successful_detection(self):
         """Successful detection returns valid result."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         
         # Mock the LLM response
         mock_response = MagicMock()
@@ -196,7 +195,7 @@ class TestTopicDetectorFindBoundary:
     
     def test_invalid_boundary_index_clamped(self):
         """Invalid boundary index is set to None."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -218,7 +217,7 @@ class TestTopicDetectorFindBoundary:
     
     def test_negative_boundary_index_rejected(self):
         """Negative boundary index is set to None."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -234,7 +233,7 @@ class TestTopicDetectorFindBoundary:
     
     def test_llm_error_handled(self):
         """LLM errors are handled gracefully."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         
         messages = [{"role": "user", "content": "test"}]
         
@@ -253,7 +252,7 @@ class TestTopicDetectorSync:
     
     def test_sync_wrapper_works(self):
         """Sync wrapper successfully calls async method."""
-        detector = TopicDetector()
+        detector = TopicDetector(model="gpt-4o-mini")
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]

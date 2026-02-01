@@ -133,14 +133,16 @@ class TopicDetector:
     enabling intelligent summarization that preserves recent context.
     """
     
-    def __init__(self, model: str = None):
+    def __init__(self, model: str):
         """
         Initialize topic detector.
         
         Args:
-            model: LLM model to use (defaults to smaller/faster model)
+            model: LLM model to use for topic detection (required)
         """
-        self.model = model or "anthropic/claude-3-haiku-20240307"
+        if not model:
+            raise ValueError("model is required for TopicDetector")
+        self.model = model
         self._prompt = _load_compaction_prompt()
     
     async def find_topic_boundary(

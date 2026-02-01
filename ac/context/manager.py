@@ -75,6 +75,9 @@ class ContextManager:
         self._compaction_enabled = False
         self._compactor: Optional[HistoryCompactor] = None
         if compaction_config and compaction_config.get('enabled', True):
+            detection_model = compaction_config.get('detection_model')
+            if not detection_model:
+                raise ValueError("detection_model is required in compaction_config when compaction is enabled")
             self._compaction_enabled = True
             self._compactor = HistoryCompactor(
                 config=CompactionConfig(
@@ -82,10 +85,10 @@ class ContextManager:
                     verbatim_window_tokens=compaction_config.get('verbatim_window_tokens', 3000),
                     summary_budget_tokens=compaction_config.get('summary_budget_tokens', 500),
                     min_verbatim_exchanges=compaction_config.get('min_verbatim_exchanges', 2),
-                    detection_model=compaction_config.get('detection_model', 'anthropic/claude-3-haiku-20240307'),
                 ),
                 token_counter=self.token_counter,
                 model_name=model_name,
+                detection_model=detection_model,
             )
         
         # Conversation history
