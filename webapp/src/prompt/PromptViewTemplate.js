@@ -175,6 +175,13 @@ function renderHud(component) {
           <span class="hud-value">${formatTokens(data.cache_write_tokens)}</span>
         </div>
       ` : ''}
+      ${data.history_tokens !== undefined ? html`
+        <div class="hud-divider"></div>
+        <div class="hud-row history ${data.history_tokens > data.history_threshold * 0.95 ? 'critical' : data.history_tokens > data.history_threshold * 0.8 ? 'warning' : ''}">
+          <span class="hud-label">History:</span>
+          <span class="hud-value">${formatTokens(data.history_tokens)} / ${formatTokens(data.history_threshold)}</span>
+        </div>
+      ` : ''}
       ${renderPromotions(data)}
       ${data.session_total_tokens ? html`
         <div class="hud-divider"></div>

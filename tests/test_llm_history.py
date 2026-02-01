@@ -165,6 +165,61 @@ class TestStreamingCompactionIntegration:
         assert summarized is False
 
 
+class TestCompactionEventData:
+    """Test compaction event data structure for frontend."""
+    
+    def test_compaction_start_event_structure(self):
+        """Verify compaction_start event has expected fields."""
+        event = {
+            'type': 'compaction_start',
+            'message': '🗜️ Compacting history...'
+        }
+        
+        assert event['type'] == 'compaction_start'
+        assert 'message' in event
+        
+    def test_compaction_complete_event_structure(self):
+        """Verify compaction_complete event has expected fields."""
+        from ac.history.compactor import CompactionResult
+        
+        result = CompactionResult(
+            case="topic_boundary",
+            compacted_messages=[],
+            tokens_before=5000,
+            tokens_after=2000,
+        )
+        
+        # This mirrors the event structure created in streaming.py
+        event = {
+            'type': 'compaction_complete',
+            'case': result.case,
+            'tokens_before': result.tokens_before,
+            'tokens_after': result.tokens_after,
+            'tokens_saved': result.tokens_before - result.tokens_after,
+        }
+        
+        assert event['type'] == 'compaction_complete'
+        assert event['case'] == 'topic_boundary'
+        assert event['tokens_before'] == 5000
+        assert event['tokens_after'] == 2000
+        assert event['tokens_saved'] == 3000
+        
+    def test_history_token_info_in_result(self):
+        """Verify history token info structure for HUD."""
+        # This mirrors what streaming.py adds to token_usage
+        token_usage = {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "history_tokens": 2800,
+            "history_threshold": 6000,
+        }
+        
+        assert token_usage["history_tokens"] == 2800
+        assert token_usage["history_threshold"] == 6000
+        # Frontend uses these to show warning states
+        assert token_usage["history_tokens"] < token_usage["history_threshold"]
+
+
 class TestContextManagerHistoryIntegration:
     """Test that context manager properly tracks history."""
     

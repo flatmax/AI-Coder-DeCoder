@@ -151,11 +151,30 @@ class StreamingMixin:
             compaction_result = None
             summarized = False
             if self._context_manager:
+                # Check if compaction is needed before running it
+                if self._context_manager.should_compact():
+                    # Notify frontend that compaction is starting
+                    loop = asyncio.get_running_loop()
+                    await self._send_compaction_event(request_id, {
+                        'type': 'compaction_start',
+                        'message': '🗜️ Compacting history...'
+                    }, loop)
+                
                 compaction_result = self._context_manager.compact_history_if_needed_sync()
                 if compaction_result and compaction_result.case != "none":
                     summarized = True
                     print(f"📝 History compacted: {compaction_result.case} "
                           f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
+                    
+                    # Notify frontend of compaction result
+                    loop = asyncio.get_running_loop()
+                    await self._send_compaction_event(request_id, {
+                        'type': 'compaction_complete',
+                        'case': compaction_result.case,
+                        'tokens_before': compaction_result.tokens_before,
+                        'tokens_after': compaction_result.tokens_after,
+                        'tokens_saved': compaction_result.tokens_before - compaction_result.tokens_after,
+                    }, loop)
             
             # Load files into context manager
             if self._context_manager:
@@ -478,6 +497,14 @@ class StreamingMixin:
                 # Include context breakdown if available
                 if hud_breakdown:
                     result["token_usage"].update(hud_breakdown)
+                
+                # Add history token info for HUD
+                if self._context_manager:
+                    history_tokens = self._context_manager.history_token_count()
+                    compaction_config = self.get_compaction_config() if hasattr(self, 'get_compaction_config') else {}
+                    trigger_threshold = compaction_config.get('compaction_trigger_tokens', 6000)
+                    result["token_usage"]["history_tokens"] = history_tokens
+                    result["token_usage"]["history_threshold"] = trigger_threshold
                 
                 # Include promotions/demotions from stability tracker
                 if self._context_manager and self._context_manager.cache_stability:
@@ -1052,6 +1079,16 @@ class StreamingMixin:
         
         print(f"╰{'─' * 53}╯")
     
+    async def _send_compaction_event(self, request_id, event, loop):
+        """Send compaction event to the client."""
+        try:
+            if hasattr(self, 'get_call'):
+                call = self.get_call()
+                if call and 'PromptView.compactionEvent' in call:
+                    await call['PromptView.compactionEvent'](request_id, event)
+        except Exception as e:
+            print(f"Error sending compaction event: {e}")
+
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
         try:
