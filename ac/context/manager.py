@@ -11,6 +11,7 @@ from typing import Optional
 from .token_counter import TokenCounter, format_tokens
 from .file_context import FileContext
 from .stability_tracker import StabilityTracker
+from ac.history.compactor import HistoryCompactor, CompactionConfig, CompactionResult
 
 
 def _progress_bar(used: int, total: int, width: int = 20) -> str:
@@ -37,6 +38,7 @@ class ContextManager:
         repo_root: str = None,
         token_tracker=None,
         cache_target_tokens: int = 0,
+        compaction_config: dict = None,
     ):
         """
         Initialize context manager.
@@ -47,6 +49,10 @@ class ContextManager:
             token_tracker: Optional object with get_token_usage() for session totals
             cache_target_tokens: Target tokens per cache block (0 = disabled).
                                 Used for threshold-aware tier promotion.
+            compaction_config: Optional dict with history compaction settings.
+                              Keys: enabled, compaction_trigger_tokens, 
+                              verbatim_window_tokens, summary_budget_tokens,
+                              min_verbatim_exchanges, detection_model
         """
         self.model_name = model_name
         self.token_counter = TokenCounter(model_name)
@@ -63,6 +69,23 @@ class ContextManager:
                 thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
                 initial_tier='L3',
                 cache_target_tokens=cache_target_tokens,
+            )
+        
+        # History compaction
+        self._compaction_enabled = False
+        self._compactor: Optional[HistoryCompactor] = None
+        if compaction_config and compaction_config.get('enabled', True):
+            self._compaction_enabled = True
+            self._compactor = HistoryCompactor(
+                config=CompactionConfig(
+                    compaction_trigger_tokens=compaction_config.get('compaction_trigger_tokens', 6000),
+                    verbatim_window_tokens=compaction_config.get('verbatim_window_tokens', 3000),
+                    summary_budget_tokens=compaction_config.get('summary_budget_tokens', 500),
+                    min_verbatim_exchanges=compaction_config.get('min_verbatim_exchanges', 2),
+                    detection_model=compaction_config.get('detection_model', 'anthropic/claude-3-haiku-20240307'),
+                ),
+                token_counter=self.token_counter,
+                model_name=model_name,
             )
         
         # Conversation history
@@ -118,11 +141,86 @@ class ContextManager:
             return 0
         return self.token_counter.count(self._history)
     
-    # ========== Summarization ==========
+    # ========== Compaction ==========
+    
+    def should_compact(self) -> bool:
+        """
+        Check if history should be compacted.
+        
+        Returns:
+            True if compaction is enabled and history exceeds trigger threshold
+        """
+        if not self._compaction_enabled or not self._compactor:
+            return False
+        return self._compactor.should_compact(self._history)
+    
+    async def compact_history_if_needed(self) -> Optional[CompactionResult]:
+        """
+        Compact history if it exceeds the trigger threshold.
+        
+        Uses topic-aware compaction to preserve current conversation context
+        while summarizing or truncating older content.
+        
+        Returns:
+            CompactionResult if compaction was performed, None otherwise
+        """
+        if not self.should_compact():
+            return None
+        
+        result = await self._compactor.compact(self._history)
+        if result.case != "none":
+            self._history = result.compacted_messages
+        return result
+    
+    def compact_history_if_needed_sync(self) -> Optional[CompactionResult]:
+        """
+        Synchronous version of compact_history_if_needed.
+        
+        Returns:
+            CompactionResult if compaction was performed, None otherwise
+        """
+        if not self.should_compact():
+            return None
+        
+        result = self._compactor.compact_sync(self._history)
+        if result.case != "none":
+            self._history = result.compacted_messages
+        return result
+    
+    def get_compaction_status(self) -> dict:
+        """
+        Get current compaction status for UI display.
+        
+        Returns:
+            Dict with history_tokens, trigger_threshold, and percent_used
+        """
+        if not self._compaction_enabled or not self._compactor:
+            return {
+                "enabled": False,
+                "history_tokens": self.history_token_count(),
+                "trigger_threshold": 0,
+                "percent_used": 0,
+            }
+        
+        history_tokens = self.history_token_count()
+        trigger = self._compactor.config.compaction_trigger_tokens
+        percent = int((history_tokens / trigger) * 100) if trigger > 0 else 0
+        
+        return {
+            "enabled": True,
+            "history_tokens": history_tokens,
+            "trigger_threshold": trigger,
+            "percent_used": min(percent, 100),
+        }
+    
+    # ========== Summarization (Legacy) ==========
     
     def history_needs_summary(self) -> bool:
         """
         Check if history exceeds token budget and needs summarization.
+        
+        Note: This is the legacy method. Prefer should_compact() for
+        topic-aware compaction.
         
         Returns:
             True if history tokens exceed max_history_tokens

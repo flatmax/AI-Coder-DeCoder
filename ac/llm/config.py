@@ -6,6 +6,16 @@ import os
 DEFAULT_CACHE_MIN_TOKENS = 1024
 DEFAULT_CACHE_BUFFER_MULTIPLIER = 1.5
 
+# Default history compaction configuration
+DEFAULT_COMPACTION_CONFIG = {
+    "enabled": True,
+    "compaction_trigger_tokens": 6000,
+    "verbatim_window_tokens": 3000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2,
+    "detection_model": "anthropic/claude-3-haiku-20240307",
+}
+
 
 class ConfigMixin:
     """Mixin for configuration loading and management."""
@@ -53,3 +63,14 @@ class ConfigMixin:
     def get_cache_target_tokens(self) -> int:
         """Get target tokens per cache block (min * multiplier)."""
         return int(self.get_cache_min_tokens() * self.get_cache_buffer_multiplier())
+    
+    def get_compaction_config(self) -> dict:
+        """Get history compaction configuration."""
+        defaults = DEFAULT_COMPACTION_CONFIG.copy()
+        config_section = self.config.get('history_compaction', {})
+        defaults.update(config_section)
+        return defaults
+    
+    def is_compaction_enabled(self) -> bool:
+        """Check if history compaction is enabled."""
+        return self.get_compaction_config().get('enabled', True)

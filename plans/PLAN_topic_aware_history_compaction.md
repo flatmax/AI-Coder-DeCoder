@@ -711,14 +711,16 @@ Result:
 ## Files to Modify
 
 - `ac/context/__init__.py` - Export TopicDetector and TopicBoundaryResult ✅ DONE
-- `ac/context/manager.py` - Integrate compactor, add `compact_history_if_needed()`
-- `ac/llm/streaming.py` - Call compaction before streaming, send UI events
-- `ac/llm/chat.py` - Deprecate old `summarize_history()`
-- `ac/llm/config.py` - Add compaction config loading
-- `ac-dc.json` - Add history_compaction configuration block
-- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages
-- `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD
-- `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states
+- `ac/context/manager.py` - Integrate compactor, add `compact_history_if_needed()` ✅ DONE
+- `ac/llm/config.py` - Add compaction config loading ✅ DONE
+- `ac-dc.json` - Add history_compaction configuration block ✅ DONE
+- `tests/test_context_manager.py` - Add compaction integration tests ✅ DONE
+- `ac/llm/llm.py` - Pass compaction config to ContextManager (Phase 4)
+- `ac/llm/streaming.py` - Call compaction before streaming, send UI events (Phase 4)
+- `ac/llm/chat.py` - Deprecate old `summarize_history()` (Phase 4)
+- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages (Phase 5)
+- `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD (Phase 5)
+- `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states (Phase 5)
 
 ## History Architecture Clarification
 
