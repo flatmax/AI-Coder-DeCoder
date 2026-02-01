@@ -292,6 +292,44 @@ function renderResizeHandles(component) {
   `;
 }
 
+function renderPanelResizer(component) {
+  if (component.minimized) return '';
+  
+  return html`
+    <div class="panel-resizer">
+      <div class="panel-resizer-handle" @mousedown=${(e) => component._handlePanelResizeStart(e)}></div>
+      <button class="panel-collapse-btn" @click=${() => component.toggleLeftPanel()} title="${component.leftPanelCollapsed ? 'Expand panel' : 'Collapse panel'}">
+        ${component.leftPanelCollapsed ? '▶' : '◀'}
+      </button>
+    </div>
+  `;
+}
+
+function renderSnippetButtons(component) {
+  if (!component.promptSnippets || component.promptSnippets.length === 0) {
+    return '';
+  }
+  
+  return html`
+    <div class="snippet-drawer ${component.snippetDrawerOpen ? 'open' : ''}">
+      <button 
+        class="snippet-drawer-toggle ${component.snippetDrawerOpen ? 'open' : ''}" 
+        @click=${() => component.toggleSnippetDrawer()}
+        title="${component.snippetDrawerOpen ? 'Close snippets' : 'Open snippets'}"
+      >📋</button>
+      <div class="snippet-drawer-content">
+        ${component.promptSnippets.map(snippet => html`
+          <button 
+            class="snippet-btn" 
+            @click=${() => component.appendSnippet(snippet.message)}
+            title="${snippet.tooltip}"
+          >${snippet.icon}</button>
+        `)}
+      </div>
+    </div>
+  `;
+}
+
 export function renderPromptView(component) {
   const isDragged = component.dialogX !== null && component.dialogY !== null;
   const positionStyle = isDragged 
@@ -364,8 +402,8 @@ export function renderPromptView(component) {
       ${component.minimized ? '' : html`
         <div class="main-content">
           ${component.activeLeftTab === 'files' ? html`
-            ${component.showFilePicker ? html`
-              <div class="picker-panel">
+            ${component.showFilePicker && !component.leftPanelCollapsed ? html`
+              <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
                   .tree=${component.fileTree}
                   .modified=${component.modifiedFiles}
@@ -379,6 +417,9 @@ export function renderPromptView(component) {
                   @copy-path-to-prompt=${component.handleCopyPathToPrompt}
                 ></file-picker>
               </div>
+              ${renderPanelResizer(component)}
+            ` : component.showFilePicker && component.leftPanelCollapsed ? html`
+              ${renderPanelResizer(component)}
             ` : ''}
             <div class="chat-panel">
               <div class="messages-wrapper">
@@ -416,9 +457,7 @@ export function renderPromptView(component) {
               <div class="input-area">
                 <div class="input-buttons-stack">
                   <speech-to-text @transcript=${(e) => component.handleSpeechTranscript(e)}></speech-to-text>
-                  <button class="file-btn ${component.showFilePicker ? 'active' : ''}" @click=${component.toggleFilePicker} title="Select files">
-                    📁 ${component.selectedFiles.length || ''}
-                  </button>
+                  ${renderSnippetButtons(component)}
                 </div>
                 <textarea
                   placeholder="Type a message... (paste images with Ctrl+V)"

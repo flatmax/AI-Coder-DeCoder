@@ -146,11 +146,13 @@ export const promptViewStyles = css`
   }
 
   .picker-panel {
-    width: 280px;
+    min-width: 150px;
+    max-width: 500px;
     border-right: 1px solid #0f3460;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   file-picker {
@@ -363,6 +365,108 @@ export const promptViewStyles = css`
   .input-buttons-stack .file-btn {
     padding: 6px 10px;
     font-size: 12px;
+  }
+
+  /* Snippet drawer - collapsible horizontal expand */
+  .snippet-drawer {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .snippet-drawer-toggle {
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    transition: all 0.15s;
+    z-index: 1;
+  }
+
+  .snippet-drawer-toggle:hover {
+    background: #0f3460;
+    border-color: #e94560;
+  }
+
+  .snippet-drawer-toggle.open {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right: none;
+  }
+
+  .snippet-drawer-content {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    max-width: 0;
+    overflow: hidden;
+    transition: max-width 0.2s ease-out, padding 0.2s ease-out;
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    border-left: none;
+    border-radius: 0 6px 6px 0;
+    padding: 0;
+  }
+
+  .snippet-drawer.open .snippet-drawer-content {
+    max-width: 300px;
+    padding: 4px 6px;
+  }
+
+  .snippet-btn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .snippet-btn:hover {
+    background: rgba(233, 69, 96, 0.2);
+    transform: scale(1.1);
+  }
+
+  /* Panel resizer */
+  .panel-resizer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 12px;
+    background: #0f3460;
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .panel-resizer-handle {
+    flex: 1;
+    width: 100%;
+    cursor: col-resize;
+    transition: background 0.15s;
+  }
+
+  .panel-resizer-handle:hover {
+    background: rgba(233, 69, 96, 0.3);
+  }
+
+  .panel-collapse-btn {
+    background: transparent;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 8px 2px;
+    font-size: 10px;
+    transition: color 0.15s;
+  }
+
+  .panel-collapse-btn:hover {
+    color: #e94560;
   }
 
   /* URL chips */
