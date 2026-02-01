@@ -149,9 +149,11 @@ class StreamingMixin:
             
             # Check/handle history compaction using new context manager
             compaction_result = None
+            summarized = False
             if self._context_manager:
                 compaction_result = self._context_manager.compact_history_if_needed_sync()
                 if compaction_result and compaction_result.case != "none":
+                    summarized = True
                     print(f"📝 History compacted: {compaction_result.case} "
                           f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
             

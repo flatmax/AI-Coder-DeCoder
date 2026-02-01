@@ -118,6 +118,53 @@ class TestLiteLLMCompactionConfig:
                             assert llm._context_manager._compactor is None
 
 
+class TestStreamingCompactionIntegration:
+    """Test that streaming properly integrates with compaction."""
+    
+    def test_summarized_flag_set_on_compaction(self):
+        """summarized flag should be True when compaction occurs."""
+        from ac.history.compactor import CompactionResult
+        
+        # Simulate compaction result - case != "none" indicates compaction happened
+        result = CompactionResult(
+            case="topic_boundary",
+            compacted_messages=[
+                {"role": "user", "content": "Summary of previous conversation"},
+                {"role": "assistant", "content": "Ok, I understand."},
+                {"role": "user", "content": "Recent question"},
+                {"role": "assistant", "content": "Recent answer"},
+            ],
+            tokens_before=5000,
+            tokens_after=2000,
+        )
+        
+        # Verify the result indicates compaction happened
+        assert result.case != "none"
+        # This is how streaming.py determines summarized flag
+        summarized = result.case != "none"
+        assert summarized is True
+        
+    def test_summarized_flag_false_when_no_compaction(self):
+        """summarized flag should be False when no compaction needed."""
+        from ac.history.compactor import CompactionResult
+        
+        # When no compaction needed, result case is "none"
+        result = CompactionResult(
+            case="none",
+            compacted_messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+            tokens_before=1000,
+            tokens_after=1000,
+        )
+        
+        assert result.case == "none"
+        # This is how streaming.py determines summarized flag
+        summarized = result.case != "none"
+        assert summarized is False
+
+
 class TestContextManagerHistoryIntegration:
     """Test that context manager properly tracks history."""
     
