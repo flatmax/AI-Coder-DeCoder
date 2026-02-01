@@ -5,8 +5,24 @@ These tests verify that the topic detection and summarization works correctly
 using realistic conversation history data.
 """
 
+import json
+import os
 import pytest
+from pathlib import Path
 from ac.context.topic_detector import TopicDetector, TopicBoundaryResult
+
+
+@pytest.fixture(autouse=True)
+def setup_llm_env():
+    """Apply environment variables from config/llm.json before tests."""
+    # tests_skills/ is at repo root, so parent is repo root
+    repo_root = Path(__file__).parent.parent
+    llm_json = repo_root / "config" / "llm.json"
+    if llm_json.exists():
+        config = json.loads(llm_json.read_text())
+        env_vars = config.get("env", {})
+        for key, value in env_vars.items():
+            os.environ[key] = value
 
 
 # Test conversation history - simulates a real session with a topic shift
@@ -89,11 +105,9 @@ TEST_HISTORY_SINGLE_TOPIC = [
 
 def _get_smaller_model() -> str:
     """Get the smaller model from config/llm.json config."""
-    import json
-    from pathlib import Path
-
     # Use absolute path relative to this file to find repo root
-    repo_root = Path(__file__).parent.parent.parent
+    # tests_skills/ is at repo root, so parent is repo root
+    repo_root = Path(__file__).parent.parent
     llm_json = repo_root / "config" / "llm.json"
     if llm_json.exists():
         config = json.loads(llm_json.read_text())
