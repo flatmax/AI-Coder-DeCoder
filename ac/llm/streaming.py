@@ -147,12 +147,13 @@ class StreamingMixin:
         try:
             model = self.smaller_model if use_smaller_model else self.model
             
-            # Check/handle summarization using new context manager
-            summarized = False
-            if self._context_manager and self._context_manager.history_needs_summary():
-                summary_result = self.summarize_history()
-                if summary_result.get("status") == "summarized":
-                    summarized = True
+            # Check/handle history compaction using new context manager
+            compaction_result = None
+            if self._context_manager:
+                compaction_result = self._context_manager.compact_history_if_needed_sync()
+                if compaction_result and compaction_result.case != "none":
+                    print(f"📝 History compacted: {compaction_result.case} "
+                          f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
             
             # Load files into context manager
             if self._context_manager:

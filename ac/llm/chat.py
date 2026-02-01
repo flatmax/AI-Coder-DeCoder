@@ -97,9 +97,18 @@ class ChatMixin:
         """
         Summarize conversation history if it's too large.
         
+        DEPRECATED: Use ContextManager.compact_history_if_needed_sync() instead.
+        This method is kept for backwards compatibility but will be removed in a future version.
+        
         Returns:
             Dict with status and new token count
         """
+        import warnings
+        warnings.warn(
+            "summarize_history() is deprecated. Use ContextManager.compact_history_if_needed_sync() instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self._context_manager:
             return {"status": "not_needed", "message": "No context manager"}
         

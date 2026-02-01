@@ -77,6 +77,47 @@ class TestLiteLLMClearHistory:
                         assert len(llm.conversation_history) == 0
 
 
+class TestLiteLLMCompactionConfig:
+    """Test that LiteLLM passes compaction config to ContextManager."""
+    
+    def test_compaction_config_passed_to_context_manager(self):
+        """LiteLLM should pass compaction config when enabled."""
+        with patch('ac.llm.llm.LiteLLM._load_config') as mock_config:
+            mock_config.return_value = {
+                'model': 'gpt-4',
+                'history_compaction': {
+                    'enabled': True,
+                    'compaction_trigger_tokens': 5000,
+                    'verbatim_window_tokens': 2000,
+                }
+            }
+            with patch('ac.llm.llm.LiteLLM._apply_env_vars'):
+                with patch('ac.llm.llm.LiteLLM._auto_save_symbol_map', return_value=None):
+                    with patch('ac.llm.llm.LiteLLM._init_history_store'):
+                        from ac.llm import LiteLLM
+                        llm = LiteLLM(repo=None)
+                        
+                        # Verify compaction is enabled in context manager
+                        assert llm._context_manager._compaction_enabled is True
+                        assert llm._context_manager._compactor is not None
+                        assert llm._context_manager._compactor.config.compaction_trigger_tokens == 5000
+                        assert llm._context_manager._compactor.config.verbatim_window_tokens == 2000
+    
+    def test_compaction_disabled_when_not_in_config(self):
+        """LiteLLM should not enable compaction when not configured."""
+        from ac.llm import LiteLLM
+        
+        with patch.object(LiteLLM, '_load_config', return_value={'model': 'gpt-4'}):
+            with patch.object(LiteLLM, '_apply_env_vars'):
+                with patch.object(LiteLLM, '_auto_save_symbol_map', return_value=None):
+                    with patch.object(LiteLLM, '_init_history_store'):
+                        with patch.object(LiteLLM, 'is_compaction_enabled', return_value=False):
+                            llm = LiteLLM(repo=None)
+                            
+                            assert llm._context_manager._compaction_enabled is False
+                            assert llm._context_manager._compactor is None
+
+
 class TestContextManagerHistoryIntegration:
     """Test that context manager properly tracks history."""
     
