@@ -34,7 +34,7 @@ The compaction system uses two distinct thresholds:
 ```
 EXAMPLE CONFIGURATION:
 ┌─────────────────────────────────────────────────────────────┐
-│ compaction_trigger_tokens = 6000  (when to start compacting)│
+│ compaction_trigger_tokens = 9000  (when to start compacting)│
 │ verbatim_window_tokens    = 3000  (recent msgs to preserve) │
 │ summary_budget_tokens     = 500   (max tokens for summary)  │
 └─────────────────────────────────────────────────────────────┘
@@ -719,9 +719,9 @@ Result:
 - `ac/llm/streaming.py` - Call compaction before streaming, return compaction info ✅ DONE
 - `ac/llm/chat.py` - Deprecate old `summarize_history()` ✅ DONE
 - `tests/test_llm_history.py` - Add LiteLLM compaction config tests ✅ DONE
-- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages (Phase 5)
-- `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD (Phase 5)
-- `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states (Phase 5)
+- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages ✅ DONE
+- `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD ✅ DONE
+- `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states ✅ DONE
 
 ## History Architecture Clarification
 

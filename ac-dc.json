@@ -5,7 +5,7 @@
   },
   "history_compaction": {
     "enabled": true,
-    "compaction_trigger_tokens": 6000,
+    "compaction_trigger_tokens": 9000,
     "verbatim_window_tokens": 3000,
     "summary_budget_tokens": 500,
     "min_verbatim_exchanges": 2,

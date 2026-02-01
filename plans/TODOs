@@ -1,2 +1,3 @@
 prompt : All tests passed, can you confirm the tests are testing what you intended to test ?
 prompt : Great! Does the code look good for committing (I can generate the commit messaages) ? can you update the plan first ? What will be next ?
+bug : when I switch tabs, say to context from the files, then I switch back, the picker has been reset, it should save the state of the checked files

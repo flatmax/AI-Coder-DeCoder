@@ -741,6 +741,18 @@ export const promptViewStyles = css`
     color: #4a9eff;
   }
 
+  .hud-row.history .hud-value {
+    color: #7ec699;
+  }
+
+  .hud-row.history.warning .hud-value {
+    color: #f0a500;
+  }
+
+  .hud-row.history.critical .hud-value {
+    color: #e94560;
+  }
+
   .hud-changes {
     font-size: 10px;
     max-width: 180px;

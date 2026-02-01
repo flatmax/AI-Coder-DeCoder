@@ -49,6 +49,46 @@ export const StreamingMixin = (superClass) => class extends superClass {
   }
 
   /**
+   * Called by server when a compaction event occurs.
+   * @param {string} requestId - The request ID
+   * @param {object} event - The compaction event data
+   */
+  compactionEvent(requestId, event) {
+    if (event.type === 'compaction_start') {
+      // Add a system message indicating compaction is starting
+      this.addMessage('assistant', event.message);
+    } else if (event.type === 'compaction_complete') {
+      // Update the compaction message with results
+      const lastMessage = this.messageHistory[this.messageHistory.length - 1];
+      if (lastMessage && lastMessage.role === 'assistant' && lastMessage.content.includes('Compacting')) {
+        const tokensSaved = event.tokens_saved.toLocaleString();
+        const tokensBefore = event.tokens_before.toLocaleString();
+        const tokensAfter = event.tokens_after.toLocaleString();
+        
+        let resultMessage;
+        if (event.case === 'summarized') {
+          resultMessage = `📋 **History Compacted**\n\nOlder conversation summarized to preserve context.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+        } else if (event.case === 'truncated') {
+          resultMessage = `✂️ **History Truncated**\n\nOlder messages from previous topic removed.\nCurrent topic context preserved.\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+        } else {
+          resultMessage = `🗜️ **History Compacted** (${event.case})\n\n---\n_${tokensBefore} → ${tokensAfter} tokens (saved ${tokensSaved})_`;
+        }
+        
+        // Replace the "Compacting..." message with the result
+        const updatedMessage = {
+          ...lastMessage,
+          content: resultMessage,
+          final: true
+        };
+        this.messageHistory = [
+          ...this.messageHistory.slice(0, -1),
+          updatedMessage
+        ];
+      }
+    }
+  }
+
+  /**
    * Called by server when streaming is complete.
    * @param {string} requestId - The request ID
    * @param {object} result - The final result with edits
