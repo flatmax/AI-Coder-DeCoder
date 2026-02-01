@@ -798,3 +798,11 @@ Compaction then operates on that working copy without affecting the stored origi
 - Current topic context is preserved after compaction
 - No noticeable degradation in LLM response quality
 - Compaction latency < 2 seconds (single small-model LLM call)
+
+### Phase 6: Simplify Detection Model Configuration
+
+Remove `detection_model` from `ac-dc.json` and use `smaller_model` from `llm.json` instead, following the same pattern as commit message generation in `ac/llm/chat.py`.
+
+**Changes:**
+- `ac/llm/config.py` - Remove `detection_model` from `DEFAULT_COMPACTION_CONFIG` ✅ DONE  
+- `ac/llm/llm.py` - Pass `smaller_model` to ContextManager as `detection_model` ✅ DONE

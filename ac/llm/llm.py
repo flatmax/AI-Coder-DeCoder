@@ -50,6 +50,9 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         self._context_manager = None
         cache_target = self.get_cache_target_tokens()
         compaction_config = self.get_compaction_config() if self.is_compaction_enabled() else None
+        # Add smaller_model as detection_model for history compaction
+        if compaction_config:
+            compaction_config['detection_model'] = self.smaller_model
         if repo:
             self._context_manager = ContextManager(
                 model_name=self.model,
