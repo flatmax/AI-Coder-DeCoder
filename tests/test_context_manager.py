@@ -209,6 +209,173 @@ class TestContextManagerTokenReport:
         assert "remaining" in report.lower()
 
 
+class TestContextManagerCompaction:
+    """Tests for history compaction integration."""
+    
+    def test_compaction_disabled_by_default_without_config(self):
+        """Compaction is disabled when no config provided."""
+        mgr = ContextManager("gpt-4")
+        assert mgr._compaction_enabled is False
+        assert mgr._compactor is None
+    
+    def test_compaction_enabled_with_config(self):
+        """Compaction is enabled when config provided."""
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 5000,
+            "verbatim_window_tokens": 2000,
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        assert mgr._compaction_enabled is True
+        assert mgr._compactor is not None
+        assert mgr._compactor.config.compaction_trigger_tokens == 5000
+        assert mgr._compactor.config.verbatim_window_tokens == 2000
+    
+    def test_compaction_disabled_in_config(self):
+        """Compaction can be explicitly disabled in config."""
+        config = {"enabled": False}
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        assert mgr._compaction_enabled is False
+        assert mgr._compactor is None
+    
+    def test_should_compact_false_when_disabled(self):
+        """should_compact returns False when compaction disabled."""
+        mgr = ContextManager("gpt-4")
+        mgr.add_message("user", "x" * 10000)  # Large message
+        assert mgr.should_compact() is False
+    
+    def test_should_compact_false_when_under_threshold(self):
+        """should_compact returns False when history under threshold."""
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 10000,
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        mgr.add_message("user", "Hello")  # Small message
+        assert mgr.should_compact() is False
+    
+    def test_should_compact_true_when_over_threshold(self):
+        """should_compact returns True when history exceeds threshold."""
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 50,  # Very low threshold
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        # Add enough content to exceed 50 tokens
+        mgr.add_message("user", " ".join(["word"] * 100))
+        assert mgr.should_compact() is True
+    
+    def test_get_compaction_status_disabled(self):
+        """get_compaction_status returns disabled status."""
+        mgr = ContextManager("gpt-4")
+        status = mgr.get_compaction_status()
+        assert status["enabled"] is False
+        assert status["trigger_threshold"] == 0
+    
+    def test_get_compaction_status_enabled(self):
+        """get_compaction_status returns current status."""
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 1000,
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        mgr.add_message("user", "Hello world")
+        
+        status = mgr.get_compaction_status()
+        assert status["enabled"] is True
+        assert status["trigger_threshold"] == 1000
+        assert status["history_tokens"] > 0
+        assert 0 <= status["percent_used"] <= 100
+    
+    def test_compact_history_if_needed_sync_returns_none_when_not_needed(self):
+        """compact_history_if_needed_sync returns None when no compaction needed."""
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 10000,
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        mgr.add_message("user", "Hello")
+        
+        result = mgr.compact_history_if_needed_sync()
+        assert result is None
+    
+    def test_compact_history_if_needed_sync_returns_none_when_disabled(self):
+        """compact_history_if_needed_sync returns None when compaction disabled."""
+        mgr = ContextManager("gpt-4")
+        mgr.add_message("user", " ".join(["word"] * 1000))
+        
+        result = mgr.compact_history_if_needed_sync()
+        assert result is None
+    
+    def test_compact_history_if_needed_sync_compacts_when_needed(self):
+        """compact_history_if_needed_sync actually compacts history."""
+        from unittest.mock import patch, MagicMock
+        from ac.history.compactor import CompactionResult
+        
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 50,  # Low threshold
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        
+        # Add messages exceeding threshold
+        mgr.add_message("user", " ".join(["word"] * 100))
+        mgr.add_message("assistant", " ".join(["reply"] * 100))
+        
+        original_history_len = len(mgr.get_history())
+        assert original_history_len == 2
+        
+        # Mock the compactor to return a compacted result
+        mock_result = CompactionResult(
+            compacted_messages=[{"role": "user", "content": "compacted"}],
+            summary_message={"role": "system", "content": "summary"},
+            truncated_count=1,
+            tokens_before=200,
+            tokens_after=50,
+            case="summarize"
+        )
+        
+        with patch.object(mgr._compactor, 'compact_sync', return_value=mock_result):
+            result = mgr.compact_history_if_needed_sync()
+        
+        assert result is not None
+        assert result.case == "summarize"
+        assert result.truncated_count == 1
+        # History should be updated to compacted version
+        assert len(mgr.get_history()) == 1
+        assert mgr.get_history()[0]["content"] == "compacted"
+    
+    def test_compact_history_preserves_history_when_case_none(self):
+        """History unchanged when compaction returns case='none'."""
+        from unittest.mock import patch
+        from ac.history.compactor import CompactionResult
+        
+        config = {
+            "enabled": True,
+            "compaction_trigger_tokens": 50,
+        }
+        mgr = ContextManager("gpt-4", compaction_config=config)
+        
+        mgr.add_message("user", " ".join(["word"] * 100))
+        original_history = mgr.get_history()
+        
+        # Mock compactor returning "none" case (no compaction needed)
+        mock_result = CompactionResult(
+            compacted_messages=original_history,
+            tokens_before=100,
+            tokens_after=100,
+            case="none"
+        )
+        
+        with patch.object(mgr._compactor, 'compact_sync', return_value=mock_result):
+            result = mgr.compact_history_if_needed_sync()
+        
+        assert result is not None
+        assert result.case == "none"
+        # History should be unchanged
+        assert mgr.get_history() == original_history
+
+
 class TestContextManagerCacheStability:
     """Tests for unified cache stability tracking."""
     
