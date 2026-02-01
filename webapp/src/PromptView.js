@@ -159,6 +159,18 @@ export class PromptView extends MixedBase {
     return this._urlService?.getUrlDisplayName(urlInfo) || urlInfo.url;
   }
 
+  /**
+   * Convert selectedFiles array to selection object for FilePicker.
+   * @returns {Object} Selection object with file paths as keys and true as values
+   */
+  _getSelectedObject() {
+    const selected = {};
+    for (const path of this.selectedFiles || []) {
+      selected[path] = true;
+    }
+    return selected;
+  }
+
   // ============ History Browser ============
 
   toggleHistoryBrowser() {
