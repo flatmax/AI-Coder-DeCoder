@@ -1049,6 +1049,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
                 "label": f"History ({history_count} messages)",
                 "message_count": history_count,
                 "max_tokens": self._context_manager.max_history_tokens,
+                "compaction_threshold": self._context_manager._compactor.config.compaction_trigger_tokens if self._context_manager._compactor else self._context_manager.max_history_tokens,
                 "needs_summary": self._context_manager.history_needs_summary()
             }
         }

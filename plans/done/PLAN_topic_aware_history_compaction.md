@@ -123,84 +123,11 @@ on_before_llm_call():
 
 ### Phase 1: Topic Boundary Detection
 
-**New file: `ac/prompts/compaction_skill.md`**
+**File: `config/prompts/skills/compaction.md`**
 
-This prompt instructs the small model to analyze conversation history and perform both topic boundary detection and summarization in a single call:
+This prompt instructs the small model to analyze conversation history and perform both topic boundary detection and summarization in a single call. See the actual file for the full prompt.
 
-```markdown
-# History Compaction Assistant
-
-You are analyzing a conversation history to help compact it while preserving context.
-
-## Your Tasks
-
-1. **Identify the current topic**: What is the user currently working on or discussing?
-
-2. **Find the topic boundary**: At which message index did the current topic/task begin? 
-   - Look for clear shifts: new files, new features, new questions
-   - If the conversation is one continuous topic, return index 0
-
-3. **Summarize prior content** (if any exists before the topic boundary):
-   - Capture key decisions made
-   - Note any important context established
-   - Keep under {summary_budget} tokens
-   - If no prior content, return null
-
-## Input Format
-
-You will receive messages in this format:
-```
-[0] USER: <message>
-[1] ASSISTANT: <message>
-[2] USER: <message>
-...
-```
-
-## Output Format
-
-Respond with JSON only:
-```json
-{
-  "current_topic": "Brief description of what user is currently working on",
-  "topic_start_index": <integer>,
-  "prior_summary": "Summary of content before topic boundary, or null if none",
-  "confidence": <float 0.0-1.0>
-}
-```
-
-## Examples
-
-### Example 1: Clear topic shift
-Input shows user discussing auth module in messages 0-3, then switching to database schema in messages 4-7.
-```json
-{
-  "current_topic": "Designing database schema for user profiles",
-  "topic_start_index": 4,
-  "prior_summary": "Previously discussed auth module: decided to use JWT tokens, implemented login endpoint, added refresh token rotation.",
-  "confidence": 0.95
-}
-```
-
-### Example 2: Continuous single topic
-Input shows ongoing discussion about the same feature throughout.
-```json
-{
-  "current_topic": "Implementing file upload feature",
-  "topic_start_index": 0,
-  "prior_summary": null,
-  "confidence": 0.9
-}
-```
-
-## Guidelines
-
-- Be conservative: if unsure about a topic boundary, prefer keeping more context
-- Focus on what's actionable: decisions, code changes, agreed approaches
-- Ignore small tangents that don't affect the main topic
-- The summary should help an LLM continue the conversation without the original messages
-```
-
-**New file: `ac/history/topic_detector.py`**
+**File: `ac/context/topic_detector.py`**
 
 ```python
 from dataclasses import dataclass
@@ -700,28 +627,82 @@ Result:
 3. **Phase 3:** Enable by default, deprecate old `summarize_history()` in `chat.py`
 4. **Phase 4:** Remove legacy summarization code
 
-## Files to Create
+## Files Created
 
-- `ac/prompts/compaction_skill.md` - Prompt for small model to detect topics and summarize ✅ DONE
-- `ac/context/topic_detector.py` - Topic boundary detection ✅ DONE (note: in context/, not history/)
+- `config/prompts/skills/compaction.md` - Prompt for small model to detect topics and summarize ✅ DONE
+- `ac/context/topic_detector.py` - Topic boundary detection ✅ DONE
 - `ac/history/compactor.py` - Compaction logic ✅ DONE
 - `tests/test_topic_detector.py` - Detection tests ✅ DONE
 - `tests/test_history_compaction.py` - Compaction tests ✅ DONE
 
-## Files to Modify
+## Files Modified
 
 - `ac/context/__init__.py` - Export TopicDetector and TopicBoundaryResult ✅ DONE
 - `ac/context/manager.py` - Integrate compactor, add `compact_history_if_needed()` ✅ DONE
 - `ac/llm/config.py` - Add compaction config loading ✅ DONE
-- `ac-dc.json` - Add history_compaction configuration block ✅ DONE
+- `config/llm.json` - Add history_compaction configuration block ✅ DONE
 - `tests/test_context_manager.py` - Add compaction integration tests ✅ DONE
 - `ac/llm/llm.py` - Pass compaction config to ContextManager ✅ DONE
-- `ac/llm/streaming.py` - Call compaction before streaming, return compaction info ✅ DONE
+- `ac/llm/streaming.py` - Call compaction after streaming, send compaction events to frontend ✅ DONE
 - `ac/llm/chat.py` - Deprecate old `summarize_history()` ✅ DONE
 - `tests/test_llm_history.py` - Add LiteLLM compaction config tests ✅ DONE
-- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, display chat messages ✅ DONE
+- `webapp/src/prompt/StreamingMixin.js` - Handle compaction events, rebuild chat history ✅ DONE
 - `webapp/src/prompt/PromptViewTemplate.js` - Add history token usage to HUD ✅ DONE
 - `webapp/src/prompt/PromptViewStyles.js` - Styles for history indicator states ✅ DONE
+
+## Implementation Notes
+
+### Actual Data Structures (differ slightly from original plan)
+
+**TopicBoundaryResult** (`ac/context/topic_detector.py`):
+```python
+@dataclass
+class TopicBoundaryResult:
+    boundary_index: Optional[int]  # Message index where new topic starts (None = no boundary)
+    boundary_reason: str           # Why this was identified as a boundary
+    confidence: float              # 0.0-1.0 confidence score
+    summary: str                   # Summary of messages before boundary
+    messages_analyzed: int         # How many messages were analyzed
+```
+
+**CompactionResult** (`ac/history/compactor.py`):
+```python
+@dataclass
+class CompactionResult:
+    compacted_messages: list[dict]          # New message list to use
+    summary_message: Optional[dict] = None  # Summary of truncated content (if any)
+    truncated_count: int = 0                # How many messages were removed
+    topic_detected: Optional[str] = None    # What topic boundary was identified
+    boundary_index: Optional[int] = None    # Where the boundary was found
+    confidence: float = 0.0                 # Confidence in the boundary detection
+    tokens_before: int = 0                  # Tokens before compaction
+    tokens_after: int = 0                   # Tokens after compaction
+    case: str = "none"                      # "truncate_only", "summarize", or "none"
+```
+
+### Case Values
+- `truncate_only` - Clear topic boundary found inside verbatim window, just drop old messages
+- `summarize` - No clear boundary, generate summary of old messages + keep verbatim window
+- `none` - No compaction needed
+
+### Async Implementation
+Both `TopicDetector.find_topic_boundary()` and `HistoryCompactor.compact()` are async methods with `_sync` wrapper methods for synchronous callers.
+
+### Configuration
+Located in `config/llm.json` under `history_compaction` key (not `ac-dc.json`):
+```json
+{
+  "history_compaction": {
+    "enabled": true,
+    "compaction_trigger_tokens": 9000,
+    "verbatim_window_tokens": 3000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2
+  }
+}
+```
+
+The `detection_model` is automatically set to `smallerModel` from `llm.json`.
 
 ## History Architecture Clarification
 

@@ -376,7 +376,8 @@ export class PromptView extends MixedBase {
     const historyData = breakdown.breakdown?.history;
     if (historyData) {
       this._hudData.history_tokens = historyData.tokens || 0;
-      this._hudData.history_threshold = historyData.max_tokens || 50000;
+      // Use compaction_threshold (from config) if available, else fall back to max_tokens
+      this._hudData.history_threshold = historyData.compaction_threshold || historyData.max_tokens || 50000;
     }
     
     // Trigger re-render for history bar
@@ -618,6 +619,15 @@ export class PromptView extends MixedBase {
    */
   async streamComplete(requestId, result) {
     await super.streamComplete(requestId, result);
+  }
+
+  /**
+   * Called by server when a compaction event occurs.
+   * Explicitly defined here so JRPC-OO can find it.
+   * Delegates to mixin implementation.
+   */
+  compactionEvent(requestId, event) {
+    super.compactionEvent(requestId, event);
   }
 
   render() {
