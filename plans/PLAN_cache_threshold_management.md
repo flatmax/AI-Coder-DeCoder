@@ -191,3 +191,35 @@ def update_after_response(self, items, get_content, get_tokens, modified) -> dic
 3. **Compute tokens on the fly** - token counting is inexpensive; simplicity over optimization
 4. **All context entries are token-counted** - the LLM doesn't discriminate between files, symbol map entries, or other content; everything contributing to a cache tier counts toward the threshold
 5. **Same multiplier for init and regular operation** - use `cacheBufferMultiplier` consistently; simplicity in first implementation
+
+## Clarifications
+
+### Symbol Map Entry Token Counting
+
+Symbol map entries (prefixed with `symbol:` in the tracker) should have their tokens counted from the **formatted symbol block string**. This is the actual content that will be included in the cache block, computed via `format_file_symbol_block()` in `compact_format.py`.
+
+### Callback Interface for Token Counting
+
+Following the existing pattern of `get_content: Callable[[str], str]`, add a parallel `get_tokens: Callable[[str], int]` callback to `update_after_response()`. The caller in `streaming.py` provides this callback, which:
+- For regular files: returns `token_counter.count(file_content)`
+- For symbol entries: returns `token_counter.count(formatted_symbol_block)`
+
+### Initialization Token Counting
+
+The `initialize_from_refs()` method can and should be threshold-aware. The caller already has access to:
+- `symbols_by_file` - the indexed symbols for each file
+- `format_file_symbol_block()` - to generate the formatted content
+- `token_counter.count()` - to count tokens
+
+The interface changes to accept token counts alongside ref counts:
+
+```python
+def initialize_from_refs(
+    self,
+    files_with_refs: list[tuple[str, int, int]],  # (path, ref_count, tokens)
+    exclude_active: Optional[set[str]] = None,
+    target_tokens: int = 1536,  # cacheMinTokens * multiplier
+) -> dict[str, str]:
+```
+
+This allows initialization to fill tiers top-down (L0 → L1 → L2 → L3) respecting cache thresholds from the very first request.
