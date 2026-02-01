@@ -88,11 +88,13 @@ TEST_HISTORY_SINGLE_TOPIC = [
 
 
 def _get_smaller_model() -> str:
-    """Get the smaller model from llm.json config."""
+    """Get the smaller model from config/llm.json config."""
     import json
     from pathlib import Path
-    
-    llm_json = Path("llm.json")
+
+    # Use absolute path relative to this file to find repo root
+    repo_root = Path(__file__).parent.parent.parent
+    llm_json = repo_root / "config" / "llm.json"
     if llm_json.exists():
         config = json.loads(llm_json.read_text())
         # Try both camelCase (from config) and snake_case

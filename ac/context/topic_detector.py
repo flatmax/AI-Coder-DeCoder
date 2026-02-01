@@ -27,7 +27,9 @@ class TopicBoundaryResult:
 
 def _load_compaction_prompt() -> str:
     """Load the compaction skill prompt."""
-    prompt_path = Path(__file__).parent.parent / "prompts" / "compaction_skill.md"
+    # Look in config/prompts/skills/ from repo root
+    repo_root = Path(__file__).parent.parent.parent
+    prompt_path = repo_root / "config" / "prompts" / "skills" / "compaction.md"
     if prompt_path.exists():
         return prompt_path.read_text()
     

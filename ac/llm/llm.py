@@ -1078,7 +1078,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
     
     def get_prompt_snippets(self):
         """
-        Load prompt snippets from prompt-snippets.json in repo root.
+        Load prompt snippets from config/prompt-snippets.json in repo root.
         
         Returns:
             List of snippet dicts with icon, tooltip, message fields.
@@ -1092,7 +1092,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             from pathlib import Path
             
             repo_root = self.repo.get_repo_root()
-            snippets_path = Path(repo_root) / 'prompt-snippets.json'
+            snippets_path = Path(repo_root) / 'config' / 'prompt-snippets.json'
             
             if not snippets_path.exists():
                 return []
