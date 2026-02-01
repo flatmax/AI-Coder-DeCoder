@@ -66,8 +66,17 @@ class ConfigMixin:
     def get_compaction_config(self) -> dict:
         """Get history compaction configuration."""
         defaults = DEFAULT_COMPACTION_CONFIG.copy()
+        
+        # First check for nested 'history_compaction' section
         config_section = self.config.get('history_compaction', {})
         defaults.update(config_section)
+        
+        # Also check root level for backward compatibility
+        # (allows putting compaction_trigger_tokens directly in llm.json)
+        for key in DEFAULT_COMPACTION_CONFIG.keys():
+            if key in self.config:
+                defaults[key] = self.config[key]
+        
         return defaults
     
     def is_compaction_enabled(self) -> bool:
