@@ -135,7 +135,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       return;
     }
     this.dispatchEvent(new CustomEvent('load-session', {
-      detail: { messages: this.selectedSession },
+      detail: { messages: this.selectedSession, sessionId: this.selectedSessionId },
       bubbles: true,
       composed: true
     }));
