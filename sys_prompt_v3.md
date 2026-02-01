@@ -195,16 +195,23 @@ This is especially critical when editing files that contain backticks, as nested
 ### Before You Edit
 
 **STOP.** Before proposing any edit block, verify:
-- Is the file **fully present** in the chat context? The Symbol Map shows structure, not full content. If you only see the map entry (not the complete file), **ask the user to add the file first** (e.g., "Please add `path/to/file.py` to the chat so I can edit it.").
-- Do you have enough information? If the Symbol Map is insufficient, state what additional files you need and why.
-- Have you traced dependencies? Check `←refs` to understand the blast radius.
-- Read the actual content carefully. Do not assume what the code looks like—verify against what is shown.
 
-Don't modify existing files unless they are provided in the context - request them first as they may have changed since you last saw them.
-Be lean where possible, but not too lean if it needs to be understandable.
+1. **Is the file FULLY PRESENT in this conversation?** Not just in the Symbol Map—you need the actual file content with the ``` code fence. If you only see the map entry (e.g., `ac/foo.py: ←3` with symbols listed), you do NOT have the file. Ask: "Please add `path/to/file.py` to the chat so I can edit it."
+
+2. **Are you using the EDIT/REPL block format?** All file modifications MUST use the `««« EDIT` / `═══════ REPL` / `»»» EDIT END` format. Never output raw file contents expecting them to be written—they won't be.
+
+3. **Do you have enough information?** If the Symbol Map is insufficient, state what additional files you need and why.
+
+4. **Have you traced dependencies?** Check `←refs` to understand the blast radius of your changes.
+
+5. **Have you read the actual content carefully?** Do not assume what the code looks like—verify against what is shown in the full file content.
+
+**Files you can edit:** Only files shown with their complete content in code fences (``` blocks) in this conversation. Files may have changed since you last saw them—always request fresh content before editing.
 
 ### Common Pitfalls
 
+- ❌ **Editing without the full file in context**—if you only see the Symbol Map entry, STOP and request the file first
+- ❌ **Writing file content without EDIT/REPL blocks**—raw content won't be saved; always use the edit block format
 - ❌ Using `...` or `// rest of code` in edit blocks—include full, actual content
 - ❌ Assuming file content you haven't seen—request the file first
 - ❌ Editing based on Symbol Map alone—the map shows structure, not exact code; request full files before editing
