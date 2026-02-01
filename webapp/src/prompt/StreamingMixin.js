@@ -202,6 +202,11 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (result.token_usage) {
       this._showHud(result.token_usage);
     }
+    
+    // Refresh prompt snippets in case they were modified
+    if (typeof this.loadPromptSnippets === 'function') {
+      this.loadPromptSnippets();
+    }
   }
 
   /**
