@@ -22,7 +22,7 @@ class URLConfig:
     @classmethod
     def load(cls, config_path: Optional[str] = None) -> 'URLConfig':
         """
-        Load configuration from ac-dc.json file.
+        Load configuration from config/app.json file.
         
         Args:
             config_path: Optional path to config file.
@@ -32,13 +32,14 @@ class URLConfig:
             URLConfig instance with loaded or default values.
         """
         if config_path is None:
-            # Look for ac-dc.json in the repo root (three levels up from url_handler/config.py)
+            # Look for config/app.json in the repo root (three levels up from url_handler/config.py)
             # Path: ac/url_handler/config.py -> ac/url_handler/ -> ac/ -> repo root
             config_path = os.path.join(
                 os.path.dirname(__file__), 
                 '..', 
                 '..',
-                'ac-dc.json'
+                'config',
+                'app.json'
             )
         
         config_data = {}

@@ -21,7 +21,7 @@ class ConfigMixin:
     
     def _load_config(self, config_path=None):
         """
-        Load configuration from llm.json file.
+        Load configuration from config/llm.json file.
         
         Args:
             config_path: Optional path to config file
@@ -30,9 +30,9 @@ class ConfigMixin:
             Dict with configuration settings
         """
         if config_path is None:
-            # Look for llm.json in the repo root (three levels up from llm/config.py)
+            # Look for config/llm.json in the repo root (three levels up from llm/config.py)
             # Path: ac/llm/config.py -> ac/llm/ -> ac/ -> repo root
-            config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'llm.json')
+            config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'llm.json')
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:

@@ -89,7 +89,7 @@ Then run with `--dev` for hot-reloading during development.
 
 ## Configuration
 
-Create or edit `llm.json` in the repository root to configure your LLM provider:
+Create or edit `config/llm.json` to configure your LLM provider:
 
 **OpenAI:**
 ```json
@@ -128,9 +128,9 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 
 See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
 
-### Application Configuration (ac-dc.json)
+### Application Configuration (config/app.json)
 
-Create or modify `ac-dc.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
+Create or modify `config/app.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
 
 > ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac-dc_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
 
@@ -198,8 +198,15 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 ## Project Structure
 
 ```
-llm.json                # LLM provider configuration (model, API keys)
-ac-dc.json              # Application settings (URL cache, etc.)
+config/                 # All configuration files
+├── llm.json           # LLM provider configuration (model, API keys)
+├── app.json           # Application settings (URL cache, etc.)
+├── prompt-snippets.json # User prompt snippets
+└── prompts/           # System prompts and skills
+    ├── system.md      # Main system prompt
+    ├── system_extra.md # Optional extra prompt content
+    └── skills/        # Skill-specific prompts
+        └── compaction.md # History compaction skill
 
 ac/                     # Python backend
 ├── dc.py              # Main entry point
