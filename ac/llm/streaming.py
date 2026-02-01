@@ -148,12 +148,6 @@ class StreamingMixin:
             model = self.smaller_model if use_smaller_model else self.model
             summarized = False  # History compaction runs post-response
             
-            # Debug: check history at start of _stream_chat
-            if self._context_manager:
-                hist_count = len(self._context_manager.get_history())
-                hist_tokens = self._context_manager.history_token_count()
-                print(f"🔍 _stream_chat START: {hist_count} messages, {hist_tokens} tokens in history")
-            
             # Load files into context manager
             if self._context_manager:
                 self._context_manager.file_context.clear()
@@ -258,9 +252,6 @@ class StreamingMixin:
             # Store in conversation history (context manager is single source of truth)
             if self._context_manager:
                 self._context_manager.add_exchange(user_text, full_content)
-                hist_count = len(self._context_manager.get_history())
-                hist_tokens = self._context_manager.history_token_count()
-                print(f"🔍 After add_exchange: {hist_count} messages, {hist_tokens} tokens in history")
             
             # Update symbol map with current context files
             symbol_map_info = self._auto_save_symbol_map()
@@ -494,18 +485,9 @@ class StreamingMixin:
                     result["token_usage"]["demotions"] = stability.get_last_demotions()
             
             await self._send_stream_complete(request_id, result)
-            print(f"🔍 After _send_stream_complete")
             
             # Run compaction AFTER response is complete (non-blocking for user)
-            # Debug: check history right before compaction
-            if self._context_manager:
-                hist_count = len(self._context_manager.get_history())
-                hist_tokens = self._context_manager.history_token_count()
-                print(f"🔍 Before compaction call: {hist_count} messages, {hist_tokens} tokens, ctx_mgr={id(self._context_manager)}")
-            
-            print(f"🔍 About to call _run_post_response_compaction, self={id(self)}")
             await self._run_post_response_compaction(request_id)
-            print(f"🔍 Returned from _run_post_response_compaction")
             
         except Exception as e:
             import traceback
@@ -1087,27 +1069,21 @@ class StreamingMixin:
 
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
-        print(f"🔍 _send_stream_complete: starting")
         try:
             # Small delay to ensure final streamChunk is delivered first
             await asyncio.sleep(0.05)
-            print(f"🔍 _send_stream_complete: after sleep, getting call")
             if hasattr(self, 'get_call'):
                 call = self.get_call()
-                print(f"🔍 _send_stream_complete: got call, has streamComplete: {'PromptView.streamComplete' in call if call else 'no call'}")
                 if call and 'PromptView.streamComplete' in call:
-                    print(f"🔍 _send_stream_complete: calling streamComplete")
                     # Fire-and-forget: don't await since frontend doesn't return a value
                     # and awaiting can hang if the connection is in a bad state
                     asyncio.create_task(call['PromptView.streamComplete'](request_id, result))
                     # Give it a moment to send
                     await asyncio.sleep(0.1)
-                    print(f"🔍 _send_stream_complete: streamComplete fired")
         except Exception as e:
             print(f"Error sending stream complete: {e}")
             import traceback
             traceback.print_exc()
-        print(f"🔍 _send_stream_complete: done")
 
     async def _run_post_response_compaction(self, request_id):
         """
@@ -1117,46 +1093,18 @@ class StreamingMixin:
         their response, so it doesn't block the main request. The compacted
         history will benefit the next request.
         """
-        print(f"🔍 _run_post_response_compaction called with request_id={request_id}, self={id(self)}")
-        
         if not self._context_manager:
-            print("🔍 Compaction: no context manager")
             return
         
-        print(f"🔍 In compaction: ctx_mgr={id(self._context_manager)}")
-        
-        # Debug logging
-        history_tokens = self._context_manager.history_token_count()
-        history_len = len(self._context_manager.get_history())
-        compaction_enabled = self.is_compaction_enabled() if hasattr(self, 'is_compaction_enabled') else 'unknown'
-        compaction_config = self.get_compaction_config() if hasattr(self, 'get_compaction_config') else {}
-        trigger_threshold = compaction_config.get('compaction_trigger_tokens', 6000)
-        
-        print(f"🔍 Compaction check: {history_tokens} tokens ({history_len} messages), threshold={trigger_threshold}, enabled={compaction_enabled}")
-        
-        # Debug: print actual history content length
-        history = self._context_manager.get_history()
-        for i, msg in enumerate(history):
-            content = msg.get('content', '')
-            print(f"🔍   msg[{i}] {msg.get('role', '?')}: {len(content)} chars")
-        
-        should = self._context_manager.should_compact()
-        print(f"🔍 should_compact() = {should}")
-        
-        if not should:
-            print(f"🔍 Compaction: not needed (tokens={history_tokens}, threshold={trigger_threshold})")
+        if not self._context_manager.should_compact():
             return
-        
-        print(f"🔍 Compaction: STARTING compaction (tokens={history_tokens} > threshold={trigger_threshold})")
         
         try:
             # Notify frontend that compaction is starting
-            print(f"🔍 Compaction: sending compaction_start event")
             await self._send_compaction_event(request_id, {
                 'type': 'compaction_start',
                 'message': '🗜️ Compacting history...'
             }, asyncio.get_running_loop())
-            print(f"🔍 Compaction: compaction_start event sent")
             
             # Run compaction in executor to not block the event loop
             loop = asyncio.get_running_loop()
