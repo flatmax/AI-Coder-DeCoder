@@ -91,8 +91,11 @@ export class AppShell extends LitElement {
   }
 
   async _loadFileIntoDiff(file, replace = true) {
+    // Normalize undefined to true (default behavior)
+    const shouldReplace = replace !== false;
+    
     const existing = this.diffFiles.find(f => f.path === file);
-    if (existing && !replace) {
+    if (existing && !shouldReplace) {
       return true; // Already loaded
     }
     
@@ -115,7 +118,7 @@ export class AppShell extends LitElement {
           isReadOnly: true
         };
         
-        if (replace) {
+        if (shouldReplace) {
           // Replace all files with just this one (LSP navigation mode)
           this.diffFiles = [newFile];
         } else {
