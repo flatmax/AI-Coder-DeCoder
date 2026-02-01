@@ -8,30 +8,11 @@ from tree_sitter import Language, Parser
 from typing import Optional
 from pathlib import Path
 
+from .extensions import EXTENSION_TO_LANGUAGE
+
 
 class TreeSitterParser:
     """Wraps tree-sitter with lazy grammar loading."""
-    
-    # Extension to language mapping
-    EXTENSION_MAP = {
-        '.py': 'python',
-        '.js': 'javascript',
-        '.mjs': 'javascript',
-        '.jsx': 'javascript',
-        '.ts': 'typescript',
-        '.tsx': 'tsx',
-        '.cpp': 'cpp',
-        '.cc': 'cpp',
-        '.cxx': 'cpp',
-        '.c++': 'cpp',
-        '.C': 'cpp',
-        '.hpp': 'cpp',
-        '.hh': 'cpp',
-        '.hxx': 'cpp',
-        '.h++': 'cpp',
-        '.H': 'cpp',
-        '.h': 'cpp',  # Could be C or C++, defaulting to C++
-    }
     
     def __init__(self):
         self._languages: dict[str, Language] = {}
@@ -73,8 +54,12 @@ class TreeSitterParser:
     
     def get_language_for_file(self, file_path: str) -> Optional[str]:
         """Determine language from file extension."""
-        ext = Path(file_path).suffix.lower()
-        return self.EXTENSION_MAP.get(ext)
+        path = Path(file_path)
+        ext = path.suffix
+        # Handle case-sensitive .C for C++
+        if ext == '.C':
+            return 'cpp'
+        return EXTENSION_TO_LANGUAGE.get(ext.lower())
     
     def parse_file(self, file_path: str, content: Optional[str] = None):
         """Parse a file and return the tree-sitter tree.

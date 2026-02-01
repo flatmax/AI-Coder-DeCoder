@@ -14,6 +14,12 @@ Implements a "ripple promotion" policy where:
 Each tier's computation is independent - it only depends on direct entries to that tier.
 This ensures stable files gradually move to higher cache tiers while keeping
 the promotion logic predictable and testable.
+
+With threshold-aware promotion:
+- Tiers must meet a minimum token count before veterans can promote
+- Low-N veterans "anchor" tiers by filling the cache threshold
+- Once threshold is met, remaining veterans can progress toward higher tiers
+- This ensures cache blocks meet provider minimums (e.g., 1024 tokens for Anthropic)
 """
 
 import hashlib
@@ -61,6 +67,11 @@ class StabilityTracker:
     - If no promotions occur in a tier, higher tiers remain unchanged
     - Edited items reset to N=0 and return to Active
     
+    With threshold-aware promotion:
+    - Tiers must accumulate enough tokens before veterans can promote
+    - Low-N veterans "anchor" tiers by filling the cache threshold
+    - Once threshold is met, remaining veterans can get N++ and potentially promote
+    
     Tiers (Bedrock 4-cache-block optimized):
     - L0: Most stable content (N >= 12), cached first
     - L1: Very stable (N >= 9), cached second
@@ -77,7 +88,8 @@ class StabilityTracker:
         l0_threshold: int = 5,
         reorg_interval: int = 10,
         reorg_drift_threshold: float = 0.2,
-        initial_tier: str = 'L3'
+        initial_tier: str = 'L3',
+        cache_target_tokens: int = 0,
     ):
         """
         Initialize stability tracker.
@@ -91,6 +103,8 @@ class StabilityTracker:
             reorg_interval: Unused in ripple mode (kept for API compatibility)
             reorg_drift_threshold: Unused in ripple mode (kept for API compatibility)
             initial_tier: Starting tier for new items (default: 'L3')
+            cache_target_tokens: Target tokens per cache block (0 = disabled).
+                                Veterans below this threshold anchor the tier.
         """
         self._persistence_path = Path(persistence_path)
         
@@ -108,6 +122,7 @@ class StabilityTracker:
         )
         
         self._initial_tier = initial_tier
+        self._cache_target_tokens = cache_target_tokens
         
         self._stability: dict[str, StabilityInfo] = {}
         self._response_count: int = 0
@@ -129,22 +144,27 @@ class StabilityTracker:
         self,
         items: list[str],
         get_content: Callable[[str], str],
-        modified: list[str] = None
+        modified: list[str] = None,
+        get_tokens: Callable[[str], int] = None,
     ) -> dict[str, str]:
         """
         Update stability tracking after an assistant response.
         
-        Implements ripple promotion:
+        Implements ripple promotion with optional threshold-aware behavior:
         1. Items in Active context stay active (N=0)
         2. Items leaving Active enter L3 with N=3
         3. Modified cached items return to Active with N=0
-        4. Items entering a tier trigger N++ for existing items in that tier
-        5. Promotions cascade through tiers
+        4. Items entering a tier trigger processing for existing items
+        5. With cache_target_tokens > 0: low-N veterans anchor tiers,
+           only veterans past the threshold get N++ and can promote
+        6. Promotions cascade through tiers
         
         Args:
             items: All items currently in Active context
             get_content: Function to get content for an item (for hash computation)
             modified: Items known to be modified this round
+            get_tokens: Optional function to get token count for an item.
+                       Required if cache_target_tokens > 0 for threshold-aware promotion.
         
         Returns:
             Dict mapping items to their new tiers (only changed items)
@@ -216,7 +236,7 @@ class StabilityTracker:
         
         # Process all items entering L3 as a batch (triggers ripple promotions)
         if items_entering_l3:
-            self._process_tier_entries(items_entering_l3, 'L3', tier_changes)
+            self._process_tier_entries(items_entering_l3, 'L3', tier_changes, get_tokens)
         
         # Update tracking for next round
         self._last_active_items = current_active.copy()
@@ -228,17 +248,23 @@ class StabilityTracker:
         self,
         initial_entering_items: list[str],
         initial_tier: str,
-        tier_changes: dict[str, str]
+        tier_changes: dict[str, str],
+        get_tokens: Callable[[str], int] = None,
     ) -> None:
         """
         Process items entering cache tiers with ripple promotion.
         
         Ripple promotion is computed independently per tier:
         1. Items entering a tier get that tier's entry_n value
-        2. Veterans (items already in that tier) get N++ once per cycle
-        3. If any veteran reaches promotion_threshold, they promote to the next tier
-        4. Promoted items become direct entries for the next tier
-        5. If no promotions occur, higher tiers remain unchanged
+        2. With threshold-aware mode (cache_target_tokens > 0):
+           a. Accumulate tokens from entering items
+           b. Sort veterans by N ascending (lowest first)
+           c. Veterans below token threshold anchor the tier (no N++)
+           d. Veterans past threshold get N++ and can promote
+        3. Without threshold mode: all veterans get N++ once per cycle
+        4. If any veteran reaches promotion_threshold, they promote to the next tier
+        5. Promoted items become direct entries for the next tier
+        6. If no promotions occur, higher tiers remain unchanged
         
         Each tier's computation depends only on direct entries to that tier,
         not on activity in other tiers.
@@ -247,6 +273,7 @@ class StabilityTracker:
             initial_entering_items: Items initially entering (from Active leaving or threshold)
             initial_tier: The first tier being entered (typically 'L3')
             tier_changes: Dict to record tier changes (mutated)
+            get_tokens: Optional function to get token count for items
         """
         if not initial_entering_items or initial_tier not in TIER_CONFIG:
             return
@@ -267,6 +294,7 @@ class StabilityTracker:
             ]
             
             # Move all entering items to this tier with entry_n
+            accumulated_tokens = 0
             for item in entering_items:
                 if item not in self._stability:
                     continue
@@ -278,16 +306,49 @@ class StabilityTracker:
                 tier_changes[item] = current_tier
                 if self._is_promotion(old_tier, current_tier):
                     self._last_promotions.append((item, current_tier))
-            
-            # Veterans get N++ once per cycle (only if there are direct entries)
-            items_to_promote = []
-            for veteran_item in veterans_in_tier:
-                veteran_info = self._stability[veteran_item]
-                veteran_info.n_value += 1
                 
-                # Check if this veteran should promote
-                if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
-                    items_to_promote.append(veteran_item)
+                # Accumulate tokens from entering items
+                if get_tokens and self._cache_target_tokens > 0:
+                    try:
+                        accumulated_tokens += get_tokens(item)
+                    except Exception:
+                        pass
+            
+            # Process veterans with threshold-aware logic
+            items_to_promote = []
+            
+            if self._cache_target_tokens > 0 and get_tokens:
+                # Threshold-aware mode: sort veterans by N ascending (lowest first)
+                # Low-N veterans anchor the tier, high-N veterans can promote
+                veterans_sorted = sorted(
+                    veterans_in_tier,
+                    key=lambda x: self._stability[x].n_value
+                )
+                
+                for veteran_item in veterans_sorted:
+                    veteran_info = self._stability[veteran_item]
+                    
+                    if accumulated_tokens < self._cache_target_tokens:
+                        # Below threshold: veteran anchors tier (no N++)
+                        try:
+                            accumulated_tokens += get_tokens(veteran_item)
+                        except Exception:
+                            pass
+                        # No N++ for anchoring veterans
+                    else:
+                        # Threshold met: veteran gets N++ and can potentially promote
+                        veteran_info.n_value += 1
+                        
+                        if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
+                            items_to_promote.append(veteran_item)
+            else:
+                # Original behavior: all veterans get N++ once per cycle
+                for veteran_item in veterans_in_tier:
+                    veteran_info = self._stability[veteran_item]
+                    veteran_info.n_value += 1
+                    
+                    if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
+                        items_to_promote.append(veteran_item)
             
             # Promoted veterans become direct entries for the next tier
             entering_items = items_to_promote
@@ -440,14 +501,23 @@ class StabilityTracker:
     
     def initialize_from_refs(
         self,
-        files_with_refs: list[tuple[str, int]],
-        exclude_active: Optional[set[str]] = None
+        files_with_refs: list[tuple[str, int]] | list[tuple[str, int, int]],
+        exclude_active: Optional[set[str]] = None,
+        target_tokens: Optional[int] = None,
     ) -> dict[str, str]:
         """
         Initialize tier placement based on reference counts (heuristic).
         
         Only runs if stability data is empty (fresh start). Uses ←refs counts
-        to distribute files across tiers based on structural importance:
+        to distribute files across tiers based on structural importance.
+        
+        With threshold-aware mode (target_tokens provided and files have token counts):
+        - Fill tiers top-down (L0 → L1 → L2 → L3) until each meets target_tokens
+        - Files are sorted by ref count descending (most referenced first)
+        - Each tier fills to threshold before moving to the next
+        - L3 absorbs all remaining files
+        
+        Without threshold mode (legacy behavior):
         - Top 20% by refs → L1 (N=9) - core/central files
         - Next 30% → L2 (N=6) - moderately referenced
         - Bottom 50% → L3 (N=3) - leaf files, tests, utilities
@@ -455,8 +525,10 @@ class StabilityTracker:
         L0 is never assigned heuristically - must be earned through stability.
         
         Args:
-            files_with_refs: List of (file_path, ref_count) tuples, need not be sorted
+            files_with_refs: List of (file_path, ref_count) or (file_path, ref_count, tokens) tuples
             exclude_active: Files currently in Active context (will be skipped)
+            target_tokens: Target tokens per tier for threshold-aware initialization.
+                          If None, uses self._cache_target_tokens. If 0, uses legacy behavior.
         
         Returns:
             Dict mapping file paths to their assigned tiers
@@ -470,38 +542,77 @@ class StabilityTracker:
         
         exclude = exclude_active or set()
         
+        # Determine target tokens
+        effective_target = target_tokens if target_tokens is not None else self._cache_target_tokens
+        
+        # Check if we have token information (3-tuples)
+        has_tokens = len(files_with_refs[0]) >= 3 if files_with_refs else False
+        
         # Sort by ref count descending
         sorted_files = sorted(files_with_refs, key=lambda x: x[1], reverse=True)
         
         # Filter out active files
-        sorted_files = [(f, r) for f, r in sorted_files if f not in exclude]
+        if has_tokens:
+            sorted_files = [(f, r, t) for f, r, t in sorted_files if f not in exclude]
+        else:
+            sorted_files = [(f, r) for f, r in sorted_files if f not in exclude]
         
         if not sorted_files:
             return {}
         
-        total = len(sorted_files)
-        top_20_cutoff = total // 5
-        top_50_cutoff = total // 2
-        
         tier_assignments = {}
         
-        for i, (file_path, ref_count) in enumerate(sorted_files):
-            if i < top_20_cutoff:
-                tier, n_value = 'L1', 9
-            elif i < top_50_cutoff:
-                tier, n_value = 'L2', 6
-            else:
-                tier, n_value = 'L3', 3
+        # Threshold-aware initialization
+        if effective_target > 0 and has_tokens:
+            # Fill tiers top-down: L1 → L2 → L3 (skip L0 - must be earned)
+            tier_order = ['L1', 'L2', 'L3']
+            tier_n_values = {'L1': 9, 'L2': 6, 'L3': 3}
             
-            # Compute a placeholder hash - will be updated on first real access
-            content_hash = f"heuristic:{file_path}"
+            file_index = 0
+            for tier in tier_order:
+                tier_tokens = 0
+                n_value = tier_n_values[tier]
+                
+                while file_index < len(sorted_files):
+                    file_path, ref_count, tokens = sorted_files[file_index]
+                    
+                    # Add file to this tier
+                    content_hash = f"heuristic:{file_path}"
+                    self._stability[file_path] = StabilityInfo(
+                        content_hash=content_hash,
+                        n_value=n_value,
+                        tier=tier
+                    )
+                    tier_assignments[file_path] = tier
+                    tier_tokens += tokens
+                    file_index += 1
+                    
+                    # Check if tier meets threshold (except L3 which absorbs all remaining)
+                    if tier != 'L3' and tier_tokens >= effective_target:
+                        break
+        else:
+            # Legacy percentile-based initialization
+            total = len(sorted_files)
+            top_20_cutoff = total // 5
+            top_50_cutoff = total // 2
             
-            self._stability[file_path] = StabilityInfo(
-                content_hash=content_hash,
-                n_value=n_value,
-                tier=tier
-            )
-            tier_assignments[file_path] = tier
+            for i, item in enumerate(sorted_files):
+                file_path = item[0]
+                
+                if i < top_20_cutoff:
+                    tier, n_value = 'L1', 9
+                elif i < top_50_cutoff:
+                    tier, n_value = 'L2', 6
+                else:
+                    tier, n_value = 'L3', 3
+                
+                content_hash = f"heuristic:{file_path}"
+                self._stability[file_path] = StabilityInfo(
+                    content_hash=content_hash,
+                    n_value=n_value,
+                    tier=tier
+                )
+                tier_assignments[file_path] = tier
         
         self.save()
         return tier_assignments
@@ -543,6 +654,22 @@ class StabilityTracker:
             Dict mapping tier names to entry N values
         """
         return self._thresholds.copy()
+    
+    def get_cache_target_tokens(self) -> int:
+        """Get the cache target tokens threshold.
+        
+        Returns:
+            Target tokens per cache block, or 0 if disabled
+        """
+        return self._cache_target_tokens
+    
+    def set_cache_target_tokens(self, target: int) -> None:
+        """Set the cache target tokens threshold.
+        
+        Args:
+            target: Target tokens per cache block, or 0 to disable
+        """
+        self._cache_target_tokens = target
     
     def get_tier_order(self) -> list[str]:
         """Get tiers in ascending threshold order.

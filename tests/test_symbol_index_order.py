@@ -1,4 +1,7 @@
-"""Tests for symbol map stable ordering (prefix cache optimization)."""
+"""Tests for symbol map stable ordering (prefix cache optimization).
+
+Note: make_symbol and make_call_site fixtures are defined in conftest.py
+"""
 
 import json
 import pytest
@@ -138,23 +141,12 @@ class TestGetOrderedFiles:
 class TestCompactFormatFileOrder:
     """Test that compact format respects file_order parameter."""
     
-    def _make_symbol(self, name, line=1):
-        """Helper to create a simple symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind="function",
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-        )
-    
-    def test_uses_provided_order(self):
+    def test_uses_provided_order(self, make_symbol):
         """to_compact uses file_order when provided."""
         symbols_by_file = {
-            "c.py": [self._make_symbol("c_func")],
-            "a.py": [self._make_symbol("a_func")],
-            "b.py": [self._make_symbol("b_func")],
+            "c.py": [make_symbol("c_func")],
+            "a.py": [make_symbol("a_func")],
+            "b.py": [make_symbol("b_func")],
         }
         
         result = to_compact(
@@ -168,12 +160,12 @@ class TestCompactFormatFileOrder:
         
         assert file_lines == ["b.py:", "c.py:", "a.py:"]
     
-    def test_falls_back_to_sorted_without_order(self):
+    def test_falls_back_to_sorted_without_order(self, make_symbol):
         """to_compact sorts alphabetically when file_order is None."""
         symbols_by_file = {
-            "c.py": [self._make_symbol("c_func")],
-            "a.py": [self._make_symbol("a_func")],
-            "b.py": [self._make_symbol("b_func")],
+            "c.py": [make_symbol("c_func")],
+            "a.py": [make_symbol("a_func")],
+            "b.py": [make_symbol("b_func")],
         }
         
         result = to_compact(
@@ -187,11 +179,11 @@ class TestCompactFormatFileOrder:
         
         assert file_lines == ["a.py:", "b.py:", "c.py:"]
     
-    def test_filters_order_to_available_files(self):
+    def test_filters_order_to_available_files(self, make_symbol):
         """Files in file_order but not in symbols_by_file are skipped."""
         symbols_by_file = {
-            "a.py": [self._make_symbol("a_func")],
-            "b.py": [self._make_symbol("b_func")],
+            "a.py": [make_symbol("a_func")],
+            "b.py": [make_symbol("b_func")],
         }
         
         result = to_compact(
@@ -234,24 +226,12 @@ class TestIsTestFile:
 class TestTestFileCollapsing:
     """Test that test files are collapsed to summaries."""
     
-    def _make_symbol(self, name, kind="function", line=1, children=None):
-        """Helper to create a symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind=kind,
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-            children=children or [],
-        )
-    
-    def test_collapsed_test_file_shows_counts(self):
+    def test_collapsed_test_file_shows_counts(self, make_symbol):
         """Collapsed test file should show class/method counts."""
-        test_class = self._make_symbol("TestFoo", kind="class", children=[
-            self._make_symbol("test_one", kind="method"),
-            self._make_symbol("test_two", kind="method"),
-            self._make_symbol("test_three", kind="method"),
+        test_class = make_symbol("TestFoo", kind="class", children=[
+            make_symbol("test_one", kind="method"),
+            make_symbol("test_two", kind="method"),
+            make_symbol("test_three", kind="method"),
         ])
         symbols = [test_class]
         
@@ -261,9 +241,9 @@ class TestTestFileCollapsing:
         assert "tests/test_foo.py:" in content
         assert "1c/3m" in content  # 1 class, 3 methods
     
-    def test_collapsed_test_file_shows_imports(self):
+    def test_collapsed_test_file_shows_imports(self, make_symbol):
         """Collapsed test file should still show imports."""
-        import_sym = self._make_symbol("import pytest", kind="import")
+        import_sym = make_symbol("import pytest", kind="import")
         symbols = [import_sym]
         
         lines = _format_collapsed_test_file("tests/test_foo.py", symbols, None)
@@ -283,11 +263,11 @@ class TestTestFileCollapsing:
         assert "ac/bar.py" in content
         assert "ac/foo.py" in content
     
-    def test_collapsed_test_file_shows_fixtures(self):
+    def test_collapsed_test_file_shows_fixtures(self, make_symbol):
         """Collapsed test file should show fixture functions."""
         symbols = [
-            self._make_symbol("my_fixture", kind="function"),
-            self._make_symbol("test_something", kind="function"),
+            make_symbol("my_fixture", kind="function"),
+            make_symbol("test_something", kind="function"),
         ]
         
         lines = _format_collapsed_test_file("tests/test_foo.py", symbols, None)
@@ -296,11 +276,11 @@ class TestTestFileCollapsing:
         assert "fixtures:my_fixture" in content
         assert "1f" in content  # 1 test function
     
-    def test_to_compact_collapses_test_files(self):
+    def test_to_compact_collapses_test_files(self, make_symbol):
         """to_compact should collapse test files by default."""
-        test_class = self._make_symbol("TestFoo", kind="class", children=[
-            self._make_symbol("test_one", kind="method"),
-            self._make_symbol("test_two", kind="method"),
+        test_class = make_symbol("TestFoo", kind="class", children=[
+            make_symbol("test_one", kind="method"),
+            make_symbol("test_two", kind="method"),
         ])
         symbols_by_file = {
             "tests/test_foo.py": [test_class],
@@ -313,11 +293,11 @@ class TestTestFileCollapsing:
         assert "test_one" not in result
         assert "test_two" not in result
     
-    def test_to_compact_collapse_tests_false(self):
+    def test_to_compact_collapse_tests_false(self, make_symbol):
         """collapse_tests=False should show full test details."""
-        test_class = self._make_symbol("TestFoo", kind="class", children=[
-            self._make_symbol("test_one", kind="method"),
-            self._make_symbol("test_two", kind="method"),
+        test_class = make_symbol("TestFoo", kind="class", children=[
+            make_symbol("test_one", kind="method"),
+            make_symbol("test_two", kind="method"),
         ])
         symbols_by_file = {
             "tests/test_foo.py": [test_class],
@@ -334,21 +314,10 @@ class TestTestFileCollapsing:
 class TestFileWeight:
     """Test that file headers show reference weight."""
     
-    def _make_symbol(self, name, line=1):
-        """Helper to create a simple symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind="function",
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-        )
-    
-    def test_file_weight_shown_when_referenced(self):
+    def test_file_weight_shown_when_referenced(self, make_symbol):
         """Files with references should show ←N in header."""
         symbols_by_file = {
-            "src/foo.py": [self._make_symbol("func")],
+            "src/foo.py": [make_symbol("func")],
         }
         file_refs = {
             "src/foo.py": {"bar.py", "baz.py", "qux.py"},
@@ -363,10 +332,10 @@ class TestFileWeight:
         
         assert "src/foo.py: ←3" in result
     
-    def test_file_weight_not_shown_when_zero(self):
+    def test_file_weight_not_shown_when_zero(self, make_symbol):
         """Files with no references should not show ←N."""
         symbols_by_file = {
-            "src/foo.py": [self._make_symbol("func")],
+            "src/foo.py": [make_symbol("func")],
         }
         
         result = to_compact(
@@ -403,24 +372,13 @@ class TestSymbolIndexToCompactOrdering:
 class TestToCompactChunked:
     """Test the chunked compact format generation."""
     
-    def _make_symbol(self, name, line=1):
-        """Helper to create a simple symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind="function",
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-        )
-    
-    def test_single_chunk_when_small(self):
+    def test_single_chunk_when_small(self, make_symbol):
         """Small symbol maps should return a single chunk."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            "a.py": [self._make_symbol("foo")],
-            "b.py": [self._make_symbol("bar")],
+            "a.py": [make_symbol("foo")],
+            "b.py": [make_symbol("bar")],
         }
         
         chunks = to_compact_chunked(
@@ -433,7 +391,7 @@ class TestToCompactChunked:
         assert "a.py:" in chunks[0]
         assert "b.py:" in chunks[0]
     
-    def test_multiple_chunks_when_large(self):
+    def test_multiple_chunks_when_large(self, make_symbol):
         """Large symbol maps should be split into multiple chunks."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
@@ -443,7 +401,7 @@ class TestToCompactChunked:
             file_name = f"file_{i:02d}.py"
             # Each file has several symbols to make it substantial
             symbols_by_file[file_name] = [
-                self._make_symbol(f"function_{j}_with_a_long_name", line=j*10)
+                make_symbol(f"function_{j}_with_a_long_name", line=j*10)
                 for j in range(10)
             ]
         
@@ -461,14 +419,14 @@ class TestToCompactChunked:
         for chunk in chunks[1:]:
             assert "# c=class" not in chunk
     
-    def test_respects_file_order(self):
+    def test_respects_file_order(self, make_symbol):
         """Chunks should respect the provided file order."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            "c.py": [self._make_symbol("c_func")],
-            "a.py": [self._make_symbol("a_func")],
-            "b.py": [self._make_symbol("b_func")],
+            "c.py": [make_symbol("c_func")],
+            "a.py": [make_symbol("a_func")],
+            "b.py": [make_symbol("b_func")],
         }
         
         chunks = to_compact_chunked(
@@ -489,15 +447,15 @@ class TestToCompactChunked:
         
         assert b_pos < c_pos < a_pos
     
-    def test_chunk_boundaries_at_file_boundaries(self):
+    def test_chunk_boundaries_at_file_boundaries(self, make_symbol):
         """Chunks should break at file boundaries, not mid-file."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         # Create files of varying sizes
         symbols_by_file = {
-            "small.py": [self._make_symbol("tiny")],
-            "medium.py": [self._make_symbol(f"func_{i}") for i in range(5)],
-            "large.py": [self._make_symbol(f"big_func_{i}") for i in range(20)],
+            "small.py": [make_symbol("tiny")],
+            "medium.py": [make_symbol(f"func_{i}") for i in range(5)],
+            "large.py": [make_symbol(f"big_func_{i}") for i in range(20)],
         }
         
         chunks = to_compact_chunked(
@@ -523,12 +481,12 @@ class TestToCompactChunked:
         chunks = to_compact_chunked({}, min_chunk_tokens=1024)
         assert chunks == []
     
-    def test_min_chunk_zero_no_splitting(self):
+    def test_min_chunk_zero_no_splitting(self, make_symbol):
         """min_chunk_tokens=0 should not split at all."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -541,12 +499,12 @@ class TestToCompactChunked:
         # Should be single chunk
         assert len(chunks) == 1
     
-    def test_num_chunks_splits_evenly(self):
+    def test_num_chunks_splits_evenly(self, make_symbol):
         """num_chunks should split into exactly that many chunks."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -563,13 +521,13 @@ class TestToCompactChunked:
         for i in range(10):
             assert f"file_{i}.py:" in all_content
     
-    def test_num_chunks_with_uneven_files(self):
+    def test_num_chunks_with_uneven_files(self, make_symbol):
         """num_chunks should handle uneven file distribution."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         # 7 files into 3 chunks: should be 2, 2, 3 (extras go to later chunks)
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(7)
         }
         
@@ -587,12 +545,12 @@ class TestToCompactChunked:
             # Each chunk should have at least 2 files
             assert len(file_headers) >= 2
     
-    def test_num_chunks_puts_newer_files_last(self):
+    def test_num_chunks_puts_newer_files_last(self, make_symbol):
         """Later chunks should contain files added later (for cache optimization)."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -611,12 +569,12 @@ class TestToCompactChunked:
         # file_0.py should be in the first chunk
         assert "file_0.py:" in chunks[0]
     
-    def test_num_chunks_includes_legend_in_first(self):
+    def test_num_chunks_includes_legend_in_first(self, make_symbol):
         """Legend should only appear in first chunk when num_chunks used."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -630,12 +588,12 @@ class TestToCompactChunked:
         for chunk in chunks[1:]:
             assert "# c=class" not in chunk
     
-    def test_return_metadata_includes_file_lists(self):
+    def test_return_metadata_includes_file_lists(self, make_symbol):
         """return_metadata=True should include files in each chunk."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -664,12 +622,12 @@ class TestToCompactChunked:
         assert len(all_files) == 10
         assert set(all_files) == {f"file_{i}.py" for i in range(10)}
     
-    def test_return_metadata_cached_flag(self):
+    def test_return_metadata_cached_flag(self, make_symbol):
         """First 3 chunks should be marked cached, rest uncached."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            f"file_{i}.py": [self._make_symbol(f"func_{i}")]
+            f"file_{i}.py": [make_symbol(f"func_{i}")]
             for i in range(10)
         }
         
@@ -686,13 +644,13 @@ class TestToCompactChunked:
         assert chunks[3]['cached'] is False
         assert chunks[4]['cached'] is False
     
-    def test_num_chunks_more_than_files(self):
+    def test_num_chunks_more_than_files(self, make_symbol):
         """num_chunks > file count should create fewer chunks."""
         from ac.symbol_index.compact_format import to_compact_chunked
         
         symbols_by_file = {
-            "a.py": [self._make_symbol("foo")],
-            "b.py": [self._make_symbol("bar")],
+            "a.py": [make_symbol("foo")],
+            "b.py": [make_symbol("bar")],
         }
         
         chunks = to_compact_chunked(
@@ -709,81 +667,68 @@ class TestToCompactChunked:
 class TestComputeFileBlockHash:
     """Test the compute_file_block_hash function."""
     
-    def _make_symbol(self, name, kind="function", line=1, children=None, parameters=None):
-        """Helper to create a symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind=kind,
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-            children=children or [],
-            parameters=parameters or [],
-        )
-    
-    def test_hash_is_deterministic(self):
+    def test_hash_is_deterministic(self, make_symbol):
         """Same inputs should produce same hash."""
-        symbols = [self._make_symbol("foo", line=10)]
+        symbols = [make_symbol("foo", line=10)]
         
         hash1 = compute_file_block_hash("test.py", symbols)
         hash2 = compute_file_block_hash("test.py", symbols)
         
         assert hash1 == hash2
     
-    def test_hash_changes_with_file_path(self):
+    def test_hash_changes_with_file_path(self, make_symbol):
         """Different file paths should produce different hashes."""
-        symbols = [self._make_symbol("foo")]
+        symbols = [make_symbol("foo")]
         
         hash1 = compute_file_block_hash("a.py", symbols)
         hash2 = compute_file_block_hash("b.py", symbols)
         
         assert hash1 != hash2
     
-    def test_hash_changes_with_symbol_name(self):
+    def test_hash_changes_with_symbol_name(self, make_symbol):
         """Different symbol names should produce different hashes."""
-        symbols1 = [self._make_symbol("foo")]
-        symbols2 = [self._make_symbol("bar")]
+        symbols1 = [make_symbol("foo")]
+        symbols2 = [make_symbol("bar")]
         
         hash1 = compute_file_block_hash("test.py", symbols1)
         hash2 = compute_file_block_hash("test.py", symbols2)
         
         assert hash1 != hash2
     
-    def test_hash_changes_with_line_number(self):
+    def test_hash_changes_with_line_number(self, make_symbol):
         """Different line numbers should produce different hashes."""
-        symbols1 = [self._make_symbol("foo", line=10)]
-        symbols2 = [self._make_symbol("foo", line=20)]
+        symbols1 = [make_symbol("foo", line=10)]
+        symbols2 = [make_symbol("foo", line=20)]
         
         hash1 = compute_file_block_hash("test.py", symbols1)
         hash2 = compute_file_block_hash("test.py", symbols2)
         
         assert hash1 != hash2
     
-    def test_hash_changes_with_kind(self):
+    def test_hash_changes_with_kind(self, make_symbol):
         """Different kinds should produce different hashes."""
-        symbols1 = [self._make_symbol("foo", kind="function")]
-        symbols2 = [self._make_symbol("foo", kind="method")]
+        symbols1 = [make_symbol("foo", kind="function")]
+        symbols2 = [make_symbol("foo", kind="method")]
         
         hash1 = compute_file_block_hash("test.py", symbols1)
         hash2 = compute_file_block_hash("test.py", symbols2)
         
         assert hash1 != hash2
     
-    def test_hash_includes_children(self):
+    def test_hash_includes_children(self, make_symbol):
         """Hash should include child symbols."""
-        child = self._make_symbol("method", kind="method", line=15)
-        symbols1 = [self._make_symbol("Class", kind="class", children=[])]
-        symbols2 = [self._make_symbol("Class", kind="class", children=[child])]
+        child = make_symbol("method", kind="method", line=15)
+        symbols1 = [make_symbol("Class", kind="class", children=[])]
+        symbols2 = [make_symbol("Class", kind="class", children=[child])]
         
         hash1 = compute_file_block_hash("test.py", symbols1)
         hash2 = compute_file_block_hash("test.py", symbols2)
         
         assert hash1 != hash2
     
-    def test_hash_is_compact(self):
+    def test_hash_is_compact(self, make_symbol):
         """Hash should be 16 characters (truncated SHA256)."""
-        symbols = [self._make_symbol("foo")]
+        symbols = [make_symbol("foo")]
         
         hash_val = compute_file_block_hash("test.py", symbols)
         
@@ -825,46 +770,34 @@ class TestGetLegend:
 class TestFormatFileSymbolBlock:
     """Test the format_file_symbol_block function."""
     
-    def _make_symbol(self, name, kind="function", line=1, children=None):
-        """Helper to create a symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind=kind,
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-            children=children or [],
-        )
-    
-    def test_formats_single_file(self):
+    def test_formats_single_file(self, make_symbol):
         """Should format a single file's symbols."""
         from ac.symbol_index.compact_format import format_file_symbol_block
         
-        symbols = [self._make_symbol("foo", line=10)]
+        symbols = [make_symbol("foo", line=10)]
         
         result = format_file_symbol_block("src/utils.py", symbols)
         
         assert "src/utils.py:" in result
         assert "f foo:10" in result
     
-    def test_includes_class_methods(self):
+    def test_includes_class_methods(self, make_symbol):
         """Should include class methods as children."""
         from ac.symbol_index.compact_format import format_file_symbol_block
         
-        method = self._make_symbol("process", kind="method", line=15)
-        cls = self._make_symbol("Handler", kind="class", line=10, children=[method])
+        method = make_symbol("process", kind="method", line=15)
+        cls = make_symbol("Handler", kind="class", line=10, children=[method])
         
         result = format_file_symbol_block("handler.py", [cls])
         
         assert "c Handler:10" in result
         assert "m process:15" in result
     
-    def test_applies_aliases(self):
+    def test_applies_aliases(self, make_symbol):
         """Should apply path aliases to references."""
         from ac.symbol_index.compact_format import format_file_symbol_block
         
-        symbols = [self._make_symbol("foo")]
+        symbols = [make_symbol("foo")]
         file_refs = {"test.py": {"ac/llm/streaming.py", "ac/llm/chat.py"}}
         aliases = {"ac/llm/": "@1/"}
         
@@ -880,24 +813,13 @@ class TestFormatFileSymbolBlock:
 class TestFormatSymbolBlocksByTier:
     """Test the format_symbol_blocks_by_tier function."""
     
-    def _make_symbol(self, name, kind="function", line=1):
-        """Helper to create a symbol."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind=kind,
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-        )
-    
-    def test_groups_by_tier(self):
+    def test_groups_by_tier(self, make_symbol):
         """Should group symbols by their tier."""
         from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
         
         symbols_by_file = {
-            "stable.py": [self._make_symbol("stable_func")],
-            "active.py": [self._make_symbol("active_func")],
+            "stable.py": [make_symbol("stable_func")],
+            "active.py": [make_symbol("active_func")],
         }
         file_tiers = {
             "L0": ["stable.py"],
@@ -911,13 +833,13 @@ class TestFormatSymbolBlocksByTier:
         assert "active.py:" in result["active"]
         assert "active_func" in result["active"]
     
-    def test_excludes_specified_files(self):
+    def test_excludes_specified_files(self, make_symbol):
         """Should exclude files in exclude_files set."""
         from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
         
         symbols_by_file = {
-            "a.py": [self._make_symbol("a_func")],
-            "b.py": [self._make_symbol("b_func")],
+            "a.py": [make_symbol("a_func")],
+            "b.py": [make_symbol("b_func")],
         }
         file_tiers = {
             "L0": ["a.py", "b.py"],
@@ -931,12 +853,12 @@ class TestFormatSymbolBlocksByTier:
         assert "a.py:" in result["L0"]
         assert "b.py:" not in result["L0"]
     
-    def test_empty_tier_returns_empty_string(self):
+    def test_empty_tier_returns_empty_string(self, make_symbol):
         """Empty tiers should return empty strings."""
         from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
         
         symbols_by_file = {
-            "a.py": [self._make_symbol("a_func")],
+            "a.py": [make_symbol("a_func")],
         }
         file_tiers = {
             "L0": ["a.py"],
@@ -950,12 +872,12 @@ class TestFormatSymbolBlocksByTier:
         assert result["L1"] == ""
         assert result["active"] == ""
     
-    def test_handles_missing_files_gracefully(self):
+    def test_handles_missing_files_gracefully(self, make_symbol):
         """Should skip files not in symbols_by_file."""
         from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
         
         symbols_by_file = {
-            "exists.py": [self._make_symbol("func")],
+            "exists.py": [make_symbol("func")],
         }
         file_tiers = {
             "L0": ["exists.py", "missing.py"],
@@ -966,11 +888,11 @@ class TestFormatSymbolBlocksByTier:
         assert "exists.py:" in result["L0"]
         assert "missing.py" not in result["L0"]
     
-    def test_all_tiers_present_in_result(self):
+    def test_all_tiers_present_in_result(self, make_symbol):
         """Result should have keys for all tiers in file_tiers."""
         from ac.symbol_index.compact_format import format_symbol_blocks_by_tier
         
-        symbols_by_file = {"a.py": [self._make_symbol("func")]}
+        symbols_by_file = {"a.py": [make_symbol("func")]}
         file_tiers = {
             "L0": ["a.py"],
             "L1": [],
@@ -987,97 +909,74 @@ class TestFormatSymbolBlocksByTier:
 class TestCrossFileCallGraph:
     """Test cross-file call graph resolution and formatting."""
     
-    def _make_symbol(self, name, kind="function", line=1, children=None, call_sites=None):
-        """Helper to create a symbol with optional call sites."""
-        r = Range(start_line=line, start_col=0, end_line=line, end_col=10)
-        return Symbol(
-            name=name,
-            kind=kind,
-            file_path="test.py",
-            range=r,
-            selection_range=r,
-            children=children or [],
-            call_sites=call_sites or [],
-        )
-    
-    def _make_call_site(self, name, target_file=None, target_symbol=None, line=1):
-        """Helper to create a CallSite."""
-        from ac.symbol_index.models import CallSite
-        return CallSite(
-            name=name,
-            target_file=target_file,
-            target_symbol=target_symbol,
-            line=line,
-        )
-    
-    def test_format_cross_file_calls_basic(self):
+    def test_format_cross_file_calls_basic(self, make_symbol, make_call_site):
         """Cross-file calls should be formatted with file:symbol."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("get", target_file="cache.py"),
-            self._make_call_site("save", target_file="db.py"),
+            make_call_site("get", target_file="cache.py"),
+            make_call_site("save", target_file="db.py"),
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert result == "→cache.py:get,db.py:save"
     
-    def test_format_cross_file_calls_filters_same_file(self):
+    def test_format_cross_file_calls_filters_same_file(self, make_symbol, make_call_site):
         """Same-file calls should be filtered out."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("external", target_file="other.py"),
-            self._make_call_site("internal", target_file="main.py"),  # Same file
+            make_call_site("external", target_file="other.py"),
+            make_call_site("internal", target_file="main.py"),  # Same file
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert "internal" not in result
         assert "other.py:external" in result
     
-    def test_format_cross_file_calls_filters_unresolved(self):
+    def test_format_cross_file_calls_filters_unresolved(self, make_symbol, make_call_site):
         """Calls without target_file should be filtered out."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("resolved", target_file="other.py"),
-            self._make_call_site("unresolved", target_file=None),
+            make_call_site("resolved", target_file="other.py"),
+            make_call_site("unresolved", target_file=None),
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert "unresolved" not in result
         assert "other.py:resolved" in result
     
-    def test_format_cross_file_calls_applies_aliases(self):
+    def test_format_cross_file_calls_applies_aliases(self, make_symbol, make_call_site):
         """Path aliases should be applied to target files."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("get", target_file="ac/url_handler/cache.py"),
+            make_call_site("get", target_file="ac/url_handler/cache.py"),
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         aliases = {"ac/url_handler/": "@1/"}
         
         result = _format_cross_file_calls(symbol, current_file="main.py", aliases=aliases)
         
         assert result == "→@1/cache.py:get"
     
-    def test_format_cross_file_calls_dedupes(self):
+    def test_format_cross_file_calls_dedupes(self, make_symbol, make_call_site):
         """Duplicate file:symbol pairs should be deduplicated."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("get", target_file="cache.py", line=10),
-            self._make_call_site("get", target_file="cache.py", line=20),  # Duplicate
-            self._make_call_site("save", target_file="cache.py", line=30),
+            make_call_site("get", target_file="cache.py", line=10),
+            make_call_site("get", target_file="cache.py", line=20),  # Duplicate
+            make_call_site("save", target_file="cache.py", line=30),
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
@@ -1085,15 +984,15 @@ class TestCrossFileCallGraph:
         assert result.count("cache.py:get") == 1
         assert "cache.py:save" in result
     
-    def test_format_cross_file_calls_limits_to_5(self):
+    def test_format_cross_file_calls_limits_to_5(self, make_symbol, make_call_site):
         """Should limit to 5 calls with +N overflow."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site(f"func{i}", target_file=f"file{i}.py")
+            make_call_site(f"func{i}", target_file=f"file{i}.py")
             for i in range(8)
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
@@ -1101,63 +1000,63 @@ class TestCrossFileCallGraph:
         # Should have exactly 5 file:func pairs before +3
         assert result.count(":func") == 5
     
-    def test_format_cross_file_calls_strips_module_prefix(self):
+    def test_format_cross_file_calls_strips_module_prefix(self, make_symbol, make_call_site):
         """Module prefixes in call names should be stripped."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("module.submodule.func", target_file="other.py"),
+            make_call_site("module.submodule.func", target_file="other.py"),
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert result == "→other.py:func"
     
-    def test_format_cross_file_calls_empty_when_no_calls(self):
+    def test_format_cross_file_calls_empty_when_no_calls(self, make_symbol):
         """Should return empty string when no call sites."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
-        symbol = self._make_symbol("fetch", call_sites=[])
+        symbol = make_symbol("fetch", call_sites=[])
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert result == ""
     
-    def test_format_cross_file_calls_empty_when_all_filtered(self):
+    def test_format_cross_file_calls_empty_when_all_filtered(self, make_symbol, make_call_site):
         """Should return empty when all calls are filtered out."""
         from ac.symbol_index.compact_format import _format_cross_file_calls
         
         call_sites = [
-            self._make_call_site("internal", target_file="main.py"),  # Same file
-            self._make_call_site("unresolved", target_file=None),  # Unresolved
+            make_call_site("internal", target_file="main.py"),  # Same file
+            make_call_site("unresolved", target_file=None),  # Unresolved
         ]
-        symbol = self._make_symbol("fetch", call_sites=call_sites)
+        symbol = make_symbol("fetch", call_sites=call_sites)
         
         result = _format_cross_file_calls(symbol, current_file="main.py")
         
         assert result == ""
     
-    def test_to_compact_includes_cross_file_calls_by_default(self):
+    def test_to_compact_includes_cross_file_calls_by_default(self, make_symbol, make_call_site):
         """to_compact should include cross-file calls by default."""
         call_sites = [
-            self._make_call_site("helper", target_file="utils.py"),
+            make_call_site("helper", target_file="utils.py"),
         ]
         symbols_by_file = {
-            "main.py": [self._make_symbol("process", call_sites=call_sites)],
+            "main.py": [make_symbol("process", call_sites=call_sites)],
         }
         
         result = to_compact(symbols_by_file, include_legend=False)
         
         assert "→utils.py:helper" in result
     
-    def test_to_compact_cross_file_calls_disabled(self):
+    def test_to_compact_cross_file_calls_disabled(self, make_symbol, make_call_site):
         """to_compact with include_cross_file_calls=False should not show calls."""
         call_sites = [
-            self._make_call_site("helper", target_file="utils.py"),
+            make_call_site("helper", target_file="utils.py"),
         ]
         symbols_by_file = {
-            "main.py": [self._make_symbol("process", call_sites=call_sites)],
+            "main.py": [make_symbol("process", call_sites=call_sites)],
         }
         
         result = to_compact(

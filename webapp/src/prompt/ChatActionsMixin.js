@@ -224,7 +224,16 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
         originalContent = original;
       }
       
-      const modifiedContent = newContents[filePath] || updated;
+      // Get modified content: prefer result.content, then fetch from disk
+      let modifiedContent = newContents[filePath];
+      if (!modifiedContent) {
+        try {
+          const response = await this.call['Repo.get_file_content'](filePath);
+          modifiedContent = this.extractResponse(response);
+        } catch (e) {
+          modifiedContent = updated;
+        }
+      }
       
       diffFiles.push({
         path: filePath,
@@ -238,10 +247,8 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
   }
 
   async _getOriginalFileContent(filePath, newContent, searchBlock, replaceBlock) {
-    if (searchBlock && replaceBlock && newContent) {
-      return newContent.replace(replaceBlock, searchBlock);
-    }
-    
+    // First, try to get the committed version from git HEAD
+    // This is the most reliable source for the original content
     try {
       const response = await this.call['Repo.get_file_content'](filePath, 'HEAD');
       const content = this.extractResponse(response);
@@ -249,9 +256,19 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
         return content;
       }
     } catch (e) {
-      console.error('Could not fetch original from git:', e);
+      // File might be new (not yet committed)
     }
     
-    return searchBlock || '';
+    // For new files, the original is empty
+    if (searchBlock === '') {
+      return '';
+    }
+    
+    // Fallback: try to reconstruct from search/replace blocks
+    if (searchBlock && replaceBlock && newContent) {
+      return newContent.replace(replaceBlock, searchBlock);
+    }
+    
+    return '';
   }
 };

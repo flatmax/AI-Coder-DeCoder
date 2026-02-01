@@ -4,7 +4,6 @@ import { formatTokens } from '../utils/formatters.js';
 // ========== Helper Functions ==========
 
 function formatPath(path) {
-  // Shorten long paths for display
   if (path.length > 40) {
     const parts = path.split('/');
     if (parts.length > 3) {
@@ -17,6 +16,25 @@ function formatPath(path) {
 function formatStability(item) {
   if (!item.next_threshold) return '';
   return `${item.stable_count}/${item.next_threshold}`;
+}
+
+// ========== Search Box ==========
+
+function renderSearchBox(component) {
+  return html`
+    <div class="search-box">
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Filter items... (fuzzy search)"
+        .value=${component.searchQuery}
+        @input=${(e) => component.handleSearchInput(e)}
+      />
+      ${component.searchQuery ? html`
+        <button class="search-clear" @click=${() => component.clearSearch()}>✕</button>
+      ` : ''}
+    </div>
+  `;
 }
 
 // ========== Performance Header ==========
@@ -48,7 +66,6 @@ function renderPerformanceHeader(component) {
 
 function renderStabilityBar(item, tier) {
   if (!item.next_threshold) {
-    // Already at highest tier
     return html`
       <div class="stability-container">
         <div class="stability-bar">
@@ -72,102 +89,102 @@ function renderStabilityBar(item, tier) {
 
 // ========== Content Groups ==========
 
-function renderSymbolsGroup(component, tier, content) {
-  const expanded = component.isGroupExpanded(tier, 'symbols');
+/**
+ * Generic group renderer for symbols, files, and URLs.
+ * @param {Object} component - The CacheViewer component
+ * @param {string} tier - Tier name (L0, L1, etc.)
+ * @param {Object} content - Content object with items, count, tokens
+ * @param {Object} config - Group configuration
+ * @param {string} config.type - Group type ('symbols', 'files', 'urls')
+ * @param {string} config.icon - Emoji icon
+ * @param {string} config.label - Display label
+ * @param {Function} [config.renderItem] - Custom item renderer (optional)
+ */
+function renderContentGroup(component, tier, content, config) {
+  const { type, icon, label } = config;
+  const expanded = component.isGroupExpanded(tier, type);
+  const filteredItems = component.filterItems(content.items, type);
+  const matchCount = filteredItems?.length || 0;
+  const totalCount = content.items?.length || content.count || 0;
+  
+  if (component.searchQuery && matchCount === 0) return '';
+  
+  const countDisplay = component.searchQuery ? `${matchCount}/${totalCount}` : totalCount;
+  const labelSuffix = type === 'symbols' ? ' files' : '';
   
   return html`
     <div class="content-group">
-      <div class="content-row" @click=${() => component.toggleGroup(tier, 'symbols')}>
+      <div class="content-row" @click=${() => component.toggleGroup(tier, type)}>
         <span class="content-expand">${expanded ? '▼' : '▶'}</span>
-        <span class="content-icon">📦</span>
-        <span class="content-label">Symbols (${content.count} files)</span>
+        <span class="content-icon">${icon}</span>
+        <span class="content-label">${label} (${countDisplay}${labelSuffix})</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${expanded ? html`
         <div class="item-list">
-          ${(content.items || []).map(item => html`
-            <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
-              <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
-              ${renderStabilityBar(item, tier)}
-            </div>
-          `)}
+          ${(filteredItems || []).map(item => 
+            config.renderItem 
+              ? config.renderItem(component, item, tier)
+              : renderDefaultItem(component, item, tier)
+          )}
         </div>
       ` : ''}
     </div>
   `;
 }
 
-function renderFilesGroup(component, tier, content) {
-  const expanded = component.isGroupExpanded(tier, 'files');
-  
+function renderDefaultItem(component, item, tier) {
   return html`
-    <div class="content-group">
-      <div class="content-row" @click=${() => component.toggleGroup(tier, 'files')}>
-        <span class="content-expand">${expanded ? '▼' : '▶'}</span>
-        <span class="content-icon">📄</span>
-        <span class="content-label">Files (${content.count})</span>
-        <span class="content-tokens">${formatTokens(content.tokens)}</span>
-      </div>
-      ${expanded ? html`
-        <div class="item-list">
-          ${(content.items || []).map(item => html`
-            <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
-              <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
-              <span class="item-tokens">${formatTokens(item.tokens)}</span>
-              ${renderStabilityBar(item, tier)}
-            </div>
-          `)}
-        </div>
-      ` : ''}
+    <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
+      <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
+      ${renderStabilityBar(item, tier)}
     </div>
   `;
 }
 
-function renderUrlsGroup(component, tier, content) {
-  const expanded = component.isGroupExpanded(tier, 'urls');
-  const urlCount = content.items?.length || 0;
-  
+function renderFileItem(component, item, tier) {
   return html`
-    <div class="content-group">
-      <div class="content-row" @click=${() => component.toggleGroup(tier, 'urls')}>
-        <span class="content-expand">${expanded ? '▼' : '▶'}</span>
-        <span class="content-icon">🔗</span>
-        <span class="content-label">URLs (${urlCount})</span>
-        <span class="content-tokens">${formatTokens(content.tokens)}</span>
-      </div>
-      ${expanded ? html`
-        <div class="item-list">
-          ${(content.items || []).map(item => {
-            const included = component.isUrlIncluded(item.url);
-            return html`
-              <div class="url-row">
-                <input 
-                  type="checkbox" 
-                  class="url-checkbox"
-                  .checked=${included}
-                  @click=${(e) => e.stopPropagation()}
-                  @change=${(e) => { e.stopPropagation(); component.toggleUrlIncluded(item.url); }}
-                />
-                <span class="url-title ${included ? '' : 'excluded'}" title="${item.url}">
-                  ${item.title || item.url}
-                </span>
-                <span class="item-tokens">${included ? formatTokens(item.tokens) : '—'}</span>
-                <div class="url-actions">
-                  <button class="url-btn" @click=${(e) => { e.stopPropagation(); component.viewUrl(item.url); }}>
-                    View
-                  </button>
-                  <button class="url-btn danger" @click=${(e) => { e.stopPropagation(); component.removeUrl(item.url); }}>
-                    ✕
-                  </button>
-                </div>
-              </div>
-            `;
-          })}
-        </div>
-      ` : ''}
+    <div class="item-row clickable" @click=${() => component.viewFile(item.path)}>
+      <span class="item-path" title="${item.path}">${formatPath(item.path)}</span>
+      <span class="item-tokens">${formatTokens(item.tokens)}</span>
+      ${renderStabilityBar(item, tier)}
     </div>
   `;
 }
+
+function renderUrlItem(component, item, tier) {
+  const included = component.isUrlIncluded(item.url);
+  return html`
+    <div class="url-row">
+      <input 
+        type="checkbox" 
+        class="url-checkbox"
+        .checked=${included}
+        @click=${(e) => e.stopPropagation()}
+        @change=${(e) => { e.stopPropagation(); component.toggleUrlIncluded(item.url); }}
+      />
+      <span class="url-title ${included ? '' : 'excluded'}" title="${item.url}">
+        ${item.title || item.url}
+      </span>
+      <span class="item-tokens">${included ? formatTokens(item.tokens) : '—'}</span>
+      <div class="url-actions">
+        <button class="url-btn" @click=${(e) => { e.stopPropagation(); component.viewUrl(item.url); }}>
+          View
+        </button>
+        <button class="url-btn danger" @click=${(e) => { e.stopPropagation(); component.removeUrl(item.url); }}>
+          ✕
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+// Group configuration registry
+const GROUP_CONFIG = {
+  symbols: { type: 'symbols', icon: '📦', label: 'Symbols', renderItem: null },
+  files: { type: 'files', icon: '📄', label: 'Files', renderItem: renderFileItem },
+  urls: { type: 'urls', icon: '🔗', label: 'URLs', renderItem: renderUrlItem },
+};
 
 function renderHistoryGroup(component, tier, content) {
   return html`
@@ -220,6 +237,10 @@ function renderTierBlock(component, block) {
   const isEmpty = block.tokens === 0;
   const tierColor = component.getTierColor(block.tier);
   
+  if (component.searchQuery && !component.tierHasMatches(block)) {
+    return '';
+  }
+  
   return html`
     <div class="tier-block ${isEmpty ? 'empty' : ''}" style="--tier-color: ${tierColor}">
       <div class="tier-header" @click=${() => component.toggleTier(block.tier)}>
@@ -247,11 +268,9 @@ function renderTierBlock(component, block) {
               case 'legend':
                 return renderLegendContent(component, content);
               case 'symbols':
-                return renderSymbolsGroup(component, block.tier, content);
               case 'files':
-                return renderFilesGroup(component, block.tier, content);
               case 'urls':
-                return renderUrlsGroup(component, block.tier, content);
+                return renderContentGroup(component, block.tier, content, GROUP_CONFIG[content.type]);
               case 'history':
                 return renderHistoryGroup(component, block.tier, content);
               default:
@@ -367,18 +386,27 @@ export function renderCacheViewer(component) {
     return html`
       <div class="cache-container">
         ${renderPerformanceHeader(component)}
+        ${renderSearchBox(component)}
         <div class="loading">No cache blocks available. Send a message to populate cache tiers.</div>
         ${renderFooter(component)}
       </div>
     `;
   }
 
+  // Check if search has no results
+  const hasSearchResults = !component.searchQuery || 
+    blocks.some(block => component.tierHasMatches(block));
+
   return html`
     <div class="cache-container">
       ${renderPerformanceHeader(component)}
+      ${renderSearchBox(component)}
       ${renderRecentChanges(component)}
       
-      ${blocks.map(block => renderTierBlock(component, block))}
+      ${hasSearchResults 
+        ? blocks.map(block => renderTierBlock(component, block))
+        : html`<div class="no-results">No items match "${component.searchQuery}"</div>`
+      }
       
       ${renderFooter(component)}
       ${renderSessionTotals(component)}

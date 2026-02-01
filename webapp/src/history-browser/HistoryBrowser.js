@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { historyBrowserStyles } from './HistoryBrowserStyles.js';
 import { renderHistoryBrowser } from './HistoryBrowserTemplate.js';
-import { extractResponse, RpcMixin, debounce } from '../utils/rpc.js';
+import { RpcMixin, debounce } from '../utils/rpc.js';
 
 export class HistoryBrowser extends RpcMixin(LitElement) {
   static properties = {
@@ -28,45 +28,70 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this.isSearching = false;
     this.isLoading = false;
     this._debouncedSearch = debounce(() => this.performSearch(), 300);
+    this._messagesScrollTop = 0;
+    this._sessionsScrollTop = 0;
+  }
+
+  onRpcReady() {
+    // Auto-load sessions when RPC becomes available and visible
+    if (this.visible) {
+      this.loadSessions();
+    }
   }
 
   async show() {
     this.visible = true;
     await this.loadSessions();
+    
+    // Restore scroll positions after render
+    await this.updateComplete;
+    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+    if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
+    if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
   }
 
   hide() {
+    // Save scroll positions before hiding
+    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+    if (messagesPanel) this._messagesScrollTop = messagesPanel.scrollTop;
+    if (sessionsPanel) this._sessionsScrollTop = sessionsPanel.scrollTop;
+    
     this.visible = false;
-    this.selectedSessionId = null;
-    this.selectedSession = [];
-    this.searchQuery = '';
-    this.searchResults = [];
-    this.isSearching = false;
+    // Keep selectedSessionId, selectedSession, searchQuery, searchResults, isSearching
+    // so reopening preserves state
   }
 
   async loadSessions() {
-    this.isLoading = true;
-    try {
-      const response = await this._call('LiteLLM.history_list_sessions', 50);
-      this.sessions = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error loading sessions:', e);
-      this.sessions = [];
-    }
-    this.isLoading = false;
+    const result = await this._rpcWithState('LiteLLM.history_list_sessions', {}, 50);
+    this.sessions = result || [];
   }
 
-  async selectSession(sessionId) {
-    this.selectedSessionId = sessionId;
-    this.isLoading = true;
-    try {
-      const response = await this._call('LiteLLM.history_get_session', sessionId);
-      this.selectedSession = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error loading session:', e);
-      this.selectedSession = [];
+  async selectSession(sessionId, messageId = null) {
+    // Only reload if switching sessions
+    if (this.selectedSessionId !== sessionId) {
+      this.selectedSessionId = sessionId;
+      const result = await this._rpcWithState('LiteLLM.history_get_session', {}, sessionId);
+      this.selectedSession = result || [];
     }
-    this.isLoading = false;
+    
+    // Scroll to specific message if provided
+    if (messageId) {
+      this._scrollToMessage(messageId);
+    }
+  }
+
+  _scrollToMessage(messageId) {
+    // Wait for render, then scroll
+    this.updateComplete.then(() => {
+      const msgEl = this.shadowRoot?.querySelector(`[data-message-id="${messageId}"]`);
+      if (msgEl) {
+        msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        msgEl.classList.add('highlight');
+        setTimeout(() => msgEl.classList.remove('highlight'), 2000);
+      }
+    });
   }
 
   handleSearchInput(e) {
@@ -89,17 +114,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     
     this.isSearching = true;
-    this.isLoading = true;
-    
-    try {
-      const response = await this._call('LiteLLM.history_search', this.searchQuery, null, 100);
-      this.searchResults = extractResponse(response) || [];
-    } catch (e) {
-      console.error('Error searching:', e);
-      this.searchResults = [];
-    }
-    
-    this.isLoading = false;
+    const result = await this._rpcWithState('LiteLLM.history_search', {}, this.searchQuery, null, 100);
+    this.searchResults = result || [];
   }
 
   copyToClipboard(content) {

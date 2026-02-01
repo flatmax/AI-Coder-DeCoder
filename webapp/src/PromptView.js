@@ -40,6 +40,10 @@ export class PromptView extends MixedBase {
     dialogY: { type: Number },
     showHistoryBrowser: { type: Boolean },
     viewingFile: { type: String },
+    promptSnippets: { type: Array },
+    snippetDrawerOpen: { type: Boolean },
+    leftPanelWidth: { type: Number },
+    leftPanelCollapsed: { type: Boolean },
     detectedUrls: { type: Array },
     fetchingUrls: { type: Object },
     fetchedUrls: { type: Object },
@@ -71,8 +75,14 @@ export class PromptView extends MixedBase {
     this.fetchedUrls = {};
     this.excludedUrls = new Set();
     this.activeLeftTab = 'files';
+    this.promptSnippets = [];
+    this.snippetDrawerOpen = false;
+    this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
+    this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
     this._filePickerScrollTop = 0;
     this._messagesScrollTop = 0;
+    this._wasScrolledUp = false;
+    this._isPanelResizing = false;
     
     const urlParams = new URLSearchParams(window.location.search);
     this.port = urlParams.get('port');
@@ -158,6 +168,18 @@ export class PromptView extends MixedBase {
     return this._urlService?.getUrlDisplayName(urlInfo) || urlInfo.url;
   }
 
+  /**
+   * Convert selectedFiles array to selection object for FilePicker.
+   * @returns {Object} Selection object with file paths as keys and true as values
+   */
+  _getSelectedObject() {
+    const selected = {};
+    for (const path of this.selectedFiles || []) {
+      selected[path] = true;
+    }
+    return selected;
+  }
+
   // ============ History Browser ============
 
   toggleHistoryBrowser() {
@@ -211,6 +233,10 @@ export class PromptView extends MixedBase {
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
+    
+    // Bind panel resize handlers
+    this._boundPanelResizeMove = this._handlePanelResizeMove.bind(this);
+    this._boundPanelResizeEnd = this._handlePanelResizeEnd.bind(this);
   }
 
   /**
@@ -240,6 +266,8 @@ export class PromptView extends MixedBase {
       const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
       if (messagesContainer) {
         this._messagesScrollTop = messagesContainer.scrollTop;
+        // Save whether user had scrolled up
+        this._wasScrolledUp = this._userHasScrolledUp;
       }
     }
 
@@ -254,8 +282,18 @@ export class PromptView extends MixedBase {
           filePicker.setScrollTop(this._filePickerScrollTop);
         }
         const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-        if (messagesContainer && this._messagesScrollTop > 0) {
-          messagesContainer.scrollTop = this._messagesScrollTop;
+        if (messagesContainer) {
+          if (this._wasScrolledUp) {
+            // User was scrolled up - restore their position
+            messagesContainer.scrollTop = this._messagesScrollTop;
+            this._userHasScrolledUp = true;
+            this._showScrollButton = true;
+          } else {
+            // User was at bottom - scroll to bottom
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            this._userHasScrolledUp = false;
+            this._showScrollButton = false;
+          }
         }
       });
     } else if (tab === 'search') {
@@ -361,14 +399,99 @@ export class PromptView extends MixedBase {
     this.destroyInputHandler();
     this.destroyWindowControls();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
+    // Clean up any panel resize listeners
+    window.removeEventListener('mousemove', this._boundPanelResizeMove);
+    window.removeEventListener('mouseup', this._boundPanelResizeEnd);
   }
 
   remoteIsUp() {}
 
   async setupDone() {
     this.isConnected = true;
+    
+    // Ensure call object is available (may have slight delay from JRPC)
+    if (!this.call) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    if (!this.call) {
+      console.warn('setupDone called but this.call is not available yet');
+      return;
+    }
+    
     await this.loadFileTree();
     await this.loadLastSession();
+    await this.loadPromptSnippets();
+  }
+
+  async loadPromptSnippets() {
+    try {
+      const response = await this.call['LiteLLM.get_prompt_snippets']();
+      const snippets = this.extractResponse(response);
+      if (Array.isArray(snippets)) {
+        this.promptSnippets = snippets;
+      }
+    } catch (e) {
+      console.warn('Could not load prompt snippets:', e);
+    }
+  }
+
+  toggleSnippetDrawer() {
+    this.snippetDrawerOpen = !this.snippetDrawerOpen;
+  }
+
+  appendSnippet(message) {
+    // Close the drawer after selecting
+    this.snippetDrawerOpen = false;
+    
+    // Append message to textarea, adding newline if there's existing content
+    if (this.inputValue && !this.inputValue.endsWith('\n')) {
+      this.inputValue += '\n' + message;
+    } else {
+      this.inputValue += message;
+    }
+    
+    // Focus textarea after appending
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.focus();
+        // Move cursor to end
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+        // Trigger resize
+        this._autoResizeTextarea(textarea);
+      }
+    });
+  }
+
+  // Panel resize handlers
+  toggleLeftPanel() {
+    this.leftPanelCollapsed = !this.leftPanelCollapsed;
+    localStorage.setItem('promptview-left-panel-collapsed', this.leftPanelCollapsed);
+  }
+
+  _handlePanelResizeStart(e) {
+    e.preventDefault();
+    this._isPanelResizing = true;
+    this._panelResizeStartX = e.clientX;
+    this._panelResizeStartWidth = this.leftPanelWidth;
+    window.addEventListener('mousemove', this._boundPanelResizeMove);
+    window.addEventListener('mouseup', this._boundPanelResizeEnd);
+  }
+
+  _handlePanelResizeMove(e) {
+    if (!this._isPanelResizing) return;
+    const delta = e.clientX - this._panelResizeStartX;
+    const newWidth = Math.max(150, Math.min(500, this._panelResizeStartWidth + delta));
+    this.leftPanelWidth = newWidth;
+  }
+
+  _handlePanelResizeEnd() {
+    if (!this._isPanelResizing) return;
+    this._isPanelResizing = false;
+    localStorage.setItem('promptview-left-panel-width', this.leftPanelWidth);
+    window.removeEventListener('mousemove', this._boundPanelResizeMove);
+    window.removeEventListener('mouseup', this._boundPanelResizeEnd);
   }
 
   async loadLastSession() {
@@ -392,7 +515,7 @@ export class PromptView extends MixedBase {
         if (messages && messages.length > 0) {
           // Load messages into chat history
           for (const msg of messages) {
-            this.addMessage(msg.role, msg.content, msg.images || null);
+            this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
           console.log(`📜 Loaded ${messages.length} messages from last session`);
         }

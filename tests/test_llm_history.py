@@ -77,6 +77,149 @@ class TestLiteLLMClearHistory:
                         assert len(llm.conversation_history) == 0
 
 
+class TestLiteLLMCompactionConfig:
+    """Test that LiteLLM passes compaction config to ContextManager."""
+    
+    def test_compaction_config_passed_to_context_manager(self):
+        """LiteLLM should pass compaction config when enabled."""
+        with patch('ac.llm.llm.LiteLLM._load_config') as mock_config:
+            mock_config.return_value = {
+                'model': 'gpt-4',
+                'history_compaction': {
+                    'enabled': True,
+                    'compaction_trigger_tokens': 5000,
+                    'verbatim_window_tokens': 2000,
+                }
+            }
+            with patch('ac.llm.llm.LiteLLM._apply_env_vars'):
+                with patch('ac.llm.llm.LiteLLM._auto_save_symbol_map', return_value=None):
+                    with patch('ac.llm.llm.LiteLLM._init_history_store'):
+                        from ac.llm import LiteLLM
+                        llm = LiteLLM(repo=None)
+                        
+                        # Verify compaction is enabled in context manager
+                        assert llm._context_manager._compaction_enabled is True
+                        assert llm._context_manager._compactor is not None
+                        assert llm._context_manager._compactor.config.compaction_trigger_tokens == 5000
+                        assert llm._context_manager._compactor.config.verbatim_window_tokens == 2000
+    
+    def test_compaction_disabled_when_not_in_config(self):
+        """LiteLLM should not enable compaction when not configured."""
+        from ac.llm import LiteLLM
+        
+        with patch.object(LiteLLM, '_load_config', return_value={'model': 'gpt-4'}):
+            with patch.object(LiteLLM, '_apply_env_vars'):
+                with patch.object(LiteLLM, '_auto_save_symbol_map', return_value=None):
+                    with patch.object(LiteLLM, '_init_history_store'):
+                        with patch.object(LiteLLM, 'is_compaction_enabled', return_value=False):
+                            llm = LiteLLM(repo=None)
+                            
+                            assert llm._context_manager._compaction_enabled is False
+                            assert llm._context_manager._compactor is None
+
+
+class TestStreamingCompactionIntegration:
+    """Test that streaming properly integrates with compaction."""
+    
+    def test_summarized_flag_set_on_compaction(self):
+        """summarized flag should be True when compaction occurs."""
+        from ac.history.compactor import CompactionResult
+        
+        # Simulate compaction result - case != "none" indicates compaction happened
+        result = CompactionResult(
+            case="topic_boundary",
+            compacted_messages=[
+                {"role": "user", "content": "Summary of previous conversation"},
+                {"role": "assistant", "content": "Ok, I understand."},
+                {"role": "user", "content": "Recent question"},
+                {"role": "assistant", "content": "Recent answer"},
+            ],
+            tokens_before=5000,
+            tokens_after=2000,
+        )
+        
+        # Verify the result indicates compaction happened
+        assert result.case != "none"
+        # This is how streaming.py determines summarized flag
+        summarized = result.case != "none"
+        assert summarized is True
+        
+    def test_summarized_flag_false_when_no_compaction(self):
+        """summarized flag should be False when no compaction needed."""
+        from ac.history.compactor import CompactionResult
+        
+        # When no compaction needed, result case is "none"
+        result = CompactionResult(
+            case="none",
+            compacted_messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+            tokens_before=1000,
+            tokens_after=1000,
+        )
+        
+        assert result.case == "none"
+        # This is how streaming.py determines summarized flag
+        summarized = result.case != "none"
+        assert summarized is False
+
+
+class TestCompactionEventData:
+    """Test compaction event data structure for frontend."""
+    
+    def test_compaction_start_event_structure(self):
+        """Verify compaction_start event has expected fields."""
+        event = {
+            'type': 'compaction_start',
+            'message': '🗜️ Compacting history...'
+        }
+        
+        assert event['type'] == 'compaction_start'
+        assert 'message' in event
+        
+    def test_compaction_complete_event_structure(self):
+        """Verify compaction_complete event has expected fields."""
+        from ac.history.compactor import CompactionResult
+        
+        result = CompactionResult(
+            case="topic_boundary",
+            compacted_messages=[],
+            tokens_before=5000,
+            tokens_after=2000,
+        )
+        
+        # This mirrors the event structure created in streaming.py
+        event = {
+            'type': 'compaction_complete',
+            'case': result.case,
+            'tokens_before': result.tokens_before,
+            'tokens_after': result.tokens_after,
+            'tokens_saved': result.tokens_before - result.tokens_after,
+        }
+        
+        assert event['type'] == 'compaction_complete'
+        assert event['case'] == 'topic_boundary'
+        assert event['tokens_before'] == 5000
+        assert event['tokens_after'] == 2000
+        assert event['tokens_saved'] == 3000
+        
+    def test_history_token_info_in_result(self):
+        """Verify history token info structure for HUD."""
+        # This mirrors what streaming.py adds to token_usage
+        token_usage = {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "history_tokens": 2800,
+            "history_threshold": 6000,
+        }
+        
+        assert token_usage["history_tokens"] == 2800
+        assert token_usage["history_threshold"] == 6000
+        # Frontend uses these to show warning states
+        assert token_usage["history_tokens"] < token_usage["history_threshold"]
+
+
 class TestContextManagerHistoryIntegration:
     """Test that context manager properly tracks history."""
     

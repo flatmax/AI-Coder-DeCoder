@@ -146,6 +146,66 @@ export class CardMarkdown extends LitElement {
       font-size: 10px;
     }
 
+    /* Edits summary section */
+    .edits-summary {
+      margin-top: 12px;
+      padding: 10px 12px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .edits-summary-header {
+      color: #8b949e;
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .edits-summary-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .edit-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .edit-tag.applied {
+      background: #1f3d1f;
+      color: #7ee787;
+      border: 1px solid #238636;
+    }
+
+    .edit-tag.applied:hover {
+      background: #238636;
+    }
+
+    .edit-tag.failed {
+      background: #3d1f1f;
+      color: #ffa198;
+      border: 1px solid #da3633;
+    }
+
+    .edit-tag.failed:hover {
+      background: #da3633;
+    }
+
+    .edit-tag-icon {
+      font-size: 10px;
+    }
+
     /* Edit block styles */
     .edit-block {
       background: #0d1117;
@@ -432,7 +492,10 @@ export class CardMarkdown extends LitElement {
    */
   getEditResultForFile(filePath) {
     if (!this.editResults || this.editResults.length === 0) return null;
-    return this.editResults.find(r => r.file_path === filePath);
+    // Normalize paths for comparison (handle ./ prefix, backslashes, etc.)
+    const normalize = (p) => p?.replace(/^\.\//, '').replace(/\\/g, '/').trim();
+    const normalizedSearch = normalize(filePath);
+    return this.editResults.find(r => normalize(r.file_path) === normalizedSearch);
   }
 
   /**
@@ -628,6 +691,39 @@ export class CardMarkdown extends LitElement {
     return result;
   }
 
+  renderEditsSummary() {
+    if (!this.editResults || this.editResults.length === 0) {
+      return '';
+    }
+
+    const tagsHtml = this.editResults.map(result => {
+      const isApplied = result.status === 'applied';
+      const statusClass = isApplied ? 'applied' : 'failed';
+      const icon = isApplied ? '✓' : '✗';
+      const tooltip = isApplied ? 'Applied successfully' : `Failed: ${result.reason || 'Unknown error'}`;
+      return `<span class="edit-tag ${statusClass}" title="${this.escapeHtml(tooltip)}" data-file="${this.escapeHtml(result.file_path)}"><span class="edit-tag-icon">${icon}</span>${this.escapeHtml(result.file_path)}</span>`;
+    }).join('');
+
+    const appliedCount = this.editResults.filter(r => r.status === 'applied').length;
+    const failedCount = this.editResults.length - appliedCount;
+    
+    let summaryText = '';
+    if (appliedCount > 0 && failedCount > 0) {
+      summaryText = `${appliedCount} applied, ${failedCount} failed`;
+    } else if (appliedCount > 0) {
+      summaryText = `${appliedCount} edit${appliedCount > 1 ? 's' : ''} applied`;
+    } else {
+      summaryText = `${failedCount} edit${failedCount > 1 ? 's' : ''} failed`;
+    }
+
+    return `
+      <div class="edits-summary">
+        <div class="edits-summary-header">✏️ Edits: ${summaryText}</div>
+        <div class="edits-summary-list">${tagsHtml}</div>
+      </div>
+    `;
+  }
+
   renderFilesSummary() {
     if (this._foundFiles.length === 0) {
       return '';
@@ -701,6 +797,25 @@ export class CardMarkdown extends LitElement {
       }
     }
 
+    // Handle edit tag clicks
+    const editTag = e.target.closest('.edit-tag');
+    if (editTag) {
+      const filePath = editTag.dataset.file;
+      if (filePath) {
+        const result = this.getEditResultForFile(filePath);
+        this.dispatchEvent(new CustomEvent('edit-block-click', {
+          detail: { 
+            path: filePath,
+            line: result?.estimated_line || 1,
+            status: result?.status || 'pending',
+            searchContext: null
+          },
+          bubbles: true,
+          composed: true
+        }));
+      }
+    }
+
     // Handle select all button click
     const selectAllBtn = e.target.closest('.select-all-btn');
     if (selectAllBtn) {
@@ -752,6 +867,7 @@ export class CardMarkdown extends LitElement {
     return html`
       <div class="content" @click=${this.handleClick}>
         ${unsafeHTML(processedContent)}
+        ${this.role === 'assistant' ? unsafeHTML(this.renderEditsSummary()) : ''}
         ${this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
       </div>
     `;
