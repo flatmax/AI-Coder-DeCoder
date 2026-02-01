@@ -659,6 +659,32 @@ export const promptViewStyles = css`
     background: rgba(233, 69, 96, 0.3);
   }
 
+  /* History token bar */
+  .history-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: rgba(15, 52, 96, 0.5);
+    border-radius: 0 0 12px 12px;
+    overflow: hidden;
+  }
+
+  .history-bar-fill {
+    height: 100%;
+    background: #7ec699;
+    transition: width 0.3s ease, background 0.3s ease;
+  }
+
+  .history-bar.warning .history-bar-fill {
+    background: #f0a500;
+  }
+
+  .history-bar.critical .history-bar-fill {
+    background: #e94560;
+  }
+
   /* Token HUD overlay */
   .token-hud {
     position: fixed;
