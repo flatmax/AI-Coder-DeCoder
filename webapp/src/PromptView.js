@@ -230,6 +230,9 @@ export class PromptView extends MixedBase {
     
     this.showHistoryBrowser = false;
     console.log(`📜 Loaded ${messages.length} messages from session`);
+    
+    // Refresh history bar to reflect loaded session
+    await this._refreshHistoryBar();
   }
 
   connectedCallback() {
@@ -583,6 +586,9 @@ export class PromptView extends MixedBase {
           console.log(`📜 Loaded ${messages.length} messages from last session`);
         }
       }
+      
+      // Refresh history bar to reflect loaded session
+      await this._refreshHistoryBar();
     } catch (e) {
       console.warn('Could not load last session:', e);
       console.error(e);

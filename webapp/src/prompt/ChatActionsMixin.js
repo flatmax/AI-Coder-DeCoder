@@ -49,6 +49,12 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       if (this.clearAllUrlState) {
         this.clearAllUrlState();
       }
+      // Reset history bar to reflect cleared history
+      if (!this._hudData) {
+        this._hudData = {};
+      }
+      this._hudData.history_tokens = 0;
+      this.requestUpdate();
       this.addMessage('assistant', 'Context cleared. Starting fresh conversation.');
     } catch (e) {
       console.error('Error clearing context:', e);
