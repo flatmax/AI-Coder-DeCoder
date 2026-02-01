@@ -702,14 +702,15 @@ Result:
 
 ## Files to Create
 
-- `ac/prompts/compaction_skill.md` - Prompt for small model to detect topics and summarize
-- `ac/history/topic_detector.py` - Topic boundary detection
-- `ac/history/compactor.py` - Compaction logic
-- `tests/test_topic_detector.py` - Detection tests
-- `tests/test_history_compaction.py` - Compaction tests
+- `ac/prompts/compaction_skill.md` - Prompt for small model to detect topics and summarize ✅ DONE
+- `ac/context/topic_detector.py` - Topic boundary detection ✅ DONE (note: in context/, not history/)
+- `ac/history/compactor.py` - Compaction logic ✅ DONE
+- `tests/test_topic_detector.py` - Detection tests ✅ DONE
+- `tests/test_history_compaction.py` - Compaction tests ✅ DONE
 
 ## Files to Modify
 
+- `ac/context/__init__.py` - Export TopicDetector and TopicBoundaryResult ✅ DONE
 - `ac/context/manager.py` - Integrate compactor, add `compact_history_if_needed()`
 - `ac/llm/streaming.py` - Call compaction before streaming, send UI events
 - `ac/llm/chat.py` - Deprecate old `summarize_history()`
