@@ -208,19 +208,31 @@ export class PromptView extends MixedBase {
     });
   }
 
-  handleLoadSession(e) {
-    const { messages } = e.detail;
+  async handleLoadSession(e) {
+    const { messages, sessionId } = e.detail;
     
     // Clear current history
     this.clearHistory();
     
-    // Load all messages from the session
+    // If we have a sessionId, use load_session_into_context to populate context manager
+    if (sessionId) {
+      try {
+        await this.call['LiteLLM.load_session_into_context'](sessionId);
+      } catch (err) {
+        console.warn('Could not load session into context:', err);
+      }
+    }
+    
+    // Load all messages from the session into UI
     for (const msg of messages) {
       this.addMessage(msg.role, msg.content, msg.images || null);
     }
     
     this.showHistoryBrowser = false;
     console.log(`📜 Loaded ${messages.length} messages from session`);
+    
+    // Refresh history bar to reflect loaded session
+    await this._refreshHistoryBar();
   }
 
   connectedCallback() {
@@ -317,28 +329,79 @@ export class PromptView extends MixedBase {
   /**
    * Refresh the context viewer with current state
    */
-  _refreshContextViewer() {
+  async _refreshContextViewer() {
     const contextViewer = this.shadowRoot?.querySelector('context-viewer');
     if (contextViewer && this.call) {
       contextViewer.rpcCall = this.call;
       contextViewer.selectedFiles = this.selectedFiles || [];
       contextViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
       contextViewer.excludedUrls = this.excludedUrls;
-      contextViewer.refreshBreakdown();
+      await contextViewer.refreshBreakdown();
+      
+      // Sync history bar with context viewer's breakdown data
+      if (contextViewer.breakdown) {
+        this._syncHistoryBarFromBreakdown(contextViewer.breakdown);
+      }
     }
   }
 
   /**
    * Refresh the cache viewer with current state
    */
-  _refreshCacheViewer() {
+  async _refreshCacheViewer() {
     const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
     if (cacheViewer && this.call) {
       cacheViewer.rpcCall = this.call;
       cacheViewer.selectedFiles = this.selectedFiles || [];
       cacheViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
       cacheViewer.excludedUrls = this.excludedUrls;
-      cacheViewer.refreshBreakdown();
+      await cacheViewer.refreshBreakdown();
+      
+      // Sync history bar with cache viewer's breakdown data
+      if (cacheViewer.breakdown) {
+        this._syncHistoryBarFromBreakdown(cacheViewer.breakdown);
+      }
+    }
+  }
+
+  /**
+   * Sync history bar data from context breakdown
+   */
+  _syncHistoryBarFromBreakdown(breakdown) {
+    if (!breakdown) return;
+    
+    // Initialize _hudData if needed
+    if (!this._hudData) {
+      this._hudData = {};
+    }
+    
+    // Extract history data from the legacy breakdown structure
+    const historyData = breakdown.breakdown?.history;
+    if (historyData) {
+      this._hudData.history_tokens = historyData.tokens || 0;
+      // Use compaction_threshold (from config) if available, else fall back to max_tokens
+      this._hudData.history_threshold = historyData.compaction_threshold || historyData.max_tokens || 50000;
+    }
+    
+    // Trigger re-render for history bar
+    this.requestUpdate();
+  }
+
+  /**
+   * Refresh history bar by fetching current context breakdown
+   */
+  async _refreshHistoryBar() {
+    if (!this.call) return;
+    
+    try {
+      const response = await this.call['LiteLLM.get_context_breakdown'](
+        this.selectedFiles || [],
+        Object.keys(this.fetchedUrls || {})
+      );
+      const breakdown = this.extractResponse(response);
+      this._syncHistoryBarFromBreakdown(breakdown);
+    } catch (e) {
+      console.warn('Could not refresh history bar:', e);
     }
   }
 
@@ -422,6 +485,9 @@ export class PromptView extends MixedBase {
     await this.loadFileTree();
     await this.loadLastSession();
     await this.loadPromptSnippets();
+    
+    // Sync history bar with current context state
+    await this._refreshHistoryBar();
   }
 
   async loadPromptSnippets() {
@@ -506,8 +572,8 @@ export class PromptView extends MixedBase {
         const lastSessionId = sessions[0].session_id;
         console.log('📜 Loading session:', lastSessionId);
         
-        // Load the session messages
-        const messagesResponse = await this.call['LiteLLM.history_get_session'](lastSessionId);
+        // Load the session messages AND populate context manager for token counting
+        const messagesResponse = await this.call['LiteLLM.load_session_into_context'](lastSessionId);
         console.log('📜 Messages response:', messagesResponse);
         const messages = this.extractResponse(messagesResponse);
         console.log('📜 Extracted messages:', messages);
@@ -520,6 +586,9 @@ export class PromptView extends MixedBase {
           console.log(`📜 Loaded ${messages.length} messages from last session`);
         }
       }
+      
+      // Refresh history bar to reflect loaded session
+      await this._refreshHistoryBar();
     } catch (e) {
       console.warn('Could not load last session:', e);
       console.error(e);
@@ -556,6 +625,15 @@ export class PromptView extends MixedBase {
    */
   async streamComplete(requestId, result) {
     await super.streamComplete(requestId, result);
+  }
+
+  /**
+   * Called by server when a compaction event occurs.
+   * Explicitly defined here so JRPC-OO can find it.
+   * Delegates to mixin implementation.
+   */
+  compactionEvent(requestId, event) {
+    super.compactionEvent(requestId, event);
   }
 
   render() {

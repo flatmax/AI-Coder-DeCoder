@@ -32,7 +32,7 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **Streaming Responses** — Real-time streaming of AI responses with stop capability
 - **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns and automatic prompt caching optimization
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
-- **Conversation History** — Persistent history with search, session browsing, and automatic summarization when context grows too large
+- **Conversation History** — Persistent history with search, session browsing, and automatic compaction when context grows too large (summarizes old messages to stay within token limits)
 - **Find in Files** — Search across the codebase with regex support and context preview
 - **Voice Input** — Speech-to-text for hands-free prompt dictation with continuous auto-transcribe mode
 
@@ -91,7 +91,7 @@ Then run with `--dev` for hot-reloading during development.
 
 ## Configuration
 
-Create or edit `llm.json` in the repository root to configure your LLM provider:
+Create or edit `config/llm.json` to configure your LLM provider:
 
 **OpenAI:**
 ```json
@@ -130,17 +130,24 @@ Create or edit `llm.json` in the repository root to configure your LLM provider:
 
 See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
 
-### Application Configuration (ac-dc.json)
+### Application Configuration (config/app.json)
 
-Create or modify `ac-dc.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
+Create or modify `config/app.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
 
 > ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac-dc_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
 
 ```json
 {
   "url_cache": {
-    "path": "/tmp/ac-dc_url_cache",
+    "path": "/tmp/ac_url_cache",
     "ttl_hours": 24
+  },
+  "history_compaction": {
+    "enabled": true,
+    "compaction_trigger_tokens": 12000,
+    "verbatim_window_tokens": 3000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2
   }
 }
 ```
@@ -149,6 +156,13 @@ Create or modify `ac-dc.json` in **your project's repository root** (not the AC�
 |---------|---------|-------------|
 | `url_cache.path` | `/tmp/ac_url_cache` | Directory for caching fetched URL content |
 | `url_cache.ttl_hours` | `24` | How long cached URLs remain valid (hours) |
+| `history_compaction.enabled` | `true` | Enable automatic history compaction |
+| `history_compaction.compaction_trigger_tokens` | `12000` | Token threshold to trigger compaction |
+| `history_compaction.verbatim_window_tokens` | `3000` | Tokens to keep verbatim (recent messages) |
+| `history_compaction.summary_budget_tokens` | `500` | Max tokens for the summary |
+| `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges to preserve |
+
+> **Note:** The JSON example above shows sample values. The table shows the code defaults used when settings are omitted.
 
 ## Usage
 
@@ -200,8 +214,15 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 ## Project Structure
 
 ```
-llm.json                # LLM provider configuration (model, API keys)
-ac-dc.json              # Application settings (URL cache, etc.)
+config/                 # All configuration files
+├── llm.json           # LLM provider configuration (model, API keys)
+├── app.json           # Application settings (URL cache, etc.)
+├── prompt-snippets.json # User prompt snippets
+└── prompts/           # System prompts and skills
+    ├── system.md      # Main system prompt
+    ├── system_extra.md # Optional extra prompt content
+    └── skills/        # Skill-specific prompts
+        └── compaction.md # History compaction skill
 
 ac/                     # Python backend
 ├── dc.py              # Main entry point

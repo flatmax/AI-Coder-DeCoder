@@ -224,6 +224,7 @@ class TestContextManagerCompaction:
             "enabled": True,
             "compaction_trigger_tokens": 5000,
             "verbatim_window_tokens": 2000,
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         assert mgr._compaction_enabled is True
@@ -249,6 +250,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 10000,
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         mgr.add_message("user", "Hello")  # Small message
@@ -259,6 +261,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 50,  # Very low threshold
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         # Add enough content to exceed 50 tokens
@@ -277,6 +280,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 1000,
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         mgr.add_message("user", "Hello world")
@@ -292,6 +296,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 10000,
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         mgr.add_message("user", "Hello")
@@ -315,6 +320,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 50,  # Low threshold
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         
@@ -353,6 +359,7 @@ class TestContextManagerCompaction:
         config = {
             "enabled": True,
             "compaction_trigger_tokens": 50,
+            "detection_model": "gpt-4o-mini",
         }
         mgr = ContextManager("gpt-4", compaction_config=config)
         

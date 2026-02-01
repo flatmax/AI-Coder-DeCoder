@@ -395,6 +395,9 @@ export function renderPromptView(component) {
         </div>
         <div class="header-section header-git">
           ${!component.minimized && component.activeLeftTab === 'files' ? html`
+            <button class="header-btn" @click=${component.copyGitDiff} title="Copy git diff HEAD to clipboard">
+              📋
+            </button>
             <button class="header-btn commit-btn" @click=${component.handleCommit} title="Generate commit message and commit">
               💾
             </button>

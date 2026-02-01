@@ -1,6 +1,11 @@
 {
   "snippets": [
     {
+      "icon": "✏️",
+      "tooltip": "Tell AI to honor edit blocks.",
+      "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."
+    },
+    {
       "icon": "✅",
       "tooltip": "Confirm tests are testing what was intended",
       "message": "All tests passed, can you confirm the tests are testing what you intended to test?"
