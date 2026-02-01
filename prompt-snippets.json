@@ -9,6 +9,11 @@
       "icon": "📦",
       "tooltip": "Check if ready to commit and update plan",
       "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? What will be next?"
+    },
+    {
+      "icon": "🏁",
+      "tooltip": "Check if ready to commit, update plan and git mv",
+      "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? Please give me the git mv command to mark the plan as done."
     }
   ]
 }
