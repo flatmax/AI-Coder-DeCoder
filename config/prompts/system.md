@@ -165,6 +165,14 @@ path/to/file.py
 »»» EDIT END
 ```
 
+❌ WRONG - wrapping after filename in markdown fence:
+path/to/file.py
+```language
+««« EDIT
+...
+»»» EDIT END
+```
+
 ✅ CORRECT - raw edit block (no outer fences):
 path/to/file.py
 ««« EDIT

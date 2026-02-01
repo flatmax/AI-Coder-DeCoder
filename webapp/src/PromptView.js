@@ -326,28 +326,78 @@ export class PromptView extends MixedBase {
   /**
    * Refresh the context viewer with current state
    */
-  _refreshContextViewer() {
+  async _refreshContextViewer() {
     const contextViewer = this.shadowRoot?.querySelector('context-viewer');
     if (contextViewer && this.call) {
       contextViewer.rpcCall = this.call;
       contextViewer.selectedFiles = this.selectedFiles || [];
       contextViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
       contextViewer.excludedUrls = this.excludedUrls;
-      contextViewer.refreshBreakdown();
+      await contextViewer.refreshBreakdown();
+      
+      // Sync history bar with context viewer's breakdown data
+      if (contextViewer.breakdown) {
+        this._syncHistoryBarFromBreakdown(contextViewer.breakdown);
+      }
     }
   }
 
   /**
    * Refresh the cache viewer with current state
    */
-  _refreshCacheViewer() {
+  async _refreshCacheViewer() {
     const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
     if (cacheViewer && this.call) {
       cacheViewer.rpcCall = this.call;
       cacheViewer.selectedFiles = this.selectedFiles || [];
       cacheViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
       cacheViewer.excludedUrls = this.excludedUrls;
-      cacheViewer.refreshBreakdown();
+      await cacheViewer.refreshBreakdown();
+      
+      // Sync history bar with cache viewer's breakdown data
+      if (cacheViewer.breakdown) {
+        this._syncHistoryBarFromBreakdown(cacheViewer.breakdown);
+      }
+    }
+  }
+
+  /**
+   * Sync history bar data from context breakdown
+   */
+  _syncHistoryBarFromBreakdown(breakdown) {
+    if (!breakdown) return;
+    
+    // Initialize _hudData if needed
+    if (!this._hudData) {
+      this._hudData = {};
+    }
+    
+    // Extract history data from the legacy breakdown structure
+    const historyData = breakdown.breakdown?.history;
+    if (historyData) {
+      this._hudData.history_tokens = historyData.tokens || 0;
+      this._hudData.history_threshold = historyData.max_tokens || 50000;
+    }
+    
+    // Trigger re-render for history bar
+    this.requestUpdate();
+  }
+
+  /**
+   * Refresh history bar by fetching current context breakdown
+   */
+  async _refreshHistoryBar() {
+    if (!this.call) return;
+    
+    try {
+      const response = await this.call['LiteLLM.get_context_breakdown'](
+        this.selectedFiles || [],
+        Object.keys(this.fetchedUrls || {})
+      );
+      const breakdown = this.extractResponse(response);
+      this._syncHistoryBarFromBreakdown(breakdown);
+    } catch (e) {
+      console.warn('Could not refresh history bar:', e);
     }
   }
 
@@ -431,6 +481,9 @@ export class PromptView extends MixedBase {
     await this.loadFileTree();
     await this.loadLastSession();
     await this.loadPromptSnippets();
+    
+    // Sync history bar with current context state
+    await this._refreshHistoryBar();
   }
 
   async loadPromptSnippets() {
