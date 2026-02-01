@@ -208,13 +208,22 @@ export class PromptView extends MixedBase {
     });
   }
 
-  handleLoadSession(e) {
-    const { messages } = e.detail;
+  async handleLoadSession(e) {
+    const { messages, sessionId } = e.detail;
     
     // Clear current history
     this.clearHistory();
     
-    // Load all messages from the session
+    // If we have a sessionId, use load_session_into_context to populate context manager
+    if (sessionId) {
+      try {
+        await this.call['LiteLLM.load_session_into_context'](sessionId);
+      } catch (err) {
+        console.warn('Could not load session into context:', err);
+      }
+    }
+    
+    // Load all messages from the session into UI
     for (const msg of messages) {
       this.addMessage(msg.role, msg.content, msg.images || null);
     }
@@ -506,8 +515,8 @@ export class PromptView extends MixedBase {
         const lastSessionId = sessions[0].session_id;
         console.log('📜 Loading session:', lastSessionId);
         
-        // Load the session messages
-        const messagesResponse = await this.call['LiteLLM.history_get_session'](lastSessionId);
+        // Load the session messages AND populate context manager for token counting
+        const messagesResponse = await this.call['LiteLLM.load_session_into_context'](lastSessionId);
         console.log('📜 Messages response:', messagesResponse);
         const messages = this.extractResponse(messagesResponse);
         console.log('📜 Extracted messages:', messages);
