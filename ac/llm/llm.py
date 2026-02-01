@@ -1,6 +1,7 @@
 import os
 
 from .config import ConfigMixin
+from .context_builder import ContextBuilderMixin, TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS
 from .file_context import FileContextMixin
 from .chat import ChatMixin
 from .streaming import StreamingMixin
@@ -10,7 +11,7 @@ from ..context import ContextManager
 from ..url_handler import URLFetcher, URLDetector, URLType, SummaryType
 
 
-class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
+class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
     """LiteLLM wrapper for AI completions with file context support."""
     
     def __init__(self, repo=None, config_path=None):
@@ -864,69 +865,27 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
     
     # ========== Context Visualization Methods ==========
     
-    def _get_file_items(self, paths, tc, stability):
-        """Build file items with token counts and stability info."""
-        file_items = []
-        total_tokens = 0
-        for path in paths:
-            try:
-                content = self.repo.get_file_content(path)
-                if content and not (isinstance(content, dict) and 'error' in content):
-                    path_tokens = tc.count(f"{path}\n```\n{content}\n```\n")
-                    total_tokens += path_tokens
-                    info = stability.get_item_info(path) if stability else {
-                        'stable_count': 0, 'next_tier': 'L3', 'next_threshold': 3, 'progress': 0.0
-                    }
-                    file_items.append({
-                        "path": path,
-                        "tokens": path_tokens,
-                        "stable_count": info['stable_count'],
-                        "next_tier": info['next_tier'],
-                        "next_threshold": info['next_threshold'],
-                        "progress": info['progress'],
-                    })
-            except Exception:
-                pass
-        return file_items, total_tokens
-
-    def _get_symbol_items(self, files, tc, stability):
-        """Build symbol items with stability info."""
-        items = []
-        for f in files:
-            info = stability.get_item_info(f"symbol:{f}") if stability else {
-                'stable_count': 0, 'next_tier': 'L3', 'next_threshold': 3, 'progress': 0.0
-            }
-            items.append({
-                "path": f,
-                "stable_count": info['stable_count'],
-                "next_tier": info['next_tier'],
-                "next_threshold": info['next_threshold'],
-                "progress": info['progress'],
-            })
-        return items
-
-    def _build_tier_block(self, tier, tier_names, thresholds, symbol_map_content, 
-                          symbol_files_by_tier, file_tiers, tc, stability):
+    def _build_tier_block(self, tier, symbol_map_content, symbol_files_by_tier, file_tiers):
         """Build a single tier block with symbols and files."""
         contents = []
         tier_tokens = 0
         
         # Symbols
         if symbol_map_content.get(tier):
-            sym_tokens = tc.count(symbol_map_content[tier])
+            sym_tokens = self._safe_count_tokens(symbol_map_content[tier])
             files = symbol_files_by_tier.get(tier, [])
             contents.append({
                 "type": "symbols",
                 "count": len(files),
                 "tokens": sym_tokens,
                 "files": files,
-                "items": self._get_symbol_items(files, tc, stability)
+                "items": self._build_symbol_items(files)
             })
             tier_tokens += sym_tokens
         
         # Files
         if file_tiers.get(tier):
-            file_items, file_tokens = self._get_file_items(file_tiers[tier], tc, stability)
+            file_items, file_tokens = self._build_file_items(file_tiers[tier])
             if file_tokens:
                 contents.append({
                     "type": "files",
@@ -939,155 +898,12 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         return {
             "tier": tier,
-            "name": tier_names.get(tier, tier),
+            "name": TIER_NAMES.get(tier, tier),
             "tokens": tier_tokens,
             "cached": tier != 'active',
-            "threshold": thresholds.get(tier),
+            "threshold": TIER_THRESHOLDS.get(tier),
             "contents": contents
         }, tier_tokens
-
-    def _get_symbol_map_data(self, active_context_files, file_paths, stability, tc):
-        """Get symbol map content organized by tier."""
-        from ..symbol_index.compact_format import (
-            get_legend, format_symbol_blocks_by_tier, _compute_path_aliases
-        )
-        
-        symbol_map_content = {}
-        symbol_files_by_tier = {}
-        legend = ""
-        legend_tokens = 0
-        
-        if not self.repo:
-            return symbol_map_content, symbol_files_by_tier, legend, legend_tokens
-        
-        try:
-            all_files = self._get_all_trackable_files()
-            if not all_files:
-                return symbol_map_content, symbol_files_by_tier, legend, legend_tokens
-            
-            indexer = self._get_indexer()
-            symbols_by_file = indexer.index_files(all_files)
-            indexer.build_references(all_files)
-            symbol_index = indexer._get_symbol_index()
-            
-            # Get reference data
-            file_refs, file_imports, references = {}, {}, {}
-            if hasattr(symbol_index, '_reference_index') and symbol_index._reference_index:
-                ref_index = symbol_index._reference_index
-                for f in all_files:
-                    file_refs[f] = ref_index.get_files_referencing(f)
-                    file_imports[f] = ref_index.get_file_dependencies(f)
-                    references[f] = ref_index.get_references_to_file(f)
-            
-            # Compute aliases and legend
-            aliases = _compute_path_aliases(references, file_refs)
-            legend = get_legend(aliases)
-            legend_tokens = tc.count(legend) if legend else 0
-            
-            # Initialize stability tracker from refs if fresh start
-            if stability and not stability.is_initialized():
-                files_with_refs = [(f, len(file_refs.get(f, set()))) for f in all_files]
-                files_with_refs.extend([
-                    (f"symbol:{f}", len(file_refs.get(f, set()))) 
-                    for f in symbols_by_file.keys()
-                ])
-                tier_assignments = stability.initialize_from_refs(
-                    files_with_refs,
-                    exclude_active=set(file_paths) if file_paths else set()
-                )
-                if tier_assignments:
-                    print(f"📊 Cache viewer initialized {len(tier_assignments)} items from ref counts")
-            
-            # Get symbol tiers
-            symbol_items = [f"symbol:{f}" for f in symbols_by_file.keys()]
-            symbol_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
-            
-            if stability:
-                symbol_tiers = stability.get_items_by_tier(symbol_items)
-                for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
-                    symbol_tiers.setdefault(tier, [])
-                # Untracked symbols go to L3
-                tracked = set().union(*symbol_tiers.values())
-                for item in symbol_items:
-                    if item not in tracked:
-                        symbol_tiers['L3'].append(item)
-            else:
-                symbol_tiers['L3'] = symbol_items
-            
-            # Convert to file paths, excluding active context files
-            for tier, items in symbol_tiers.items():
-                symbol_files_by_tier[tier] = [
-                    item.replace("symbol:", "") for item in items
-                    if item.startswith("symbol:") and item.replace("symbol:", "") not in active_context_files
-                ]
-            
-            # Format symbol blocks
-            symbol_map_content = format_symbol_blocks_by_tier(
-                symbols_by_file=symbols_by_file,
-                file_tiers=symbol_files_by_tier,
-                references=references,
-                file_refs=file_refs,
-                file_imports=file_imports,
-                aliases=aliases,
-                exclude_files=active_context_files,
-            )
-        except Exception:
-            pass
-        
-        return symbol_map_content, symbol_files_by_tier, legend, legend_tokens
-
-    def _get_file_tiers(self, file_paths, stability):
-        """Organize file paths into stability tiers."""
-        file_tiers = {'L0': [], 'L1': [], 'L2': [], 'L3': [], 'active': []}
-        if not file_paths:
-            return file_tiers
-        
-        if stability:
-            file_tiers = stability.get_items_by_tier(list(file_paths))
-            for tier in ['L0', 'L1', 'L2', 'L3', 'active']:
-                file_tiers.setdefault(tier, [])
-            # Untracked files go to active
-            tracked = set().union(*file_tiers.values())
-            for path in file_paths:
-                if path not in tracked:
-                    file_tiers['active'].append(path)
-        else:
-            file_tiers['active'] = list(file_paths)
-        
-        return file_tiers
-
-    def _build_url_items(self, fetched_urls, tc):
-        """Build URL items with token counts."""
-        url_items = []
-        url_tokens = 0
-        if not fetched_urls:
-            return url_items, url_tokens
-        
-        fetcher = self._get_url_fetcher()
-        for url in fetched_urls:
-            try:
-                cached = fetcher.cache.get(url)
-                if cached:
-                    tokens = tc.count(cached.format_for_prompt())
-                    url_items.append({
-                        "url": url,
-                        "tokens": tokens,
-                        "title": cached.title or url,
-                        "type": cached.url_type.value if cached.url_type else "unknown",
-                        "fetched_at": cached.fetched_at.isoformat() if cached.fetched_at else None
-                    })
-                    url_tokens += tokens
-                else:
-                    url_items.append({"url": url, "tokens": 0, "title": url, "type": "unknown", "not_cached": True})
-            except Exception as e:
-                url_items.append({"url": url, "tokens": 0, "title": url, "type": "error", "error": str(e)})
-        
-        if url_items:
-            # Add header overhead
-            url_tokens += tc.count("# URL Context\n\nThe following content was fetched from URLs mentioned in the conversation:\n\n")
-            url_tokens += tc.count("Ok, I've reviewed the URL content.")
-        
-        return url_items, url_tokens
 
     def get_context_breakdown(self, file_paths=None, fetched_urls=None):
         """
@@ -1107,20 +923,16 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
             return {"error": "No context manager available"}
         
         tc = self._context_manager.token_counter
-        stability = self._context_manager.cache_stability
-        
-        thresholds = {'L0': 12, 'L1': 9, 'L2': 6, 'L3': 3}
-        tier_names = {'L0': 'Most Stable', 'L1': 'Very Stable', 'L2': 'Stable', 
-                      'L3': 'Moderately Stable', 'active': 'Active'}
+        stability = self._get_stability_tracker()
         
         active_context_files = set(file_paths) if file_paths else set()
-        file_tiers = self._get_file_tiers(file_paths, stability)
+        file_tiers = self._get_file_tiers(file_paths)
         symbol_map_content, symbol_files_by_tier, legend, legend_tokens = \
-            self._get_symbol_map_data(active_context_files, file_paths, stability, tc)
+            self._get_symbol_map_data(active_context_files, file_paths)
         
         # Build system prompt
         system_prompt = build_system_prompt()
-        system_tokens = tc.count(system_prompt)
+        system_tokens = self._safe_count_tokens(system_prompt)
         
         # Build L0 block with system prompt and legend
         blocks = []
@@ -1128,8 +940,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         cached_tokens = 0
         
         l0_block, l0_tokens = self._build_tier_block(
-            'L0', tier_names, thresholds, symbol_map_content,
-            symbol_files_by_tier, file_tiers, tc, stability
+            'L0', symbol_map_content, symbol_files_by_tier, file_tiers
         )
         # Prepend system and legend to L0
         l0_block['contents'] = [{"type": "system", "tokens": system_tokens}] + \
@@ -1143,8 +954,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         # Build L1-L3 blocks
         for tier in ['L1', 'L2', 'L3']:
             block, tokens = self._build_tier_block(
-                tier, tier_names, thresholds, symbol_map_content,
-                symbol_files_by_tier, file_tiers, tc, stability
+                tier, symbol_map_content, symbol_files_by_tier, file_tiers
             )
             blocks.append(block)
             total_tokens += tokens
@@ -1156,7 +966,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         # Active files
         if file_tiers.get('active'):
-            file_items, file_tokens = self._get_file_items(file_tiers['active'], tc, stability)
+            file_items, file_tokens = self._build_file_items(file_tiers['active'])
             if file_tokens:
                 active_contents.append({
                     "type": "files",
@@ -1168,7 +978,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
                 active_tokens += file_tokens
         
         # URLs
-        url_items, url_tokens = self._build_url_items(fetched_urls, tc)
+        url_items, url_tokens = self._build_url_items(fetched_urls)
         if url_items:
             active_contents.append({
                 "type": "urls",
@@ -1193,7 +1003,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         
         blocks.append({
             "tier": "active",
-            "name": tier_names['active'],
+            "name": TIER_NAMES['active'],
             "tokens": active_tokens,
             "cached": False,
             "threshold": None,
@@ -1218,7 +1028,7 @@ class LiteLLM(ConfigMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryM
         legacy_breakdown = {
             "system": {"tokens": system_tokens, "label": "System Prompt"},
             "symbol_map": {
-                "tokens": sum(tc.count(c) for c in symbol_map_content.values() if c) + legend_tokens,
+                "tokens": sum(self._safe_count_tokens(c) for c in symbol_map_content.values() if c) + legend_tokens,
                 "label": "Symbol Map",
                 "file_count": sum(len(files) for files in symbol_files_by_tier.values()),
             },
