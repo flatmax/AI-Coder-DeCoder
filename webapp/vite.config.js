@@ -52,8 +52,8 @@ var crypto = self.crypto;`
 
 export default defineConfig({
   plugins: [jrpcFixes()],
-  // Use repo name as base path for GitHub Pages, or '/' for local dev
-  base: process.env.GITHUB_ACTIONS ? '/AI-Coder-DeCoder/' : '/',
+  // Base path is set via CLI --base arg in CI, defaults to '/' for local dev
+  base: '/',
   optimizeDeps: {
     exclude: ['@flatmax/jrpc-oo']
   },
