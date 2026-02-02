@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AC-DC Webapp</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    a { color: #4dabf7; }
+    .error { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <p id="status">Loading version info...</p>
+  <script>
+    fetch('/versions.json')
+      .then(r => r.json())
+      .then(data => {
+        if (data.latest) {
+          // Preserve query string (e.g., ?port=18080)
+          const query = window.location.search;
+          window.location.href = '/' + data.latest + '/' + query;
+        } else {
+          document.getElementById('status').innerHTML = 
+            '<span class="error">No versions available</span>';
+        }
+      })
+      .catch(err => {
+        document.getElementById('status').innerHTML = 
+          '<span class="error">Failed to load versions: ' + err.message + '</span>';
+      });
+  </script>
+</body>
+</html>
