@@ -27,21 +27,17 @@ jobs:
         with:
           path: source
 
-      - name: Checkout gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: gh-pages
-        continue-on-error: true
-
-      - name: Initialize gh-pages if needed
+      - name: Checkout gh-pages or initialize
         run: |
-          if [ ! -d "gh-pages" ]; then
-            mkdir gh-pages
+          # Try to clone gh-pages branch, or create empty directory if it doesn't exist
+          git clone --depth 1 --branch gh-pages "https://github.com/${{ github.repository }}.git" gh-pages 2>/dev/null || {
+            echo "gh-pages branch doesn't exist, creating fresh directory"
+            mkdir -p gh-pages
             cd gh-pages
             git init
             git checkout -b gh-pages
-          fi
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
