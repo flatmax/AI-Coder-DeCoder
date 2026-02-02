@@ -64,6 +64,32 @@ export class AppShell extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('keydown', this._handleKeydown);
+    this._updateTitle();
+  }
+
+  async _updateTitle() {
+    // Wait for prompt-view to be ready and connected
+    await this.updateComplete;
+    const promptView = this.shadowRoot?.querySelector('prompt-view');
+    if (promptView) {
+      // Wait for RPC to be ready
+      const checkRpc = setInterval(async () => {
+        if (promptView.call) {
+          clearInterval(checkRpc);
+          try {
+            const response = await promptView.call['Repo.get_repo_name']();
+            const repoName = response ? Object.values(response)[0] : null;
+            if (repoName) {
+              document.title = repoName;
+            }
+          } catch (err) {
+            console.error('Failed to get repo name:', err);
+          }
+        }
+      }, 100);
+      // Stop checking after 10 seconds
+      setTimeout(() => clearInterval(checkRpc), 10000);
+    }
   }
 
   disconnectedCallback() {
