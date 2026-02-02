@@ -4,12 +4,33 @@ import os
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
+import sys
 from jrpc_oo import JRPCServer
 from ac.llm import LiteLLM
 from ac.repo import Repo
 from ac.port_utils import find_available_port
+from git.exc import InvalidGitRepositoryError
 from ac.version import get_git_sha, get_webapp_base_url
 from ac.webapp_server import start_npm_dev_server
+
+
+def _show_error_dialog(title: str, message: str):
+    """Show an error dialog, falling back to print if no GUI available."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        
+        # Create hidden root window
+        root = tk.Tk()
+        root.withdraw()
+        
+        # Show error dialog
+        messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        # Fallback to console if tkinter not available
+        print(f"\n❌ {title}")
+        print(f"   {message}")
 
 
 def _get_webapp_dir() -> str:
@@ -79,6 +100,24 @@ async def find_ports_async(server_start_port, webapp_start_port):
 
 
 async def main_starter_async(args):
+    # Validate git repository early, before starting any servers
+    repo_path = args.repo_path or os.getcwd()
+    try:
+        repo = Repo(repo_path)
+    except (ValueError, InvalidGitRepositoryError) as e:
+        error_msg = (
+            f"{repo_path}\n"
+            f"is not a valid git repository.\n\n"
+            f"Please run ac-dc from within a git repository,\n"
+            f"or specify a repository path with --repo-path.\n\n"
+            f"To initialize a new git repository:\n"
+            f"  cd {repo_path}\n"
+            f"  git init"
+        )
+        print(f"\n❌ Error: {error_msg}")
+        _show_error_dialog("Not a Git Repository", error_msg)
+        return
+    
     local_mode = args.dev or args.preview
     
     # Only need webapp port if running locally
@@ -100,8 +139,7 @@ async def main_starter_async(args):
         print(f"Webapp port: {actual_webapp_port}")
         print("Preview mode: building and running local preview server")
 
-    repo = Repo(args.repo_path)
-    
+    # repo was already validated and created above
     server = JRPCServer(port=actual_server_port)
     server.add_class(repo)
     llm = LiteLLM(repo=repo)
