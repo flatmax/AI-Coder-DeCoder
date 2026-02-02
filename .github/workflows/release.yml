@@ -1,0 +1,131 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Get version info
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="dev-$(echo ${{ github.sha }} | cut -c1-8)"
+          fi
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION} (${SHORT_SHA})"
+
+      - name: Bake version file
+        shell: bash
+        run: |
+          echo "${{ github.sha }}" > ac/VERSION
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e .
+
+      - name: Build executable
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ac-dc-linux \
+            --add-data "ac/VERSION:ac" \
+            --add-data "config:config" \
+            --hidden-import=litellm \
+            --hidden-import=tiktoken \
+            --hidden-import=tiktoken_ext.openai_public \
+            --hidden-import=tiktoken_ext \
+            ac/dc.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ac-dc-linux
+          path: dist/ac-dc-linux
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Checkout for changelog
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git log
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous release tag (if any)
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -n "$PREV_TAG" ]; then
+            echo "Generating changelog since $PREV_TAG"
+            CHANGELOG=$(git log --format="%h %ad %s" --date=short "$PREV_TAG"..HEAD)
+          else
+            echo "No previous tag, showing last 50 commits"
+            CHANGELOG=$(git log --format="%h %ad %s" --date=short -50)
+          fi
+          
+          # Write to file (handles multiline)
+          echo "$CHANGELOG" > changelog.txt
+          
+          # Also create formatted version
+          echo "## Changes" > release_notes.md
+          echo "" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "$CHANGELOG" >> release_notes.md
+          echo '```' >> release_notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.sha.outputs.short }}
+          name: Build ${{ steps.sha.outputs.short }}
+          body_path: release_notes.md
+          files: |
+            artifacts/ac-dc-linux/ac-dc-linux
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

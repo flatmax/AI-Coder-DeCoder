@@ -12,6 +12,20 @@ from ac.version import get_git_sha, get_webapp_base_url
 from ac.webapp_server import start_npm_dev_server
 
 
+def _get_webapp_dir() -> str:
+    """Get webapp directory, handling both dev and bundled scenarios."""
+    import sys
+    
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, 'webapp')
+        return os.path.join(os.path.dirname(sys.executable), 'webapp')
+    
+    # Development mode
+    return os.path.join(os.path.dirname(__file__), '..', 'webapp')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='AC-DC: AI Coder / DeCoder')
     parser.add_argument('--server-port', type=int, default=18080,
@@ -95,7 +109,7 @@ async def main_starter_async(args):
     server.add_class(llm)
 
     if local_mode:
-        webapp_dir = os.path.join(os.path.dirname(__file__), '..', 'webapp')
+        webapp_dir = _get_webapp_dir()
         loop = asyncio.get_event_loop()
         # preview mode builds first, dev mode just runs start
         await loop.run_in_executor(None, start_npm_dev_server, webapp_dir, actual_webapp_port, args.preview)

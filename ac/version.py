@@ -1,11 +1,46 @@
 """Git version detection utilities."""
 
 import os
+import sys
 import subprocess
 from pathlib import Path
 
 
+def _get_package_dir() -> Path:
+    """Get the directory containing this package."""
+    return Path(__file__).parent
+
+
+def _read_baked_version() -> str | None:
+    """Read version from baked VERSION file (used in bundled releases)."""
+    # Check multiple locations for VERSION file
+    locations = [
+        _get_package_dir() / 'VERSION',           # ac/VERSION (installed/bundled)
+        _get_package_dir().parent / 'VERSION',    # repo root VERSION
+    ]
+    
+    # PyInstaller sets this attribute
+    if getattr(sys, 'frozen', False):
+        # Running as bundled executable
+        bundle_dir = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else Path(sys.executable).parent
+        locations.insert(0, bundle_dir / 'VERSION')
+    
+    for version_file in locations:
+        try:
+            if version_file.exists():
+                return version_file.read_text().strip()
+        except (OSError, IOError):
+            pass
+    
+    return None
+
+
 def get_git_sha(short: bool = True) -> str | None:
+    # First try baked version (for bundled releases)
+    baked = _read_baked_version()
+    if baked:
+        return baked[:8] if short else baked
+
     """Get current git commit SHA.
     
     Args:
