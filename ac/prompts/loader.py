@@ -10,6 +10,14 @@ from typing import Optional
 
 def _get_repo_root() -> Path:
     """Get the repository root directory."""
+    import sys
+    
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle
+        if hasattr(sys, '_MEIPASS'):
+            return Path(sys._MEIPASS)
+        return Path(sys.executable).parent
+    
     # Go up from ac/prompts/ to repo root
     return Path(__file__).parent.parent.parent
 
