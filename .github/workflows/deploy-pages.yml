@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -16,26 +16,177 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Initialize gh-pages if needed
+        run: |
+          if [ ! -d "gh-pages" ]; then
+            mkdir gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: webapp/package-lock.json
+          cache-dependency-path: source/webapp/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: webapp
+        working-directory: source/webapp
 
-      - name: Build
-        run: npm run build
-        working-directory: webapp
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Build webapp
+        run: npm run build -- --base=/${{ steps.sha.outputs.short }}/
+        working-directory: source/webapp
+
+      - name: Deploy versioned build
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.short }}"
+          DEPLOY_DIR="gh-pages/${SHORT_SHA}"
+          
+          # Remove existing version if present (re-run case)
+          rm -rf "${DEPLOY_DIR}"
+          
+          # Copy new build (has base=/{sha}/)
+          cp -r source/webapp/dist "${DEPLOY_DIR}"
+
+      - name: Update versions.json
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.short }}"
+          FULL_SHA="${{ github.sha }}"
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          VERSIONS_FILE="gh-pages/versions.json"
+          
+          # Create or update versions.json
+          if [ -f "${VERSIONS_FILE}" ]; then
+            # Add new version to the front, update latest
+            jq --arg sha "$SHORT_SHA" \
+               --arg full "$FULL_SHA" \
+               --arg date "$DATE" \
+               --arg branch "${{ github.ref_name }}" \
+               '.latest = $sha | .versions = [{"sha": $sha, "full_sha": $full, "date": $date, "branch": $branch}] + .versions' \
+               "${VERSIONS_FILE}" > tmp.json && mv tmp.json "${VERSIONS_FILE}"
+          else
+            # Create new versions.json
+            cat > "${VERSIONS_FILE}" << EOF
+          {
+            "latest": "${SHORT_SHA}",
+            "versions": [
+              {"sha": "${SHORT_SHA}", "full_sha": "${FULL_SHA}", "date": "${DATE}", "branch": "${{ github.ref_name }}"}
+            ]
+          }
+          EOF
+          fi
+
+      - name: Cleanup old versions (keep last 20)
+        run: |
+          VERSIONS_FILE="gh-pages/versions.json"
+          
+          if [ -f "${VERSIONS_FILE}" ]; then
+            # Get list of SHAs to keep (latest 20)
+            KEEP_SHAS=$(jq -r '.versions[:20][].sha' "${VERSIONS_FILE}")
+            
+            # Trim versions array to 20 entries
+            jq '.versions = .versions[:20]' "${VERSIONS_FILE}" > tmp.json && mv tmp.json "${VERSIONS_FILE}"
+            
+            # Remove old version directories
+            for dir in gh-pages/*/; do
+              dirname=$(basename "$dir")
+              # Check if this SHA should be kept
+              if ! echo "$KEEP_SHAS" | grep -q "^${dirname}$"; then
+                echo "Removing old version: ${dirname}"
+                rm -rf "$dir"
+              fi
+            done
+          fi
+
+      - name: Create root index.html
+        run: |
+          cat > gh-pages/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>AC-DC Webapp</title>
+            <style>
+              body {
+                font-family: system-ui, -apple-system, sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+                background: #1a1a2e;
+                color: #eee;
+              }
+              a { color: #4dabf7; }
+              .error { color: #ff6b6b; }
+            </style>
+          </head>
+          <body>
+            <p id="status">Loading version info...</p>
+            <script>
+              fetch('/versions.json')
+                .then(r => r.json())
+                .then(data => {
+                  if (data.latest) {
+                    // Preserve query string (e.g., ?port=18080)
+                    const query = window.location.search;
+                    window.location.href = '/' + data.latest + '/' + query;
+                  } else {
+                    document.getElementById('status').innerHTML = 
+                      '<span class="error">No versions available</span>';
+                  }
+                })
+                .catch(err => {
+                  document.getElementById('status').innerHTML = 
+                    '<span class="error">Failed to load versions: ' + err.message + '</span>';
+                });
+            </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Commit and push to gh-pages
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Set remote (needed if we initialized fresh)
+          git remote get-url origin 2>/dev/null || git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          
+          git add -A
+          git commit -m "Deploy ${{ steps.sha.outputs.short }} from ${{ github.ref_name }}" || echo "No changes to commit"
+          
+          # Push (create branch if doesn't exist)
+          git push origin gh-pages --force || git push --set-upstream origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -43,15 +194,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: webapp/dist
+          path: gh-pages
 
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

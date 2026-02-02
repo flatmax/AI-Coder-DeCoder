@@ -174,6 +174,35 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     this._dirtyFiles.clear();
   }
 
+  getOpenFilePaths() {
+    return this.files.map(f => f.path);
+  }
+
+  refreshFileContent(filePath, original, modified) {
+    const fileIndex = this.files.findIndex(f => f.path === filePath);
+    if (fileIndex === -1) return false;
+
+    // Update the file data
+    this.files = this.files.map((f, i) => 
+      i === fileIndex ? { ...f, original, modified } : f
+    );
+
+    // Update the Monaco models if they exist
+    const models = this._models.get(filePath);
+    if (models) {
+      models.original.setValue(original);
+      models.modified.setValue(modified);
+      models.savedContent = modified;
+      this._dirtyFiles.delete(filePath);
+    }
+
+    return true;
+  }
+
+  getOpenFilePaths() {
+    return this.files.map(f => f.path);
+  }
+
   clearFiles() {
     this.files = [];
     this.selectedFile = null;

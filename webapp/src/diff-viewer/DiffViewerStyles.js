@@ -124,11 +124,16 @@ export const diffViewerStyles = css`
     color: #666;
     font-size: 16px;
     gap: 12px;
+    padding-left: 33%;
+    box-sizing: border-box;
   }
 
-  .empty-state .icon {
-    font-size: 48px;
-    opacity: 0.5;
+  .empty-state .brand {
+    font-size: 72px;
+    font-weight: bold;
+    color: #3c3c3c;
+    letter-spacing: 4px;
+    user-select: none;
   }
 
   .hidden {
