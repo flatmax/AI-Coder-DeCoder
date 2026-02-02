@@ -126,9 +126,12 @@ export const diffViewerStyles = css`
     gap: 12px;
   }
 
-  .empty-state .icon {
-    font-size: 48px;
-    opacity: 0.5;
+  .empty-state .brand {
+    font-size: 72px;
+    font-weight: bold;
+    color: #3c3c3c;
+    letter-spacing: 4px;
+    user-select: none;
   }
 
   .hidden {

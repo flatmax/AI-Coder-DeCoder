@@ -33,11 +33,7 @@ export function renderDiffViewer(component) {
         </div>
       ` : html`
         <div class="empty-state">
-          <div class="icon">📝</div>
-          <div>No changes to display</div>
-          <div style="font-size: 13px; color: #555;">
-            Send a message to make code changes
-          </div>
+          <div class="brand">AC⚡DC</div>
         </div>
       `}
       <div id="editor-container"></div>
