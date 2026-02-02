@@ -240,6 +240,18 @@ export const StreamingMixin = (superClass) => class extends superClass {
     // Refresh file tree if edits were applied
     if (result.passed && result.passed.length > 0) {
       await this.loadFileTree();
+
+      // Notify that files were edited (for refreshing already-open tabs, not opening new ones)
+      const editedPaths = result.passed.map(edit => 
+        Array.isArray(edit) ? edit[0] : (edit.file_path || edit.path)
+      ).filter(Boolean);
+      if (editedPaths.length > 0) {
+        this.dispatchEvent(new CustomEvent('files-edited', {
+          detail: { paths: editedPaths },
+          bubbles: true,
+          composed: true
+        }));
+      }
     }
     
     // Show token usage HUD if available
