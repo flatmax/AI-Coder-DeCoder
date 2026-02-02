@@ -184,6 +184,41 @@ export class AppShell extends LitElement {
     await this._loadFileIntoDiff(file);
   }
 
+  async handleFilesEdited(e) {
+    const { paths } = e.detail;
+    if (!paths || paths.length === 0) return;
+
+    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+    if (!diffViewer) return;
+
+    const openPaths = diffViewer.getOpenFilePaths();
+    if (openPaths.length === 0) return;
+
+    // Only refresh files that are both open and edited
+    const editedSet = new Set(paths);
+    const pathsToRefresh = openPaths.filter(p => editedSet.has(p));
+    if (pathsToRefresh.length === 0) return;
+
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) return;
+
+    for (const filePath of pathsToRefresh) {
+      try {
+        const headResponse = await promptView.call['Repo.get_file_content'](filePath, 'HEAD');
+        const headResult = headResponse ? Object.values(headResponse)[0] : null;
+        const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? '');
+
+        const workingResponse = await promptView.call['Repo.get_file_content'](filePath);
+        const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
+        const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? '');
+
+        diffViewer.refreshFileContent(filePath, original, modified);
+      } catch (err) {
+        console.error('Failed to refresh file:', filePath, err);
+      }
+    }
+  }
+
   handleCloseSearch() {
     this.activeLeftTab = 'files';
   }
@@ -197,6 +232,41 @@ export class AppShell extends LitElement {
     if (files && files.length > 0) {
       this.diffFiles = files;
       this.showDiff = true;
+    }
+  }
+
+  async handleFilesEdited(e) {
+    const { paths } = e.detail;
+    if (!paths || paths.length === 0) return;
+
+    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+    if (!diffViewer) return;
+
+    const openPaths = diffViewer.getOpenFilePaths();
+    if (openPaths.length === 0) return;
+
+    // Only refresh files that are both open and edited
+    const editedSet = new Set(paths);
+    const pathsToRefresh = openPaths.filter(p => editedSet.has(p));
+    if (pathsToRefresh.length === 0) return;
+
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) return;
+
+    for (const filePath of pathsToRefresh) {
+      try {
+        const headResponse = await promptView.call['Repo.get_file_content'](filePath, 'HEAD');
+        const headResult = headResponse ? Object.values(headResponse)[0] : null;
+        const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? '');
+
+        const workingResponse = await promptView.call['Repo.get_file_content'](filePath);
+        const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
+        const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? '');
+
+        diffViewer.refreshFileContent(filePath, original, modified);
+      } catch (err) {
+        console.error('Failed to refresh file:', filePath, err);
+      }
     }
   }
 
@@ -396,6 +466,7 @@ export class AppShell extends LitElement {
             .viewingFile=${this.viewingFile}
             @edits-applied=${this.handleEditsApplied}
             @navigate-to-edit=${this.handleNavigateToEdit}
+            @files-edited=${this.handleFilesEdited}
             @url-removed=${this.handleUrlRemoved}
             @view-url-content=${this.handleViewUrlContent}
             @search-result-selected=${this.handleSearchResultSelected}
