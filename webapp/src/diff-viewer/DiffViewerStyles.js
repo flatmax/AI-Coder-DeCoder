@@ -124,6 +124,8 @@ export const diffViewerStyles = css`
     color: #666;
     font-size: 16px;
     gap: 12px;
+    padding-left: 33%;
+    box-sizing: border-box;
   }
 
   .empty-state .brand {
