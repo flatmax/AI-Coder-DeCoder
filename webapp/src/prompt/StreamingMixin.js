@@ -237,19 +237,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
       ];
     }
     
-    // Refresh file tree and show diffs if edits were applied
+    // Refresh file tree if edits were applied
     if (result.passed && result.passed.length > 0) {
       await this.loadFileTree();
-      
-      // Build diff files and dispatch event to show them
-      const diffFiles = await this._buildDiffFiles(result);
-      if (diffFiles.length > 0) {
-        this.dispatchEvent(new CustomEvent('edits-applied', {
-          detail: { files: diffFiles },
-          bubbles: true,
-          composed: true
-        }));
-      }
     }
     
     // Show token usage HUD if available
@@ -261,6 +251,15 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (typeof this.loadPromptSnippets === 'function') {
       this.loadPromptSnippets();
     }
+    
+    // Focus the textarea for next input after a brief delay
+    // to ensure DOM updates and any other focus changes have settled
+    setTimeout(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.focus();
+      }
+    }, 100);
   }
 
   /**
