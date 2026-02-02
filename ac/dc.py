@@ -8,6 +8,7 @@ from jrpc_oo import JRPCServer
 from ac.llm import LiteLLM
 from ac.repo import Repo
 from ac.port_utils import find_available_port
+from ac.version import get_git_sha, get_webapp_base_url
 from ac.webapp_server import start_npm_dev_server
 
 
@@ -29,10 +30,23 @@ def parse_args():
 
 
 def get_browser_url(server_port, webapp_port=None, dev_mode=False):
+    """Construct the browser URL for the webapp.
+    
+    In dev/preview mode: use local server
+    Otherwise: use GitHub Pages with version matching
+    """
     if dev_mode:
         return f"http://localhost:{webapp_port}/?port={server_port}"
+    
+    base_url = get_webapp_base_url()
+    sha = get_git_sha(short=True)
+    
+    if sha:
+        # Use SHA-specific version for exact match
+        return f"{base_url}/{sha}/?port={server_port}"
     else:
-        return f"https://flatmax.github.io/AI-Coder-DeCoder/?port={server_port}"
+        # Fallback to root (which redirects to latest via JS)
+        return f"{base_url}/?port={server_port}"
 
 
 def open_browser(server_port, webapp_port=None, dev_mode=False):
