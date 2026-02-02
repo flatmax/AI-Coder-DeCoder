@@ -1,10 +1,24 @@
 import json
 import os
+import sys
+from pathlib import Path
 
 
 # Default cache configuration values
 DEFAULT_CACHE_MIN_TOKENS = 1024
 DEFAULT_CACHE_BUFFER_MULTIPLIER = 1.5
+
+
+def _get_config_dir() -> Path:
+    """Get the config directory, handling both normal and frozen (PyInstaller) execution."""
+    # PyInstaller sets sys.frozen and sys._MEIPASS
+    if getattr(sys, 'frozen', False):
+        # Running as bundled executable
+        bundle_dir = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else Path(sys.executable).parent
+        return bundle_dir / 'config'
+    else:
+        # Normal execution: config is at repo root (two levels up from ac/llm/)
+        return Path(__file__).parent.parent.parent / 'config'
 
 
 class ConfigMixin:
@@ -21,9 +35,7 @@ class ConfigMixin:
             Dict with configuration settings
         """
         if config_path is None:
-            # Look for config/llm.json in the repo root (three levels up from llm/config.py)
-            # Path: ac/llm/config.py -> ac/llm/ -> ac/ -> repo root
-            config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'llm.json')
+            config_path = _get_config_dir() / 'llm.json'
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
