@@ -55,7 +55,10 @@ jobs:
         run: echo "short=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
 
       - name: Build webapp
-        run: npm run build -- --base=/${{ steps.sha.outputs.short }}/
+        run: |
+          REPO_NAME="${{ github.repository }}"
+          REPO_NAME="${REPO_NAME#*/}"  # Extract repo name from owner/repo
+          npm run build -- --base=/${REPO_NAME}/${{ steps.sha.outputs.short }}/
         working-directory: source/webapp
 
       - name: Deploy versioned build
