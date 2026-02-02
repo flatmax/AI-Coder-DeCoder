@@ -62,10 +62,18 @@ jobs:
             --name ac-dc-linux \
             --add-data "ac/VERSION:ac" \
             --add-data "config:config" \
-            --hidden-import=litellm \
-            --hidden-import=tiktoken \
-            --hidden-import=tiktoken_ext.openai_public \
-            --hidden-import=tiktoken_ext \
+            --collect-all=litellm \
+            --collect-all=tiktoken \
+            --collect-all=tiktoken_ext \
+            --collect-all=tree_sitter \
+            --collect-all=tree_sitter_python \
+            --collect-all=tree_sitter_javascript \
+            --collect-all=tree_sitter_typescript \
+            --collect-all=tree_sitter_c \
+            --collect-all=tree_sitter_cpp \
+            --collect-all=trafilatura \
+            --hidden-import=boto3 \
+            --hidden-import=botocore \
             ac/dc.py
 
       - name: Upload artifact
@@ -104,8 +112,8 @@ jobs:
             echo "Generating changelog since $PREV_TAG"
             CHANGELOG=$(git log --format="%h %ad %s" --date=short "$PREV_TAG"..HEAD)
           else
-            echo "No previous tag, showing last 50 commits"
-            CHANGELOG=$(git log --format="%h %ad %s" --date=short -50)
+            echo "No previous tag, showing full history"
+            CHANGELOG=$(git log --format="%h %ad %s" --date=short)
           fi
           
           # Write to file (handles multiline)
