@@ -1,6 +1,12 @@
 {
-  "latest": "53c61143",
+  "latest": "da9a6136",
   "versions": [
+    {
+      "sha": "da9a6136",
+      "full_sha": "da9a6136fc2ec635c710db0e6a89efb29c86841c",
+      "date": "2026-02-02T10:39:46Z",
+      "branch": "master"
+    },
     {
       "sha": "53c61143",
       "full_sha": "53c611437af388a9804c3c36a2f3714d3fc94d91",
