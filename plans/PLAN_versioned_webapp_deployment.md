@@ -1,185 +1,104 @@
 # Plan: Versioned Webapp Deployment
 
+## Status: IMPLEMENTED
+
 ## Overview
 
-Deploy the webapp to GitHub Pages with git commit SHA-based versioning, allowing the Python backend to fetch the exact webapp version that matches its codebase.
-
-## Current State
-
-- GitHub Pages deploys webapp to root (`/`)
-- `--dev` mode runs Vite dev server locally from `webapp/` directory
-- Non-dev mode serves from GitHub Pages (single version)
-- No version compatibility checking between Python and webapp
-
-## Goals
-
-1. Deploy each commit to `/{sha}/` subdirectory on GitHub Pages
-2. Maintain `/latest/` pointing to most recent build
-3. Python backend fetches webapp from `/{sha}/` matching its own commit
-4. Skip version checking in `--dev` mode
-5. Graceful fallback when exact SHA not available
+Deploy the webapp to GitHub Pages with git commit SHA-based versioning, allowing the Python backend to open the exact webapp version that matches its codebase.
 
 ## Design
 
-### Build-Time Version Embedding
+### Version Detection
 
-**Vite build configuration** (`webapp/vite.config.js`):
-- Inject `VITE_GIT_SHA` environment variable during build
-- Webapp can display/expose this for debugging
+**Python side** (`ac/version.py`):
+- `get_git_sha(short=True)` returns 8-char SHA from local git repo
+- Primary: runs `git rev-parse HEAD`
+- Fallback: reads `.git/HEAD` directly
+- Returns `None` if not in a git repo
 
-**GitHub Actions workflow**:
-- Capture `${{ github.sha }}` (short form)
-- Pass to Vite build as env var
-- Deploy built files to `/{sha}/` subdirectory
+**Webapp side**:
+- Version extracted from URL path at runtime: `/a1b2c3d4/` → `a1b2c3d4`
+- No build-time injection needed
 
 ### GitHub Pages Structure
 
 ```
 /
-├── index.html          # Version picker or redirect to /latest/
-├── versions.json       # List of available versions with metadata
-├── latest/             # Copy of most recent build
-│   └── ...
-├── a1b2c3d/            # Build for commit a1b2c3d
+├── index.html          # Fetches versions.json, redirects to latest SHA
+├── versions.json       # Tracks available versions for root redirect & cleanup
+├── a1b2c3d4/           # Build for commit a1b2c3d4 (base=/{sha}/)
 │   ├── index.html
-│   ├── assets/
-│   └── ...
-├── b2c3d4e/            # Build for commit b2c3d4e
+│   └── assets/
+├── b2c3d4e5/           # Build for commit b2c3d4e5
 │   └── ...
 └── ...
 ```
+
+No `/latest/` directory - root redirect uses `versions.json` to find most recent SHA.
 
 ### versions.json Format
 
 ```json
 {
-  "latest": "a1b2c3d",
+  "latest": "a1b2c3d4",
   "versions": [
-    {"sha": "a1b2c3d", "date": "2024-01-15T10:30:00Z", "branch": "master"},
-    {"sha": "b2c3d4e", "date": "2024-01-14T15:20:00Z", "branch": "master"}
+    {"sha": "a1b2c3d4", "full_sha": "a1b2c3d4...", "date": "2024-01-15T10:30:00Z", "branch": "master"},
+    {"sha": "b2c3d4e5", "full_sha": "b2c3d4e5...", "date": "2024-01-14T15:20:00Z", "branch": "master"}
   ]
 }
 ```
 
-### Python-Side Changes
+Used only for:
+1. Root `index.html` redirect to latest version
+2. Cleanup logic (keep last 20 versions)
 
-**Version detection** (`ac/version.py` - new file):
-```python
-def get_git_sha() -> str | None:
-    """Get current git commit SHA, or None if not in a git repo."""
-    # Try git command first
-    # Fall back to checking .git/HEAD
-    # Return None if not available
-```
+### URL Construction (`ac/dc.py`)
 
-**Webapp URL construction** (`ac/dc.py` or new module):
 ```python
-def get_webapp_url(dev_mode: bool, preview_mode: bool) -> str:
+def get_browser_url(server_port, webapp_port=None, dev_mode=False):
     if dev_mode:
-        return f"http://localhost:{webapp_port}/"
+        return f"http://localhost:{webapp_port}/?port={server_port}"
     
-    sha = get_git_sha()
-    base = "https://{user}.github.io/{repo}"
+    base_url = get_webapp_base_url()  # https://flatmax.github.io/AI-Coder-DeCoder
+    sha = get_git_sha(short=True)
     
     if sha:
-        # Try SHA-specific version first
-        return f"{base}/{sha[:7]}/"
+        return f"{base_url}/{sha}/?port={server_port}"
     else:
-        # Fallback to latest
-        return f"{base}/latest/"
+        # Fallback to root (redirects to latest via JS)
+        return f"{base_url}/?port={server_port}"
 ```
-
-**Fallback logic**:
-1. Try `/{sha}/` - exact match
-2. If 404, try `/latest/` with warning
-3. If still 404, error with helpful message
 
 ### CLI Behavior
 
-| Mode | Webapp Source | Version Check |
-|------|---------------|---------------|
-| `--dev` | Local Vite dev server | Skipped |
-| `--preview` | GitHub Pages `/{sha}/` | Enabled |
-| (default) | GitHub Pages `/{sha}/` | Enabled |
+| Mode | Webapp Source | Version Matching |
+|------|---------------|------------------|
+| `--dev` | Local Vite dev server | N/A |
+| `--preview` | Local preview server | N/A |
+| (default) | GitHub Pages `/{sha}/` | Exact SHA match |
 
-### Workflow Changes
+### Workflow (`.github/workflows/deploy-pages.yml`)
 
-**Modified `.github/workflows/deploy-pages.yml`**:
-
-1. **Build step**:
-   - Set `VITE_GIT_SHA=${{ github.sha }}`
-   - Run `npm run build`
-
-2. **Deploy step**:
-   - Checkout existing `gh-pages` branch
-   - Copy build to `/{short-sha}/` directory
-   - Update `/latest/` with copy of new build
-   - Update `/versions.json` with new entry
-   - Update root `/index.html`
-   - Commit and push to `gh-pages`
-
-### Root index.html
-
-Simple page that either:
-- Redirects to `/latest/` automatically, or
-- Shows a version picker UI listing available versions
-
-Recommendation: Auto-redirect with a small delay showing "Redirecting to latest version..."
-
-## Implementation Steps
-
-### Phase 1: Workflow Updates
-1. [ ] Modify `deploy-pages.yml` to deploy to `/{sha}/`
-2. [ ] Add `versions.json` generation
-3. [ ] Add `/latest/` copy
-4. [ ] Add root `index.html` with redirect
-
-### Phase 2: Vite Build Changes
-1. [ ] Update `vite.config.js` to accept `VITE_GIT_SHA`
-2. [ ] Optionally display SHA in webapp UI (footer/about)
-
-### Phase 3: Python Backend Changes
-1. [ ] Create `ac/version.py` with `get_git_sha()`
-2. [ ] Update `ac/dc.py` to construct versioned URLs
-3. [ ] Add fallback logic with warnings
-4. [ ] Skip version checking in `--dev` mode
-
-### Phase 4: Testing
-1. [ ] Test `--dev` mode still works (local Vite)
-2. [ ] Test non-dev mode fetches correct SHA version
-3. [ ] Test fallback to `/latest/` when SHA missing
-4. [ ] Verify old versions remain accessible
+1. Checkout source repo and existing gh-pages branch
+2. Build with `--base=/{sha}/`
+3. Copy build to `gh-pages/{sha}/`
+4. Update `versions.json` (prepend new version, set latest)
+5. Cleanup old versions (keep last 20)
+6. Update root `index.html` (JS redirect)
+7. Commit and push to gh-pages
+8. Deploy via GitHub Pages action
 
 ## Edge Cases
 
-1. **Uncommitted changes**: `get_git_sha()` returns HEAD, but local code differs
-   - Accept this; version checking is best-effort
-
+1. **Uncommitted changes**: SHA matches HEAD, not working tree - acceptable
 2. **Detached HEAD**: Works fine, SHA still available
+3. **Not a git repo**: Falls back to root URL (redirects to latest)
+4. **SHA not deployed yet**: 404 - user must wait for CI or use `--dev`
+5. **Feature branches**: Only master deploys; branches use `--dev` mode
 
-3. **Not a git repo**: `get_git_sha()` returns None, use `/latest/`
+## Files Modified
 
-4. **SHA not deployed yet**: New commits before workflow runs
-   - Fallback to `/latest/` with warning
-
-5. **Feature branches**: Only `master` deploys, branches use `/latest/`
-   - Could extend to deploy branches too if needed
-
-## Future Considerations
-
-1. **Cleanup job**: Remove old versions after N builds or N days
-2. **Branch-specific deploys**: Deploy feature branches to `/branch/{name}/`
-3. **Bundled fallback**: Include pre-built webapp in Python package for offline use
-4. **Version compatibility ranges**: Allow webapp to work with range of Python commits
-
-## Files to Modify
-
-- `.github/workflows/deploy-pages.yml` - SHA-based deployment
-- `webapp/vite.config.js` - Accept git SHA env var
-- `ac/dc.py` - URL construction and version checking
-- `ac/version.py` (new) - Git SHA detection
-
-## Files to Create
-
-- `webapp/public/index.html` - Root redirect page (or generated)
-- `ac/version.py` - Version utilities
+- `.github/workflows/deploy-pages.yml` - SHA-based versioned deployment
+- `webapp/vite.config.js` - Simplified, base path via CLI arg
+- `ac/dc.py` - Versioned URL construction
+- `ac/version.py` (new) - Git SHA detection utilities
