@@ -18,6 +18,16 @@ _config_path: Optional[str] = None
 
 def _get_default_config_path() -> str:
     """Get default path to config/app.json."""
+    import sys
+    
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle
+        if hasattr(sys, '_MEIPASS'):
+            base = sys._MEIPASS
+        else:
+            base = os.path.dirname(sys.executable)
+        return os.path.join(base, 'config', 'app.json')
+    
     return os.path.join(
         os.path.dirname(__file__),
         '..',
