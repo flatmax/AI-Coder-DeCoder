@@ -93,19 +93,25 @@ jobs:
         with:
           path: artifacts
 
-      - name: Get short SHA
-        id: sha
-        run: echo "short=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+      - name: Get version info
+        id: version
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+          DATE_TAG=$(date -u +%Y.%m.%d)
+          RELEASE_TAG="${DATE_TAG}-${SHORT_SHA}"
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
 
       - name: Generate release notes
         id: notes
         run: |
-          SHORT_SHA="${{ steps.sha.outputs.short }}"
+          SHORT_SHA="${{ steps.version.outputs.short_sha }}"
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
           REPO="${{ github.repository }}"
           COMMITS_URL="https://github.com/${REPO}/commits/${SHORT_SHA}"
           
           cat > release_notes.md << EOF
-          ## AC-DC Build ${SHORT_SHA}
+          ## AC-DC ${RELEASE_TAG}
           
           [View commit history](${COMMITS_URL})
           
@@ -121,8 +127,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.sha.outputs.short }}
-          name: Build ${{ steps.sha.outputs.short }}
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          name: ${{ steps.version.outputs.release_tag }}
           body_path: release_notes.md
           files: |
             artifacts/ac-dc-linux/ac-dc-linux
