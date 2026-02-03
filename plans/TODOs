@@ -1,3 +1,1 @@
-bug: clicking on a change unchecks and checks the file picker file.
-bug: switching between files, find, context, cache tabs in the dialog collapses the picker tree. this shouldn't happen.
 bug: when working in a different repo, the snippets ui button isn't showing.
