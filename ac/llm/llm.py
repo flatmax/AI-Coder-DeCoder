@@ -102,6 +102,41 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             'env': {k: v for k, v in self.config.get('env', {}).items()}
         }
     
+    def reload_config(self):
+        """Reload LLM configuration from llm.json.
+        
+        Re-reads the config file, updates model settings, and applies
+        environment variables.
+        
+        Returns:
+            dict with 'success' bool and either config info or 'error'
+        """
+        try:
+            # Re-read config file
+            self.config = self._load_config()
+            
+            # Apply environment variables from config
+            self._apply_env_vars()
+            
+            # Update model settings
+            self.model = self.config.get('model', 'gpt-4o-mini')
+            self.smaller_model = self.config.get('smallerModel', 'gpt-4o-mini')
+            
+            # Update context manager's token counter model
+            if self._context_manager:
+                self._context_manager.model_name = self.model
+                self._context_manager.token_counter.model_name = self.model
+                self._context_manager.token_counter._info = None  # Reset cached info
+            
+            return {
+                "success": True,
+                "model": self.model,
+                "smaller_model": self.smaller_model,
+                "message": "LLM config reloaded successfully"
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     @property
     def conversation_history(self) -> list[dict]:
         """Get conversation history from context manager."""

@@ -12,6 +12,7 @@ import './file-picker/FilePicker.js';
 import './history-browser/HistoryBrowser.js';
 import './find-in-files/FindInFiles.js';
 import './context-viewer/ContextViewer.js';
+import './settings/SettingsPanel.js';
 
 const MixedBase = StreamingMixin(
   WindowControlsMixin(
@@ -325,6 +326,10 @@ export class PromptView extends MixedBase {
       this.updateComplete.then(() => {
         this._refreshCacheViewer();
       });
+    } else if (tab === 'settings') {
+      this.updateComplete.then(() => {
+        this._refreshSettingsPanel();
+      });
     }
   }
 
@@ -363,6 +368,17 @@ export class PromptView extends MixedBase {
       if (cacheViewer.breakdown) {
         this._syncHistoryBarFromBreakdown(cacheViewer.breakdown);
       }
+    }
+  }
+
+  /**
+   * Refresh the settings panel
+   */
+  async _refreshSettingsPanel() {
+    const settingsPanel = this.shadowRoot?.querySelector('settings-panel');
+    if (settingsPanel && this.call) {
+      settingsPanel.rpcCall = this.call;
+      await settingsPanel.loadConfigInfo();
     }
   }
 
