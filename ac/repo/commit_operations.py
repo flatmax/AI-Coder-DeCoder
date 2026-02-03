@@ -111,11 +111,15 @@ class CommitOperationsMixin:
         """
         try:
             # Check if there are staged changes
-            if not self._repo.index.diff('HEAD') and not self._repo.untracked_files:
-                # Check for staged files
-                staged = list(self._repo.index.diff('HEAD'))
-                if not staged:
-                    return self._create_error_response('No staged changes to commit')
+            # For new repos without HEAD, check if index has any entries
+            try:
+                staged_files = list(self._repo.index.diff('HEAD'))
+            except Exception:
+                # No HEAD exists (new repo) - check if index has entries
+                staged_files = list(self._repo.index.entries.keys()) if self._repo.index.entries else []
+            
+            if not staged_files:
+                return self._create_error_response('No staged changes to commit')
             
             commit = self._repo.index.commit(message)
             return {
