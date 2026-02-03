@@ -589,6 +589,7 @@ export const promptViewStyles = css`
   .resize-handle {
     position: absolute;
     background: transparent;
+    z-index: 100;
   }
 
   .resize-handle-n {
