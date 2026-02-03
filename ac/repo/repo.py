@@ -51,16 +51,17 @@ class Repo(FileOperationsMixin, TreeOperationsMixin, CommitOperationsMixin, Sear
         return {'error': message}
     
     def _ensure_aicoder_gitignore(self):
-        """Ensure .aicoder/history.jsonl is in .gitignore."""
+        """Ensure .aicoder/ directory is in .gitignore."""
         gitignore_path = os.path.join(self.get_repo_root(), '.gitignore')
-        entry = '.aicoder/history.jsonl'
+        entry = '.aicoder/'
         
         # Check if entry already exists
         if os.path.exists(gitignore_path):
             try:
                 with open(gitignore_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    if entry in content:
+                    # Check for exact entry or wildcard variant
+                    if entry in content or '.aicoder/*' in content:
                         return  # Already present
             except Exception:
                 pass
@@ -75,6 +76,8 @@ class Repo(FileOperationsMixin, TreeOperationsMixin, CommitOperationsMixin, Sear
                         if content and not content.endswith('\n'):
                             f.write('\n')
                 f.write(f'{entry}\n')
-            print(f"📝 Added {entry} to .gitignore")
+            # Stage the .gitignore file
+            self._repo.git.add('.gitignore')
+            print(f"📝 Added {entry} to .gitignore (staged)")
         except Exception as e:
             print(f"Warning: Could not update .gitignore: {e}")
