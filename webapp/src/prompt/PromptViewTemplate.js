@@ -369,7 +369,8 @@ export function renderPromptView(component) {
           <span>${component.activeLeftTab === 'files' ? '💬 Chat' : 
                   component.activeLeftTab === 'search' ? '🔍 Search' : 
                   component.activeLeftTab === 'context' ? '📊 Context' :
-                  '🗄️ Cache'}</span>
+                  component.activeLeftTab === 'cache' ? '🗄️ Cache' :
+                  '⚙️ Settings'}</span>
         </div>
         <div class="header-section header-tabs">
           <button 
@@ -392,6 +393,11 @@ export function renderPromptView(component) {
             @click=${(e) => { e.stopPropagation(); component.switchTab('cache'); }}
             title="Cache Tiers"
           >🗄️</button>
+          <button 
+            class="header-tab ${component.activeLeftTab === 'settings' ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab('settings'); }}
+            title="Settings"
+          >⚙️</button>
         </div>
         <div class="header-section header-git">
           ${!component.minimized && component.activeLeftTab === 'files' ? html`
@@ -512,7 +518,7 @@ export function renderPromptView(component) {
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
               ></context-viewer>
             </div>
-          ` : html`
+          ` : component.activeLeftTab === 'cache' ? html`
             <div class="embedded-panel">
               <cache-viewer
                 .rpcCall=${component.call}
@@ -523,6 +529,12 @@ export function renderPromptView(component) {
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
                 @file-selected=${(e) => component.handleFileMentionClick(e)}
               ></cache-viewer>
+            </div>
+          ` : html`
+            <div class="embedded-panel">
+              <settings-panel
+                .rpcCall=${component.call}
+              ></settings-panel>
             </div>
           `}
         </div>

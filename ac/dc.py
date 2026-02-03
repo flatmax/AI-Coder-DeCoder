@@ -8,6 +8,7 @@ import sys
 from jrpc_oo import JRPCServer
 from ac.llm import LiteLLM
 from ac.repo import Repo
+from ac.settings import Settings
 from ac.port_utils import find_available_port
 from git.exc import InvalidGitRepositoryError
 from ac.version import get_git_sha, get_webapp_base_url
@@ -145,6 +146,8 @@ async def main_starter_async(args):
     llm = LiteLLM(repo=repo)
     llm.server = server  # Give LiteLLM access to server for callbacks
     server.add_class(llm)
+    settings = Settings(llm=llm)
+    server.add_class(settings)
 
     if local_mode:
         webapp_dir = _get_webapp_dir()
