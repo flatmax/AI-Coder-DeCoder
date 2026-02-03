@@ -43,8 +43,9 @@ export class FilePicker extends MixedBase {
 
   willUpdate(changedProperties) {
     // Auto-expand directories containing changed files when data first loads
-    // Using willUpdate to avoid triggering additional update cycles
-    if (!this._expandedInitialized && this.tree && 
+    // Only do this if the parent hasn't provided expanded state
+    const hasParentExpanded = Object.keys(this.expanded || {}).length > 0;
+    if (!this._expandedInitialized && this.tree && !hasParentExpanded &&
         (this.modified.length > 0 || this.staged.length > 0 || this.untracked.length > 0)) {
       this._expandedInitialized = true;
       this._expandChangedFileDirs();
@@ -134,7 +135,15 @@ export class FilePicker extends MixedBase {
     for (const dir of dirsToExpand) {
       newExpanded[dir] = true;
     }
+    this._updateExpanded(newExpanded);
+  }
+
+  /**
+   * Update expanded state and notify parent
+   */
+  _updateExpanded(newExpanded) {
     this.expanded = newExpanded;
+    this.dispatchEvent(new CustomEvent('expanded-change', { detail: newExpanded }));
   }
 
   render() {

@@ -431,7 +431,9 @@ export function renderPromptView(component) {
                   .diffStats=${component.diffStats}
                   .viewingFile=${component.viewingFile}
                   .selected=${component._getSelectedObject()}
+                  .expanded=${component.filePickerExpanded}
                   @selection-change=${component.handleSelectionChange}
+                  @expanded-change=${component.handleExpandedChange}
                   @file-view=${component.handleFileView}
                   @copy-path-to-prompt=${component.handleCopyPathToPrompt}
                 ></file-picker>

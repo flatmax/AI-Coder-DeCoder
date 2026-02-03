@@ -48,7 +48,8 @@ export class PromptView extends MixedBase {
     fetchingUrls: { type: Object },
     fetchedUrls: { type: Object },
     excludedUrls: { type: Object },  // Set of URLs excluded from context
-    activeLeftTab: { type: String }  // 'files' | 'search' | 'context' | 'cache'
+    activeLeftTab: { type: String },  // 'files' | 'search' | 'context' | 'cache'
+    filePickerExpanded: { type: Object }
   };
 
   static styles = promptViewStyles;
@@ -77,6 +78,7 @@ export class PromptView extends MixedBase {
     this.activeLeftTab = 'files';
     this.promptSnippets = [];
     this.snippetDrawerOpen = false;
+    this.filePickerExpanded = {};
     this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
     this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
     this._filePickerScrollTop = 0;
@@ -455,6 +457,13 @@ export class PromptView extends MixedBase {
       newExcluded.add(url);
     }
     this.excludedUrls = newExcluded;
+  }
+
+  /**
+   * Handle file picker expanded state change
+   */
+  handleExpandedChange(e) {
+    this.filePickerExpanded = e.detail;
   }
 
   disconnectedCallback() {
