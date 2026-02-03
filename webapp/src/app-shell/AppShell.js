@@ -71,25 +71,39 @@ export class AppShell extends LitElement {
     // Wait for prompt-view to be ready and connected
     await this.updateComplete;
     const promptView = this.shadowRoot?.querySelector('prompt-view');
-    if (promptView) {
-      // Wait for RPC to be ready
-      const checkRpc = setInterval(async () => {
-        if (promptView.call) {
-          clearInterval(checkRpc);
-          try {
-            const response = await promptView.call['Repo.get_repo_name']();
-            const repoName = response ? Object.values(response)[0] : null;
-            if (repoName) {
-              document.title = repoName;
-            }
-          } catch (err) {
-            console.error('Failed to get repo name:', err);
-          }
-        }
-      }, 100);
-      // Stop checking after 10 seconds
-      setTimeout(() => clearInterval(checkRpc), 10000);
+    if (!promptView) {
+      console.warn('_updateTitle: prompt-view not found');
+      return;
     }
+    
+    // Wait for RPC to be ready with exponential backoff
+    let attempts = 0;
+    const maxAttempts = 50; // 5 seconds total with initial 100ms
+    
+    const checkRpc = setInterval(async () => {
+      attempts++;
+      if (attempts > maxAttempts) {
+        clearInterval(checkRpc);
+        console.warn('_updateTitle: timed out waiting for RPC');
+        return;
+      }
+      
+      // Check if call exists and has the method
+      if (promptView.call && typeof promptView.call['Repo.get_repo_name'] === 'function') {
+        clearInterval(checkRpc);
+        try {
+          const response = await promptView.call['Repo.get_repo_name']();
+          const repoName = response ? Object.values(response)[0] : null;
+          if (repoName) {
+            document.title = repoName;
+          } else {
+            console.warn('_updateTitle: empty repo name response', response);
+          }
+        } catch (err) {
+          console.error('Failed to get repo name:', err);
+        }
+      }
+    }, 100);
   }
 
   disconnectedCallback() {
