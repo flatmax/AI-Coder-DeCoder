@@ -61,14 +61,32 @@ Create a new `Settings` class in `ac/settings.py` that:
 - Is registered with JRPC (like `Repo` and `LiteLLM`)
 - Holds a reference to the `LiteLLM` instance (to call its reload method)
 - Provides RPC methods for config operations
+- Whitelists allowed config types for security
 
 ```python
+# Whitelist of allowed config types -> relative paths
+ALLOWED_CONFIGS = {
+    'llm': 'config/llm.json',
+    'app': 'config/app.json',
+    'snippets': 'config/prompt-snippets.json',
+    'system': 'config/prompts/system.md',
+    'system_extra': 'config/prompts/system_extra.md',
+    'compaction': 'config/prompts/skills/compaction.md',
+}
+
 class Settings:
     def __init__(self, llm: 'LiteLLM'):
         self._llm = llm
     
     def open_config_file(self, config_type: str) -> dict:
-        """Open a config file in OS default editor."""
+        """Open a config file in OS default editor.
+        
+        Args:
+            config_type: One of the whitelisted config types
+                         (llm, app, snippets, system, system_extra, compaction)
+        """
+        if config_type not in ALLOWED_CONFIGS:
+            return {"success": False, "error": f"Unknown config type: {config_type}"}
         ...
     
     def reload_llm_config(self) -> dict:
@@ -170,7 +188,10 @@ def open_in_editor(file_path: Path) -> dict:
         if system == 'Darwin':  # macOS
             subprocess.Popen(['open', str(file_path)])
         elif system == 'Windows':
-            os.startfile(str(file_path))
+            if hasattr(os, 'startfile'):
+                os.startfile(str(file_path))
+            else:
+                return {"success": False, "error": "os.startfile not available"}
         else:  # Linux/Unix
             editor = os.environ.get('EDITOR', 'xdg-open')
             subprocess.Popen([editor, str(file_path)])
@@ -203,8 +224,11 @@ def open_in_editor(file_path: Path) -> dict:
 
 ### Phase 1: Backend - Settings Class
 1. Create `ac/settings.py` with `Settings` class
+   - Whitelist allowed config types (don't accept arbitrary paths)
+   - Use `_get_config_dir()` to resolve actual bundled config paths
 2. Add `open_in_editor()` utility to `ac/llm/config.py`
 3. Add `get_config_paths()` function to `ac/llm/config.py`
+   - Use `_get_config_dir()` to resolve paths relative to installed package
 4. Add `reload_app_config()` wrapper to `ac/config.py`
 5. Add `reload_config()` method to `LiteLLM`
 6. Register `Settings` with JRPC in `ac/dc.py`
@@ -215,10 +239,12 @@ def open_in_editor(file_path: Path) -> dict:
 3. Create SettingsPanel.js component with sections for each config type
 4. Create SettingsPanelStyles.js with appropriate styling
 5. Create SettingsPanelTemplate.js with render functions
-6. Wire up RPC calls for open/reload buttons
-7. Display current model name and reload status messages
+6. Add `webapp/settings-panel.js` entry point (like other components)
+7. Wire up RPC calls for open/reload buttons
+8. Display current model name and reload status messages
+9. Add toast/notification for reload success/error feedback
 
-### Phase 4: Testing
+### Phase 3: Testing
 1. Test editor opening on macOS and Linux
 2. Test LLM config reload picks up new model name
 3. Test LLM config reload applies new env vars
@@ -233,6 +259,7 @@ def open_in_editor(file_path: Path) -> dict:
 - `webapp/src/settings/SettingsPanel.js` - Settings panel component
 - `webapp/src/settings/SettingsPanelStyles.js` - Styles
 - `webapp/src/settings/SettingsPanelTemplate.js` - Template
+- `webapp/settings-panel.js` - Entry point for the component
 
 ### Modified Files
 - `ac/llm/config.py` - Add `open_in_editor()`, `get_config_paths()`
@@ -283,3 +310,9 @@ def open_in_editor(file_path: Path) -> dict:
 │ └─────────────────────────────────┘ │
 └─────────────────────────────────────┘
 ```
+
+### Toast Notification States
+
+- **Success:** Green background, checkmark icon, "Config reloaded successfully"
+- **Error:** Red background, X icon, error message from backend
+- **Auto-dismiss:** Toast disappears after 3 seconds, or on click
