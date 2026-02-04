@@ -109,5 +109,27 @@ export class MessageHandler extends JRPCClient {
     this.messageHistory = [];
     this._userHasScrolledUp = false;
     this._showScrollButton = false;
+    this.requestUpdate();
+  }
+
+  setupScrollObserver() {
+    const container = this.shadowRoot?.querySelector('#messages-container');
+    if (!container || this._resizeObserver) return;
+
+    this._resizeObserver = new ResizeObserver(() => {
+      // When content resizes and user is at bottom, keep them there
+      if (!this._userHasScrolledUp) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+
+    this._resizeObserver.observe(container);
+  }
+
+  disconnectScrollObserver() {
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
   }
 }

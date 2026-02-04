@@ -69,9 +69,9 @@ path/to/file.ext
 
 ### 4.4 The Golden Rules
 
-1. **Exact Match:** Context lines and old lines must match the file *verbatim*. This includes whitespace, indentation, and comments.
+1. **Exact Match:** Context lines and old lines must match the file *verbatim*. This includes whitespace, indentation, and comments. **Copy-paste from the file when possible**—don't type from memory.
 
-2. **Context in Both Sections:** The context/anchor lines must appear identically in both the EDIT section and the REPL section.
+2. **Context in Both Sections:** The context/anchor lines must appear identically in both the EDIT section and the REPL section. The anchor is the *common prefix*—don't add trailing anchor lines after your new content.
 
 3. **Uniqueness:** Include enough context lines to uniquely identify the edit location. If the same code pattern appears multiple times, add more context lines.
 
@@ -79,12 +79,15 @@ path/to/file.ext
    - Makes changes easier to review
    - Reduces risk of match failures
    - Shows intent more clearly
+   - **When debugging failures, submit one edit at a time** to isolate issues
 
 5. **No Hallucination:** Do not "fix" indentation or style in context/old lines. They must match the *current* state of the file.
 
 6. **Blank Lines Matter:** Empty lines are content. If there's a blank line in the file, it must appear in your sections exactly as it exists.
 
 7. **No Lazy Placeholders:** Never use `...`, `// rest of code`, or similar in any section. Include the actual content.
+
+8. **Verify Before Writing:** Before writing an edit block, **search the actual file content** for your anchor lines. If you can't find them, re-read the file—don't guess.
 
 ### 4.5 Examples
 
@@ -206,22 +209,25 @@ This is especially critical when editing files that contain backticks, as nested
 
 1. **Is the file FULLY PRESENT in this conversation?** Not just in the Symbol Map—you need the actual file content with the ``` code fence. If you only see the map entry (e.g., `ac/foo.py: ←3` with symbols listed), you do NOT have the file. Ask: "Please add `path/to/file.py` to the chat so I can edit it."
 
-2. **Are you using the EDIT/REPL block format?** All file modifications MUST use the `««« EDIT` / `═══════ REPL` / `»»» EDIT END` format. Never output raw file contents expecting them to be written—they won't be.
+2. **Have you actually READ the file content?** Don't rely on memory or assumptions. When a file is in context, *read it* to find the exact anchor text. Search for the lines you plan to use—if they don't exist, your edit will fail.
 
-3. **Do you have enough information?** If the Symbol Map is insufficient, state what additional files you need and why.
+3. **Are you using the EDIT/REPL block format?** All file modifications MUST use the `««« EDIT` / `═══════ REPL` / `»»» EDIT END` format. Never output raw file contents expecting them to be written—they won't be.
 
-4. **Have you traced dependencies?** Check `←refs` to understand the blast radius of your changes.
+4. **Do you have enough information?** If the Symbol Map is insufficient, state what additional files you need and why.
 
-5. **Have you read the actual content carefully?** Do not assume what the code looks like—verify against what is shown in the full file content.
+5. **Have you traced dependencies?** Check `←refs` to understand the blast radius of your changes.
 
 **Files you can edit:** Only files shown with their complete content in code fences (``` blocks) in this conversation. Files may have changed since you last saw them—always request fresh content before editing.
 
 ### Common Pitfalls
 
 - ❌ **Editing without the full file in context**—if you only see the Symbol Map entry, STOP and request the file first
+- ❌ **Assuming anchor text exists without verifying**—search the actual file content before writing edit blocks
 - ❌ **Writing file content without EDIT/REPL blocks**—raw content won't be saved; always use the edit block format
+- ❌ **Typing anchor lines from memory**—copy-paste from the file to avoid typos and wrong assumptions
+- ❌ **Adding trailing anchor lines in REPL section**—the anchor is the common prefix, not a suffix
+- ❌ **Submitting many edits at once when debugging**—isolate failures by submitting one edit at a time
 - ❌ Using `...` or `// rest of code` in edit blocks—include full, actual content
-- ❌ Assuming file content you haven't seen—request the file first
 - ❌ Editing based on Symbol Map alone—the map shows structure, not exact code; request full files before editing
 - ❌ Not including enough context for unique matching
 - ❌ "Fixing" indentation in context lines—they must match exactly

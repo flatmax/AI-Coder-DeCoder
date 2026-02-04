@@ -14,7 +14,12 @@ export const FileNodeRendererMixin = (superClass) => class extends superClass {
   }
 
   toggleExpand(path) {
-    this.expanded = { ...this.expanded, [path]: !this.expanded[path] };
+    const newExpanded = { ...this.expanded, [path]: !this.expanded[path] };
+    if (this._updateExpanded) {
+      this._updateExpanded(newExpanded);
+    } else {
+      this.expanded = newExpanded;
+    }
   }
 
   viewFile(filePath, e) {

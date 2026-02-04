@@ -12,6 +12,7 @@ import './file-picker/FilePicker.js';
 import './history-browser/HistoryBrowser.js';
 import './find-in-files/FindInFiles.js';
 import './context-viewer/ContextViewer.js';
+import './settings/SettingsPanel.js';
 
 const MixedBase = StreamingMixin(
   WindowControlsMixin(
@@ -48,7 +49,8 @@ export class PromptView extends MixedBase {
     fetchingUrls: { type: Object },
     fetchedUrls: { type: Object },
     excludedUrls: { type: Object },  // Set of URLs excluded from context
-    activeLeftTab: { type: String }  // 'files' | 'search' | 'context' | 'cache'
+    activeLeftTab: { type: String },  // 'files' | 'search' | 'context' | 'cache'
+    filePickerExpanded: { type: Object }
   };
 
   static styles = promptViewStyles;
@@ -77,6 +79,7 @@ export class PromptView extends MixedBase {
     this.activeLeftTab = 'files';
     this.promptSnippets = [];
     this.snippetDrawerOpen = false;
+    this.filePickerExpanded = {};
     this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
     this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
     this._filePickerScrollTop = 0;
@@ -231,6 +234,18 @@ export class PromptView extends MixedBase {
     this.showHistoryBrowser = false;
     console.log(`📜 Loaded ${messages.length} messages from session`);
     
+    // Reset saved scroll positions to avoid stale values after session load
+    this._filePickerScrollTop = 0;
+    this._messagesScrollTop = 0;
+    this._wasScrolledUp = false;
+    
+    // Scroll to bottom after loading session (with delay for content-visibility render)
+    this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        this.scrollToBottomNow();
+      });
+    });
+    
     // Refresh history bar to reflect loaded session
     await this._refreshHistoryBar();
   }
@@ -242,6 +257,7 @@ export class PromptView extends MixedBase {
     this.initWindowControls();
     this.initStreaming();
     this._initUrlService();
+    this.setupScrollObserver();
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
@@ -278,35 +294,44 @@ export class PromptView extends MixedBase {
       const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
       if (messagesContainer) {
         this._messagesScrollTop = messagesContainer.scrollTop;
+        this._messagesScrollHeight = messagesContainer.scrollHeight;
         // Save whether user had scrolled up
         this._wasScrolledUp = this._userHasScrolledUp;
       }
     }
 
+    // Disconnect observer before tab switch to prevent interference
+    this.disconnectScrollObserver();
+
     this.activeLeftTab = tab;
 
     // Restore scroll positions when switching back to files tab
     if (tab === 'files') {
-      this.updateComplete.then(async () => {
-        const filePicker = this.shadowRoot?.querySelector('file-picker');
-        if (filePicker && this._filePickerScrollTop > 0) {
-          await filePicker.updateComplete;
-          filePicker.setScrollTop(this._filePickerScrollTop);
-        }
-        const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-        if (messagesContainer) {
-          if (this._wasScrolledUp) {
-            // User was scrolled up - restore their position
-            messagesContainer.scrollTop = this._messagesScrollTop;
-            this._userHasScrolledUp = true;
-            this._showScrollButton = true;
-          } else {
-            // User was at bottom - scroll to bottom
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            this._userHasScrolledUp = false;
-            this._showScrollButton = false;
+      // Use double rAF to ensure DOM is fully rendered after tab switch
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const filePicker = this.shadowRoot?.querySelector('file-picker');
+          if (filePicker && this._filePickerScrollTop > 0) {
+            filePicker.setScrollTop(this._filePickerScrollTop);
           }
-        }
+          const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+          if (messagesContainer) {
+            if (this._wasScrolledUp) {
+              // User was scrolled up - restore their position
+              messagesContainer.scrollTop = this._messagesScrollTop;
+              this._userHasScrolledUp = true;
+              this._showScrollButton = true;
+            } else {
+              // User was at bottom - scroll to bottom
+              messagesContainer.scrollTop = messagesContainer.scrollHeight;
+              this._userHasScrolledUp = false;
+              this._showScrollButton = false;
+            }
+            // Re-setup observer after scroll is restored
+            this.setupScrollObserver();
+            this.requestUpdate();
+          }
+        });
       });
     } else if (tab === 'search') {
       this.updateComplete.then(() => {
@@ -322,6 +347,10 @@ export class PromptView extends MixedBase {
     } else if (tab === 'cache') {
       this.updateComplete.then(() => {
         this._refreshCacheViewer();
+      });
+    } else if (tab === 'settings') {
+      this.updateComplete.then(() => {
+        this._refreshSettingsPanel();
       });
     }
   }
@@ -361,6 +390,17 @@ export class PromptView extends MixedBase {
       if (cacheViewer.breakdown) {
         this._syncHistoryBarFromBreakdown(cacheViewer.breakdown);
       }
+    }
+  }
+
+  /**
+   * Refresh the settings panel
+   */
+  async _refreshSettingsPanel() {
+    const settingsPanel = this.shadowRoot?.querySelector('settings-panel');
+    if (settingsPanel && this.call) {
+      settingsPanel.rpcCall = this.call;
+      await settingsPanel.loadConfigInfo();
     }
   }
 
@@ -457,10 +497,27 @@ export class PromptView extends MixedBase {
     this.excludedUrls = newExcluded;
   }
 
+  /**
+   * Handle file picker expanded state change
+   */
+  handleExpandedChange(e) {
+    this.filePickerExpanded = e.detail;
+  }
+
+  handleConfigEditRequest(e) {
+    // Forward to AppShell to load config into diff viewer
+    this.dispatchEvent(new CustomEvent('config-edit-request', {
+      bubbles: true,
+      composed: true,
+      detail: e.detail
+    }));
+  }
+
   disconnectedCallback() {
     super.disconnectedCallback();
     this.destroyInputHandler();
     this.destroyWindowControls();
+    this.disconnectScrollObserver();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
     // Clean up any panel resize listeners
     window.removeEventListener('mousemove', this._boundPanelResizeMove);
@@ -584,6 +641,9 @@ export class PromptView extends MixedBase {
             this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
           console.log(`📜 Loaded ${messages.length} messages from last session`);
+          
+          // Scroll to bottom after loading session
+          this.scrollToBottomNow();
         }
       }
       

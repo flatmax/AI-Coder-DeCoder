@@ -1,12 +1,14 @@
-# Plan: Versioned Webapp Deployment
+# Plan: Versioned Releases
 
 ## Status: IMPLEMENTED
 
 ## Overview
 
-Deploy the webapp to GitHub Pages with git commit SHA-based versioning, allowing the Python backend to open the exact webapp version that matches its codebase.
+Two-part release system:
+1. **Webapp**: Deployed to GitHub Pages with git commit SHA-based versioning
+2. **Executables**: Built as standalone binaries and published as GitHub Releases
 
-## Design
+## Part 1: Webapp Deployment (GitHub Pages)
 
 ### Version Detection
 
@@ -88,7 +90,7 @@ def get_browser_url(server_port, webapp_port=None, dev_mode=False):
 7. Commit and push to gh-pages
 8. Deploy via GitHub Pages action
 
-## Edge Cases
+### Edge Cases
 
 1. **Uncommitted changes**: SHA matches HEAD, not working tree - acceptable
 2. **Detached HEAD**: Works fine, SHA still available
@@ -96,9 +98,55 @@ def get_browser_url(server_port, webapp_port=None, dev_mode=False):
 4. **SHA not deployed yet**: 404 - user must wait for CI or use `--dev`
 5. **Feature branches**: Only master deploys; branches use `--dev` mode
 
+## Part 2: Executable Releases (GitHub Releases)
+
+### Build Matrix
+
+| Platform | Runner | Output |
+|----------|--------|--------|
+| Linux | `ubuntu-latest` | `ac-dc-linux` |
+| macOS | `macos-latest` | `ac-dc-macos` |
+| Windows | `windows-latest` | `ac-dc-windows.exe` |
+
+### PyInstaller Configuration
+
+All builds use `--onefile` with:
+- **Data files**: `ac/VERSION` (baked SHA), `config/` directory
+- **Collected packages**: litellm, tiktoken, tree_sitter (all languages), trafilatura
+- **Hidden imports**: boto3, botocore (for AWS Bedrock support)
+
+### Version Baking
+
+The git SHA is baked into the executable at build time:
+```bash
+echo "${{ github.sha }}" > ac/VERSION
+```
+
+This allows the executable to know its exact version even when not running from a git repo.
+
+### Release Naming
+
+Releases use date-based tags: `YYYY.MM.DD-{short_sha}`
+
+Example: `2024.01.15-a1b2c3d4`
+
+### Release Trigger
+
+- **Automatic**: Every push to `master` branch
+- **Manual**: Via `workflow_dispatch` with optional version override
+
+### Release Artifacts
+
+Each release includes:
+- `ac-dc-linux` - Linux x64 executable
+- `ac-dc-macos` - macOS executable  
+- `ac-dc-windows.exe` - Windows executable
+- Auto-generated release notes with download instructions
+
 ## Files Modified
 
-- `.github/workflows/deploy-pages.yml` - SHA-based versioned deployment
+- `.github/workflows/deploy-pages.yml` - SHA-based webapp deployment
+- `.github/workflows/release.yml` - Executable builds and GitHub releases
 - `webapp/vite.config.js` - Simplified, base path via CLI arg
 - `ac/dc.py` - Versioned URL construction
-- `ac/version.py` (new) - Git SHA detection utilities
+- `ac/version.py` - Git SHA detection utilities

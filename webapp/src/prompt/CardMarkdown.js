@@ -527,7 +527,7 @@ export class CardMarkdown extends LitElement {
     const encodedContext = this.escapeHtml(searchContext).replace(/"/g, '&quot;');
     
     return `
-      <div class="edit-block">
+      <div class="edit-block" data-file="${this.escapeHtml(block.filePath)}">
         <div class="edit-block-header">
           <span class="edit-block-file" data-file="${this.escapeHtml(block.filePath)}" data-context="${encodedContext}">${this.escapeHtml(block.filePath)}</span>
           <div>
@@ -762,22 +762,10 @@ export class CardMarkdown extends LitElement {
           composed: true
         }));
       }
+      return;
     }
     
-    // Handle file chip clicks in summary (allow both in-context and not-in-context)
-    const fileChip = e.target.closest('.file-chip');
-    if (fileChip) {
-      const filePath = fileChip.dataset.file;
-      if (filePath) {
-        this.dispatchEvent(new CustomEvent('file-mention-click', {
-          detail: { path: filePath },
-          bubbles: true,
-          composed: true
-        }));
-      }
-    }
-
-    // Handle edit block file path clicks
+    // Handle edit block file path clicks - check BEFORE file-chip since edit-tag might be nested
     const editBlockFile = e.target.closest('.edit-block-file');
     if (editBlockFile) {
       const filePath = editBlockFile.dataset.file;
@@ -795,6 +783,7 @@ export class CardMarkdown extends LitElement {
           composed: true
         }));
       }
+      return;
     }
 
     // Handle edit tag clicks
@@ -814,6 +803,21 @@ export class CardMarkdown extends LitElement {
           composed: true
         }));
       }
+      return;
+    }
+
+    // Handle file chip clicks in summary (allow both in-context and not-in-context)
+    const fileChip = e.target.closest('.file-chip');
+    if (fileChip) {
+      const filePath = fileChip.dataset.file;
+      if (filePath) {
+        this.dispatchEvent(new CustomEvent('file-mention-click', {
+          detail: { path: filePath },
+          bubbles: true,
+          composed: true
+        }));
+      }
+      return;
     }
 
     // Handle select all button click
@@ -832,6 +836,27 @@ export class CardMarkdown extends LitElement {
       } catch (e) {
         console.error('Failed to parse files:', e);
       }
+      return;
+    }
+
+    // Handle click on edit block background - navigate to the edit location
+    const editBlock = e.target.closest('.edit-block');
+    if (editBlock) {
+      const filePath = editBlock.dataset.file;
+      if (filePath) {
+        const result = this.getEditResultForFile(filePath);
+        this.dispatchEvent(new CustomEvent('edit-block-click', {
+          detail: { 
+            path: filePath,
+            line: result?.estimated_line || 1,
+            status: result?.status || 'pending',
+            searchContext: null
+          },
+          bubbles: true,
+          composed: true
+        }));
+      }
+      return;
     }
   }
 

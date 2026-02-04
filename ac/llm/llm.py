@@ -102,6 +102,41 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             'env': {k: v for k, v in self.config.get('env', {}).items()}
         }
     
+    def reload_config(self):
+        """Reload LLM configuration from llm.json.
+        
+        Re-reads the config file, updates model settings, and applies
+        environment variables.
+        
+        Returns:
+            dict with 'success' bool and either config info or 'error'
+        """
+        try:
+            # Re-read config file
+            self.config = self._load_config()
+            
+            # Apply environment variables from config
+            self._apply_env_vars()
+            
+            # Update model settings
+            self.model = self.config.get('model', 'gpt-4o-mini')
+            self.smaller_model = self.config.get('smallerModel', 'gpt-4o-mini')
+            
+            # Update context manager's token counter model
+            if self._context_manager:
+                self._context_manager.model_name = self.model
+                self._context_manager.token_counter.model_name = self.model
+                self._context_manager.token_counter._info = None  # Reset cached info
+            
+            return {
+                "success": True,
+                "model": self.model,
+                "smaller_model": self.smaller_model,
+                "message": "LLM config reloaded successfully"
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     @property
     def conversation_history(self) -> list[dict]:
         """Get conversation history from context manager."""
@@ -1079,25 +1114,37 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
     
     def get_prompt_snippets(self):
         """
-        Load prompt snippets from config/prompt-snippets.json in repo root.
+        Load prompt snippets from config/prompt-snippets.json.
+        
+        Looks first in the repo's config directory, then falls back to
+        aicoder's own config directory.
         
         Returns:
             List of snippet dicts with icon, tooltip, message fields.
-            Empty list if file doesn't exist or is invalid.
+            Empty list if no file exists or is invalid.
         """
-        if not self.repo:
+        import json
+        from pathlib import Path
+        
+        snippets_path = None
+        
+        # First try repo's config directory
+        if self.repo:
+            repo_root = self.repo.get_repo_root()
+            repo_snippets = Path(repo_root) / 'config' / 'prompt-snippets.json'
+            if repo_snippets.exists():
+                snippets_path = repo_snippets
+        
+        # Fall back to aicoder's config directory
+        if not snippets_path:
+            aicoder_config = Path(__file__).parent.parent.parent / 'config' / 'prompt-snippets.json'
+            if aicoder_config.exists():
+                snippets_path = aicoder_config
+        
+        if not snippets_path:
             return []
         
         try:
-            import json
-            from pathlib import Path
-            
-            repo_root = self.repo.get_repo_root()
-            snippets_path = Path(repo_root) / 'config' / 'prompt-snippets.json'
-            
-            if not snippets_path.exists():
-                return []
-            
             with open(snippets_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
