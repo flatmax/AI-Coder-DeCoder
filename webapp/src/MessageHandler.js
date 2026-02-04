@@ -109,6 +109,7 @@ export class MessageHandler extends JRPCClient {
     this.messageHistory = [];
     this._userHasScrolledUp = false;
     this._showScrollButton = false;
+    this.requestUpdate();
   }
 
   setupScrollObserver() {
