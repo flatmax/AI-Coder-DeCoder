@@ -6,7 +6,8 @@ Loads config/app.json and provides access to all app-level settings.
 
 import json
 import os
-from dataclasses import dataclass
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -16,24 +17,69 @@ _cached_config: Optional[dict] = None
 _config_path: Optional[str] = None
 
 
+def get_user_config_dir() -> Path:
+    """Get the persistent user config directory for frozen executables.
+    
+    Returns platform-appropriate path:
+    - Linux/macOS: ~/.config/ac-dc/
+    - Windows: %APPDATA%/ac-dc/
+    """
+    if sys.platform == 'win32':
+        base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+    else:
+        base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+    return base / 'ac-dc'
+
+
+def get_bundled_config_dir() -> Path:
+    """Get the bundled config directory inside PyInstaller bundle."""
+    if hasattr(sys, '_MEIPASS'):
+        return Path(sys._MEIPASS) / 'config'
+    return Path(sys.executable).parent / 'config'
+
+
+def ensure_user_config() -> None:
+    """Copy bundled defaults to user config dir if not present (frozen only).
+    
+    This is called once at startup for frozen executables to ensure
+    user has editable config files in a persistent location.
+    """
+    if not getattr(sys, 'frozen', False):
+        return  # Dev mode - nothing to do
+    
+    user_dir = get_user_config_dir()
+    bundled_dir = get_bundled_config_dir()
+    
+    if not user_dir.exists():
+        # First run - copy all bundled configs
+        shutil.copytree(bundled_dir, user_dir)
+    else:
+        # Ensure any new config files from updates are copied
+        # (but don't overwrite user's existing files)
+        for bundled_file in bundled_dir.rglob('*'):
+            if bundled_file.is_file():
+                rel_path = bundled_file.relative_to(bundled_dir)
+                user_file = user_dir / rel_path
+                if not user_file.exists():
+                    user_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(bundled_file, user_file)
+
+
+def get_config_dir() -> Path:
+    """Get the config directory, handling both frozen and dev execution.
+    
+    - Frozen: Returns persistent user config dir (~/.config/ac-dc/)
+    - Dev: Returns repo's config/ directory
+    """
+    if getattr(sys, 'frozen', False):
+        return get_user_config_dir()
+    else:
+        return Path(os.path.dirname(__file__)).parent / 'config'
+
+
 def _get_default_config_path() -> str:
     """Get default path to config/app.json."""
-    import sys
-    
-    if getattr(sys, 'frozen', False):
-        # Running as PyInstaller bundle
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        else:
-            base = os.path.dirname(sys.executable)
-        return os.path.join(base, 'config', 'app.json')
-    
-    return os.path.join(
-        os.path.dirname(__file__),
-        '..',
-        'config',
-        'app.json'
-    )
+    return str(get_config_dir() / 'app.json')
 
 
 def load_app_config(config_path: Optional[str] = None, force_reload: bool = False) -> dict:
