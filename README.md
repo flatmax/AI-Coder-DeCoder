@@ -36,62 +36,49 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **Prompt Snippets** — Save and reuse common prompts via `config/prompt-snippets.json`
 - **Voice Input** — Speech-to-text for hands-free prompt dictation with continuous auto-transcribe mode
 
-## Tech Stack
+---
 
-### Backend (Python)
+# End User Guide
 
-- **[LiteLLM](https://github.com/BerriAI/litellm)** — Universal LLM API supporting 100+ models (OpenAI, Anthropic, AWS Bedrock, etc.)
-- **[Tree-sitter](https://tree-sitter.github.io/tree-sitter/)** — Fast, accurate parsing for symbol extraction across Python, JavaScript, and TypeScript
-- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket-based JSON-RPC for real-time client-server communication
-- **[GitPython](https://github.com/gitpython-developers/GitPython)** — Git repository operations
+## Quick Start
 
-### Frontend (JavaScript)
+### Installation
 
-- **[Lit](https://lit.dev/)** — Fast, lightweight web components
-- **[Monaco Editor](https://microsoft.github.io/monaco-editor/)** — VS Code's editor for diff viewing with LSP-like features
-- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket client matching the Python server
-- **[Marked](https://marked.js.org/)** — Markdown parsing for chat messages
-- **[Prism.js](https://prismjs.com/)** — Syntax highlighting in code blocks
+Download the pre-built executable for your platform from the [Releases](https://github.com/flatmax/AI-Coder-DeCoder/releases) page:
 
-## Installation
+- **Linux:** `ac-dc-linux`
+- **macOS:** `ac-dc-macos`
+- **Windows:** `ac-dc-windows.exe`
 
-### Prerequisites
-
-- Python 3.12+
-
-### Setup
-
+Make it executable (Linux/macOS):
 ```bash
-# Clone the repository
-git clone https://github.com/flatmax/AI-Coder-DeCoder.git
-cd AI-Coder-DeCoder
-
-# Install directly with pip
-pip install -e .
-
-# Or use a virtual environment (recommended)
-python -m venv .venv && source .venv/bin/activate
-uv pip install -e .
+chmod +x ac-dc-linux  # or ac-dc-macos
 ```
 
-That's it! The webapp is hosted on GitHub Pages and loads automatically.
+### Running AC⚡DC
 
-### Developer Setup
-
-If you want to modify the webapp frontend:
+Navigate to your git repository and run:
 
 ```bash
-# Additional prerequisites: Node.js 18+
-
-# Install webapp dependencies
-cd webapp && npm install
+./ac-dc-linux  # or ./ac-dc-macos or ac-dc-windows.exe
 ```
 
-Then run with `--dev` for hot-reloading during development.
+This starts the backend server and opens the webapp in your browser.
 
 ## Configuration
 
-Create or edit `config/litellm.json` to configure your LLM provider:
+AC⚡DC uses two main configuration files stored in `~/.config/ac-dc/` (Linux/macOS) or `%APPDATA%/ac-dc/` (Windows). On first run, default configs are created automatically.
+
+### LLM Configuration (litellm.json)
+
+This file configures which LLM provider and model to use. AC⚡DC uses [LiteLLM](https://github.com/BerriAI/litellm) under the hood, which supports 100+ LLM providers.
+
+The configuration has two sections:
+
+1. **`env`** — Environment variables required by your chosen provider (API keys, regions, etc.)
+2. **Model settings** — Which models to use
+
+#### Configuration Examples
 
 **OpenAI:**
 ```json
@@ -104,7 +91,7 @@ Create or edit `config/litellm.json` to configure your LLM provider:
 }
 ```
 
-**Anthropic:**
+**Anthropic (Direct API):**
 ```json
 {
   "env": {
@@ -115,7 +102,7 @@ Create or edit `config/litellm.json` to configure your LLM provider:
 }
 ```
 
-**AWS Bedrock :**
+**AWS Bedrock:**
 ```json
 {
   "env": {
@@ -125,16 +112,49 @@ Create or edit `config/litellm.json` to configure your LLM provider:
   "smallerModel": "anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 ```
+> AWS Bedrock uses your default AWS credentials from `~/.aws/credentials` or environment variables.
 
-> **Note:** AC⚡DC is currently optimized for Anthropic models on AWS Bedrock, which provides prompt caching for significant cost savings. Other providers should work via LiteLLM but may have reduced functionality or higher costs.
+**Azure OpenAI:**
+```json
+{
+  "env": {
+    "AZURE_API_KEY": "...",
+    "AZURE_API_BASE": "https://your-resource.openai.azure.com",
+    "AZURE_API_VERSION": "2024-02-15-preview"
+  },
+  "model": "azure/your-deployment-name",
+  "smallerModel": "azure/your-smaller-deployment"
+}
+```
 
-See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) for other providers.
+**Google Vertex AI:**
+```json
+{
+  "env": {
+    "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json",
+    "VERTEXAI_PROJECT": "your-project-id",
+    "VERTEXAI_LOCATION": "us-central1"
+  },
+  "model": "vertex_ai/gemini-1.5-pro",
+  "smallerModel": "vertex_ai/gemini-1.5-flash"
+}
+```
 
-### Application Configuration (config/app.json)
+#### Configuration Reference
 
-Create or modify `config/app.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
+| Field | Required | Description |
+|-------|----------|-------------|
+| `env` | Yes | Object containing environment variables for your LLM provider |
+| `model` | Yes | Primary model for code generation (use best available) |
+| `smallerModel` | Yes | Faster/cheaper model for summaries and commit messages |
+| `cacheMinTokens` | No | Minimum tokens for prompt caching (default: 1024) |
+| `cacheBufferMultiplier` | No | Buffer multiplier for cache allocation (default: 1.5) |
 
-> ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
+For a complete list of supported providers and their required environment variables, see the [LiteLLM Provider Documentation](https://docs.litellm.ai/docs/providers).
+
+### Application Configuration (app.json)
+
+General application settings:
 
 ```json
 {
@@ -162,35 +182,6 @@ Create or modify `config/app.json` in **your project's repository root** (not th
 | `history_compaction.summary_budget_tokens` | `500` | Max tokens for the summary |
 | `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges to preserve |
 
-> **Note:** The JSON example above shows recommended values. The table shows the code defaults used when settings are omitted.
-
-## Usage
-
-Simply run ac-dc in your git repo you are working on.
-
-```bash
-ac-dc
-```
-
-This starts the backend server and opens the hosted webapp in your browser. The webapp connects to your local server via WebSocket.
-
-### Run Modes
-
-| Mode | Command | Description |
-|------|---------|-------------|
-| **Standard** | `ac-dc` | Uses hosted webapp at GitHub Pages. No build required. |
-| **Dev** | `python ac/dc.py --dev` | Local Vite dev server with HMR. For AC⚡DC development. |
-| **Preview** | `python ac/dc.py --preview` | Builds AC⚡DC and serves production bundle locally. For testing. |
-
-### Command Line Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--server-port` | 18080 | JRPC WebSocket server port |
-| `--webapp-port` | 18999 | Local webapp port (dev/preview modes only) |
-| `--no-browser` | false | Don't auto-open browser |
-| `--repo-path` | cwd | Path to git repository |
-
 ## Workflow
 
 1. **Describe Your Task** — Type your request in natural language (e.g., "add error handling to the save function")
@@ -211,12 +202,99 @@ This starts the backend server and opens the hosted webapp in your browser. The 
 | `Ctrl+B` | Toggle back to file picker |
 | `Ctrl+S` | Save current file (in diff viewer) |
 
+---
+
+# Developer Guide
+
+This section is for developers who want to contribute to AC⚡DC or run it from source.
+
+## Tech Stack
+
+### Backend (Python)
+
+- **[LiteLLM](https://github.com/BerriAI/litellm)** — Universal LLM API supporting 100+ models
+- **[Tree-sitter](https://tree-sitter.github.io/tree-sitter/)** — Fast, accurate parsing for symbol extraction
+- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket-based JSON-RPC for real-time communication
+- **[GitPython](https://github.com/gitpython-developers/GitPython)** — Git repository operations
+
+### Frontend (JavaScript)
+
+- **[Lit](https://lit.dev/)** — Fast, lightweight web components
+- **[Monaco Editor](https://microsoft.github.io/monaco-editor/)** — VS Code's editor for diff viewing
+- **[JRPC-OO](https://github.com/flatmax/jrpc-oo)** — WebSocket client matching the Python server
+- **[Marked](https://marked.js.org/)** — Markdown parsing for chat messages
+- **[Prism.js](https://prismjs.com/)** — Syntax highlighting in code blocks
+
+## Development Setup
+
+### Prerequisites
+
+- Python 3.12+
+- Node.js 18+
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/flatmax/AI-Coder-DeCoder.git
+cd AI-Coder-DeCoder
+
+# Create virtual environment and install Python dependencies
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# Install webapp dependencies
+cd webapp && npm install && cd ..
+```
+
+### Development Configuration
+
+When running from source, configuration files are read from the repository's `config/` directory (not the user config directory). This allows you to:
+
+- Edit configs and see changes immediately
+- Commit config changes to git
+- Test different configurations easily
+
+### Run Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| **Standard** | `ac-dc` | Uses hosted webapp at GitHub Pages |
+| **Dev** | `python ac/dc.py --dev` | Local Vite dev server with hot module reloading |
+| **Preview** | `python ac/dc.py --preview` | Builds and serves production bundle locally |
+
+For frontend development, use `--dev` mode for instant feedback on changes.
+
+### Command Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--server-port` | 18080 | JRPC WebSocket server port |
+| `--webapp-port` | 18999 | Local webapp port (dev/preview modes only) |
+| `--no-browser` | false | Don't auto-open browser |
+| `--repo-path` | cwd | Path to git repository |
+| `--dev` | false | Run with local Vite dev server |
+| `--preview` | false | Build and serve production bundle locally |
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_edit_parser.py
+
+# Run with coverage
+pytest --cov=ac
+```
+
 ## Project Structure
 
 ```
-config/                 # All configuration files
-├── llm.json           # LLM provider configuration (model, API keys)
-├── app.json           # Application settings (URL cache, etc.)
+config/                 # Configuration files (used in dev mode)
+├── litellm.json       # LLM provider configuration
+├── app.json           # Application settings
 ├── prompt-snippets.json # User prompt snippets
 └── prompts/           # System prompts and skills
     ├── system.md      # Main system prompt
@@ -243,6 +321,9 @@ webapp/                 # JavaScript frontend (Lit web components)
 │   ├── find-in-files/ # Search interface
 │   └── history-browser/ # Conversation history UI
 └── vite.config.js     # Build configuration
+
+tests/                  # Unit tests
+tests_skills/           # Integration tests requiring LLM access
 ```
 
 ## License
