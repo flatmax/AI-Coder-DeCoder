@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import sys
 from jrpc_oo import JRPCServer
+from ac.config import ensure_user_config
 from ac.llm import LiteLLM
 from ac.repo import Repo
 from ac.settings import Settings
@@ -166,6 +167,9 @@ async def main_starter_async(args):
 
 
 def main():
+    # Ensure user config directory exists (copies bundled defaults on first run for frozen builds)
+    ensure_user_config()
+    
     args = parse_args()
     asyncio.run(main_starter_async(args))
 

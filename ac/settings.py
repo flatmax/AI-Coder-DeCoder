@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 # Whitelist of allowed config types -> relative paths from config dir
 ALLOWED_CONFIGS = {
-    'llm': 'llm.json',
+    'litellm': 'litellm.json',
     'app': 'app.json',
     'snippets': 'prompt-snippets.json',
     'system': 'prompts/system.md',
@@ -91,7 +91,7 @@ class Settings:
             return {"success": False, "error": str(e)}
     
     def reload_llm_config(self) -> dict:
-        """Reload LLM configuration from llm.json.
+        """Reload LLM configuration from litellm.json.
         
         Returns:
             dict with 'success' bool and either config info or 'error'

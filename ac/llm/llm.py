@@ -20,7 +20,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         
         Args:
             repo: Repo instance for file access. If None, file operations won't be available.
-            config_path: Path to llm.json config file. If None, looks in ac/ directory.
+            config_path: Path to litellm.json config file. If None, uses default location.
         """
         self.repo = repo
         
@@ -103,7 +103,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         }
     
     def reload_config(self):
-        """Reload LLM configuration from llm.json.
+        """Reload LLM configuration from litellm.json.
         
         Re-reads the config file, updates model settings, and applies
         environment variables.

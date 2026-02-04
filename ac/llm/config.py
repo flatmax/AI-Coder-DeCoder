@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+from ..config import get_config_dir
+
 
 # Default cache configuration values
 DEFAULT_CACHE_MIN_TOKENS = 1024
@@ -10,15 +12,11 @@ DEFAULT_CACHE_BUFFER_MULTIPLIER = 1.5
 
 
 def _get_config_dir() -> Path:
-    """Get the config directory, handling both normal and frozen (PyInstaller) execution."""
-    # PyInstaller sets sys.frozen and sys._MEIPASS
-    if getattr(sys, 'frozen', False):
-        # Running as bundled executable
-        bundle_dir = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else Path(sys.executable).parent
-        return bundle_dir / 'config'
-    else:
-        # Normal execution: config is at repo root (two levels up from ac/llm/)
-        return Path(__file__).parent.parent.parent / 'config'
+    """Get the config directory, handling both normal and frozen (PyInstaller) execution.
+    
+    This is a wrapper around the shared get_config_dir() for backwards compatibility.
+    """
+    return get_config_dir()
 
 
 class ConfigMixin:
@@ -26,7 +24,7 @@ class ConfigMixin:
     
     def _load_config(self, config_path=None):
         """
-        Load configuration from config/llm.json file.
+        Load configuration from config/litellm.json file.
         
         Args:
             config_path: Optional path to config file
@@ -35,7 +33,7 @@ class ConfigMixin:
             Dict with configuration settings
         """
         if config_path is None:
-            config_path = _get_config_dir() / 'llm.json'
+            config_path = _get_config_dir() / 'litellm.json'
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:

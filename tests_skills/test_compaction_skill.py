@@ -14,10 +14,10 @@ from ac.context.topic_detector import TopicDetector, TopicBoundaryResult
 
 @pytest.fixture(autouse=True)
 def setup_llm_env():
-    """Apply environment variables from config/llm.json before tests."""
+    """Apply environment variables from config/litellm.json before tests."""
     # tests_skills/ is at repo root, so parent is repo root
     repo_root = Path(__file__).parent.parent
-    llm_json = repo_root / "config" / "llm.json"
+    llm_json = repo_root / "config" / "litellm.json"
     if llm_json.exists():
         config = json.loads(llm_json.read_text())
         env_vars = config.get("env", {})
@@ -104,11 +104,11 @@ TEST_HISTORY_SINGLE_TOPIC = [
 
 
 def _get_smaller_model() -> str:
-    """Get the smaller model from config/llm.json config."""
+    """Get the smaller model from config/litellm.json config."""
     # Use absolute path relative to this file to find repo root
     # tests_skills/ is at repo root, so parent is repo root
     repo_root = Path(__file__).parent.parent
-    llm_json = repo_root / "config" / "llm.json"
+    llm_json = repo_root / "config" / "litellm.json"
     if llm_json.exists():
         config = json.loads(llm_json.read_text())
         # Try both camelCase (from config) and snake_case
