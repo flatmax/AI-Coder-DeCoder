@@ -83,9 +83,15 @@ export class DiffViewer extends MixedBase {
   updated(changedProperties) {
     super.updated(changedProperties);
     if (changedProperties.has('files') && this.files.length > 0 && this._editor) {
-      this.updateModels();
-      this.showDiff(this.selectedFile);
-      this._emitFileSelected(this.selectedFile);
+      // Check if files actually changed (not just re-clicking same file)
+      const oldFiles = changedProperties.get('files') || [];
+      const filesChanged = this._filesActuallyChanged(oldFiles, this.files);
+      
+      if (filesChanged) {
+        this.updateModels();
+        this.showDiff(this.selectedFile);
+        this._emitFileSelected(this.selectedFile);
+      }
     }
     
     if (changedProperties.has('selectedFile') && this.selectedFile && this._editor) {
@@ -106,6 +112,21 @@ export class DiffViewer extends MixedBase {
   selectFile(filePath) {
     this.selectedFile = filePath;
     this._emitFileSelected(filePath);
+  }
+
+  _filesActuallyChanged(oldFiles, newFiles) {
+    if (oldFiles.length !== newFiles.length) return true;
+    
+    for (let i = 0; i < newFiles.length; i++) {
+      const oldFile = oldFiles[i];
+      const newFile = newFiles[i];
+      if (!oldFile || oldFile.path !== newFile.path ||
+          oldFile.original !== newFile.original ||
+          oldFile.modified !== newFile.modified) {
+        return true;
+      }
+    }
+    return false;
   }
 
   _emitFileSelected(filePath) {

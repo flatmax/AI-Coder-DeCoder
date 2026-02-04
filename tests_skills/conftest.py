@@ -33,8 +33,8 @@ def _has_llm_credentials() -> bool:
     if (aws_dir / "credentials").exists() or (aws_dir / "config").exists():
         return True
     
-    # Check for llm.json config file
-    llm_json = Path("llm.json")
+    # Check for litellm.json config file
+    litellm_json = Path("config/litellm.json")
     if llm_json.exists():
         return True
     
@@ -47,7 +47,7 @@ def pytest_collection_modifyitems(config, items):
         return  # Credentials found, run tests normally
     
     skip_marker = pytest.mark.skip(
-        reason="No LLM credentials found. Set API keys, AWS credentials, or ensure llm.json exists."
+        reason="No LLM credentials found. Set API keys, AWS credentials, or ensure litellm.json exists."
     )
     for item in items:
         if "skills" in str(item.fspath):
