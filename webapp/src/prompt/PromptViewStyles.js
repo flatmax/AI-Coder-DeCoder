@@ -195,6 +195,16 @@ export const promptViewStyles = css`
     display: flex;
     flex-direction: column;
     gap: 12px;
+    contain: strict;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 500px;
+  }
+
+  .messages user-card,
+  .messages assistant-card {
+    contain: content;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 100px;
   }
 
   .scroll-to-bottom-btn {
