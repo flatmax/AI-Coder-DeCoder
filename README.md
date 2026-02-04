@@ -91,7 +91,7 @@ Then run with `--dev` for hot-reloading during development.
 
 ## Configuration
 
-Create or edit `config/llm.json` to configure your LLM provider:
+Create or edit `config/litellm.json` to configure your LLM provider:
 
 **OpenAI:**
 ```json

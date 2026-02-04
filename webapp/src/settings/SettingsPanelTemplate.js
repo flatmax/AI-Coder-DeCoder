@@ -31,10 +31,10 @@ function renderLlmSection(component) {
       <div class="button-row">
         <button 
           class="secondary"
-          @click=${() => component.editConfig('llm')}
+          @click=${() => component.editConfig('litellm')}
           ?disabled=${component.isLoading}
         >
-          📝 Edit llm.json
+          📝 Edit litellm.json
         </button>
         <button 
           class="primary"
