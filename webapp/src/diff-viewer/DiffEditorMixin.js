@@ -232,8 +232,16 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     this._dirtyFiles.delete(this.selectedFile);
     this.isDirty = this._dirtyFiles.size > 0;
 
+    // Find the file object to get config metadata
+    const file = this.files?.find(f => f.path === this.selectedFile);
+
     this.dispatchEvent(new CustomEvent('file-save', {
-      detail: { path: this.selectedFile, content: newContent },
+      detail: { 
+        path: this.selectedFile, 
+        content: newContent,
+        isConfig: file?.isConfig,
+        configType: file?.configType
+      },
       bubbles: true,
       composed: true
     }));
@@ -246,10 +254,16 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     
     for (const filePath of this._dirtyFiles) {
       const models = this._models.get(filePath);
+      const file = this.files?.find(f => f.path === filePath);
       if (models) {
         const newContent = models.modified.getValue();
         models.savedContent = newContent;
-        filesToSave.push({ path: filePath, content: newContent });
+        filesToSave.push({ 
+          path: filePath, 
+          content: newContent,
+          isConfig: file?.isConfig,
+          configType: file?.configType
+        });
       }
     }
     

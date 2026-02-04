@@ -31,10 +31,10 @@ function renderLlmSection(component) {
       <div class="button-row">
         <button 
           class="secondary"
-          @click=${() => component.openConfig('llm')}
+          @click=${() => component.editConfig('llm')}
           ?disabled=${component.isLoading}
         >
-          📝 Open llm.json
+          📝 Edit llm.json
         </button>
         <button 
           class="primary"
@@ -56,10 +56,10 @@ function renderAppSection(component) {
       <div class="button-row">
         <button 
           class="secondary"
-          @click=${() => component.openConfig('app')}
+          @click=${() => component.editConfig('app')}
           ?disabled=${component.isLoading}
         >
-          📝 Open app.json
+          📝 Edit app.json
         </button>
         <button 
           class="primary"
@@ -85,21 +85,21 @@ function renderPromptsSection(component) {
       <div class="file-list">
         <button 
           class="file-button"
-          @click=${() => component.openConfig('system')}
+          @click=${() => component.editConfig('system')}
           ?disabled=${component.isLoading}
         >
           📄 system.md
         </button>
         <button 
           class="file-button"
-          @click=${() => component.openConfig('system_extra')}
+          @click=${() => component.editConfig('system_extra')}
           ?disabled=${component.isLoading}
         >
           📄 system_extra.md
         </button>
         <button 
           class="file-button"
-          @click=${() => component.openConfig('snippets')}
+          @click=${() => component.editConfig('snippets')}
           ?disabled=${component.isLoading}
         >
           📄 prompt-snippets.json
@@ -121,7 +121,7 @@ function renderSkillsSection(component) {
       <div class="file-list">
         <button 
           class="file-button"
-          @click=${() => component.openConfig('compaction')}
+          @click=${() => component.editConfig('compaction')}
           ?disabled=${component.isLoading}
         >
           📄 compaction.md

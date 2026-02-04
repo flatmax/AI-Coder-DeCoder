@@ -482,6 +482,15 @@ export class PromptView extends MixedBase {
     this.filePickerExpanded = e.detail;
   }
 
+  handleConfigEditRequest(e) {
+    // Forward to AppShell to load config into diff viewer
+    this.dispatchEvent(new CustomEvent('config-edit-request', {
+      bubbles: true,
+      composed: true,
+      detail: e.detail
+    }));
+  }
+
   disconnectedCallback() {
     super.disconnectedCallback();
     this.destroyInputHandler();

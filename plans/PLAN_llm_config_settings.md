@@ -1,21 +1,22 @@
 # Plan: LLM Config Settings UI
 
+## Status: IMPLEMENTED
+
 ## Overview
 
-Add a settings tab to the webapp left panel (alongside files/search/context/cache) that allows users to open config files in the OS default editor and reload configurations.
+Add a settings tab to the webapp left panel (alongside files/search/context/cache) that allows users to edit config files using an in-app Monaco editor and reload configurations.
 
 ## Goals
 
 1. Settings tab with gear icon in PromptView left panel header
-2. List editable config files with "Open in Editor" buttons
+2. List editable config files with "Edit" buttons that load into main diff viewer
 3. "Reload LLM Config" button to re-read llm.json and apply changes
 4. "Reload App Config" button to refresh app.json settings
 
 ## Non-Goals
 
-- Building a custom config editor UI in the webapp
 - Creating new config files (use existing bundled configs)
-- Editing files within the webapp
+- Opening external editors (using main Monaco diff viewer instead)
 
 ## Config Files
 
@@ -55,38 +56,34 @@ All config files are bundled with the application:
 
 ## Architecture
 
-### Backend: New Settings Class
+### Backend: Settings Class
 
-Create a new `Settings` class in `ac/settings.py` that:
+The `Settings` class in `ac/settings.py`:
 - Is registered with JRPC (like `Repo` and `LiteLLM`)
 - Holds a reference to the `LiteLLM` instance (to call its reload method)
 - Provides RPC methods for config operations
 - Whitelists allowed config types for security
 
 ```python
-# Whitelist of allowed config types -> relative paths
 ALLOWED_CONFIGS = {
-    'llm': 'config/llm.json',
-    'app': 'config/app.json',
-    'snippets': 'config/prompt-snippets.json',
-    'system': 'config/prompts/system.md',
-    'system_extra': 'config/prompts/system_extra.md',
-    'compaction': 'config/prompts/skills/compaction.md',
+    'llm': 'llm.json',
+    'app': 'app.json',
+    'snippets': 'prompt-snippets.json',
+    'system': 'prompts/system.md',
+    'system_extra': 'prompts/system_extra.md',
+    'compaction': 'prompts/skills/compaction.md',
 }
 
 class Settings:
     def __init__(self, llm: 'LiteLLM'):
         self._llm = llm
     
-    def open_config_file(self, config_type: str) -> dict:
-        """Open a config file in OS default editor.
-        
-        Args:
-            config_type: One of the whitelisted config types
-                         (llm, app, snippets, system, system_extra, compaction)
-        """
-        if config_type not in ALLOWED_CONFIGS:
-            return {"success": False, "error": f"Unknown config type: {config_type}"}
+    def get_config_content(self, config_type: str) -> dict:
+        """Get content of a config file for editing."""
+        ...
+    
+    def save_config_content(self, config_type: str, content: str) -> dict:
+        """Save edited content back to config file."""
         ...
     
     def reload_llm_config(self) -> dict:
@@ -106,25 +103,32 @@ class Settings:
 
 `SettingsPanel` extends `LitElement` with `RpcMixin`:
 - Embedded in `PromptView` like other panels (`CacheViewer`, `FindInFiles`, etc.)
-- Uses `RpcMixin` to call `Settings.*` RPC methods
-- No need to extend `JRPCClient` directly
+- Dispatches `config-edit-request` event to load config into main diff viewer
+- Uses `RpcMixin` to call `Settings.*` RPC methods for reload operations
 
 ```javascript
-import { LitElement, html } from 'lit';
-import { RpcMixin } from '../utils/rpc.js';
-
 export class SettingsPanel extends RpcMixin(LitElement) {
-  async openConfig(configType) {
-    const result = await this._rpc('Settings.open_config_file', configType);
-    // handle result
+  editConfig(configType) {
+    // Dispatch event for AppShell to load config into diff viewer
+    this.dispatchEvent(new CustomEvent('config-edit-request', {
+      bubbles: true, composed: true,
+      detail: { configType }
+    }));
   }
   
   async reloadLlmConfig() {
-    const result = await this._rpc('Settings.reload_llm_config');
+    const result = await this._rpcExtract('Settings.reload_llm_config');
     // handle result  
   }
 }
 ```
+
+### Frontend: AppShell Integration
+
+AppShell handles the `config-edit-request` event:
+- Fetches config content via `Settings.get_config_content`
+- Loads into diff viewer with `isConfig: true` metadata
+- Saves via `Settings.save_config_content` when user saves (Ctrl+S)
 
 ## Design
 
@@ -135,122 +139,74 @@ export class SettingsPanel extends RpcMixin(LitElement) {
 - Settings panel shows:
   - Section: "LLM Configuration"
     - Current model name (readonly display)
-    - "Open llm.json" button → opens in OS editor
+    - "Edit llm.json" button → loads into main diff viewer
     - "Reload" button → re-reads config and applies changes
   - Section: "App Configuration"  
-    - "Open app.json" button → opens in OS editor
+    - "Edit app.json" button → loads into main diff viewer
     - "Reload" button → clears config cache
     - Note: "Some settings may require restart"
   - Section: "Prompts (live-reloaded)"
-    - "Open system.md" button
-    - "Open system_extra.md" button
-    - "Open prompt-snippets.json" button
+    - "system.md" button → loads into diff viewer
+    - "system_extra.md" button
+    - "prompt-snippets.json" button
   - Section: "Skills (live-reloaded)"
-    - "Open compaction.md" button
+    - "compaction.md" button
 
 ### Backend Changes
 
-**New: ac/settings.py:**
+**ac/settings.py:**
 - `Settings` class with JRPC methods:
-  - `open_config_file(config_type)` - opens specified config in OS editor
+  - `get_config_content(config_type)` - returns file content for editing
+  - `save_config_content(config_type, content)` - saves edited content
   - `reload_llm_config()` - delegates to LiteLLM.reload_config()
   - `reload_app_config()` - clears app config cache
   - `get_config_info()` - returns current model and config paths
 
-**ac/llm/config.py:**
-- Add `open_in_editor(file_path)` - utility to open file in OS default editor
-- Add `get_config_paths()` - returns dict of all config file paths
-
 **ac/llm/llm.py:**
-- Add `reload_config()` method to re-read llm.json and apply changes
+- `reload_config()` method to re-read llm.json and apply changes
 
 **ac/config.py:**
-- Add `reload_app_config()` wrapper function
+- `load_app_config(force_reload=True)` to clear cached config
 
 **ac/dc.py:**
 - Register `Settings` class with JRPC server
 
-### Opening OS Editor
-
-```python
-import subprocess
-import platform
-import os
-from pathlib import Path
-
-def open_in_editor(file_path: Path) -> dict:
-    """Open file in OS default editor."""
-    if not file_path.exists():
-        return {"success": False, "error": f"File not found: {file_path}"}
-    
-    system = platform.system()
-    try:
-        if system == 'Darwin':  # macOS
-            subprocess.Popen(['open', str(file_path)])
-        elif system == 'Windows':
-            if hasattr(os, 'startfile'):
-                os.startfile(str(file_path))
-            else:
-                return {"success": False, "error": "os.startfile not available"}
-        else:  # Linux/Unix
-            editor = os.environ.get('EDITOR', 'xdg-open')
-            subprocess.Popen([editor, str(file_path)])
-        return {"success": True, "path": str(file_path)}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-```
-
 ### Frontend Changes
 
-**webapp/src/PromptView.js:**
-- Add 'settings' to `activeLeftTab` options
-
-**webapp/src/prompt/PromptViewTemplate.js:**
-- Add settings tab icon to tab bar
-- Render settings panel when tab is active
-
 **webapp/src/settings/SettingsPanel.js:**
-- Settings panel component with config sections
-- Buttons for open/reload actions
-- Display current config values
+- Dispatches `config-edit-request` event when edit button clicked
+- Calls reload RPC methods
 
-**webapp/src/settings/SettingsPanelStyles.js:**
-- Styles for the settings panel
+**webapp/src/app-shell/AppShell.js:**
+- Handles `config-edit-request` to load config into diff viewer
+- Routes config file saves to `Settings.save_config_content`
 
-**webapp/src/settings/SettingsPanelTemplate.js:**
-- Template rendering for settings panel
+**webapp/src/diff-viewer/DiffEditorMixin.js:**
+- Passes `isConfig` and `configType` metadata in save events
 
-## Implementation Steps
+## Implementation Steps (Completed)
 
 ### Phase 1: Backend - Settings Class
-1. Create `ac/settings.py` with `Settings` class
-   - Whitelist allowed config types (don't accept arbitrary paths)
-   - Use `_get_config_dir()` to resolve actual bundled config paths
-2. Add `open_in_editor()` utility to `ac/llm/config.py`
-3. Add `get_config_paths()` function to `ac/llm/config.py`
-   - Use `_get_config_dir()` to resolve paths relative to installed package
-4. Add `reload_app_config()` wrapper to `ac/config.py`
-5. Add `reload_config()` method to `LiteLLM`
-6. Register `Settings` with JRPC in `ac/dc.py`
+1. ✅ Created `ac/settings.py` with `Settings` class
+   - Whitelist allowed config types via `ALLOWED_CONFIGS`
+   - `get_config_content()` and `save_config_content()` for in-app editing
+2. ✅ Added `reload_config()` method to `LiteLLM`
+3. ✅ Registered `Settings` with JRPC in `ac/dc.py`
 
 ### Phase 2: Frontend - Settings Tab
-1. Add 'settings' tab option to PromptView
-2. Add gear icon to tab bar in PromptViewTemplate.js
-3. Create SettingsPanel.js component with sections for each config type
-4. Create SettingsPanelStyles.js with appropriate styling
-5. Create SettingsPanelTemplate.js with render functions
-6. Add `webapp/settings-panel.js` entry point (like other components)
-7. Wire up RPC calls for open/reload buttons
-8. Display current model name and reload status messages
-9. Add toast/notification for reload success/error feedback
+1. ✅ Added 'settings' to `activeLeftTab` options in PromptView
+2. ✅ Added gear icon to tab bar in PromptViewTemplate.js
+3. ✅ Created SettingsPanel.js component
+4. ✅ Created SettingsPanelStyles.js
+5. ✅ Created SettingsPanelTemplate.js
+6. ✅ Added `webapp/settings-panel.js` entry point
+7. ✅ Wired up config editing via diff viewer
+8. ✅ Added toast notifications for reload feedback
 
-### Phase 3: Testing
-1. Test editor opening on macOS and Linux
-2. Test LLM config reload picks up new model name
-3. Test LLM config reload applies new env vars
-4. Test app config reload clears cache
-5. Test UI displays correct current config info
-6. Test error handling for missing files or parse errors
+### Phase 3: Integration
+1. ✅ AppShell handles `config-edit-request` event
+2. ✅ DiffEditorMixin passes config metadata in save events
+3. ✅ AppShell routes config saves to Settings RPC
 
 ## File Changes
 
@@ -262,20 +218,19 @@ def open_in_editor(file_path: Path) -> dict:
 - `webapp/settings-panel.js` - Entry point for the component
 
 ### Modified Files
-- `ac/llm/config.py` - Add `open_in_editor()`, `get_config_paths()`
 - `ac/llm/llm.py` - Add `reload_config()` method
-- `ac/config.py` - Add `reload_app_config()` wrapper
 - `ac/dc.py` - Register Settings class with JRPC
-- `webapp/src/PromptView.js` - Add 'settings' to activeLeftTab options
+- `webapp/src/PromptView.js` - Add 'settings' tab, forward config-edit-request
 - `webapp/src/prompt/PromptViewTemplate.js` - Add settings tab icon and panel rendering
+- `webapp/src/app-shell/AppShell.js` - Handle config editing and saving
+- `webapp/src/diff-viewer/DiffEditorMixin.js` - Pass config metadata in save events
 
 ## Edge Cases
 
-1. **Editor not found (Linux):** Return error with file path so user can edit manually
-2. **Config syntax error after edit:** Catch JSON parse error on reload, show error message, keep previous config working
-3. **LLM reload with invalid model:** Catch LiteLLM error on next request, show error message
-4. **File permissions:** Return error if file can't be opened
-5. **StabilityTracker cache threshold:** Document that this setting requires restart to take effect
+1. **Config syntax error after edit:** Catch JSON parse error on reload, show error message, keep previous config working
+2. **LLM reload with invalid model:** Catch LiteLLM error on next request, show error message
+3. **File permissions:** Return error if file can't be written
+4. **StabilityTracker cache threshold:** Document that this setting requires restart to take effect
 
 ## UI Mockup
 
@@ -288,12 +243,12 @@ def open_in_editor(file_path: Path) -> dict:
 │ LLM Configuration                   │
 │ ┌─────────────────────────────────┐ │
 │ │ Model: claude-opus-4-5-...      │ │
-│ │ [Open llm.json] [Reload]        │ │
+│ │ [Edit llm.json] [Reload]        │ │
 │ └─────────────────────────────────┘ │
 │                                     │
 │ App Configuration                   │
 │ ┌─────────────────────────────────┐ │
-│ │ [Open app.json] [Reload]        │ │
+│ │ [Edit app.json] [Reload]        │ │
 │ │ ⓘ Some settings require restart │ │
 │ └─────────────────────────────────┘ │
 │                                     │
@@ -310,6 +265,9 @@ def open_in_editor(file_path: Path) -> dict:
 │ └─────────────────────────────────┘ │
 └─────────────────────────────────────┘
 ```
+
+Clicking any "Edit" or file button loads the config into the main Monaco diff viewer.
+Save with Ctrl+S. Changes are written via Settings RPC.
 
 ### Toast Notification States
 

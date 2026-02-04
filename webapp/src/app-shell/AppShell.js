@@ -198,41 +198,6 @@ export class AppShell extends LitElement {
     await this._loadFileIntoDiff(file);
   }
 
-  async handleFilesEdited(e) {
-    const { paths } = e.detail;
-    if (!paths || paths.length === 0) return;
-
-    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
-    if (!diffViewer) return;
-
-    const openPaths = diffViewer.getOpenFilePaths();
-    if (openPaths.length === 0) return;
-
-    // Only refresh files that are both open and edited
-    const editedSet = new Set(paths);
-    const pathsToRefresh = openPaths.filter(p => editedSet.has(p));
-    if (pathsToRefresh.length === 0) return;
-
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) return;
-
-    for (const filePath of pathsToRefresh) {
-      try {
-        const headResponse = await promptView.call['Repo.get_file_content'](filePath, 'HEAD');
-        const headResult = headResponse ? Object.values(headResponse)[0] : null;
-        const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? '');
-
-        const workingResponse = await promptView.call['Repo.get_file_content'](filePath);
-        const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
-        const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? '');
-
-        diffViewer.refreshFileContent(filePath, original, modified);
-      } catch (err) {
-        console.error('Failed to refresh file:', filePath, err);
-      }
-    }
-  }
-
   handleCloseSearch() {
     this.activeLeftTab = 'files';
   }
@@ -381,32 +346,6 @@ export class AppShell extends LitElement {
     }
   }
 
-  async handleFileSave(e) {
-    const { path, content } = e.detail;
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (promptView && promptView.call) {
-      try {
-        await promptView.call['Repo.write_file'](path, content);
-      } catch (err) {
-        console.error('Failed to save file:', err);
-      }
-    }
-  }
-
-  async handleFilesSave(e) {
-    const { files } = e.detail;
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (promptView && promptView.call) {
-      for (const file of files) {
-        try {
-          await promptView.call['Repo.write_file'](file.path, file.content);
-        } catch (err) {
-          console.error('Failed to save file:', file.path, err);
-        }
-      }
-    }
-  }
-
   async handleRequestFileLoad(e) {
     const { file, line, column, replace } = e.detail;
     const loaded = await this._loadFileIntoDiff(file, replace);
@@ -454,6 +393,95 @@ export class AppShell extends LitElement {
     this.urlModalContent = null;
   }
 
+  async handleConfigEditRequest(e) {
+    const { configType } = e.detail;
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) {
+      console.error('RPC not available for config edit');
+      return;
+    }
+
+    try {
+      // Fetch config content via Settings RPC
+      const response = await promptView.call['Settings.get_config_content'](configType);
+      const result = response ? Object.values(response)[0] : null;
+      
+      if (!result?.success) {
+        console.error('Failed to load config:', result?.error);
+        return;
+      }
+
+      // Load into diff viewer with config file path as identifier
+      // Use a special prefix to identify config files
+      const configPath = `[config]/${configType}`;
+      this.diffFiles = [{
+        path: configPath,
+        original: result.content,
+        modified: result.content,
+        isNew: false,
+        isReadOnly: false,
+        isConfig: true,
+        configType: configType,
+        realPath: result.path
+      }];
+      this.viewingFile = configPath;
+    } catch (err) {
+      console.error('Failed to load config for editing:', err);
+    }
+  }
+
+  async handleFileSave(e) {
+    const { path, content, isConfig, configType } = e.detail;
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) {
+      console.error('RPC not available for file save');
+      return;
+    }
+
+    try {
+      if (isConfig && configType) {
+        // Save config file via Settings RPC
+        const response = await promptView.call['Settings.save_config_content'](configType, content);
+        const result = response ? Object.values(response)[0] : null;
+        if (!result?.success) {
+          console.error('Failed to save config:', result?.error);
+        }
+      } else {
+        // Save repo file via Repo RPC
+        await promptView.call['Repo.write_file'](path, content);
+      }
+    } catch (err) {
+      console.error('Failed to save file:', err);
+    }
+  }
+
+  async handleFilesSave(e) {
+    const { files } = e.detail;
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) {
+      console.error('RPC not available for file save');
+      return;
+    }
+
+    for (const file of files) {
+      try {
+        if (file.isConfig && file.configType) {
+          // Save config file via Settings RPC
+          const response = await promptView.call['Settings.save_config_content'](file.configType, file.content);
+          const result = response ? Object.values(response)[0] : null;
+          if (!result?.success) {
+            console.error('Failed to save config:', result?.error);
+          }
+        } else {
+          // Save repo file via Repo RPC
+          await promptView.call['Repo.write_file'](file.path, file.content);
+        }
+      } catch (err) {
+        console.error('Failed to save file:', file.path, err);
+      }
+    }
+  }
+
   render() {
     return html`
       <url-content-modal
@@ -486,6 +514,7 @@ export class AppShell extends LitElement {
             @search-result-selected=${this.handleSearchResultSelected}
             @search-file-selected=${this.handleSearchFileSelected}
             @context-remove-url=${this.handleRemoveUrl}
+            @config-edit-request=${this.handleConfigEditRequest}
           ></prompt-view>
         </div>
       </div>
