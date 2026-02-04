@@ -4,6 +4,26 @@
 
 Fix and verify scrolling behavior in the chat message list to ensure a consistent, predictable UX.
 
+## Critical Context: `content-visibility: auto`
+
+The CSS property `content-visibility: auto` was recently added to `.messages` and individual message cards in `PromptViewStyles.js` to fix textarea lag with long message histories (222+ messages). This optimization tells the browser to skip rendering off-screen messages, which dramatically improves input responsiveness.
+
+**However, this breaks scrolling in several ways:**
+
+1. **`scrollHeight` is inaccurate** - Based on estimated `contain-intrinsic-size` values, not actual content
+2. **Distance-from-bottom checks fail** - The 50px threshold in `handleWheel()` may misfire
+3. **Scroll-to-bottom may not reach true bottom** - Content renders after scroll, revealing more below
+4. **Programmatic scrolling is unreliable** - `container.scrollTop = container.scrollHeight` may not reach the end
+
+**We must keep `content-visibility: auto` in place** for performance, so the scrolling logic needs to be updated to work correctly with estimated scroll heights.
+
+### Potential Solutions
+
+1. **Multiple scroll attempts** - Scroll, wait for render, scroll again
+2. **Use `scrollIntoView()` on last message** - More reliable than `scrollTop = scrollHeight`
+3. **Observe content changes** - Use ResizeObserver or MutationObserver to re-scroll after content renders
+4. **Adjust threshold calculations** - Account for estimation inaccuracy in bottom detection
+
 ## Requirements
 
 ### R1: Auto-scroll on new messages
