@@ -1,9 +1,9 @@
 """Settings management for config file editing and reloading."""
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ac.config import load_app_config
+from ac.llm.config import _get_config_dir
 
 if TYPE_CHECKING:
     from ac.llm import LiteLLM
@@ -17,25 +17,6 @@ ALLOWED_CONFIGS = {
     'system_extra': 'prompts/system_extra.md',
     'compaction': 'prompts/skills/compaction.md',
 }
-
-
-def _get_config_dir() -> Path:
-    """Get the config directory path."""
-    # Config is bundled with the package
-    return Path(__file__).parent.parent / 'config'
-
-
-def get_config_paths() -> dict[str, str]:
-    """Get paths to all config files.
-    
-    Returns:
-        dict mapping config type to absolute file path
-    """
-    config_dir = _get_config_dir()
-    return {
-        config_type: str(config_dir / rel_path)
-        for config_type, rel_path in ALLOWED_CONFIGS.items()
-    }
 
 
 class Settings:
@@ -138,7 +119,11 @@ class Settings:
         Returns:
             dict with current config values and file paths
         """
-        config_paths = get_config_paths()
+        config_dir = _get_config_dir()
+        config_paths = {
+            config_type: str(config_dir / rel_path)
+            for config_type, rel_path in ALLOWED_CONFIGS.items()
+        }
         
         return {
             "success": True,
