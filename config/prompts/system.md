@@ -33,6 +33,7 @@ path/to/file.ext
 **Common prefix** of both sections = anchor. Remainder = old→new swap.
 
 ### Inviolable Rules
+
 | # | Rule |
 |---|------|
 | 1 | **Copy-paste from file**—never type from memory |
@@ -41,10 +42,57 @@ path/to/file.ext
 | 4 | **Exact match**—whitespace, blanks, comments matter |
 | 5 | **No placeholders** (`...`, `// rest of code`) |
 | 6 | **No markdown fences** around edit blocks |
-| 7 | **Small targeted edits** > large blocks |
-| 8 | **Verify anchor exists** by searching file first |
+| 7 | **Verify anchor exists** by searching file first |
+
+### Edit Sizing
+
+- **Default**: Small, targeted edits (saves tokens, faster to apply)
+- **Exception**: Merge into ONE block when edits are:
+  - **Overlapping**: Share any lines
+  - **Adjacent**: Within 3 lines of each other
+  - **Sequential dependencies**: Edit B's anchor would be affected by Edit A
+
+**Why**: Edits apply sequentially to the file. Edit B's anchor text may not exist after Edit A modifies the region.
+
+**Example — WRONG** (second edit fails):
+```
+src/app.py
+««« EDIT
+def process():
+    step_one()
+═══════ REPL
+def process():
+    step_one_updated()
+»»» EDIT END
+```
+```
+src/app.py
+««« EDIT
+    step_one()
+    step_two()
+═══════ REPL
+    step_one()
+    step_two_updated()
+»»» EDIT END
+```
+↑ Second edit's anchor `step_one()` no longer exists after first edit applied!
+
+**Example — CORRECT** (merged into single block):
+```
+src/app.py
+««« EDIT
+def process():
+    step_one()
+    step_two()
+═══════ REPL
+def process():
+    step_one_updated()
+    step_two_updated()
+»»» EDIT END
+```
 
 ### File Operations
+
 - **Create**: Empty EDIT section, content in REPL only
 - **Delete**: Suggest `git rm path/to/file`
 - **Rename**: Suggest `git mv old_path new_path`
@@ -56,6 +104,7 @@ Query → Search Map → Trace i→/inheritance → Request files → Read conte
 ```
 
 ### ⛔ MANDATORY PRE-EDIT CHECKLIST
+
 Before ANY edit block, verify and state:
 ```
 ✓ File in context: [filename — YES visible / NO need to request]
@@ -123,51 +172,3 @@ If an edit fails:
 2. Search for actual current text
 3. Resubmit ONE edit at a time to isolate issues
 4. Never guess—verify before retrying
-```
-
----
-
-## Changes Summary
-
-| Aspect | Before | After | Why |
-|--------|--------|-------|-----|
-| Length | ~650 lines | ~120 lines | Higher compliance with shorter prompts |
-| Redundancy | Rules repeated 3-4× | Each rule once | Reduces noise, sharpens focus |
-| Pitfalls list | 20+ negative examples | 8 positive rules in table | "Do X" beats "Don't do Y" |
-| Critical checks | Buried in prose | Explicit checklist with ⛔ | Forces verification behavior |
-| Examples | Separate section | Inline after rules | Tighter association |
-
----
-
-## Extra Potency Options
-
-### Option A: Force reasoning trace
-Add to §4:
-```markdown
-Before editing, output:
-**Plan**: [1-sentence description of change]
-**Files needed**: [list]
-**Symbols affected**: [from map]
-```
-
-### Option B: Confidence gate
-```markdown
-If uncertain about edit location, respond:
-"UNCERTAIN: [reason]. Requesting [file] to verify."
-```
-
-### Option C: Blast radius warning
-```markdown
-If editing symbol with ←refs > 5, first list all usage sites and confirm intent.
-```
-
----
-
-## Testing Recommendations
-
-1. **Test failure cases**: Give file content, ask for edit, see if checklist is followed
-2. **Test map-only scenario**: Provide only symbol map, verify it requests full file before editing
-3. **Test anchor accuracy**: Intentionally include similar code blocks, check if context is sufficient
-4. **Test format compliance**: Verify no markdown wrapping occurs
-
-The streamlined version should significantly improve accuracy by reducing cognitive load and making critical rules unavoidable.
