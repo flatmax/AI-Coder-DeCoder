@@ -32,6 +32,8 @@ This hybrid approach gives you the best of both worlds: speed for 90% of coding 
 - **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
 - **Conversation History** — Persistent history with search, session browsing, and automatic compaction when context grows too large (summarizes old messages to stay within token limits)
 - **Find in Files** — Search across the codebase with regex support and context preview
+- **URL Context** — Paste URLs to fetch web pages, GitHub repos, or documentation. Content is automatically extracted, cached, and optionally summarized for context
+- **Prompt Snippets** — Save and reuse common prompts via `config/prompt-snippets.json`
 - **Voice Input** — Speech-to-text for hands-free prompt dictation with continuous auto-transcribe mode
 
 ## Tech Stack
@@ -132,7 +134,7 @@ See [LiteLLM's provider documentation](https://docs.litellm.ai/docs/providers) f
 
 Create or modify `config/app.json` in **your project's repository root** (not the AC⚡DC installation directory) to configure application settings:
 
-> ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac-dc_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
+> ⚠️ **Important:** The `url_cache.path` defaults to `/tmp/ac_url_cache`. You may want to change this to a persistent location, especially on systems that clear `/tmp` on reboot.
 
 ```json
 {
@@ -160,7 +162,7 @@ Create or modify `config/app.json` in **your project's repository root** (not th
 | `history_compaction.summary_budget_tokens` | `500` | Max tokens for the summary |
 | `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges to preserve |
 
-> **Note:** The JSON example above shows sample values. The table shows the code defaults used when settings are omitted.
+> **Note:** The JSON example above shows recommended values. The table shows the code defaults used when settings are omitted.
 
 ## Usage
 
