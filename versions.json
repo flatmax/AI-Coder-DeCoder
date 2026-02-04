@@ -1,6 +1,12 @@
 {
-  "latest": "c8eac185",
+  "latest": "f3750827",
   "versions": [
+    {
+      "sha": "f3750827",
+      "full_sha": "f37508273ff7547b50ea0607c87e784f5642d077",
+      "date": "2026-02-04T05:21:06Z",
+      "branch": "master"
+    },
     {
       "sha": "c8eac185",
       "full_sha": "c8eac185976979b479c013e0447ff0baad0a9f77",
