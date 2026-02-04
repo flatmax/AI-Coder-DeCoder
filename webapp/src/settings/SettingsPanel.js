@@ -5,6 +5,9 @@ import { RpcMixin } from '../utils/rpc.js';
 
 /**
  * Settings panel for config file editing and reloading.
+ * 
+ * Config files are edited in the main diff viewer by dispatching
+ * a 'config-edit-request' event that AppShell handles.
  */
 export class SettingsPanel extends RpcMixin(LitElement) {
   static properties = {
@@ -49,17 +52,13 @@ export class SettingsPanel extends RpcMixin(LitElement) {
     }
   }
 
-  async openConfig(configType) {
-    try {
-      const result = await this._rpcExtract('Settings.open_config_file', configType);
-      if (result?.success) {
-        this._showMessage('success', `Opened ${configType} config`);
-      } else {
-        this._showMessage('error', result?.error || 'Failed to open config');
-      }
-    } catch (e) {
-      this._showMessage('error', e.message || 'Failed to open config');
-    }
+  editConfig(configType) {
+    // Dispatch event for AppShell to load config into diff viewer
+    this.dispatchEvent(new CustomEvent('config-edit-request', {
+      bubbles: true,
+      composed: true,
+      detail: { configType }
+    }));
   }
 
   async reloadLlmConfig() {

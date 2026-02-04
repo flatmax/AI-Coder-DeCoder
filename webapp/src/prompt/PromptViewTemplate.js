@@ -534,6 +534,7 @@ export function renderPromptView(component) {
             <div class="embedded-panel">
               <settings-panel
                 .rpcCall=${component.call}
+                @config-edit-request=${(e) => component.handleConfigEditRequest(e)}
               ></settings-panel>
             </div>
           `}

@@ -1,8 +1,5 @@
 """Settings management for config file editing and reloading."""
 
-import os
-import platform
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,47 +23,6 @@ def _get_config_dir() -> Path:
     """Get the config directory path."""
     # Config is bundled with the package
     return Path(__file__).parent.parent / 'config'
-
-
-def open_in_editor(file_path: Path) -> dict:
-    """Open file in OS default editor.
-    
-    Args:
-        file_path: Path to the file to open
-        
-    Returns:
-        dict with 'success' bool and either 'path' or 'error'
-    """
-    if not file_path.exists():
-        return {"success": False, "error": f"File not found: {file_path}"}
-    
-    system = platform.system()
-    try:
-        if system == 'Darwin':  # macOS
-            subprocess.Popen(['open', '-t', str(file_path)])  # -t forces text editor
-        elif system == 'Windows':
-            if hasattr(os, 'startfile'):
-                os.startfile(str(file_path))
-            else:
-                return {"success": False, "error": "os.startfile not available"}
-        else:  # Linux/Unix
-            # Check VISUAL first (GUI editor), then EDITOR, then try common editors
-            editor = os.environ.get('VISUAL') or os.environ.get('EDITOR')
-            if editor:
-                subprocess.Popen([editor, str(file_path)])
-            else:
-                # Try common GUI editors in order of preference
-                editors = ['code', 'gedit', 'kate', 'xed', 'pluma', 'mousepad', 'leafpad', 'nano', 'vim']
-                for ed in editors:
-                    if subprocess.run(['which', ed], capture_output=True).returncode == 0:
-                        subprocess.Popen([ed, str(file_path)])
-                        break
-                else:
-                    # Fall back to xdg-open as last resort
-                    subprocess.Popen(['xdg-open', str(file_path)])
-        return {"success": True, "path": str(file_path)}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 
 def get_config_paths() -> dict[str, str]:
@@ -97,12 +53,42 @@ class Settings:
         """
         self._llm = llm
     
-    def open_config_file(self, config_type: str) -> dict:
-        """Open a config file in OS default editor.
+    def get_config_content(self, config_type: str) -> dict:
+        """Get the content of a config file.
         
         Args:
             config_type: One of the whitelisted config types
                          (llm, app, snippets, system, system_extra, compaction)
+                         
+        Returns:
+            dict with 'success' bool and either 'content'/'path' or 'error'
+        """
+        if config_type not in ALLOWED_CONFIGS:
+            return {"success": False, "error": f"Unknown config type: {config_type}"}
+        
+        config_dir = _get_config_dir()
+        file_path = config_dir / ALLOWED_CONFIGS[config_type]
+        
+        if not file_path.exists():
+            return {"success": False, "error": f"File not found: {file_path}"}
+        
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            return {
+                "success": True,
+                "content": content,
+                "path": str(file_path),
+                "config_type": config_type
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def save_config_content(self, config_type: str, content: str) -> dict:
+        """Save content to a config file.
+        
+        Args:
+            config_type: One of the whitelisted config types
+            content: The new file content
                          
         Returns:
             dict with 'success' bool and either 'path' or 'error'
@@ -113,7 +99,15 @@ class Settings:
         config_dir = _get_config_dir()
         file_path = config_dir / ALLOWED_CONFIGS[config_type]
         
-        return open_in_editor(file_path)
+        try:
+            file_path.write_text(content, encoding='utf-8')
+            return {
+                "success": True,
+                "path": str(file_path),
+                "config_type": config_type
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     def reload_llm_config(self) -> dict:
         """Reload LLM configuration from llm.json.
