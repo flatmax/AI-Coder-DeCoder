@@ -234,6 +234,9 @@ export class PromptView extends MixedBase {
     this.showHistoryBrowser = false;
     console.log(`📜 Loaded ${messages.length} messages from session`);
     
+    // Scroll to bottom after loading session
+    this.scrollToBottomNow();
+    
     // Refresh history bar to reflect loaded session
     await this._refreshHistoryBar();
   }
@@ -245,6 +248,7 @@ export class PromptView extends MixedBase {
     this.initWindowControls();
     this.initStreaming();
     this._initUrlService();
+    this.setupScrollObserver();
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
@@ -495,6 +499,7 @@ export class PromptView extends MixedBase {
     super.disconnectedCallback();
     this.destroyInputHandler();
     this.destroyWindowControls();
+    this.disconnectScrollObserver();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
     // Clean up any panel resize listeners
     window.removeEventListener('mousemove', this._boundPanelResizeMove);
@@ -618,6 +623,9 @@ export class PromptView extends MixedBase {
             this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
           console.log(`📜 Loaded ${messages.length} messages from last session`);
+          
+          // Scroll to bottom after loading session
+          this.scrollToBottomNow();
         }
       }
       
