@@ -234,8 +234,17 @@ export class PromptView extends MixedBase {
     this.showHistoryBrowser = false;
     console.log(`📜 Loaded ${messages.length} messages from session`);
     
-    // Scroll to bottom after loading session
-    this.scrollToBottomNow();
+    // Reset saved scroll positions to avoid stale values after session load
+    this._filePickerScrollTop = 0;
+    this._messagesScrollTop = 0;
+    this._wasScrolledUp = false;
+    
+    // Scroll to bottom after loading session (with delay for content-visibility render)
+    this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        this.scrollToBottomNow();
+      });
+    });
     
     // Refresh history bar to reflect loaded session
     await this._refreshHistoryBar();
@@ -285,35 +294,44 @@ export class PromptView extends MixedBase {
       const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
       if (messagesContainer) {
         this._messagesScrollTop = messagesContainer.scrollTop;
+        this._messagesScrollHeight = messagesContainer.scrollHeight;
         // Save whether user had scrolled up
         this._wasScrolledUp = this._userHasScrolledUp;
       }
     }
 
+    // Disconnect observer before tab switch to prevent interference
+    this.disconnectScrollObserver();
+
     this.activeLeftTab = tab;
 
     // Restore scroll positions when switching back to files tab
     if (tab === 'files') {
-      this.updateComplete.then(async () => {
-        const filePicker = this.shadowRoot?.querySelector('file-picker');
-        if (filePicker && this._filePickerScrollTop > 0) {
-          await filePicker.updateComplete;
-          filePicker.setScrollTop(this._filePickerScrollTop);
-        }
-        const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-        if (messagesContainer) {
-          if (this._wasScrolledUp) {
-            // User was scrolled up - restore their position
-            messagesContainer.scrollTop = this._messagesScrollTop;
-            this._userHasScrolledUp = true;
-            this._showScrollButton = true;
-          } else {
-            // User was at bottom - scroll to bottom
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            this._userHasScrolledUp = false;
-            this._showScrollButton = false;
+      // Use double rAF to ensure DOM is fully rendered after tab switch
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const filePicker = this.shadowRoot?.querySelector('file-picker');
+          if (filePicker && this._filePickerScrollTop > 0) {
+            filePicker.setScrollTop(this._filePickerScrollTop);
           }
-        }
+          const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+          if (messagesContainer) {
+            if (this._wasScrolledUp) {
+              // User was scrolled up - restore their position
+              messagesContainer.scrollTop = this._messagesScrollTop;
+              this._userHasScrolledUp = true;
+              this._showScrollButton = true;
+            } else {
+              // User was at bottom - scroll to bottom
+              messagesContainer.scrollTop = messagesContainer.scrollHeight;
+              this._userHasScrolledUp = false;
+              this._showScrollButton = false;
+            }
+            // Re-setup observer after scroll is restored
+            this.setupScrollObserver();
+            this.requestUpdate();
+          }
+        });
       });
     } else if (tab === 'search') {
       this.updateComplete.then(() => {
