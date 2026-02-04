@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 ALLOWED_CONFIGS = {
     'litellm': 'litellm.json',
     'app': 'app.json',
-    'snippets': 'prompt-snippets.json',
+    'snippets': 'prompts/prompt-snippets.json',
     'system': 'prompts/system.md',
     'system_extra': 'prompts/system_extra.md',
     'compaction': 'prompts/skills/compaction.md',

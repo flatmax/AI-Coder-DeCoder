@@ -1131,13 +1131,13 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         # First try repo's config directory
         if self.repo:
             repo_root = self.repo.get_repo_root()
-            repo_snippets = Path(repo_root) / 'config' / 'prompt-snippets.json'
+            repo_snippets = Path(repo_root) / 'config' / 'prompts' / 'prompt-snippets.json'
             if repo_snippets.exists():
                 snippets_path = repo_snippets
         
         # Fall back to aicoder's config directory
         if not snippets_path:
-            aicoder_config = Path(__file__).parent.parent.parent / 'config' / 'prompt-snippets.json'
+            aicoder_config = Path(__file__).parent.parent.parent / 'config' / 'prompts' / 'prompt-snippets.json'
             if aicoder_config.exists():
                 snippets_path = aicoder_config
         
