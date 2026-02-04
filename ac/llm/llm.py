@@ -1114,25 +1114,37 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
     
     def get_prompt_snippets(self):
         """
-        Load prompt snippets from config/prompt-snippets.json in repo root.
+        Load prompt snippets from config/prompt-snippets.json.
+        
+        Looks first in the repo's config directory, then falls back to
+        aicoder's own config directory.
         
         Returns:
             List of snippet dicts with icon, tooltip, message fields.
-            Empty list if file doesn't exist or is invalid.
+            Empty list if no file exists or is invalid.
         """
-        if not self.repo:
+        import json
+        from pathlib import Path
+        
+        snippets_path = None
+        
+        # First try repo's config directory
+        if self.repo:
+            repo_root = self.repo.get_repo_root()
+            repo_snippets = Path(repo_root) / 'config' / 'prompt-snippets.json'
+            if repo_snippets.exists():
+                snippets_path = repo_snippets
+        
+        # Fall back to aicoder's config directory
+        if not snippets_path:
+            aicoder_config = Path(__file__).parent.parent.parent / 'config' / 'prompt-snippets.json'
+            if aicoder_config.exists():
+                snippets_path = aicoder_config
+        
+        if not snippets_path:
             return []
         
         try:
-            import json
-            from pathlib import Path
-            
-            repo_root = self.repo.get_repo_root()
-            snippets_path = Path(repo_root) / 'config' / 'prompt-snippets.json'
-            
-            if not snippets_path.exists():
-                return []
-            
             with open(snippets_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
