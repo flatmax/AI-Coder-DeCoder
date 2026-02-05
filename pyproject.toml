@@ -29,7 +29,7 @@ ac-dc = "ac.dc:main"
 
 [project.optional-dependencies]
 dev = [
-    "playwright",
+    "playwright>=1.40.0",
     "pytest",
     "pytest-asyncio>=0.23.0",
 ]
