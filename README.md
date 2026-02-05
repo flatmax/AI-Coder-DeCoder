@@ -1,5 +1,7 @@
 # AI Coder / DeCoder (AC⚡DC)
 
+![AC⚡DC Demo](https://github.com/user-attachments/assets/673aed08-4ae3-47cb-8ada-a1c98c497b4b)
+
 AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
 ## Philosophy: Speed Over Agency
