@@ -150,11 +150,6 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         if self._context_manager:
             self._context_manager.set_history(value)
     
-    def ping(self):
-        """Simple ping to test connection."""
-        print('ping returning pong')
-        return "pong"
-    
     def clear_history(self):
         """Clear the conversation history and start a new history session."""
         if self._context_manager:
