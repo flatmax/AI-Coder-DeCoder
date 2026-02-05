@@ -1,3 +1,6 @@
+# Demo recordings (keep GIFs, exclude raw videos)
+demo_videos/*.webm
+
 # Aider
 .aider*
 
