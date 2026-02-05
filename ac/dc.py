@@ -163,7 +163,7 @@ async def main_starter_async(args):
         open_browser(actual_server_port, actual_webapp_port, local_mode)
 
     # Keep the server running
-    await server.server.serve_forever()
+    await server.ws_server.serve_forever()
 
 
 def main():
