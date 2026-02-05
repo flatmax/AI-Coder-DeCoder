@@ -673,27 +673,52 @@ export class PromptView extends MixedBase {
    * Called by server when a chunk of the response is available.
    * Explicitly defined here so JRPC-OO can find it.
    * Delegates to mixin implementation.
+   * IMPORTANT: Must return a value for JRPC response to be sent.
    */
   streamChunk(requestId, content) {
-    super.streamChunk(requestId, content);
+    try {
+      super.streamChunk(requestId, content);
+      return true;  // Acknowledge receipt
+    } catch (e) {
+      console.error('streamChunk error:', e);
+      return false;
+    }
   }
 
   /**
    * Called by server when streaming is complete.
    * Explicitly defined here so JRPC-OO can find it.
    * Delegates to mixin implementation.
+   * IMPORTANT: Must return a value for JRPC response to be sent.
+   * Note: Don't await - fire-and-forget to prevent blocking the JRPC response.
    */
-  async streamComplete(requestId, result) {
-    await super.streamComplete(requestId, result);
+  streamComplete(requestId, result) {
+    // Fire-and-forget: run async work in background, return immediately
+    // This ensures JRPC response is sent promptly
+    Promise.resolve().then(async () => {
+      try {
+        await super.streamComplete(requestId, result);
+      } catch (e) {
+        console.error('streamComplete async error:', e);
+      }
+    });
+    return true;  // Acknowledge receipt immediately
   }
 
   /**
    * Called by server when a compaction event occurs.
    * Explicitly defined here so JRPC-OO can find it.
    * Delegates to mixin implementation.
+   * IMPORTANT: Must return a value for JRPC response to be sent.
    */
   compactionEvent(requestId, event) {
-    super.compactionEvent(requestId, event);
+    try {
+      super.compactionEvent(requestId, event);
+      return true;  // Acknowledge receipt
+    } catch (e) {
+      console.error('compactionEvent error:', e);
+      return false;
+    }
   }
 
   render() {
