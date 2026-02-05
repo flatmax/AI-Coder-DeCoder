@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@flatmax/jrpc-oo": "^1.0.0",
-    "lit": "^2.8.0",
+    "lit": "^3.0.0",
     "marked": "^9.0.0",
     "monaco-editor": "^0.45.0",
     "prismjs": "^1.29.0"
