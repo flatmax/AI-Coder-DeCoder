@@ -1,7 +1,5 @@
 # AI Coder / DeCoder (AC⚡DC)
 
-> ⚠️ **Alpha Software** — AC⚡DC is in active development. Expect rough edges, breaking changes, and incomplete features. Currently optimized for **Anthropic models via AWS Bedrock**. Other LLM setups should work but are not tested.
-
 AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPL block format.
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
