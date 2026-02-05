@@ -1,5 +1,5 @@
-# Demo recordings (keep GIFs, exclude raw videos)
-demo_videos/*.webm
+# Demo recordings
+demo_videos/
 
 # Aider
 .aider*
