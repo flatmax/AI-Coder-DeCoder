@@ -82,6 +82,31 @@ The configuration has two sections:
 
 #### Configuration Examples
 
+**Local LLM (Ollama):**
+```json
+{
+  "env": {
+    "OLLAMA_API_BASE": "http://localhost:11434"
+  },
+  "model": "ollama/qwen3-coder-next",
+  "smallerModel": "ollama/qwen3-coder-next"
+}
+```
+> Start Ollama first: `ollama serve` then `ollama pull deepseek-coder-v2`
+
+**Local LLM (LM Studio / OpenAI-compatible server):**
+```json
+{
+  "env": {
+    "OPENAI_API_KEY": "not-needed",
+    "OPENAI_API_BASE": "http://localhost:1234/v1"
+  },
+  "model": "openai/local-model",
+  "smallerModel": "openai/local-model"
+}
+```
+> Point `OPENAI_API_BASE` to any OpenAI-compatible server (LM Studio, llama.cpp, vLLM, etc.)
+
 **OpenAI:**
 ```json
 {
