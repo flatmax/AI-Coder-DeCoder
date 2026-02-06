@@ -225,6 +225,9 @@ class StreamingMixin:
                 loop  # Pass the loop to the thread
             )
             
+            # Flush any pending chunk coroutines scheduled from the thread
+            await asyncio.sleep(0)
+            
             # If cancelled, send completion with cancelled flag and return early
             if was_cancelled:
                 # Still store the partial assistant message
@@ -1036,26 +1039,27 @@ class StreamingMixin:
             if hasattr(self, 'get_call'):
                 call = self.get_call()
                 if call and 'PromptView.compactionEvent' in call:
-                    # Fire-and-forget: don't await since frontend doesn't return a value
-                    asyncio.create_task(call['PromptView.compactionEvent'](request_id, event))
-                    # Give it a moment to send
-                    await asyncio.sleep(0.05)
+                    await asyncio.wait_for(
+                        call['PromptView.compactionEvent'](request_id, event),
+                        timeout=5.0
+                    )
+        except asyncio.TimeoutError:
+            print(f"⚠️ compactionEvent timed out for {request_id}")
         except Exception as e:
             print(f"Error sending compaction event: {e}")
 
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
         try:
-            # Small delay to ensure final streamChunk is delivered first
-            await asyncio.sleep(0.05)
             if hasattr(self, 'get_call'):
                 call = self.get_call()
                 if call and 'PromptView.streamComplete' in call:
-                    # Fire-and-forget: don't await since frontend doesn't return a value
-                    # and awaiting can hang if the connection is in a bad state
-                    asyncio.create_task(call['PromptView.streamComplete'](request_id, result))
-                    # Give it a moment to send
-                    await asyncio.sleep(0.1)
+                    await asyncio.wait_for(
+                        call['PromptView.streamComplete'](request_id, result),
+                        timeout=5.0
+                    )
+        except asyncio.TimeoutError:
+            print(f"⚠️ streamComplete timed out for {request_id}")
         except Exception as e:
             print(f"Error sending stream complete: {e}")
             import traceback
@@ -1076,6 +1080,9 @@ class StreamingMixin:
             return
         
         try:
+            # Give frontend time to process streamComplete before starting compaction
+            await asyncio.sleep(0.5)
+            
             # Notify frontend that compaction is starting
             await self._send_compaction_event(request_id, {
                 'type': 'compaction_start',
