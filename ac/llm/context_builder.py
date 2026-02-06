@@ -7,18 +7,9 @@ between streaming chat and context breakdown visualization.
 
 from typing import Callable, Optional
 
-
-# Tier thresholds - single source of truth
-TIER_THRESHOLDS = {'L0': 12, 'L1': 9, 'L2': 6, 'L3': 3}
-TIER_NAMES = {
-    'L0': 'Most Stable',
-    'L1': 'Very Stable', 
-    'L2': 'Stable',
-    'L3': 'Moderately Stable',
-    'active': 'Active'
-}
-TIER_ORDER = ['L0', 'L1', 'L2', 'L3', 'active']
-CACHE_TIERS = ['L0', 'L1', 'L2', 'L3']  # Tiers that get cached
+from ..context.stability_tracker import (
+    TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS,
+)
 
 
 class ContextBuilderMixin:

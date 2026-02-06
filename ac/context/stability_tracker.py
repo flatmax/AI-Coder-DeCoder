@@ -44,6 +44,18 @@ TIER_CONFIG = {
 # Tier promotion order (from lowest to highest)
 TIER_PROMOTION_ORDER = ['L3', 'L2', 'L1', 'L0']
 
+# Derived constants (single source of truth for tier configuration)
+TIER_THRESHOLDS = {k: v['entry_n'] for k, v in TIER_CONFIG.items()}
+TIER_NAMES = {
+    'L0': 'Most Stable',
+    'L1': 'Very Stable',
+    'L2': 'Stable',
+    'L3': 'Moderately Stable',
+    'active': 'Active',
+}
+TIER_ORDER = ['L0', 'L1', 'L2', 'L3', 'active']
+CACHE_TIERS = ['L0', 'L1', 'L2', 'L3']
+
 
 @dataclass
 class StabilityInfo:
