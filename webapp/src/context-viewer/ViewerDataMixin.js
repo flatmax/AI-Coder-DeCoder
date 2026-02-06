@@ -36,6 +36,7 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
     this.breakdown = null;
     this.isLoading = false;
     this.error = null;
+    this._breakdownStale = true;
 
     this.selectedUrl = null;
     this.showUrlModal = false;
@@ -94,17 +95,31 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
 
   /**
    * Auto-refresh when relevant properties change.
-   * Debounced to coalesce rapid property changes (e.g. selectedFiles +
-   * fetchedUrls changing in the same microtask).
+   * Only fetches when visible. Marks data stale when properties change
+   * while hidden, so the next tab-switch triggers a refresh.
    */
   _viewerDataWillUpdate(changedProperties) {
-    if (changedProperties.has('selectedFiles') ||
+    const dataChanged = changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
-        changedProperties.has('excludedUrls')) {
-      if (this.rpcCall && this.visible && !this._refreshPromise) {
-        if (this._refreshTimer) clearTimeout(this._refreshTimer);
-        this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
-      }
+        changedProperties.has('excludedUrls');
+
+    if (dataChanged) {
+      this._breakdownStale = true;
+    }
+
+    // Fetch on becoming visible with stale data
+    if (changedProperties.has('visible') && this.visible && this._breakdownStale) {
+      this._breakdownStale = false;
+      if (this._refreshTimer) clearTimeout(this._refreshTimer);
+      this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
+      return;
+    }
+
+    // Fetch when data changes while visible
+    if (dataChanged && this.visible && this.rpcCall && !this._refreshPromise) {
+      this._breakdownStale = false;
+      if (this._refreshTimer) clearTimeout(this._refreshTimer);
+      this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
     }
   }
 

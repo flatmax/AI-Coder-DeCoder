@@ -9,6 +9,7 @@ import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import { UrlService } from './services/UrlService.js';
 import { extractResponse as _extractResponse } from './utils/rpc.js';
+import { setSharedRpcCall } from './utils/RpcContext.js';
 import { TABS } from './utils/constants.js';
 import './file-picker/FilePicker.js';
 
@@ -207,7 +208,6 @@ export class PromptView extends MixedBase {
       this.updateComplete.then(() => {
         const historyBrowser = this.shadowRoot?.querySelector('history-browser');
         if (historyBrowser) {
-          historyBrowser.rpcCall = this.call;
           historyBrowser.show();
         }
       });
@@ -504,6 +504,9 @@ export class PromptView extends MixedBase {
       console.warn('setupDone called but this.call is not available yet');
       return;
     }
+    
+    // Publish RPC call object for all RpcMixin components
+    setSharedRpcCall(this.call);
     
     await this.loadFileTree();
     await this.loadLastSession();

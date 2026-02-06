@@ -197,7 +197,6 @@ export function renderPromptView(component) {
           ${component._visitedTabs.has(TABS.SEARCH) ? html`
             <div class="embedded-panel ${component.activeLeftTab !== TABS.SEARCH ? 'tab-hidden' : ''}">
               <find-in-files
-                .rpcCall=${component.call}
                 @result-selected=${(e) => component.handleSearchResultSelected(e)}
                 @file-selected=${(e) => component.handleSearchFileSelected(e)}
               ></find-in-files>
@@ -206,7 +205,6 @@ export function renderPromptView(component) {
           ${component._visitedTabs.has(TABS.CONTEXT) ? html`
             <div class="embedded-panel ${component.activeLeftTab !== TABS.CONTEXT ? 'tab-hidden' : ''}">
               <context-viewer
-                .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
                 .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
                 .excludedUrls=${component.excludedUrls}
@@ -218,7 +216,6 @@ export function renderPromptView(component) {
           ${component._visitedTabs.has(TABS.CACHE) ? html`
             <div class="embedded-panel ${component.activeLeftTab !== TABS.CACHE ? 'tab-hidden' : ''}">
               <cache-viewer
-                .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
                 .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
                 .excludedUrls=${component.excludedUrls}
@@ -231,7 +228,6 @@ export function renderPromptView(component) {
           ${component._visitedTabs.has(TABS.SETTINGS) ? html`
             <div class="embedded-panel ${component.activeLeftTab !== TABS.SETTINGS ? 'tab-hidden' : ''}">
               <settings-panel
-                .rpcCall=${component.call}
                 @config-edit-request=${(e) => component.handleConfigEditRequest(e)}
               ></settings-panel>
             </div>
