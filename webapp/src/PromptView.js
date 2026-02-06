@@ -424,17 +424,23 @@ export class PromptView extends MixedBase {
    */
   async _refreshHistoryBar() {
     if (!this.call) return;
+    if (this._refreshHistoryBarPromise) return this._refreshHistoryBarPromise;
     
-    try {
-      const response = await this.call['LiteLLM.get_context_breakdown'](
-        this.selectedFiles || [],
-        Object.keys(this.fetchedUrls || {})
-      );
-      const breakdown = this.extractResponse(response);
-      this._syncHistoryBarFromBreakdown(breakdown);
-    } catch (e) {
-      console.warn('Could not refresh history bar:', e);
-    }
+    this._refreshHistoryBarPromise = (async () => {
+      try {
+        const response = await this.call['LiteLLM.get_context_breakdown'](
+          this.selectedFiles || [],
+          Object.keys(this.fetchedUrls || {})
+        );
+        const breakdown = this.extractResponse(response);
+        this._syncHistoryBarFromBreakdown(breakdown);
+      } catch (e) {
+        console.warn('Could not refresh history bar:', e);
+      }
+    })();
+    
+    try { await this._refreshHistoryBarPromise; }
+    finally { this._refreshHistoryBarPromise = null; }
   }
 
   /**

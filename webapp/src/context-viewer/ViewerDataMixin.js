@@ -101,7 +101,7 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
     if (changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
-      if (this.rpcCall && this.visible) {
+      if (this.rpcCall && this.visible && !this._refreshPromise) {
         if (this._refreshTimer) clearTimeout(this._refreshTimer);
         this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
       }

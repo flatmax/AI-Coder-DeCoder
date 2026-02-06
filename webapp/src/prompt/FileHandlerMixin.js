@@ -63,7 +63,13 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       const response = await this.call['Repo.get_file_tree']();
       const data = this.extractResponse(response);
       if (data && !data.error) {
-        this.fileTree = data.tree;
+        // Stabilize tree reference — only replace when content actually changed.
+        // This avoids downstream O(n) tree walks and cache invalidation on every refresh.
+        const treeJson = JSON.stringify(data.tree);
+        if (treeJson !== this._lastTreeJson) {
+          this._lastTreeJson = treeJson;
+          this.fileTree = data.tree;
+        }
         this.modifiedFiles = data.modified || [];
         this.stagedFiles = data.staged || [];
         this.untrackedFiles = data.untracked || [];

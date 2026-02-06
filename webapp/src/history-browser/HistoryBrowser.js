@@ -123,7 +123,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     
     this.isSearching = true;
+    this._searchGen = (this._searchGen || 0) + 1;
+    const gen = this._searchGen;
     const result = await this._rpcWithState('LiteLLM.history_search', {}, this.searchQuery, null, 100);
+    if (gen !== this._searchGen) return; // stale result — discard
     this.searchResults = result || [];
   }
 

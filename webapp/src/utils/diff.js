@@ -1,6 +1,6 @@
 // Simple LRU cache for diff results to avoid recomputing during streaming re-renders
 const _diffCache = new Map();
-const _DIFF_CACHE_MAX = 32;
+const _DIFF_CACHE_MAX = 12;
 
 function _getDiffCacheKey(oldLines, newLines) {
   // Use length + hash of all content for reliable collision resistance
