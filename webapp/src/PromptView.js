@@ -362,15 +362,12 @@ export class PromptView extends MixedBase {
   }
 
   /**
-   * Refresh a viewer component (context-viewer or cache-viewer) with current state
+   * Refresh a viewer component (context-viewer or cache-viewer) with current state.
+   * Properties flow via template bindings; we just trigger the refresh and sync history bar.
    */
   async _refreshViewer(selector) {
     const viewer = this.shadowRoot?.querySelector(selector);
     if (viewer && this.call) {
-      viewer.rpcCall = this.call;
-      viewer.selectedFiles = this.selectedFiles || [];
-      viewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
-      viewer.excludedUrls = this.excludedUrls;
       await viewer.refreshBreakdown();
       
       // Sync history bar with viewer's breakdown data
@@ -385,8 +382,7 @@ export class PromptView extends MixedBase {
    */
   async _refreshSettingsPanel() {
     const settingsPanel = this.shadowRoot?.querySelector('settings-panel');
-    if (settingsPanel && this.call) {
-      settingsPanel.rpcCall = this.call;
+    if (settingsPanel) {
       await settingsPanel.loadConfigInfo();
     }
   }
