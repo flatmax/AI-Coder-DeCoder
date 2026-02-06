@@ -184,7 +184,12 @@ export class PromptView extends MixedBase {
       this._selectedObject = selected;
     }
     if (changedProperties.has('fileTree')) {
-      this._addableFiles = this.getAddableFiles();
+      // Memoize: only rebuild if tree actually changed
+      const newFiles = this.getAddableFiles();
+      const prev = this._addableFiles;
+      if (!prev || prev.length !== newFiles.length || newFiles.some((f, i) => f !== prev[i])) {
+        this._addableFiles = newFiles;
+      }
     }
   }
 
@@ -501,6 +506,7 @@ export class PromptView extends MixedBase {
     this.destroyWindowControls();
     this.disconnectScrollObserver();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
+    this._urlService?.destroy();
     // Clean up any panel resize listeners
     window.removeEventListener('mousemove', this._boundPanelResizeMove);
     window.removeEventListener('mouseup', this._boundPanelResizeEnd);
