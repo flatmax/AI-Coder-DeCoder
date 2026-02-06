@@ -3,6 +3,7 @@ import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
 import { RpcMixin } from '../utils/rpc.js';
 import { getTierColor } from '../utils/tierConfig.js';
+import { ViewerDataMixin } from './ViewerDataMixin.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -12,12 +13,9 @@ import './SymbolMapModal.js';
  * Shows how content is organized for LLM prompt caching, with stability
  * indicators showing progress toward promotion to higher cache tiers.
  */
-export class CacheViewer extends RpcMixin(LitElement) {
+export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
   static properties = {
     visible: { type: Boolean },
-    breakdown: { type: Object },
-    isLoading: { type: Boolean },
-    error: { type: String },
     
     // Tier expansion state
     expandedTiers: { type: Object },      // { L0: true, L1: false, ... }
@@ -26,23 +24,10 @@ export class CacheViewer extends RpcMixin(LitElement) {
     // Recent changes for notifications
     recentChanges: { type: Array },
     
-    // URL modal state
-    selectedUrl: { type: String },
-    showUrlModal: { type: Boolean },
-    urlContent: { type: Object },
-    
-    // Symbol map modal
-    showSymbolMapModal: { type: Boolean },
-    symbolMapContent: { type: String },
-    isLoadingSymbolMap: { type: Boolean },
-    
-    // From parent
-    selectedFiles: { type: Array },
-    fetchedUrls: { type: Array },
-    excludedUrls: { type: Object },
-    
     // Search/filter
     searchQuery: { type: String },
+    
+    ...ViewerDataMixin.mixinProperties,
   };
 
   static styles = cacheViewerStyles;
@@ -50,9 +35,6 @@ export class CacheViewer extends RpcMixin(LitElement) {
   constructor() {
     super();
     this.visible = true;
-    this.breakdown = null;
-    this.isLoading = false;
-    this.error = null;
     
     // Default: L0 expanded, others collapsed
     this.expandedTiers = { L0: true, L1: false, L2: false, L3: false, active: true };
@@ -60,49 +42,20 @@ export class CacheViewer extends RpcMixin(LitElement) {
     
     this.recentChanges = [];
     
-    this.selectedUrl = null;
-    this.showUrlModal = false;
-    this.urlContent = null;
-    this.showSymbolMapModal = false;
-    this.symbolMapContent = null;
-    this.isLoadingSymbolMap = false;
-    
-    this.selectedFiles = [];
-    this.fetchedUrls = [];
-    this.excludedUrls = new Set();
-    
     this.searchQuery = '';
+    
+    this.initViewerData();
   }
 
   onRpcReady() {
     this.refreshBreakdown();
   }
 
-  // ========== Data Fetching ==========
+  // ========== Promotion/Demotion Tracking ==========
 
-  getIncludedUrls() {
-    if (!this.fetchedUrls) return [];
-    return this.fetchedUrls.filter(url => !this.excludedUrls.has(url));
-  }
-
-  async refreshBreakdown() {
-    if (!this.rpcCall) {
-      return;
-    }
-    
-    const result = await this._rpcWithState(
-      'LiteLLM.get_context_breakdown',
-      {},
-      this.selectedFiles || [],
-      this.getIncludedUrls()
-    );
-    
-    if (result) {
-      // Track promotions/demotions for notifications
-      if (result.promotions?.length || result.demotions?.length) {
-        this._addRecentChanges(result.promotions, result.demotions);
-      }
-      this.breakdown = result;
+  _onBreakdownResult(result) {
+    if (result.promotions?.length || result.demotions?.length) {
+      this._addRecentChanges(result.promotions, result.demotions);
     }
   }
 
@@ -122,14 +75,7 @@ export class CacheViewer extends RpcMixin(LitElement) {
   }
 
   willUpdate(changedProperties) {
-    // Refresh when files, URLs, or exclusions change
-    if (changedProperties.has('selectedFiles') || 
-        changedProperties.has('fetchedUrls') ||
-        changedProperties.has('excludedUrls')) {
-      if (this.rpcCall) {
-        this.refreshBreakdown();
-      }
-    }
+    this._viewerDataWillUpdate(changedProperties);
   }
 
   // ========== Tier/Group Expansion ==========
@@ -151,88 +97,6 @@ export class CacheViewer extends RpcMixin(LitElement) {
 
   isGroupExpanded(tier, group) {
     return this.expandedGroups[`${tier}-${group}`] || false;
-  }
-
-  // ========== URL Management ==========
-
-  async viewUrl(url) {
-    if (!this.rpcCall) return;
-    
-    this.selectedUrl = url;
-    this.showUrlModal = true;
-    this.urlContent = null;
-    
-    try {
-      const response = await this._rpc('LiteLLM.get_url_content', url);
-      this.urlContent = extractResponse(response);
-    } catch (e) {
-      this.urlContent = { error: e.message };
-    }
-  }
-
-  closeUrlModal() {
-    this.showUrlModal = false;
-    this.selectedUrl = null;
-    this.urlContent = null;
-  }
-
-  toggleUrlIncluded(url) {
-    const newExcluded = new Set(this.excludedUrls);
-    if (newExcluded.has(url)) {
-      newExcluded.delete(url);
-    } else {
-      newExcluded.add(url);
-    }
-    this.excludedUrls = newExcluded;
-    
-    this.dispatchEvent(new CustomEvent('url-inclusion-changed', {
-      detail: { url, included: !newExcluded.has(url), includedUrls: this.getIncludedUrls() },
-      bubbles: true,
-      composed: true
-    }));
-    
-    this.refreshBreakdown();
-  }
-
-  isUrlIncluded(url) {
-    return !this.excludedUrls.has(url);
-  }
-
-  removeUrl(url) {
-    if (this.excludedUrls.has(url)) {
-      const newExcluded = new Set(this.excludedUrls);
-      newExcluded.delete(url);
-      this.excludedUrls = newExcluded;
-    }
-    this.dispatchEvent(new CustomEvent('remove-url', {
-      detail: { url },
-      bubbles: true,
-      composed: true
-    }));
-  }
-
-  // ========== Symbol Map Modal ==========
-
-  async viewSymbolMap() {
-    if (!this.rpcCall) return;
-    
-    this.isLoadingSymbolMap = true;
-    this.showSymbolMapModal = true;
-    this.symbolMapContent = null;
-    
-    try {
-      const response = await this._rpc('LiteLLM.get_context_map', null, true);
-      this.symbolMapContent = extractResponse(response);
-    } catch (e) {
-      this.symbolMapContent = `Error loading symbol map: ${e.message}`;
-    } finally {
-      this.isLoadingSymbolMap = false;
-    }
-  }
-
-  closeSymbolMapModal() {
-    this.showSymbolMapModal = false;
-    this.symbolMapContent = null;
   }
 
   // ========== File Navigation ==========

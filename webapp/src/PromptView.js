@@ -346,11 +346,11 @@ export class PromptView extends MixedBase {
       });
     } else if (tab === TABS.CONTEXT) {
       this.updateComplete.then(() => {
-        this._refreshContextViewer();
+        this._refreshViewer('context-viewer');
       });
     } else if (tab === TABS.CACHE) {
       this.updateComplete.then(() => {
-        this._refreshCacheViewer();
+        this._refreshViewer('cache-viewer');
       });
     } else if (tab === TABS.SETTINGS) {
       this.updateComplete.then(() => {
@@ -360,39 +360,20 @@ export class PromptView extends MixedBase {
   }
 
   /**
-   * Refresh the context viewer with current state
+   * Refresh a viewer component (context-viewer or cache-viewer) with current state
    */
-  async _refreshContextViewer() {
-    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
-    if (contextViewer && this.call) {
-      contextViewer.rpcCall = this.call;
-      contextViewer.selectedFiles = this.selectedFiles || [];
-      contextViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
-      contextViewer.excludedUrls = this.excludedUrls;
-      await contextViewer.refreshBreakdown();
+  async _refreshViewer(selector) {
+    const viewer = this.shadowRoot?.querySelector(selector);
+    if (viewer && this.call) {
+      viewer.rpcCall = this.call;
+      viewer.selectedFiles = this.selectedFiles || [];
+      viewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
+      viewer.excludedUrls = this.excludedUrls;
+      await viewer.refreshBreakdown();
       
-      // Sync history bar with context viewer's breakdown data
-      if (contextViewer.breakdown) {
-        this._syncHistoryBarFromBreakdown(contextViewer.breakdown);
-      }
-    }
-  }
-
-  /**
-   * Refresh the cache viewer with current state
-   */
-  async _refreshCacheViewer() {
-    const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
-    if (cacheViewer && this.call) {
-      cacheViewer.rpcCall = this.call;
-      cacheViewer.selectedFiles = this.selectedFiles || [];
-      cacheViewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
-      cacheViewer.excludedUrls = this.excludedUrls;
-      await cacheViewer.refreshBreakdown();
-      
-      // Sync history bar with cache viewer's breakdown data
-      if (cacheViewer.breakdown) {
-        this._syncHistoryBarFromBreakdown(cacheViewer.breakdown);
+      // Sync history bar with viewer's breakdown data
+      if (viewer.breakdown) {
+        this._syncHistoryBarFromBreakdown(viewer.breakdown);
       }
     }
   }

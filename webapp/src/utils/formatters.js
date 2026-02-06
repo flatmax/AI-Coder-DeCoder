@@ -51,3 +51,14 @@ export function truncateContent(content, maxLength = 100) {
   if (!content || content.length <= maxLength) return content;
   return content.substring(0, maxLength) + '...';
 }
+
+/**
+ * Escape HTML special characters to prevent XSS
+ * @param {string} text
+ * @returns {string}
+ */
+export function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
