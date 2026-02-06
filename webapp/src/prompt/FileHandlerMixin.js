@@ -157,7 +157,11 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       if (spaceIndex === -1 && afterAt.length >= 0) {
         this.showFilePicker = true;
         this._setFilePickerFilter(filterText);
+      } else {
+        this._clearFilePickerFilter();
       }
+    } else {
+      this._clearFilePickerFilter();
     }
   }
 
@@ -165,7 +169,38 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
     const filePicker = this.shadowRoot?.querySelector('file-picker');
     if (filePicker) {
       filePicker.filter = filterText;
+      // Auto-focus first visible file when filter changes
+      filePicker.updateComplete.then(() => {
+        const visible = filePicker.getVisibleFiles();
+        filePicker.focusedFile = visible.length > 0 ? visible[0] : '';
+      });
     }
+  }
+
+  _clearFilePickerFilter() {
+    const filePicker = this.shadowRoot?.querySelector('file-picker');
+    if (filePicker && filePicker.filter) {
+      filePicker.filter = '';
+      filePicker.focusedFile = '';
+    }
+  }
+
+  /** Clear @mention from input and reset file picker filter */
+  _clearAtMention() {
+    this.inputValue = this.inputValue.replace(/@\S*$/, '').trimEnd();
+    const filePicker = this.shadowRoot?.querySelector('file-picker');
+    if (filePicker) {
+      filePicker.filter = '';
+      filePicker.focusedFile = '';
+    }
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.value = this.inputValue;
+        this._autoResizeTextarea(textarea);
+        textarea.focus();
+      }
+    });
   }
 
   handleFileMentionClick(e) {

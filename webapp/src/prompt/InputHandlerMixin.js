@@ -282,7 +282,51 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     });
   }
 
+  _isFilePickerNavigating() {
+    const filePicker = this.shadowRoot?.querySelector('file-picker');
+    return filePicker && filePicker.filter && this.showFilePicker;
+  }
+
+  _getFilePicker() {
+    return this.shadowRoot?.querySelector('file-picker');
+  }
+
   handleKeyDown(e) {
+    // Handle file picker keyboard navigation when @ filter is active
+    if (this._isFilePickerNavigating()) {
+      const filePicker = this._getFilePicker();
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        filePicker.navigateFocus(-1);
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        filePicker.navigateFocus(1);
+        return;
+      }
+      if (e.key === ' ') {
+        // Space toggles the focused file's checkbox
+        if (filePicker.focusedFile) {
+          e.preventDefault();
+          filePicker.toggleFocusedFile();
+          return;
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // Clear the @ filter and close picker
+        this._clearAtMention();
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        // Accept current state and clear @ filter
+        this._clearAtMention();
+        return;
+      }
+    }
+
     // Handle history search dropdown navigation
     if (this._showHistorySearch) {
       if (e.key === 'ArrowUp') {

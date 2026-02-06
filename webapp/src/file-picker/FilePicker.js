@@ -21,7 +21,8 @@ export class FilePicker extends MixedBase {
     selected: { type: Object },
     expanded: { type: Object },
     filter: { type: String },
-    viewingFile: { type: String }
+    viewingFile: { type: String },
+    focusedFile: { type: String }
   };
 
   static styles = filePickerStyles;
@@ -37,6 +38,7 @@ export class FilePicker extends MixedBase {
     this.expanded = {};
     this.filter = '';
     this.viewingFile = null;
+    this.focusedFile = '';
     this._expandedInitialized = false;
   }
 
@@ -127,6 +129,66 @@ export class FilePicker extends MixedBase {
     // Use queueMicrotask to avoid synchronous parent re-render cascade
     queueMicrotask(() => {
       this.dispatchEvent(new CustomEvent('expanded-change', { detail: newExpanded }));
+    });
+  }
+
+  /** Collect all visible file paths in tree order, respecting current filter */
+  _collectVisibleFiles(node, path = '') {
+    if (!node) return [];
+    const files = [];
+    const currentPath = path ? `${path}/${node.name}` : node.name;
+    
+    if (node.children) {
+      const isExpanded = this.expanded[currentPath] ?? (this.filter ? true : false);
+      if (this.filter || isExpanded) {
+        for (const child of node.children) {
+          files.push(...this._collectVisibleFiles(child, currentPath));
+        }
+      }
+    } else if (node.path) {
+      if (!this.filter || this.matchesFilter(node, this.filter)) {
+        files.push(node.path);
+      }
+    }
+    return files;
+  }
+
+  getVisibleFiles() {
+    if (!this.tree) return [];
+    return this._collectVisibleFiles(this.tree);
+  }
+
+  /** Move focus to the next/previous visible file. direction: 1=down, -1=up */
+  navigateFocus(direction) {
+    const visible = this.getVisibleFiles();
+    if (visible.length === 0) return;
+    const currentIdx = visible.indexOf(this.focusedFile);
+    let nextIdx;
+    if (currentIdx === -1) {
+      nextIdx = direction === 1 ? 0 : visible.length - 1;
+    } else {
+      nextIdx = currentIdx + direction;
+      if (nextIdx < 0) nextIdx = 0;
+      if (nextIdx >= visible.length) nextIdx = visible.length - 1;
+    }
+    this.focusedFile = visible[nextIdx];
+    this._scrollFocusedIntoView();
+  }
+
+  /** Toggle selection of the currently focused file */
+  toggleFocusedFile() {
+    if (!this.focusedFile) return;
+    const e = { stopPropagation: () => {} };
+    this.toggleSelect(this.focusedFile, e);
+  }
+
+  /** Ensure the focused file row is scrolled into view */
+  _scrollFocusedIntoView() {
+    this.updateComplete.then(() => {
+      const row = this.shadowRoot?.querySelector('.row.focused');
+      if (row) {
+        row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
     });
   }
 
