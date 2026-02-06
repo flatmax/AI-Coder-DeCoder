@@ -38,7 +38,6 @@ export class FilePicker extends MixedBase {
     this.filter = '';
     this.viewingFile = null;
     this._expandedInitialized = false;
-    this._savedScrollTop = 0;
   }
 
   willUpdate(changedProperties) {
@@ -66,25 +65,7 @@ export class FilePicker extends MixedBase {
     this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
   }
 
-  disconnectedCallback() {
-    super.disconnectedCallback?.();
-    // Save scroll position when component is disconnected (tab switch)
-    const treeEl = this.shadowRoot?.querySelector('.tree');
-    if (treeEl) {
-      this._savedScrollTop = treeEl.scrollTop;
-    }
-  }
 
-  updated(changedProperties) {
-    super.updated?.(changedProperties);
-    // Restore scroll position after render
-    if (this._savedScrollTop > 0) {
-      const treeEl = this.shadowRoot?.querySelector('.tree');
-      if (treeEl) {
-        treeEl.scrollTop = this._savedScrollTop;
-      }
-    }
-  }
 
   /**
    * Get current scroll position of the tree element.

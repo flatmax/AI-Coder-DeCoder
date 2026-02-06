@@ -167,6 +167,10 @@ export const promptViewStyles = css`
     overflow: hidden;
   }
 
+  .tab-hidden {
+    display: none !important;
+  }
+
   .embedded-panel find-in-files,
   .embedded-panel context-viewer {
     flex: 1;

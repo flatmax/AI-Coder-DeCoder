@@ -122,7 +122,7 @@ export function renderPromptView(component) {
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">
-          ${component.activeLeftTab === TABS.FILES ? html`
+          <div class="${component.activeLeftTab !== TABS.FILES ? 'tab-hidden' : ''}" style="display: ${component.activeLeftTab === TABS.FILES ? 'contents' : 'none'}">
             ${component.showFilePicker && !component.leftPanelCollapsed ? html`
               <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
@@ -196,16 +196,18 @@ export function renderPromptView(component) {
                 }
               </div>
             </div>
-          ` : component.activeLeftTab === TABS.SEARCH ? html`
-            <div class="embedded-panel">
+          </div>
+          ${component._visitedTabs.has(TABS.SEARCH) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.SEARCH ? 'tab-hidden' : ''}">
               <find-in-files
                 .rpcCall=${component.call}
                 @result-selected=${(e) => component.handleSearchResultSelected(e)}
                 @file-selected=${(e) => component.handleSearchFileSelected(e)}
               ></find-in-files>
             </div>
-          ` : component.activeLeftTab === TABS.CONTEXT ? html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.CONTEXT) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.CONTEXT ? 'tab-hidden' : ''}">
               <context-viewer
                 .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
@@ -215,8 +217,9 @@ export function renderPromptView(component) {
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
               ></context-viewer>
             </div>
-          ` : component.activeLeftTab === TABS.CACHE ? html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.CACHE) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.CACHE ? 'tab-hidden' : ''}">
               <cache-viewer
                 .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
@@ -227,14 +230,15 @@ export function renderPromptView(component) {
                 @file-selected=${(e) => component.handleFileMentionClick(e)}
               ></cache-viewer>
             </div>
-          ` : html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.SETTINGS) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.SETTINGS ? 'tab-hidden' : ''}">
               <settings-panel
                 .rpcCall=${component.call}
                 @config-edit-request=${(e) => component.handleConfigEditRequest(e)}
               ></settings-panel>
             </div>
-          `}
+          ` : ''}
         </div>
       `}
       ${renderHistoryBar(component)}
