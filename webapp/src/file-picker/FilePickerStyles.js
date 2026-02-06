@@ -18,6 +18,11 @@ export const filePickerStyles = css`
     line-height: 1;
   }
   .row:hover { background: #0f3460; }
+  .row.focused {
+    background: #0f3460;
+    outline: 1px solid #e94560;
+    outline-offset: -1px;
+  }
   .row.viewing { 
     background: #1a3a6e; 
     border-left: 2px solid #e94560;
