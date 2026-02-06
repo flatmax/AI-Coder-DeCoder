@@ -410,38 +410,73 @@ export class CardMarkdown extends LitElement {
       return escapeHtml(this.content).replace(/\n/g, '<br>');
     }
     
-    // During streaming, content changes frequently — cache parse results
-    // to avoid re-parsing unchanged prefixes. Only re-parse on actual change.
+    // Fast cache hit — content hasn't changed at all
     if (this._cachedContent === this.content && this._cachedResult) {
       return this._cachedResult;
     }
-    this._cachedContent = this.content;
     
-    // Check if content contains edit blocks
+    // During streaming, use incremental parsing: if the new content is
+    // an append-only extension of the previous content (which it always
+    // is during streaming), only re-parse from the last complete block.
+    const isStreaming = this._isStreaming();
     const hasEditBlocks = this.content.includes('««« EDIT');
     
+    if (isStreaming && !hasEditBlocks && this._cachedContent 
+        && this.content.startsWith(this._cachedContent)
+        && this._cachedParsedPrefix) {
+      // Find the last paragraph/block boundary in the previously parsed content
+      // to avoid re-parsing everything. We re-parse only the last block + new text
+      // because markdown context (lists, emphasis) can span blocks.
+      const prevLen = this._cachedContent.length;
+      const lastDoubleNewline = this._cachedContent.lastIndexOf('\n\n');
+      
+      if (lastDoubleNewline > 0) {
+        const stableContent = this._cachedContent.substring(0, lastDoubleNewline);
+        const tailContent = this.content.substring(lastDoubleNewline);
+        
+        // Only use incremental if the stable prefix hasn't changed
+        if (this._lastStablePrefix === stableContent && this._lastStableParsed) {
+          const tailParsed = marked.parse(tailContent);
+          const result = this._lastStableParsed + tailParsed;
+          this._cachedContent = this.content;
+          this._cachedParsedPrefix = result;
+          return result;
+        }
+      }
+    }
+    
+    this._cachedContent = this.content;
+    
     if (hasEditBlocks) {
-      // Parse edit blocks and process markdown separately
       let processed = this.processContentWithEditBlocks(this.content);
       processed = this.wrapCodeBlocksWithCopyButton(processed);
       processed = this.highlightFileMentions(processed);
-      // Only cache if message is final (not still streaming)
-      if (!this._isStreaming()) {
+      if (!isStreaming) {
         this._cachedResult = processed;
       }
       return processed;
     }
     
-    // Pre-process to protect search/replace markers from markdown parsing
     let content = this.protectSearchReplaceBlocks(this.content);
-    
     let processed = marked.parse(content);
-    processed = this.wrapCodeBlocksWithCopyButton(processed);
-    processed = this.highlightFileMentions(processed);
-    // Only cache if message is final (not still streaming)
-    if (!this._isStreaming()) {
+    
+    // Cache the stable prefix for incremental parsing on next chunk
+    if (isStreaming) {
+      const lastDoubleNewline = this.content.lastIndexOf('\n\n');
+      if (lastDoubleNewline > 0) {
+        this._lastStablePrefix = this.content.substring(0, lastDoubleNewline);
+        this._lastStableParsed = marked.parse(this._lastStablePrefix);
+      }
+      this._cachedParsedPrefix = processed;
+    } else {
+      processed = this.wrapCodeBlocksWithCopyButton(processed);
+      processed = this.highlightFileMentions(processed);
       this._cachedResult = processed;
+      this._lastStablePrefix = null;
+      this._lastStableParsed = null;
+      this._cachedParsedPrefix = null;
     }
+    
     return processed;
   }
 

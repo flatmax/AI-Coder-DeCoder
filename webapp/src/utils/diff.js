@@ -3,9 +3,10 @@ const _diffCache = new Map();
 const _DIFF_CACHE_MAX = 32;
 
 function _getDiffCacheKey(oldLines, newLines) {
-  // Use length + first/last lines as a fast hash — collisions are acceptable
-  // since we verify with full content on hit
-  return `${oldLines.length}:${newLines.length}:${oldLines[0] || ''}:${newLines[0] || ''}`;
+  // Use length + first + last lines for better collision resistance
+  const oLast = oldLines[oldLines.length - 1] || '';
+  const nLast = newLines[newLines.length - 1] || '';
+  return `${oldLines.length}:${newLines.length}:${oldLines[0] || ''}:${oLast}:${newLines[0] || ''}:${nLast}`;
 }
 
 /**

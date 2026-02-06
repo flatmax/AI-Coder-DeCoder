@@ -10,6 +10,14 @@ export class AssistantCard extends LitElement {
     final: { type: Boolean }  // Whether the message is complete (not still streaming)
   };
 
+  shouldUpdate(changedProperties) {
+    // Skip re-render if only content changed but value is identical (streaming sibling updates)
+    if (changedProperties.size === 1 && changedProperties.has('content')) {
+      return changedProperties.get('content') !== this.content;
+    }
+    return true;
+  }
+
   static styles = css`
     :host {
       display: block;

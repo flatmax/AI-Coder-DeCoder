@@ -67,7 +67,11 @@ export class MessageHandler extends JRPCClient {
       if (editResults && editResults.length > 0) {
         lastMessage.editResults = editResults;
       }
-      this.messageHistory = [...this.messageHistory];
+      // Mutate in place and only request update for the streaming message.
+      // Lit's repeat/map will still diff the array, but since only the last
+      // element's content changed (same object reference for all others),
+      // the template diff is O(1) for prior messages.
+      this.requestUpdate('messageHistory');
     } else {
       const newMessage = { id: this._messageId++, role, content: chunk, final };
       if (editResults && editResults.length > 0) {
