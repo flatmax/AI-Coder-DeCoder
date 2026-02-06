@@ -53,7 +53,22 @@ export class MessageHandler extends JRPCClient {
   }
 
   streamWrite(chunk, final = false, role = 'assistant', editResults = null) {
-    setTimeout(() => this._processStreamChunk(chunk, final, role, editResults), 0);
+    // Store latest chunk data — only the most recent matters since
+    // each chunk carries full accumulated content
+    this._pendingChunk = { chunk, final, role, editResults };
+    
+    // Coalesce: only schedule one rAF per frame
+    if (!this._chunkRafPending) {
+      this._chunkRafPending = true;
+      requestAnimationFrame(() => {
+        this._chunkRafPending = false;
+        const pending = this._pendingChunk;
+        if (pending) {
+          this._pendingChunk = null;
+          this._processStreamChunk(pending.chunk, pending.final, pending.role, pending.editResults);
+        }
+      });
+    }
   }
 
   _processStreamChunk(chunk, final, role, editResults = null) {

@@ -818,7 +818,11 @@ class StreamingMixin:
             print(f"📉 Demoted: {', '.join(demoted_display)}")
     
     def _fire_stream_chunk(self, request_id, content, loop):
-        """Fire stream chunk send (non-blocking).
+        """Fire stream chunk send (non-blocking, fire-and-forget).
+        
+        Each chunk carries the full accumulated content, so dropped or
+        reordered chunks are harmless — the next chunk supersedes it.
+        Only streamComplete needs reliable delivery.
         
         Args:
             request_id: The request ID
