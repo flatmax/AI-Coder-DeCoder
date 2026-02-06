@@ -1,6 +1,11 @@
 {
   "snippets": [
     {
+      "icon": "✂️",
+      "tooltip": "Your last edit was truncated",
+      "message": "Your last edit was truncated, please continue."
+    },
+    {
       "icon": "🔍",
       "tooltip": "Check in your context for that content",
       "message": "You are asking for some content which I believe is already in your context, please check there."

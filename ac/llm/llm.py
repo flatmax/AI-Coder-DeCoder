@@ -6,7 +6,6 @@ from .file_context import FileContextMixin
 from .chat import ChatMixin
 from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
-from ..indexer import Indexer
 from ..context import ContextManager
 from ..url_handler import URLFetcher, URLDetector, URLType, SummaryType
 
@@ -74,8 +73,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
                 compaction_config=compaction_config,
             )
         
-        # Lazy-loaded indexer
-        self._indexer = None
+        # Lazy-loaded symbol index
+        self._symbol_index = None
         
         # Lazy-loaded URL fetcher
         self._url_fetcher = None
@@ -268,11 +267,18 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         )
     
     def _get_indexer(self):
-        """Get or create the Indexer instance."""
-        if self._indexer is None:
+        """DEPRECATED: Use _get_symbol_index() directly."""
+        import warnings
+        warnings.warn("_get_indexer() is deprecated, use _get_symbol_index()", DeprecationWarning, stacklevel=2)
+        return self._get_symbol_index()
+    
+    def _get_symbol_index(self):
+        """Get or create the SymbolIndex instance."""
+        if self._symbol_index is None:
+            from ..symbol_index import SymbolIndex
             repo_root = self.repo.get_repo_root() if self.repo else None
-            self._indexer = Indexer(repo_root)
-        return self._indexer
+            self._symbol_index = SymbolIndex(str(repo_root) if repo_root else None)
+        return self._symbol_index
     
     def _auto_save_symbol_map(self):
         """Auto-save symbol map for all tracked files.
@@ -301,10 +307,10 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             if not file_paths:
                 return None
             
-            indexer = self._get_indexer()
+            si = self._get_symbol_index()
             py_files = [f for f in file_paths if f.endswith('.py')]
-            symbols_by_file = indexer.index_files(file_paths)
-            saved_path = indexer.save_symbol_map(file_paths=file_paths)
+            symbols_by_file = si.index_files(file_paths)
+            saved_path = si.save_compact(file_paths=file_paths)
             
             return {
                 'total_files': len(file_paths),
@@ -340,8 +346,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             Dict with path to saved file.
         """
         try:
-            indexer = self._get_indexer()
-            saved_path = indexer.save_symbol_map(file_paths=file_paths, output_path=output_path)
+            si = self._get_symbol_index()
+            saved_path = si.save_compact(file_paths=file_paths, output_path=output_path)
             return {"path": saved_path}
         except Exception as e:
             return {"error": str(e)}
@@ -357,8 +363,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             Symbol map as string.
         """
         try:
-            indexer = self._get_indexer()
-            return indexer.get_symbol_map(file_paths)
+            si = self._get_symbol_index()
+            return si.to_compact(file_paths)
         except Exception as e:
             return {"error": str(e)}
     
@@ -373,8 +379,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             List of LSP DocumentSymbol dicts.
         """
         try:
-            indexer = self._get_indexer()
-            return indexer.get_document_symbols(file_path)
+            si = self._get_symbol_index()
+            return si.get_document_symbols(file_path)
         except Exception as e:
             return {"error": str(e)}
     
@@ -389,8 +395,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             LSP-compatible dict structure.
         """
         try:
-            indexer = self._get_indexer()
-            return indexer.get_lsp_data(file_path)
+            si = self._get_symbol_index()
+            return si.to_lsp(file_path)
         except Exception as e:
             return {"error": str(e)}
     
@@ -410,8 +416,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             if file_paths is None and self.repo:
                 file_paths = self._get_all_trackable_files()
             
-            indexer = self._get_indexer()
-            saved_path = indexer.get_symbol_map_with_refs(
+            si = self._get_symbol_index()
+            saved_path = si.save_compact_with_refs(
                 file_paths=file_paths,
                 output_path=output_path
             )
@@ -466,17 +472,14 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             if not map_files:
                 return ""
             
-            indexer = self._get_indexer()
+            si = self._get_symbol_index()
             
             # Build references if requested
             if include_references:
-                indexer.build_references(map_files)
-            
-            # Get symbol index
-            symbol_index = indexer._get_symbol_index()
+                si.build_references(map_files)
             
             # Generate compact format with or without references
-            return symbol_index.to_compact(
+            return si.to_compact(
                 file_paths=map_files,
                 include_references=include_references
             )
@@ -543,17 +546,14 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             if not map_files:
                 return []
             
-            indexer = self._get_indexer()
+            si = self._get_symbol_index()
             
             # Build references if requested
             if include_references:
-                indexer.build_references(map_files)
-            
-            # Get symbol index
-            symbol_index = indexer._get_symbol_index()
+                si.build_references(map_files)
             
             # Generate chunked compact format
-            return symbol_index.to_compact_chunked(
+            return si.to_compact_chunked(
                 file_paths=map_files,
                 include_references=include_references,
                 min_chunk_tokens=min_chunk_tokens,
@@ -578,8 +578,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             List of location dicts or error.
         """
         try:
-            indexer = self._get_indexer()
-            return indexer.get_references_to_symbol(file_path, symbol_name)
+            si = self._get_symbol_index()
+            return si.get_references_to_symbol(file_path, symbol_name)
         except Exception as e:
             return {"error": str(e)}
     
@@ -594,8 +594,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             Sorted list of file paths or error.
         """
         try:
-            indexer = self._get_indexer()
-            return indexer.get_files_referencing(file_path)
+            si = self._get_symbol_index()
+            return si.get_files_referencing(file_path)
         except Exception as e:
             return {"error": str(e)}
     
@@ -615,8 +615,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         """
         try:
             from .lsp_helpers import find_symbol_at_position, get_hover_info
-            indexer = self._get_indexer()
-            symbols = indexer.index_file(file_path)
+            si = self._get_symbol_index()
+            symbols = si.index_file(file_path)
             symbol = find_symbol_at_position(symbols, line, col)
             if symbol:
                 return get_hover_info(symbol)
@@ -638,7 +638,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         """
         try:
             from .lsp_helpers import find_identifier_at_position, find_symbol_definition
-            indexer = self._get_indexer()
+            si = self._get_symbol_index()
             
             # Get the identifier at cursor position
             identifier = find_identifier_at_position(file_path, line, col, self.repo)
@@ -651,7 +651,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             
             # Search for definition in all indexed files
             all_files = self._get_all_trackable_files()
-            symbols_by_file = indexer.index_files(all_files)
+            symbols_by_file = si.index_files(all_files)
             
             definition = find_symbol_definition(identifier, symbols_by_file, exclude_file=file_path)
             if definition:
@@ -678,8 +678,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         """
         try:
             from .lsp_helpers import find_symbol_at_position
-            indexer = self._get_indexer()
-            symbols = indexer.index_file(file_path)
+            si = self._get_symbol_index()
+            symbols = si.index_file(file_path)
             symbol = find_symbol_at_position(symbols, line, col)
             
             if not symbol:
@@ -687,9 +687,9 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             
             # Build references if not already done
             all_files = self._get_all_trackable_files()
-            indexer.build_references(all_files)
+            si.build_references(all_files)
             
-            return indexer.get_references_to_symbol(file_path, symbol.name)
+            return si.get_references_to_symbol(file_path, symbol.name)
         except Exception as e:
             return {"error": str(e)}
     
@@ -708,11 +708,11 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         """
         try:
             from .lsp_helpers import get_completions
-            indexer = self._get_indexer()
+            si = self._get_symbol_index()
             
             # Get symbols from current file and all tracked files
             all_files = self._get_all_trackable_files()
-            symbols_by_file = indexer.index_files(all_files)
+            symbols_by_file = si.index_files(all_files)
             
             return get_completions(prefix, symbols_by_file, file_path)
         except Exception as e:

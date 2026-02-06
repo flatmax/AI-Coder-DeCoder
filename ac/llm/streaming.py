@@ -317,10 +317,9 @@ class StreamingMixin:
                 
                 # Invalidate symbol index cache for modified files so references get rebuilt
                 if apply_result.files_modified:
-                    indexer = self._get_indexer()
-                    symbol_index = indexer._get_symbol_index()
+                    si = self._get_symbol_index()
                     for modified_file in apply_result.files_modified:
-                        symbol_index.invalidate_file(modified_file)
+                        si.invalidate_file(modified_file)
             else:
                 result["passed"] = []
                 result["failed"] = []
@@ -735,8 +734,8 @@ class StreamingMixin:
                 # Symbol entry - compute hash from symbols
                 file_path = item.replace("symbol:", "")
                 try:
-                    indexer = self._get_indexer()
-                    symbols = indexer._get_symbol_index().get_symbols(file_path)
+                    si = self._get_symbol_index()
+                    symbols = si.get_symbols(file_path)
                     if symbols:
                         return compute_file_block_hash(file_path, symbols)
                 except Exception:
@@ -752,13 +751,12 @@ class StreamingMixin:
                 # Symbol entry - count tokens in formatted block
                 file_path = item.replace("symbol:", "")
                 try:
-                    indexer = self._get_indexer()
-                    symbol_index = indexer._get_symbol_index()
-                    symbols = symbol_index.get_symbols(file_path)
+                    si = self._get_symbol_index()
+                    symbols = si.get_symbols(file_path)
                     if symbols:
                         from ..symbol_index.compact_format import format_file_symbol_block
                         # Get reference data for formatting
-                        ref_index = getattr(symbol_index, '_reference_index', None)
+                        ref_index = getattr(si, '_reference_index', None)
                         file_refs_data = {}
                         file_imports_data = {}
                         references_data = {}
