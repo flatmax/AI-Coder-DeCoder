@@ -423,10 +423,11 @@ export class CardMarkdown extends LitElement {
     if (isStreaming) {
       if (this._streamCache && this.content.startsWith(this._streamCacheSource)) {
         const delta = this.content.slice(this._streamCacheSource.length);
-        // If delta has no markdown-significant chars, append escaped text
-        if (delta && !/[`#*_\[\]!<>\-|\\~\n]/.test(delta)) {
+        // If delta has no markdown-significant chars, append escaped text.
+        // Allow newlines (very common in streaming) — convert to <br>.
+        if (delta && !/[`#*_\[\]!<>\-|\\~]/.test(delta)) {
           this._streamCacheSource = this.content;
-          this._streamCache += escapeHtml(delta);
+          this._streamCache += escapeHtml(delta).replace(/\n/g, '<br>');
           this._cachedContent = this.content;
           this._cachedResult = null;
           return this._streamCache;
@@ -569,9 +570,9 @@ export class CardMarkdown extends LitElement {
 
   willUpdate() {
     // Save horizontal scroll positions of all code blocks before re-render.
-    // Skip DOM traversal entirely for messages without code blocks.
+    // Skip during streaming — no user interaction with code blocks yet.
     this._codeScrollPositions.clear();
-    if (this.content?.includes('```')) {
+    if (this.final && this.content?.includes('```')) {
       const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
       if (codeBlocks) {
         codeBlocks.forEach((pre, index) => {
@@ -599,11 +600,12 @@ export class CardMarkdown extends LitElement {
 
   render() {
     const processedContent = this.processContent();
+    const isFinal = this.final;
     return html`
       <div class="content" @click=${this.handleClick}>
         ${unsafeHTML(processedContent)}
-        ${this.role === 'assistant' ? unsafeHTML(this.renderEditsSummary()) : ''}
-        ${this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
+        ${isFinal && this.role === 'assistant' ? unsafeHTML(this.renderEditsSummary()) : ''}
+        ${isFinal && this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
       </div>
     `;
   }
