@@ -207,6 +207,14 @@ export const promptViewStyles = css`
     contain-intrinsic-size: auto 100px;
   }
 
+  #scroll-sentinel {
+    height: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    flex-shrink: 0;
+  }
+
   /* Force last 15 messages to render fully for accurate scroll heights */
   .messages user-card:nth-last-child(-n+15),
   .messages assistant-card:nth-last-child(-n+15) {

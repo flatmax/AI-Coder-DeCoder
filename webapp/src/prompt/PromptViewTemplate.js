@@ -156,6 +156,7 @@ export function renderPromptView(component) {
                       }
                     }
                   )}
+                  <div id="scroll-sentinel"></div>
                 </div>
                 ${component._showScrollButton ? html`
                   <button class="scroll-to-bottom-btn" @click=${() => component.scrollToBottomNow()} title="Scroll to bottom">

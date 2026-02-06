@@ -1,6 +1,6 @@
 # Plan: Message List Scrolling Behavior
 
-## Status: PENDING
+## Status: DONE
 
 ## Overview
 
@@ -134,17 +134,17 @@ Add an invisible sentinel `<div>` as the last child of `.messages`. Use `scrollI
 
 ### Phase 4: Testing checklist
 
-- [ ] App startup: messages load, view scrolls to bottom
-- [ ] New message: view scrolls to bottom
-- [ ] Streaming: view follows stream
-- [ ] Scroll up: auto-scroll pauses, button appears
-- [ ] Scroll to bottom manually: button hides, auto-scroll resumes
-- [ ] Click scroll button: jumps to bottom, resumes auto-scroll
-- [ ] Clear history: scroll state resets
-- [ ] Load session from history browser: scrolls to bottom
-- [ ] Switch tabs and back: position preserved or scrolled to bottom
-- [ ] 200+ messages: no performance regression from sentinel
-- [ ] content-visibility still working (check devtools rendering stats)
+- [x] App startup: messages load, view scrolls to bottom
+- [x] New message: view scrolls to bottom
+- [x] Streaming: view follows stream
+- [x] Scroll up: auto-scroll pauses, button appears
+- [x] Scroll to bottom manually: button hides, auto-scroll resumes
+- [x] Click scroll button: jumps to bottom, resumes auto-scroll
+- [x] Clear history: scroll state resets
+- [x] Load session from history browser: scrolls to bottom
+- [x] Switch tabs and back: position preserved or scrolled to bottom
+- [x] 200+ messages: no performance regression from sentinel
+- [x] content-visibility still working (check devtools rendering stats)
 
 ## Files to Modify
 
