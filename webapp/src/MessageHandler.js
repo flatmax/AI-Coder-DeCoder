@@ -28,29 +28,15 @@ export class MessageHandler extends JRPCClient {
       this._userHasScrolledUp = true;
       this._showScrollButton = true;
     }
-    
-    // User scrolled down - check if at bottom
-    if (event.deltaY > 0) {
-      const container = this.shadowRoot?.querySelector('#messages-container');
-      if (container) {
-        // Small delay to let scroll complete
-        setTimeout(() => {
-          const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-          if (distanceFromBottom < 50) {
-            this._userHasScrolledUp = false;
-            this._showScrollButton = false;
-          }
-        }, 50);
-      }
-    }
+    // Downward scroll resumption is handled by IntersectionObserver on #scroll-sentinel
   }
 
   scrollToBottomNow() {
     this._userHasScrolledUp = false;
     this._showScrollButton = false;
-    const container = this.shadowRoot?.querySelector('#messages-container');
-    if (container) {
-      container.scrollTop = container.scrollHeight;
+    const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+    if (sentinel) {
+      sentinel.scrollIntoView({ block: 'end' });
     }
   }
 
@@ -96,12 +82,12 @@ export class MessageHandler extends JRPCClient {
     if (this._userHasScrolledUp) return;
     
     this.updateComplete.then(() => {
-      const container = this.shadowRoot?.querySelector('#messages-container');
-      if (container) {
-        requestAnimationFrame(() => {
-          container.scrollTop = container.scrollHeight;
-        });
-      }
+      requestAnimationFrame(() => {
+        const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+        if (sentinel) {
+          sentinel.scrollIntoView({ block: 'end' });
+        }
+      });
     });
   }
 
@@ -114,22 +100,27 @@ export class MessageHandler extends JRPCClient {
 
   setupScrollObserver() {
     const container = this.shadowRoot?.querySelector('#messages-container');
-    if (!container || this._resizeObserver) return;
+    const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+    if (!container || !sentinel || this._intersectionObserver) return;
 
-    this._resizeObserver = new ResizeObserver(() => {
-      // When content resizes and user is at bottom, keep them there
-      if (!this._userHasScrolledUp) {
-        container.scrollTop = container.scrollHeight;
+    this._intersectionObserver = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        // Sentinel is visible — user is at the bottom
+        this._userHasScrolledUp = false;
+        this._showScrollButton = false;
       }
-    });
+      // Note: we do NOT set _userHasScrolledUp=true when sentinel leaves viewport.
+      // Only handleWheel() sets that flag (explicit user intent). This prevents
+      // false positives when content above expands and pushes sentinel out of view.
+    }, { root: container });
 
-    this._resizeObserver.observe(container);
+    this._intersectionObserver.observe(sentinel);
   }
 
   disconnectScrollObserver() {
-    if (this._resizeObserver) {
-      this._resizeObserver.disconnect();
-      this._resizeObserver = null;
+    if (this._intersectionObserver) {
+      this._intersectionObserver.disconnect();
+      this._intersectionObserver = null;
     }
   }
 }

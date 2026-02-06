@@ -243,11 +243,10 @@ export class PromptView extends MixedBase {
     this._messagesScrollTop = 0;
     this._wasScrolledUp = false;
     
-    // Scroll to bottom after loading session (with delay for content-visibility render)
-    this.updateComplete.then(() => {
-      requestAnimationFrame(() => {
-        this.scrollToBottomNow();
-      });
+    // Scroll to bottom after loading session (double rAF for content-visibility)
+    await this.updateComplete;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => this.scrollToBottomNow());
     });
     
     // Refresh history bar to reflect loaded session
@@ -318,23 +317,21 @@ export class PromptView extends MixedBase {
           if (filePicker && this._filePickerScrollTop > 0) {
             filePicker.setScrollTop(this._filePickerScrollTop);
           }
-          const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-          if (messagesContainer) {
-            if (this._wasScrolledUp) {
-              // User was scrolled up - restore their position
+          if (this._wasScrolledUp) {
+            // User was scrolled up - restore their position
+            const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
+            if (messagesContainer) {
               messagesContainer.scrollTop = this._messagesScrollTop;
-              this._userHasScrolledUp = true;
-              this._showScrollButton = true;
-            } else {
-              // User was at bottom - scroll to bottom
-              messagesContainer.scrollTop = messagesContainer.scrollHeight;
-              this._userHasScrolledUp = false;
-              this._showScrollButton = false;
             }
-            // Re-setup observer after scroll is restored
-            this.setupScrollObserver();
-            this.requestUpdate();
+            this._userHasScrolledUp = true;
+            this._showScrollButton = true;
+          } else {
+            // User was at bottom - scroll to sentinel
+            this.scrollToBottomNow();
           }
+          // Re-setup observer after scroll is restored
+          this.setupScrollObserver();
+          this.requestUpdate();
         });
       });
     } else if (tab === TABS.SEARCH) {
@@ -621,8 +618,11 @@ export class PromptView extends MixedBase {
             this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
           
-          // Scroll to bottom after loading session
-          this.scrollToBottomNow();
+          // Scroll to bottom after loading session (double rAF for content-visibility)
+          await this.updateComplete;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => this.scrollToBottomNow());
+          });
         }
       }
       
