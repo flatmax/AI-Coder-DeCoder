@@ -1,6 +1,6 @@
 # Plan: Webapp Optimization Refactors
 
-## Status: IN PROGRESS
+## Status: COMPLETE
 
 ## Goal
 Reduce complexity and improve maintainability across the webapp codebase through a set of independent, incremental refactors.
@@ -71,7 +71,7 @@ Scroll save/restore is implemented in PromptView, FilePicker, and HistoryBrowser
 ## Execution Order
 
 1. **CardMarkdown Click Handler** — ✅ DONE
-2. **RPC Consistency** — lowest priority, additive only
+2. **RPC Consistency** — deferred (minimal value; patterns are already consistent within each component family)
 
 Each change is independent and can be shipped separately.
 
