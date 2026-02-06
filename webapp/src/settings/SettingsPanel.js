@@ -29,12 +29,13 @@ export class SettingsPanel extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
-    this.loadConfigInfo();
+    if (this.visible) {
+      this.loadConfigInfo();
+    }
   }
 
   async loadConfigInfo() {
-    if (!this.rpcCall) {
-      console.warn('loadConfigInfo called but rpcCall not set');
+    if (!this.rpcCall || !this.visible) {
       return;
     }
     try {

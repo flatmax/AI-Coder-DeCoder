@@ -82,13 +82,11 @@ export class PromptView extends MixedBase {
     this.promptSnippets = [];
     this.snippetDrawerOpen = false;
     this.filePickerExpanded = {};
+    this._visitedTabs = new Set([TABS.FILES]);
     this._selectedObject = {};
     this._addableFiles = [];
     this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
     this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
-    this._filePickerScrollTop = 0;
-    this._messagesScrollTop = 0;
-    this._wasScrolledUp = false;
     this._isPanelResizing = false;
     
     const urlParams = new URLSearchParams(window.location.search);
@@ -252,11 +250,6 @@ export class PromptView extends MixedBase {
     
     this.showHistoryBrowser = false;
     
-    // Reset saved scroll positions to avoid stale values after session load
-    this._filePickerScrollTop = 0;
-    this._messagesScrollTop = 0;
-    this._wasScrolledUp = false;
-    
     // Scroll to bottom after loading session (double rAF for content-visibility)
     await this.updateComplete;
     requestAnimationFrame(() => {
@@ -302,53 +295,10 @@ export class PromptView extends MixedBase {
    * Switch between tabs (files/search/context)
    */
   switchTab(tab) {
-    // Save scroll positions before switching away from files tab
-    if (this.activeLeftTab === TABS.FILES) {
-      const filePicker = this.shadowRoot?.querySelector('file-picker');
-      if (filePicker) {
-        this._filePickerScrollTop = filePicker.getScrollTop();
-      }
-      const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-      if (messagesContainer) {
-        this._messagesScrollTop = messagesContainer.scrollTop;
-        this._messagesScrollHeight = messagesContainer.scrollHeight;
-        // Save whether user had scrolled up
-        this._wasScrolledUp = this._userHasScrolledUp;
-      }
-    }
-
-    // Disconnect observer before tab switch to prevent interference
-    this.disconnectScrollObserver();
-
+    this._visitedTabs.add(tab);
     this.activeLeftTab = tab;
 
-    // Restore scroll positions when switching back to files tab
-    if (tab === TABS.FILES) {
-      // Use double rAF to ensure DOM is fully rendered after tab switch
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const filePicker = this.shadowRoot?.querySelector('file-picker');
-          if (filePicker && this._filePickerScrollTop > 0) {
-            filePicker.setScrollTop(this._filePickerScrollTop);
-          }
-          if (this._wasScrolledUp) {
-            // User was scrolled up - restore their position
-            const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-            if (messagesContainer) {
-              messagesContainer.scrollTop = this._messagesScrollTop;
-            }
-            this._userHasScrolledUp = true;
-            this._showScrollButton = true;
-          } else {
-            // User was at bottom - scroll to sentinel
-            this.scrollToBottomNow();
-          }
-          // Re-setup observer after scroll is restored
-          this.setupScrollObserver();
-          this.requestUpdate();
-        });
-      });
-    } else if (tab === TABS.SEARCH) {
+    if (tab === TABS.SEARCH) {
       this.updateComplete.then(() => {
         const findInFiles = this.shadowRoot?.querySelector('find-in-files');
         if (findInFiles) {

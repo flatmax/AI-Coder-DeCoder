@@ -47,11 +47,11 @@ Remove from `FilePicker`:
 - Scroll restore in `updated`
 
 ## Execution Order
-1. Add `.tab-hidden` CSS and `_visitedTabs` tracking to PromptView
-2. Restructure PromptViewTemplate to always-render visited tabs
-3. Gate SettingsPanel RPC on visibility
-4. Remove scroll save/restore from PromptView.switchTab()
-5. Remove scroll save/restore from FilePicker
+1. [x] Add `.tab-hidden` CSS and `_visitedTabs` tracking to PromptView
+2. [x] Restructure PromptViewTemplate to always-render visited tabs
+3. [x] Gate SettingsPanel RPC on visibility
+4. [x] Remove scroll save/restore from PromptView.switchTab()
+5. [x] Remove scroll save/restore from FilePicker
 
 ## Files Changed
 - `webapp/src/prompt/PromptViewTemplate.js` — restructure tab rendering
