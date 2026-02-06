@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'lit';
+import { extractResponse } from '../utils/rpc.js';
 import { TABS } from '../utils/constants.js';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
@@ -85,7 +86,7 @@ export class AppShell extends LitElement {
       }
       try {
         const response = await promptView.call['Repo.get_repo_name']();
-        const repoName = response ? Object.values(response)[0] : null;
+        const repoName = extractResponse(response);
         if (repoName) {
           document.title = repoName;
           return true;
@@ -139,6 +140,25 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * Fetch file content via RPC, returning the string or null on failure.
+   */
+  async _fetchFileContent(file, version = undefined) {
+    const promptView = this.shadowRoot.querySelector('prompt-view');
+    if (!promptView?.call) return null;
+    
+    try {
+      const args = version ? [file, version] : [file];
+      const response = await promptView.call['Repo.get_file_content'](...args);
+      const result = extractResponse(response);
+      if (typeof result === 'string') return result;
+      return result?.content ?? null;
+    } catch (err) {
+      console.error('Failed to fetch file content:', file, err);
+      return null;
+    }
+  }
+
   async _loadFileIntoDiff(file, replace = true) {
     // Normalize undefined to true (default behavior)
     const shouldReplace = replace !== false;
@@ -148,17 +168,9 @@ export class AppShell extends LitElement {
       return true; // Already loaded
     }
     
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) {
-      return false;
-    }
-    
-    try {
-      const response = await promptView.call['Repo.get_file_content'](file);
-      const result = response ? Object.values(response)[0] : null;
-      const content = typeof result === 'string' ? result : (result?.content ?? null);
+    const content = await this._fetchFileContent(file);
       
-      if (content !== null) {
+    if (content !== null) {
         const newFile = {
           path: file,
           original: content,
@@ -175,9 +187,6 @@ export class AppShell extends LitElement {
           this.diffFiles = [...this.diffFiles, newFile];
         }
         return true;
-      }
-    } catch (err) {
-      console.error('Failed to load file:', err);
     }
     return false;
   }
@@ -242,21 +251,11 @@ export class AppShell extends LitElement {
     if (!promptView?.call) return;
 
     await Promise.all(pathsToRefresh.map(async (filePath) => {
-      try {
-        const [headResponse, workingResponse] = await Promise.all([
-          promptView.call['Repo.get_file_content'](filePath, 'HEAD'),
-          promptView.call['Repo.get_file_content'](filePath)
-        ]);
-        const headResult = headResponse ? Object.values(headResponse)[0] : null;
-        const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? '');
-
-        const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
-        const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? '');
-
-        diffViewer.refreshFileContent(filePath, original, modified);
-      } catch (err) {
-        console.error('Failed to refresh file:', filePath, err);
-      }
+      const [original, modified] = await Promise.all([
+        this._fetchFileContent(filePath, 'HEAD').then(r => r ?? ''),
+        this._fetchFileContent(filePath).then(r => r ?? '')
+      ]);
+      diffViewer.refreshFileContent(filePath, original, modified);
     }));
   }
 
@@ -306,25 +305,12 @@ export class AppShell extends LitElement {
    * Used for viewing applied edits from history.
    */
   async _loadDiffFromHead(file) {
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) {
+    const original = await this._fetchFileContent(file, 'HEAD');
+    const modified = await this._fetchFileContent(file);
+      
+    if (original === null || modified === null) {
       return false;
     }
-    
-    try {
-      // Get committed version from HEAD
-      const headResponse = await promptView.call['Repo.get_file_content'](file, 'HEAD');
-      const headResult = headResponse ? Object.values(headResponse)[0] : null;
-      const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? null);
-      
-      // Get current working copy
-      const workingResponse = await promptView.call['Repo.get_file_content'](file);
-      const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
-      const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? null);
-      
-      if (original === null || modified === null) {
-        return false;
-      }
       
       // Only show diff if there are actual changes
       if (original === modified) {
@@ -342,10 +328,6 @@ export class AppShell extends LitElement {
       }];
       
       return true;
-    } catch (err) {
-      console.error('Failed to load diff from HEAD:', err);
-      return false;
-    }
   }
 
   clearDiff() {
@@ -415,7 +397,7 @@ export class AppShell extends LitElement {
     try {
       // Fetch config content via Settings RPC
       const response = await promptView.call['Settings.get_config_content'](configType);
-      const result = response ? Object.values(response)[0] : null;
+      const result = extractResponse(response);
       
       if (!result?.success) {
         console.error('Failed to load config:', result?.error);
@@ -453,7 +435,7 @@ export class AppShell extends LitElement {
       if (isConfig && configType) {
         // Save config file via Settings RPC
         const response = await promptView.call['Settings.save_config_content'](configType, content);
-        const result = response ? Object.values(response)[0] : null;
+        const result = extractResponse(response);
         if (!result?.success) {
           console.error('Failed to save config:', result?.error);
         }
@@ -479,7 +461,7 @@ export class AppShell extends LitElement {
         if (file.isConfig && file.configType) {
           // Save config file via Settings RPC
           const response = await promptView.call['Settings.save_config_content'](file.configType, file.content);
-          const result = response ? Object.values(response)[0] : null;
+          const result = extractResponse(response);
           if (!result?.success) {
             console.error('Failed to save config:', result?.error);
           }

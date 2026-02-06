@@ -3,10 +3,23 @@ const _diffCache = new Map();
 const _DIFF_CACHE_MAX = 32;
 
 function _getDiffCacheKey(oldLines, newLines) {
-  // Use length + first + last lines for better collision resistance
-  const oLast = oldLines[oldLines.length - 1] || '';
-  const nLast = newLines[newLines.length - 1] || '';
-  return `${oldLines.length}:${newLines.length}:${oldLines[0] || ''}:${oLast}:${newLines[0] || ''}:${nLast}`;
+  // Use length + hash of all content for reliable collision resistance
+  // without storing full joined strings for verification
+  const oJoin = oldLines.join('\n');
+  const nJoin = newLines.join('\n');
+  return `${oldLines.length}:${newLines.length}:${oJoin.length}:${nJoin.length}:${simpleHash(oJoin)}:${simpleHash(nJoin)}`;
+}
+
+/**
+ * Fast non-cryptographic string hash (djb2 variant).
+ * Used only for cache key collision resistance.
+ */
+function simpleHash(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+  }
+  return hash;
 }
 
 /**
@@ -18,11 +31,10 @@ function _getDiffCacheKey(oldLines, newLines) {
  * @returns {Array<{type: 'context'|'add'|'remove', line: string, pair?: object}>}
  */
 export function computeLineDiff(oldLines, newLines) {
-  // Check memo cache
+  // Check memo cache — key includes lengths + hashes so a match is sufficient
   const cacheKey = _getDiffCacheKey(oldLines, newLines);
   const cached = _diffCache.get(cacheKey);
-  if (cached && cached.oldLen === oldLines.length && cached.newLen === newLines.length
-      && cached.oldJoin === oldLines.join('\n') && cached.newJoin === newLines.join('\n')) {
+  if (cached) {
     return cached.result;
   }
 
@@ -74,13 +86,7 @@ export function computeLineDiff(oldLines, newLines) {
     const firstKey = _diffCache.keys().next().value;
     _diffCache.delete(firstKey);
   }
-  _diffCache.set(cacheKey, {
-    oldLen: oldLines.length,
-    newLen: newLines.length,
-    oldJoin: oldLines.join('\n'),
-    newJoin: newLines.join('\n'),
-    result: finalResult
-  });
+  _diffCache.set(cacheKey, { result: finalResult });
   
   return finalResult;
 }

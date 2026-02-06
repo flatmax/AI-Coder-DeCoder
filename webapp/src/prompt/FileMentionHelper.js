@@ -19,7 +19,15 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
   // Sort by length descending to match longer paths first
   const sortedFiles = [...mentionedFiles].sort((a, b) => b.length - a.length);
 
+  // Pre-filter: skip files whose path doesn't even appear as a substring.
+  // This avoids expensive regex construction + execution for the vast majority
+  // of repo files that aren't mentioned in the content.
+  const lowercaseResult = result.toLowerCase();
+
   for (const filePath of sortedFiles) {
+    // Fast substring check before expensive regex
+    if (!lowercaseResult.includes(filePath.toLowerCase())) continue;
+
     const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
 

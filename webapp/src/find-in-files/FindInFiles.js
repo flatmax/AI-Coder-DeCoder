@@ -147,7 +147,7 @@ export class FindInFiles extends RpcMixin(LitElement) {
     this.focusedIndex = -1;
 
     try {
-      const response = await this._call(
+      const response = await this._rpc(
         'Repo.search_files',
         this.query,
         this.wholeWord,
