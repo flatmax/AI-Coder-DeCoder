@@ -18,6 +18,13 @@ export class UrlService {
     this._urlDetectDebounce = null;
   }
 
+  destroy() {
+    if (this._urlDetectDebounce) {
+      clearTimeout(this._urlDetectDebounce);
+      this._urlDetectDebounce = null;
+    }
+  }
+
   // ============ Getters ============
 
   get detectedUrls() { return this._detectedUrls; }

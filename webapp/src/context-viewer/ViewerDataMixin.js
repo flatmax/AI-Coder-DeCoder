@@ -89,7 +89,7 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
     if (changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
-      if (this.rpcCall) {
+      if (this.rpcCall && this.visible !== false) {
         this.refreshBreakdown();
       }
     }
