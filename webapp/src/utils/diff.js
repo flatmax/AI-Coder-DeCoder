@@ -2,12 +2,25 @@
 const _diffCache = new Map();
 const _DIFF_CACHE_MAX = 12;
 
+function _hashLines(lines) {
+  let hash = 5381;
+  let totalLen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    totalLen += line.length;
+    for (let j = 0; j < line.length; j++) {
+      hash = ((hash << 5) + hash + line.charCodeAt(j)) | 0;
+    }
+    // Hash a newline separator between lines
+    hash = ((hash << 5) + hash + 10) | 0;
+  }
+  return { hash, totalLen };
+}
+
 function _getDiffCacheKey(oldLines, newLines) {
-  // Use length + hash of all content for reliable collision resistance
-  // without storing full joined strings for verification
-  const oJoin = oldLines.join('\n');
-  const nJoin = newLines.join('\n');
-  return `${oldLines.length}:${newLines.length}:${oJoin.length}:${nJoin.length}:${simpleHash(oJoin)}:${simpleHash(nJoin)}`;
+  const o = _hashLines(oldLines);
+  const n = _hashLines(newLines);
+  return `${oldLines.length}:${newLines.length}:${o.totalLen}:${n.totalLen}:${o.hash}:${n.hash}`;
 }
 
 /**

@@ -441,19 +441,24 @@ export class CardMarkdown extends LitElement {
       return result;
     }
     
-    // Final render: full processing pipeline — clear streaming cache
-    this._streamCache = null;
-    this._streamCacheSource = null;
+    // Final render — reuse streaming parse if content unchanged
     this._cachedContent = this.content;
     
     const hasEditBlocks = this.content.includes('««« EDIT');
     let processed;
     
     if (hasEditBlocks) {
+      // Edit blocks need structural extraction; must reparse
       processed = this.processContentWithEditBlocks(this.content);
+    } else if (this._streamCache && this._streamCacheSource === this.content) {
+      // Content unchanged since last streaming chunk — reuse parsed HTML
+      processed = this._streamCache;
     } else {
       processed = marked.parse(this.content);
     }
+    
+    this._streamCache = null;
+    this._streamCacheSource = null;
     
     processed = this.wrapCodeBlocksWithCopyButton(processed);
     processed = this.highlightFileMentions(processed);

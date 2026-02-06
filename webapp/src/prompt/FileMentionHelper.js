@@ -12,40 +12,35 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
     return { html: htmlContent, foundFiles: [] };
   }
 
-  let result = htmlContent;
-  const foundFiles = [];
   const selectedSet = selectedFiles ? new Set(selectedFiles) : new Set();
+  const lowercaseContent = htmlContent.toLowerCase();
 
-  // Sort by length descending to match longer paths first.
-  // Reuse previous sort if the input array reference is the same.
-  if (mentionedFiles !== highlightFileMentions._lastInput) {
-    highlightFileMentions._lastInput = mentionedFiles;
-    highlightFileMentions._lastSorted = [...mentionedFiles].sort((a, b) => b.length - a.length);
-  }
-  const sortedFiles = highlightFileMentions._lastSorted;
+  // Pre-filter: only files whose path appears as substring
+  const candidates = mentionedFiles.filter(f => lowercaseContent.includes(f.toLowerCase()));
 
-  // Pre-filter: skip files whose path doesn't even appear as a substring.
-  // This avoids expensive regex construction + execution for the vast majority
-  // of repo files that aren't mentioned in the content.
-  const lowercaseResult = result.toLowerCase();
-
-  for (const filePath of sortedFiles) {
-    // Fast substring check before expensive regex
-    if (!lowercaseResult.includes(filePath.toLowerCase())) continue;
-
-    const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
-
-    // Test against `result` (not original) to ensure consistency
-    if (regex.test(result)) {
-      foundFiles.push(filePath);
-      const contextClass = selectedSet.has(filePath) ? ' in-context' : '';
-      regex.lastIndex = 0;
-      result = result.replace(regex, `<span class="file-mention${contextClass}" data-file="${filePath}">$1</span>`);
-    }
+  if (candidates.length === 0) {
+    return { html: htmlContent, foundFiles: [] };
   }
 
-  return { html: result, foundFiles };
+  // Sort by length descending so longer paths match first in alternation
+  candidates.sort((a, b) => b.length - a.length);
+
+  // Build single combined regex — one pass instead of N
+  const escapedPaths = candidates.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const combined = new RegExp(
+    `(?<!<[^>]*)(?<!class=")\\b(${escapedPaths.join('|')})\\b(?![^<]*>)`,
+    'g'
+  );
+
+  const foundSet = new Set();
+
+  const result = htmlContent.replace(combined, (match, filePath) => {
+    foundSet.add(filePath);
+    const contextClass = selectedSet.has(filePath) ? ' in-context' : '';
+    return `<span class="file-mention${contextClass}" data-file="${filePath}">${filePath}</span>`;
+  });
+
+  return { html: result, foundFiles: [...foundSet] };
 }
 
 /**
