@@ -174,6 +174,16 @@ export const StreamingMixin = (superClass) => class extends superClass {
     this._streamingRequests.delete(requestId);
     this.isStreaming = false;
     
+    // Flush any pending streamWrite chunk so the message is up-to-date
+    // before we finalize it. Without this, a race between the rAF-coalesced
+    // chunk and this microtask-scheduled handler can create duplicate messages.
+    if (this._pendingChunk) {
+      const pending = this._pendingChunk;
+      this._pendingChunk = null;
+      this._chunkRafPending = false;
+      this._processStreamChunk(pending.chunk, pending.final, pending.role, pending.editResults);
+    }
+    
     // Mark the message as final and attach edit results
     const lastMessage = this.messageHistory[this.messageHistory.length - 1];
     
