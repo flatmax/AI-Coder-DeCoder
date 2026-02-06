@@ -74,13 +74,6 @@ export const RpcMixin = (superClass) => class extends superClass {
   }
 
   /**
-   * @deprecated Use _rpc() instead
-   */
-  _call(method, ...args) {
-    return this._rpc(method, ...args);
-  }
-
-  /**
    * Call an RPC method and extract the response.
    * Handles the common pattern of calling RPC + extracting result.
    * @param {string} method - The RPC method name
