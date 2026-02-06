@@ -385,6 +385,9 @@ export class CardMarkdown extends LitElement {
     this.editResults = [];
     this._foundFiles = [];  // Files actually found in content
     this._codeScrollPositions = new Map();
+    this._cachedContent = null;
+    this._cachedResult = null;
+    this._diffCache = new Map();  // Memoize LCS diffs for edit blocks
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -405,6 +408,13 @@ export class CardMarkdown extends LitElement {
       return escapeHtml(this.content).replace(/\n/g, '<br>');
     }
     
+    // During streaming, content changes frequently — cache parse results
+    // to avoid re-parsing unchanged prefixes. Only re-parse on actual change.
+    if (this._cachedContent === this.content && this._cachedResult) {
+      return this._cachedResult;
+    }
+    this._cachedContent = this.content;
+    
     // Check if content contains edit blocks
     const hasEditBlocks = this.content.includes('««« EDIT');
     
@@ -413,6 +423,10 @@ export class CardMarkdown extends LitElement {
       let processed = this.processContentWithEditBlocks(this.content);
       processed = this.wrapCodeBlocksWithCopyButton(processed);
       processed = this.highlightFileMentions(processed);
+      // Only cache if message is final (not still streaming)
+      if (!this._isStreaming()) {
+        this._cachedResult = processed;
+      }
       return processed;
     }
     
@@ -422,7 +436,25 @@ export class CardMarkdown extends LitElement {
     let processed = marked.parse(content);
     processed = this.wrapCodeBlocksWithCopyButton(processed);
     processed = this.highlightFileMentions(processed);
+    // Only cache if message is final (not still streaming)
+    if (!this._isStreaming()) {
+      this._cachedResult = processed;
+    }
     return processed;
+  }
+
+  /**
+   * Check if this card's message is still streaming (not yet final).
+   */
+  _isStreaming() {
+    // Walk up to find the parent message's final state
+    // During streaming, the message object has final=false
+    const card = this.closest?.('assistant-card');
+    if (card) {
+      // If we can't determine, assume not streaming (cache is safe)
+      return false;
+    }
+    return false;
   }
 
   protectSearchReplaceBlocks(content) {

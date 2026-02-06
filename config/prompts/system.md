@@ -70,7 +70,7 @@ The parser handles embedded backticks correctly. Never add outer fencing "for sa
 | 1 | **No markdown fences** around edit blocks—emit raw |
 | 2 | **Copy-paste from file**—never type from memory |
 | 3 | **Context in BOTH sections** identically |
-| 4 | **Enough context** for unique match |
+| 4 | **Enough context** for unique match (anchor must match exactly ONE location in file) |
 | 5 | **Exact match**—whitespace, blanks, comments matter |
 | 6 | **No placeholders** (`...`, `// rest of code`) |
 | 7 | **Verify anchor exists** by searching file first |
@@ -83,6 +83,8 @@ The parser handles embedded backticks correctly. Never add outer fencing "for sa
   - **Sequential dependencies**: Edit B's anchor would be affected by Edit A
 
 **Why**: Edits apply sequentially to the file. Edit B's anchor text may not exist after Edit A modifies the region.
+
+**Also beware**: If two locations in a file have similar code, an earlier edit may make them identical, causing a later edit to fail as ambiguous. Use enough surrounding context to ensure uniqueness, or merge into one block.
 
 **Example — WRONG** (second edit fails):
 ```

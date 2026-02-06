@@ -81,8 +81,14 @@ export class MessageHandler extends JRPCClient {
   _scrollToBottom() {
     if (this._userHasScrolledUp) return;
     
+    // Throttle to one scroll per animation frame to avoid layout thrashing
+    // during rapid streaming chunks
+    if (this._scrollPending) return;
+    this._scrollPending = true;
+    
     this.updateComplete.then(() => {
       requestAnimationFrame(() => {
+        this._scrollPending = false;
         const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
         if (sentinel) {
           sentinel.scrollIntoView({ block: 'end' });

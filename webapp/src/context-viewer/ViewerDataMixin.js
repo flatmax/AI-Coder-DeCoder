@@ -83,14 +83,16 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
 
   /**
    * Auto-refresh when relevant properties change.
-   * Subclasses should call super.willUpdate(changedProperties).
+   * Debounced to coalesce rapid property changes (e.g. selectedFiles +
+   * fetchedUrls changing in the same microtask).
    */
   _viewerDataWillUpdate(changedProperties) {
     if (changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
       if (this.rpcCall && this.visible !== false) {
-        this.refreshBreakdown();
+        if (this._refreshTimer) clearTimeout(this._refreshTimer);
+        this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
       }
     }
   }

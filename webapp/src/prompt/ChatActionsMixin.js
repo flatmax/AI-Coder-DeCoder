@@ -264,10 +264,9 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
   }
 
   async _buildDiffFiles(result) {
-    const diffFiles = [];
     const newContents = result.content || {};
     
-    for (const edit of result.passed) {
+    const diffFilePromises = result.passed.map(async (edit) => {
       const [filePath, original, updated] = edit;
       
       let originalContent = '';
@@ -294,15 +293,15 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
         }
       }
       
-      diffFiles.push({
+      return {
         path: filePath,
         original: originalContent,
         modified: modifiedContent,
         isNew: original === ''
-      });
-    }
+      };
+    });
     
-    return diffFiles;
+    return Promise.all(diffFilePromises);
   }
 
   async _getOriginalFileContent(filePath, newContent, searchBlock, replaceBlock) {
