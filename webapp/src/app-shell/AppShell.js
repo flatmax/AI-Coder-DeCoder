@@ -1,11 +1,11 @@
 import { LitElement, html, css } from 'lit';
-import { extractResponse } from '../utils/rpc.js';
+import { RpcMixin } from '../utils/rpc.js';
 import { TABS } from '../utils/constants.js';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
 import '../context-viewer/UrlContentModal.js';
 
-export class AppShell extends LitElement {
+export class AppShell extends RpcMixin(LitElement) {
   static properties = {
     diffFiles: { type: Array },
     showDiff: { type: Boolean },
@@ -66,54 +66,19 @@ export class AppShell extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('keydown', this._handleKeydown);
+  }
+
+  onRpcReady() {
     this._updateTitle();
   }
 
   async _updateTitle() {
-    // Wait for prompt-view to be ready and connected
-    await this.updateComplete;
-    const promptView = this.shadowRoot?.querySelector('prompt-view');
-    if (!promptView) {
-      console.warn('_updateTitle: prompt-view not found');
-      return;
+    try {
+      const repoName = await this._rpcExtract('Repo.get_repo_name');
+      if (repoName) document.title = repoName;
+    } catch (err) {
+      console.error('Failed to get repo name:', err);
     }
-    
-    // Wait for RPC to be ready — listen for the setupDone signal
-    // instead of polling with setInterval
-    const tryFetchTitle = async () => {
-      if (!promptView.call || typeof promptView.call['Repo.get_repo_name'] !== 'function') {
-        return false;
-      }
-      try {
-        const response = await promptView.call['Repo.get_repo_name']();
-        const repoName = extractResponse(response);
-        if (repoName) {
-          document.title = repoName;
-          return true;
-        }
-      } catch (err) {
-        console.error('Failed to get repo name:', err);
-      }
-      return false;
-    };
-    
-    // Try immediately in case RPC is already ready
-    if (await tryFetchTitle()) return;
-    
-    // Otherwise wait for the prompt-view to signal it's connected
-    const handler = async () => {
-      promptView.removeEventListener('rpc-ready', handler);
-      // Small delay to ensure call methods are registered
-      await new Promise(r => setTimeout(r, 50));
-      await tryFetchTitle();
-    };
-    promptView.addEventListener('rpc-ready', handler);
-    
-    // Safety timeout — fall back to single retry after 5s
-    setTimeout(async () => {
-      promptView.removeEventListener('rpc-ready', handler);
-      await tryFetchTitle();
-    }, 5000);
   }
 
   disconnectedCallback() {
@@ -144,13 +109,9 @@ export class AppShell extends LitElement {
    * Fetch file content via RPC, returning the string or null on failure.
    */
   async _fetchFileContent(file, version = undefined) {
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) return null;
-    
     try {
       const args = version ? [file, version] : [file];
-      const response = await promptView.call['Repo.get_file_content'](...args);
-      const result = extractResponse(response);
+      const result = await this._rpcExtract('Repo.get_file_content', ...args);
       if (typeof result === 'string') return result;
       return result?.content ?? null;
     } catch (err) {
@@ -246,9 +207,6 @@ export class AppShell extends LitElement {
     const editedSet = new Set(paths);
     const pathsToRefresh = openPaths.filter(p => editedSet.has(p));
     if (pathsToRefresh.length === 0) return;
-
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) return;
 
     await Promise.all(pathsToRefresh.map(async (filePath) => {
       const [original, modified] = await Promise.all([
@@ -359,14 +317,9 @@ export class AppShell extends LitElement {
   }
 
   handleRemoveUrl(e) {
-    const { url } = e.detail;
     const promptView = this.shadowRoot?.querySelector('prompt-view');
-    if (promptView && promptView.fetchedUrls) {
-      // fetchedUrls is an object with URL keys, not an array
-      const { [url]: removed, ...remaining } = promptView.fetchedUrls;
-      promptView.fetchedUrls = remaining;
-      // Refresh the context viewer with updated data
-      this._refreshContextViewer();
+    if (promptView) {
+      promptView.handleContextRemoveUrl(e);
     }
   }
 
@@ -388,16 +341,9 @@ export class AppShell extends LitElement {
 
   async handleConfigEditRequest(e) {
     const { configType } = e.detail;
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) {
-      console.error('RPC not available for config edit');
-      return;
-    }
 
     try {
-      // Fetch config content via Settings RPC
-      const response = await promptView.call['Settings.get_config_content'](configType);
-      const result = extractResponse(response);
+      const result = await this._rpcExtract('Settings.get_config_content', configType);
       
       if (!result?.success) {
         console.error('Failed to load config:', result?.error);
@@ -425,23 +371,15 @@ export class AppShell extends LitElement {
 
   async handleFileSave(e) {
     const { path, content, isConfig, configType } = e.detail;
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) {
-      console.error('RPC not available for file save');
-      return;
-    }
 
     try {
       if (isConfig && configType) {
-        // Save config file via Settings RPC
-        const response = await promptView.call['Settings.save_config_content'](configType, content);
-        const result = extractResponse(response);
+        const result = await this._rpcExtract('Settings.save_config_content', configType, content);
         if (!result?.success) {
           console.error('Failed to save config:', result?.error);
         }
       } else {
-        // Save repo file via Repo RPC
-        await promptView.call['Repo.write_file'](path, content);
+        await this._rpc('Repo.write_file', path, content);
       }
     } catch (err) {
       console.error('Failed to save file:', err);
@@ -450,24 +388,16 @@ export class AppShell extends LitElement {
 
   async handleFilesSave(e) {
     const { files } = e.detail;
-    const promptView = this.shadowRoot.querySelector('prompt-view');
-    if (!promptView?.call) {
-      console.error('RPC not available for file save');
-      return;
-    }
 
     for (const file of files) {
       try {
         if (file.isConfig && file.configType) {
-          // Save config file via Settings RPC
-          const response = await promptView.call['Settings.save_config_content'](file.configType, file.content);
-          const result = extractResponse(response);
+          const result = await this._rpcExtract('Settings.save_config_content', file.configType, file.content);
           if (!result?.success) {
             console.error('Failed to save config:', result?.error);
           }
         } else {
-          // Save repo file via Repo RPC
-          await promptView.call['Repo.write_file'](file.path, file.content);
+          await this._rpc('Repo.write_file', file.path, file.content);
         }
       } catch (err) {
         console.error('Failed to save file:', file.path, err);

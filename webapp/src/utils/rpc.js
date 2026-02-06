@@ -1,3 +1,5 @@
+import { getSharedRpcCall, waitForRpc } from './RpcContext.js';
+
 /**
  * Extract result from RPC response
  * RPC responses come as {method_name: result} - extract the first value
@@ -32,7 +34,10 @@ export function debounce(fn, delay = 300) {
 
 /**
  * Mixin that provides RPC call functionality to LitElement components.
- * Components using this mixin should have a `rpcCall` property set by their parent.
+ *
+ * Automatically acquires the shared RPC call object from the singleton
+ * (set by PromptView on connect). Components can also receive `rpcCall`
+ * as a property — explicit assignment takes priority over the singleton.
  * 
  * Provides:
  * - `rpcCall` getter/setter that stores the call object
@@ -44,6 +49,22 @@ export function debounce(fn, delay = 300) {
  */
 export const RpcMixin = (superClass) => class extends superClass {
   __rpcCall = null;
+
+  connectedCallback() {
+    super.connectedCallback();
+    // Auto-acquire from singleton if not explicitly set
+    if (!this.__rpcCall) {
+      const call = getSharedRpcCall();
+      if (call) {
+        this.rpcCall = call;
+      } else {
+        waitForRpc().then(c => {
+          // Only set if nothing was explicitly assigned in the meantime
+          if (!this.__rpcCall) this.rpcCall = c;
+        });
+      }
+    }
+  }
 
   /**
    * Set the RPC call object. Triggers onRpcReady() on first set.
