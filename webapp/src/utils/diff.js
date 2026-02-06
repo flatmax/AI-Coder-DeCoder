@@ -1,17 +1,39 @@
+// Simple LRU cache for diff results to avoid recomputing during streaming re-renders
+const _diffCache = new Map();
+const _DIFF_CACHE_MAX = 32;
+
+function _getDiffCacheKey(oldLines, newLines) {
+  // Use length + first/last lines as a fast hash — collisions are acceptable
+  // since we verify with full content on hit
+  return `${oldLines.length}:${newLines.length}:${oldLines[0] || ''}:${newLines[0] || ''}`;
+}
+
 /**
  * Compute unified diff between two arrays of lines using LCS algorithm.
- * Returns array of diff entries in display order.
+ * Results are memoized to avoid redundant computation during streaming re-renders.
  * 
  * @param {string[]} oldLines - Original lines
  * @param {string[]} newLines - New lines  
  * @returns {Array<{type: 'context'|'add'|'remove', line: string, pair?: object}>}
  */
 export function computeLineDiff(oldLines, newLines) {
+  // Check memo cache
+  const cacheKey = _getDiffCacheKey(oldLines, newLines);
+  const cached = _diffCache.get(cacheKey);
+  if (cached && cached.oldLen === oldLines.length && cached.newLen === newLines.length
+      && cached.oldJoin === oldLines.join('\n') && cached.newJoin === newLines.join('\n')) {
+    return cached.result;
+  }
+
   const n = oldLines.length;
   const m = newLines.length;
   
-  // Build DP table for LCS
-  const dp = Array(n + 1).fill(null).map(() => Array(m + 1).fill(0));
+  // Build DP table for LCS using full matrix (needed for backtracking)
+  // Use typed arrays for better memory layout and performance
+  const dp = new Array(n + 1);
+  for (let i = 0; i <= n; i++) {
+    dp[i] = new Int32Array(m + 1);
+  }
   
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
@@ -44,7 +66,22 @@ export function computeLineDiff(oldLines, newLines) {
   const reversed = result.reverse();
   
   // Post-process to pair adjacent remove/add lines for inline highlighting
-  return pairModifiedLines(reversed);
+  const finalResult = pairModifiedLines(reversed);
+  
+  // Store in memo cache (evict oldest if full)
+  if (_diffCache.size >= _DIFF_CACHE_MAX) {
+    const firstKey = _diffCache.keys().next().value;
+    _diffCache.delete(firstKey);
+  }
+  _diffCache.set(cacheKey, {
+    oldLen: oldLines.length,
+    newLen: newLines.length,
+    oldJoin: oldLines.join('\n'),
+    newJoin: newLines.join('\n'),
+    result: finalResult
+  });
+  
+  return finalResult;
 }
 
 /**

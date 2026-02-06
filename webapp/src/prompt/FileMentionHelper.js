@@ -14,6 +14,7 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
 
   let result = htmlContent;
   const foundFiles = [];
+  const selectedSet = selectedFiles ? new Set(selectedFiles) : new Set();
 
   // Sort by length descending to match longer paths first
   const sortedFiles = [...mentionedFiles].sort((a, b) => b.length - a.length);
@@ -22,10 +23,10 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
     const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
 
-    if (regex.test(htmlContent)) {
+    // Test against `result` (not original) to ensure consistency
+    if (regex.test(result)) {
       foundFiles.push(filePath);
-      const isInContext = selectedFiles && selectedFiles.includes(filePath);
-      const contextClass = isInContext ? ' in-context' : '';
+      const contextClass = selectedSet.has(filePath) ? ' in-context' : '';
       regex.lastIndex = 0;
       result = result.replace(regex, `<span class="file-mention${contextClass}" data-file="${filePath}">$1</span>`);
     }

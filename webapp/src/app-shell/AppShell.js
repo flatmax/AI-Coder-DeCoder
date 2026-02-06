@@ -233,13 +233,15 @@ export class AppShell extends LitElement {
     const promptView = this.shadowRoot.querySelector('prompt-view');
     if (!promptView?.call) return;
 
-    for (const filePath of pathsToRefresh) {
+    await Promise.all(pathsToRefresh.map(async (filePath) => {
       try {
-        const headResponse = await promptView.call['Repo.get_file_content'](filePath, 'HEAD');
+        const [headResponse, workingResponse] = await Promise.all([
+          promptView.call['Repo.get_file_content'](filePath, 'HEAD'),
+          promptView.call['Repo.get_file_content'](filePath)
+        ]);
         const headResult = headResponse ? Object.values(headResponse)[0] : null;
         const original = typeof headResult === 'string' ? headResult : (headResult?.content ?? '');
 
-        const workingResponse = await promptView.call['Repo.get_file_content'](filePath);
         const workingResult = workingResponse ? Object.values(workingResponse)[0] : null;
         const modified = typeof workingResult === 'string' ? workingResult : (workingResult?.content ?? '');
 
@@ -247,7 +249,7 @@ export class AppShell extends LitElement {
       } catch (err) {
         console.error('Failed to refresh file:', filePath, err);
       }
-    }
+    }));
   }
 
   async handleNavigateToEdit(e) {
