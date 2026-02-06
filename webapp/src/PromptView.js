@@ -11,10 +11,6 @@ import { UrlService } from './services/UrlService.js';
 import { extractResponse as _extractResponse } from './utils/rpc.js';
 import { TABS } from './utils/constants.js';
 import './file-picker/FilePicker.js';
-import './history-browser/HistoryBrowser.js';
-import './find-in-files/FindInFiles.js';
-import './context-viewer/ContextViewer.js';
-import './settings/SettingsPanel.js';
 
 const MixedBase = StreamingMixin(
   WindowControlsMixin(
@@ -202,7 +198,10 @@ export class PromptView extends MixedBase {
 
   // ============ History Browser ============
 
-  toggleHistoryBrowser() {
+  async toggleHistoryBrowser() {
+    if (!this.showHistoryBrowser) {
+      await import('./history-browser/HistoryBrowser.js');
+    }
     this.showHistoryBrowser = !this.showHistoryBrowser;
     if (this.showHistoryBrowser) {
       this.updateComplete.then(() => {
@@ -294,7 +293,25 @@ export class PromptView extends MixedBase {
   /**
    * Switch between tabs (files/search/context)
    */
-  switchTab(tab) {
+  async switchTab(tab) {
+    // Lazy-load tab components on first visit
+    if (!this._visitedTabs.has(tab)) {
+      switch (tab) {
+        case TABS.SEARCH:
+          await import('./find-in-files/FindInFiles.js');
+          break;
+        case TABS.CONTEXT:
+          await import('./context-viewer/ContextViewer.js');
+          break;
+        case TABS.CACHE:
+          await import('./context-viewer/CacheViewer.js');
+          break;
+        case TABS.SETTINGS:
+          await import('./settings/SettingsPanel.js');
+          break;
+      }
+    }
+
     this._visitedTabs.add(tab);
     this.activeLeftTab = tab;
 
