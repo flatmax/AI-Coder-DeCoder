@@ -96,10 +96,6 @@ class StabilityTracker:
         self,
         persistence_path: Path,
         thresholds: dict[str, int] = None,
-        l1_threshold: int = 3,
-        l0_threshold: int = 5,
-        reorg_interval: int = 10,
-        reorg_drift_threshold: float = 0.2,
         initial_tier: str = 'L3',
         cache_target_tokens: int = 0,
     ):
@@ -108,24 +104,19 @@ class StabilityTracker:
         
         Args:
             persistence_path: Path to JSON file for persistence
-            thresholds: Dict mapping tier names to entry thresholds (for compatibility).
-                       In ripple mode, these define entry_n values.
-            l1_threshold: (Legacy) Used for 2-tier mode compatibility
-            l0_threshold: (Legacy) Used for 2-tier mode compatibility
-            reorg_interval: Unused in ripple mode (kept for API compatibility)
-            reorg_drift_threshold: Unused in ripple mode (kept for API compatibility)
+            thresholds: Dict mapping tier names to entry thresholds.
+                       Defines entry_n values for each tier.
+                       Defaults to 4-tier config: L3=3, L2=6, L1=9, L0=12.
             initial_tier: Starting tier for new items (default: 'L3')
             cache_target_tokens: Target tokens per cache block (0 = disabled).
                                 Veterans below this threshold anchor the tier.
         """
         self._persistence_path = Path(persistence_path)
         
-        # Support both new thresholds dict and legacy 2-tier params
         if thresholds:
             self._thresholds = thresholds
         else:
-            # Legacy 2-tier mode for backwards compatibility
-            self._thresholds = {'L1': l1_threshold, 'L0': l0_threshold}
+            self._thresholds = {k: v['entry_n'] for k, v in TIER_CONFIG.items()}
         
         # Sort thresholds by value ascending for tier order
         self._tier_order = sorted(
@@ -423,15 +414,15 @@ class StabilityTracker:
             return self._stability[item].tier
         return 'active'
     
-    def get_stable_count(self, item: str) -> int:
-        """Get stability count (N value) for an item."""
+    def get_n_value(self, item: str) -> int:
+        """Get N value for an item."""
         if item in self._stability:
             return self._stability[item].n_value
         return 0
     
-    def get_n_value(self, item: str) -> int:
-        """Get N value for an item (alias for get_stable_count)."""
-        return self.get_stable_count(item)
+    def get_stable_count(self, item: str) -> int:
+        """Deprecated: use get_n_value instead."""
+        return self.get_n_value(item)
     
     def get_items_by_tier(self, items: list[str] = None) -> dict[str, list[str]]:
         """
@@ -465,7 +456,7 @@ class StabilityTracker:
         
         # Sort within tiers by n_value descending
         for tier in result:
-            result[tier].sort(key=lambda x: self.get_stable_count(x), reverse=True)
+            result[tier].sort(key=lambda x: self.get_n_value(x), reverse=True)
         
         return result
     
@@ -705,31 +696,19 @@ class StabilityTracker:
         next_threshold = None
         
         if current_tier == 'active':
-            # Next tier is L3
             next_tier = 'L3'
             next_threshold = TIER_CONFIG['L3']['entry_n']
         elif current_tier in TIER_CONFIG:
-            # Use promotion threshold from current tier's config
             promotion_threshold = TIER_CONFIG[current_tier]['promotion_threshold']
             if promotion_threshold:
                 next_tier = self._get_next_tier(current_tier)
                 next_threshold = promotion_threshold
-        
-        # Fallback to legacy threshold lookup
-        if next_tier is None and current_tier in self._thresholds:
-            current_threshold = self._thresholds[current_tier]
-            for tier in self._tier_order:
-                if self._thresholds[tier] > current_threshold:
-                    next_tier = tier
-                    next_threshold = self._thresholds[tier]
-                    break
         
         # Calculate progress toward next tier
         progress = 0.0
         if next_threshold is not None and next_threshold > 0:
             progress = min(1.0, n_value / next_threshold)
         elif current_tier == 'L0':
-            # Already at highest tier
             progress = 1.0
         
         return {
