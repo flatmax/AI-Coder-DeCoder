@@ -77,34 +77,42 @@ export class AppShell extends LitElement {
       return;
     }
     
-    // Wait for RPC to be ready with exponential backoff
-    let attempts = 0;
-    const maxAttempts = 50; // 5 seconds total with initial 100ms
-    
-    const checkRpc = setInterval(async () => {
-      attempts++;
-      if (attempts > maxAttempts) {
-        clearInterval(checkRpc);
-        console.warn('_updateTitle: timed out waiting for RPC');
-        return;
+    // Wait for RPC to be ready — listen for the setupDone signal
+    // instead of polling with setInterval
+    const tryFetchTitle = async () => {
+      if (!promptView.call || typeof promptView.call['Repo.get_repo_name'] !== 'function') {
+        return false;
       }
-      
-      // Check if call exists and has the method
-      if (promptView.call && typeof promptView.call['Repo.get_repo_name'] === 'function') {
-        clearInterval(checkRpc);
-        try {
-          const response = await promptView.call['Repo.get_repo_name']();
-          const repoName = response ? Object.values(response)[0] : null;
-          if (repoName) {
-            document.title = repoName;
-          } else {
-            console.warn('_updateTitle: empty repo name response', response);
-          }
-        } catch (err) {
-          console.error('Failed to get repo name:', err);
+      try {
+        const response = await promptView.call['Repo.get_repo_name']();
+        const repoName = response ? Object.values(response)[0] : null;
+        if (repoName) {
+          document.title = repoName;
+          return true;
         }
+      } catch (err) {
+        console.error('Failed to get repo name:', err);
       }
-    }, 100);
+      return false;
+    };
+    
+    // Try immediately in case RPC is already ready
+    if (await tryFetchTitle()) return;
+    
+    // Otherwise wait for the prompt-view to signal it's connected
+    const handler = async () => {
+      promptView.removeEventListener('rpc-ready', handler);
+      // Small delay to ensure call methods are registered
+      await new Promise(r => setTimeout(r, 50));
+      await tryFetchTitle();
+    };
+    promptView.addEventListener('rpc-ready', handler);
+    
+    // Safety timeout — fall back to single retry after 5s
+    setTimeout(async () => {
+      promptView.removeEventListener('rpc-ready', handler);
+      await tryFetchTitle();
+    }, 5000);
   }
 
   disconnectedCallback() {

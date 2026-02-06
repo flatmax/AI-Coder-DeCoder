@@ -30,6 +30,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._debouncedSearch = debounce(() => this.performSearch(), 300);
     this._messagesScrollTop = 0;
     this._sessionsScrollTop = 0;
+    this._sessionsLoadedAt = 0;  // Timestamp of last session list fetch
+    this._sessionsCacheTTL = 10000;  // 10 seconds before refetching
   }
 
   onRpcReady() {
@@ -63,9 +65,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // so reopening preserves state
   }
 
-  async loadSessions() {
+  async loadSessions(force = false) {
+    // Skip refetch if sessions were loaded recently (within TTL)
+    const now = Date.now();
+    if (!force && this.sessions.length > 0 && (now - this._sessionsLoadedAt) < this._sessionsCacheTTL) {
+      return;
+    }
     const result = await this._rpcWithState('LiteLLM.history_list_sessions', {}, 50);
     this.sessions = result || [];
+    this._sessionsLoadedAt = Date.now();
   }
 
   async selectSession(sessionId, messageId = null) {
@@ -134,6 +142,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     if (!this.selectedSession || this.selectedSession.length === 0) {
       return;
     }
+    // Invalidate session cache since loading a session means context changed
+    this._sessionsLoadedAt = 0;
     this.dispatchEvent(new CustomEvent('load-session', {
       detail: { messages: this.selectedSession, sessionId: this.selectedSessionId },
       bubbles: true,

@@ -14,7 +14,8 @@ export class CardMarkdown extends LitElement {
     role: { type: String },
     mentionedFiles: { type: Array },
     selectedFiles: { type: Array },  // Files currently in context
-    editResults: { type: Array }  // Array of {file_path, status, reason, estimated_line}
+    editResults: { type: Array },  // Array of {file_path, status, reason, estimated_line}
+    final: { type: Boolean }  // Whether the message is complete (not still streaming)
   };
 
   static styles = css`
@@ -383,6 +384,7 @@ export class CardMarkdown extends LitElement {
     this.mentionedFiles = [];
     this.selectedFiles = [];
     this.editResults = [];
+    this.final = true;
     this._foundFiles = [];  // Files actually found in content
     this._codeScrollPositions = new Map();
     this._cachedContent = null;
@@ -447,14 +449,7 @@ export class CardMarkdown extends LitElement {
    * Check if this card's message is still streaming (not yet final).
    */
   _isStreaming() {
-    // Walk up to find the parent message's final state
-    // During streaming, the message object has final=false
-    const card = this.closest?.('assistant-card');
-    if (card) {
-      // If we can't determine, assume not streaming (cache is safe)
-      return false;
-    }
-    return false;
+    return !this.final;
   }
 
   protectSearchReplaceBlocks(content) {
@@ -467,6 +462,8 @@ export class CardMarkdown extends LitElement {
   /**
    * Process content with edit blocks by extracting them, processing markdown
    * on the remaining text, then reinserting rendered edit blocks.
+   * Uses a single marked.parse() call for all text segments to avoid
+   * per-segment parsing overhead.
    */
   processContentWithEditBlocks(content) {
     const blocks = parseEditBlocks(content);
@@ -494,14 +491,41 @@ export class CardMarkdown extends LitElement {
       segments.push({ type: 'text', content: textLines.join('\n') });
     }
     
-    let result = '';
+    // Batch all text segments into a single marked.parse() call
+    // using unique placeholders, then split and interleave
+    const PLACEHOLDER_PREFIX = '\n\n<!--EDIT_BLOCK_';
+    const PLACEHOLDER_SUFFIX = '-->\n\n';
+    let combinedText = '';
+    let editBlockIndex = 0;
+    
     for (const segment of segments) {
       if (segment.type === 'text') {
-        result += marked.parse(segment.content);
+        combinedText += segment.content;
       } else {
-        result += renderEditBlock(segment.block, this.editResults);
+        combinedText += `${PLACEHOLDER_PREFIX}${editBlockIndex}${PLACEHOLDER_SUFFIX}`;
+        editBlockIndex++;
       }
     }
+    
+    // Single parse call for all markdown
+    const parsedHtml = marked.parse(combinedText);
+    
+    // Split on placeholders and interleave edit blocks
+    const editBlocks = segments.filter(s => s.type === 'edit');
+    const placeholderRegex = /<!--EDIT_BLOCK_(\d+)-->/g;
+    let result = '';
+    let lastIndex = 0;
+    let match;
+    
+    while ((match = placeholderRegex.exec(parsedHtml)) !== null) {
+      result += parsedHtml.slice(lastIndex, match.index);
+      const blockIdx = parseInt(match[1], 10);
+      if (blockIdx < editBlocks.length) {
+        result += renderEditBlock(editBlocks[blockIdx].block, this.editResults);
+      }
+      lastIndex = match.index + match[0].length;
+    }
+    result += parsedHtml.slice(lastIndex);
     
     return result;
   }
@@ -509,6 +533,11 @@ export class CardMarkdown extends LitElement {
 
 
   wrapCodeBlocksWithCopyButton(htmlContent) {
+    // Skip wrapping during streaming — the copy button regex is expensive
+    // and the content is changing every chunk anyway
+    if (this._isStreaming()) {
+      return htmlContent;
+    }
     const preCodeRegex = /(<pre[^>]*>)(\s*<code[^>]*>)([\s\S]*?)(<\/code>\s*<\/pre>)/gi;
     return htmlContent.replace(preCodeRegex, (match, pre, code, content, closing) => {
       return `<div class="code-wrapper">${pre}${code}${content}${closing}<button class="copy-btn" onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>`;
@@ -516,6 +545,12 @@ export class CardMarkdown extends LitElement {
   }
 
   highlightFileMentions(htmlContent) {
+    // Skip expensive regex-based file mention highlighting during streaming —
+    // it runs O(files × content_length) per render and the results change
+    // on every chunk anyway. Only apply on final render.
+    if (this._isStreaming()) {
+      return htmlContent;
+    }
     const { html: result, foundFiles } = highlightFileMentions(htmlContent, this.mentionedFiles, this.selectedFiles);
     this._foundFiles = foundFiles;
     return result;

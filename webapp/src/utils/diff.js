@@ -128,6 +128,15 @@ function pairModifiedLines(diff) {
  * @returns {{oldSegments: Array, newSegments: Array, similarity: number}}
  */
 export function computeCharDiff(oldStr, newStr) {
+  // Fast-path: identical strings need no diff computation
+  if (oldStr === newStr) {
+    return {
+      oldSegments: [{ type: 'same', text: oldStr }],
+      newSegments: [{ type: 'same', text: newStr }],
+      similarity: 1
+    };
+  }
+
   // Tokenize into words and whitespace
   const oldTokens = tokenize(oldStr);
   const newTokens = tokenize(newStr);
