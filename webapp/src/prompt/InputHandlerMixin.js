@@ -156,9 +156,8 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
   _autoResizeTextarea(textarea) {
     if (!textarea) return;
     
-    // Get the chat panel height to calculate max height (50% of chat panel)
-    const chatPanel = this.shadowRoot?.querySelector('.chat-panel');
-    const maxHeight = chatPanel ? chatPanel.clientHeight * 0.5 : 200;
+    // Cap at 100px to prevent textarea from dominating the chat panel
+    const maxHeight = 100;
     
     // Set the CSS variable for max-height
     textarea.style.setProperty('--textarea-max-height', `${maxHeight}px`);
