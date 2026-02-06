@@ -119,7 +119,7 @@ export function renderPromptView(component) {
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">
-          <div class="${component.activeLeftTab !== TABS.FILES ? 'tab-hidden' : ''}" style="display: ${component.activeLeftTab === TABS.FILES ? 'contents' : 'none'}">
+          <div class="files-tab-panel ${component.activeLeftTab !== TABS.FILES ? 'tab-hidden' : ''}">
             ${component.showFilePicker && !component.leftPanelCollapsed ? html`
               <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
