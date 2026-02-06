@@ -8,95 +8,23 @@ ordered by priority (highest impact / lowest risk first).
 
 ---
 
-## Phase 1: Consolidate Tier Constants (Small, High Impact)
+## Phase 1: Consolidate Tier Constants ✅ DONE
 
-### Problem
-Tier configuration is defined in 3+ places that must be kept in sync manually:
-- `ac/context/stability_tracker.py`: `TIER_CONFIG`, `TIER_PROMOTION_ORDER`
-- `ac/llm/context_builder.py`: `TIER_THRESHOLDS`, `TIER_NAMES`, `TIER_ORDER`, `CACHE_TIERS`
-- `webapp/src/utils/tierConfig.js`: `TIER_THRESHOLDS`, `TIER_NAMES` (JS side, keep as-is)
-
-The values are identical (`TIER_CONFIG[tier]['entry_n']` == `TIER_THRESHOLDS[tier]`)
-but if someone updates one file and not the other, behavior diverges silently.
-
-### Changes
-1. In `ac/context/stability_tracker.py`, add derived constants after `TIER_CONFIG`:
-   ```python
-   TIER_THRESHOLDS = {k: v['entry_n'] for k, v in TIER_CONFIG.items()}
-   TIER_NAMES = {
-       'L0': 'Most Stable', 'L1': 'Very Stable',
-       'L2': 'Stable', 'L3': 'Moderately Stable', 'active': 'Active'
-   }
-   TIER_ORDER = ['L0', 'L1', 'L2', 'L3', 'active']
-   CACHE_TIERS = ['L0', 'L1', 'L2', 'L3']
-   ```
-
-2. In `ac/llm/context_builder.py`, replace the 4 local constant definitions
-   with imports and re-export them so downstream consumers are unaffected:
-   ```python
-   from ..context.stability_tracker import (
-       TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS
-   )
-   ```
-
-3. `streaming.py` and `llm.py` already import from `context_builder` —
-   no changes needed since the re-exports preserve the public API.
-
-### Files Modified
-- `ac/context/stability_tracker.py` (add 4 derived constants)
-- `ac/llm/context_builder.py` (replace 4 local constants with imports)
-
-### Tests
-- Existing tests in `tests/test_stability_tracker.py` pass unchanged.
-- Verify `from ac.llm.context_builder import TIER_THRESHOLDS` returns same values.
-- Add one test: `assert TIER_THRESHOLDS == {k: v['entry_n'] for k, v in TIER_CONFIG.items()}`.
+Derived constants (`TIER_THRESHOLDS`, `TIER_NAMES`, `TIER_ORDER`, `CACHE_TIERS`)
+are defined once in `ac/context/stability_tracker.py` after `TIER_CONFIG`.
+`ac/llm/context_builder.py` imports and re-exports them.
+`streaming.py` and `llm.py` import from `context_builder` unchanged.
 
 ---
 
-## Phase 2: Loop-ify `_build_streaming_messages` L1-L3 Blocks (Small, High Impact)
+## Phase 2: Loop-ify `_build_streaming_messages` L1-L3 Blocks ✅ DONE
 
-### Problem
-`streaming.py` `_build_streaming_messages` has ~80 lines of near-identical code
-for L1, L2, and L3 blocks. Each block does: check symbol content, check files,
-combine, append message + "Ok." response, or increment empty_tiers.
+Extracted `_build_tier_cache_block` helper on `StreamingMixin` in `streaming.py`.
+The 3 repetitive L1/L2/L3 blocks replaced with a 10-line loop.
+L0 stays separate (system prompt + legend have different structure).
 
-### Changes
-1. Extract helper method `_build_tier_cache_block(self, tier, symbol_map_content,
-   symbol_files_by_tier, file_tiers, tier_info, file_header)` that:
-   - Prepends `REPO_MAP_CONTINUATION` to symbol content if present (same for all tiers)
-   - Appends files formatted with the tier-specific `file_header`
-   - Builds the combined content string with `cache_control` wrapper
-   - Updates `tier_info` for the tier (symbol count, file count, tokens)
-   - Returns dict with `messages` list and `symbol_tokens` count, or `None` if empty
-
-2. Replace the 3 repetitive blocks (L1, L2, L3) with a loop:
-   ```python
-   tier_file_headers = {'L1': FILES_L1_HEADER, 'L2': FILES_L2_HEADER, 'L3': FILES_L3_HEADER}
-   for tier in ['L1', 'L2', 'L3']:
-       result = self._build_tier_cache_block(
-           tier, symbol_map_content, symbol_files_by_tier,
-           file_tiers, tier_info, tier_file_headers[tier]
-       )
-       if result:
-           messages.extend(result['messages'])
-           context_map_tokens += result['symbol_tokens']
-       else:
-           tier_info['empty_tiers'] += 1
-   ```
-
-3. L0 block stays separate (it includes system prompt and legend — different structure).
-
-4. Note: `REPO_MAP_CONTINUATION` is the same for all tiers (symbol header),
-   while `FILES_L1_HEADER` / `FILES_L2_HEADER` / `FILES_L3_HEADER` differ per tier
-   (they label the tier for the LLM). Both are passed into the helper.
-
-### Files Modified
-- `ac/llm/streaming.py`
-
-### Tests
-- Existing streaming tests should pass unchanged.
-- Manual verification: run a chat and confirm the HUD output shows the same
-  tier distribution as before the refactor.
+Note: `context_builder.py` has a separate `_build_tier_block` for the UI
+visualization in `get_context_breakdown` — different purpose, not duplicated.
 
 ---
 
@@ -273,9 +201,9 @@ indirection without benefit.
 ## Implementation Order
 
 ```
-Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7
-  ↑           ↑         ↑         ↑         ↑         ↑         ↑
- small      small     medium    small     small     medium    small
+Phase 1 ✅ → Phase 2 ✅ → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7
+                            ↑         ↑         ↑         ↑         ↑
+                          medium    small     small     medium    small
 ```
 
 Each phase is independently deployable and testable. No phase depends on
@@ -288,12 +216,8 @@ conflicts since Phases 2 and 3 both touch `streaming.py`.
 - Phases 1-5 are pure refactors with no behavior change — all existing tests
   must pass without modification.
 
-Key test files per phase:
-- **Phase 1**: `tests/test_stability_tracker.py` (tier constants), plus verify
-  `from ac.llm.context_builder import TIER_THRESHOLDS` still works
-- **Phase 2**: `tests/test_context_manager.py`, `tests/test_llm_history.py`
-  (streaming message building is exercised indirectly)
-- **Phase 3**: Same as Phase 2 (stability update is part of stream flow)
+Key test files per remaining phase:
+- **Phase 3**: `tests/test_context_manager.py`, `tests/test_llm_history.py`
 - **Phase 4**: No existing tests call `summarize_history()` — add a minimal
   test that it emits `DeprecationWarning` and returns correct format
 - **Phase 5**: Add a test that two `LiteLLM` instances have independent counters

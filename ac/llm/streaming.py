@@ -663,98 +663,22 @@ class StreamingMixin:
             ]
         })
         
-        # Block 2 (L1): L1 symbols + L1 files (cached)
-        l1_parts = []
-        if symbol_map_content.get('L1'):
-            l1_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
-            tier_info['L1']['symbols'] = len(symbol_files_by_tier.get('L1', []))
-            l1_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L1'])
-            tier_info['L1']['tokens'] += l1_symbol_tokens
-            context_map_tokens += l1_symbol_tokens
-        if file_tiers.get('L1'):
-            l1_files = self._format_files_for_cache(file_tiers['L1'], FILES_L1_HEADER)
-            if l1_files:
-                l1_parts.append(l1_files)
-                tier_info['L1']['files'] = len(file_tiers['L1'])
-                tier_info['L1']['tokens'] += self._safe_count_tokens(l1_files)
-        
-        if l1_parts:
-            l1_content = "\n\n".join(l1_parts)
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": l1_content,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            })
-            messages.append({"role": "assistant", "content": "Ok."})
-        else:
-            tier_info['empty_tiers'] += 1
-        
-        # Block 3 (L2): L2 symbols + L2 files (cached)
-        l2_parts = []
-        if symbol_map_content.get('L2'):
-            l2_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
-            tier_info['L2']['symbols'] = len(symbol_files_by_tier.get('L2', []))
-            l2_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L2'])
-            tier_info['L2']['tokens'] += l2_symbol_tokens
-            context_map_tokens += l2_symbol_tokens
-        if file_tiers.get('L2'):
-            l2_files = self._format_files_for_cache(file_tiers['L2'], FILES_L2_HEADER)
-            if l2_files:
-                l2_parts.append(l2_files)
-                tier_info['L2']['files'] = len(file_tiers['L2'])
-                tier_info['L2']['tokens'] += self._safe_count_tokens(l2_files)
-        
-        if l2_parts:
-            l2_content = "\n\n".join(l2_parts)
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": l2_content,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            })
-            messages.append({"role": "assistant", "content": "Ok."})
-        else:
-            tier_info['empty_tiers'] += 1
-        
-        # Block 4 (L3): L3 symbols + L3 files (cached)
-        l3_parts = []
-        if symbol_map_content.get('L3'):
-            l3_parts.append(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
-            tier_info['L3']['symbols'] = len(symbol_files_by_tier.get('L3', []))
-            l3_symbol_tokens = self._safe_count_tokens(REPO_MAP_CONTINUATION + symbol_map_content['L3'])
-            tier_info['L3']['tokens'] += l3_symbol_tokens
-            context_map_tokens += l3_symbol_tokens
-        if file_tiers.get('L3'):
-            l3_files = self._format_files_for_cache(file_tiers['L3'], FILES_L3_HEADER)
-            if l3_files:
-                l3_parts.append(l3_files)
-                tier_info['L3']['files'] = len(file_tiers['L3'])
-                tier_info['L3']['tokens'] += self._safe_count_tokens(l3_files)
-        
-        if l3_parts:
-            l3_content = "\n\n".join(l3_parts)
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": l3_content,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            })
-            messages.append({"role": "assistant", "content": "Ok."})
-        else:
-            tier_info['empty_tiers'] += 1
+        # Blocks 2-4 (L1, L2, L3): symbols + files per tier (cached)
+        tier_file_headers = {
+            'L1': FILES_L1_HEADER,
+            'L2': FILES_L2_HEADER,
+            'L3': FILES_L3_HEADER,
+        }
+        for tier in ['L1', 'L2', 'L3']:
+            result = self._build_tier_cache_block(
+                tier, symbol_map_content, symbol_files_by_tier,
+                file_tiers, tier_info, tier_file_headers[tier]
+            )
+            if result:
+                messages.extend(result['messages'])
+                context_map_tokens += result['symbol_tokens']
+            else:
+                tier_info['empty_tiers'] += 1
         
         # Add file tree (in active block for now - could be stability tracked later)
         if use_repo_map and self.repo:
@@ -837,6 +761,58 @@ class StreamingMixin:
         if len(parts) == 1:
             return ""
         return "\n\n".join(parts)
+    
+    def _build_tier_cache_block(self, tier, symbol_map_content, symbol_files_by_tier,
+                                file_tiers, tier_info, file_header):
+        """Build a cache block for a single tier (L1/L2/L3).
+        
+        Args:
+            tier: Tier name ('L1', 'L2', 'L3')
+            symbol_map_content: Dict of tier -> formatted symbol content
+            symbol_files_by_tier: Dict of tier -> file path lists
+            file_tiers: Dict of tier -> file path lists (full content files)
+            tier_info: Mutable dict tracking per-tier token counts
+            file_header: Header string for the file section
+            
+        Returns:
+            Dict with 'messages' and 'symbol_tokens', or None if tier is empty
+        """
+        parts = []
+        symbol_tokens = 0
+        
+        if symbol_map_content.get(tier):
+            sym_content = REPO_MAP_CONTINUATION + symbol_map_content[tier]
+            parts.append(sym_content)
+            tier_info[tier]['symbols'] = len(symbol_files_by_tier.get(tier, []))
+            sym_tokens = self._safe_count_tokens(sym_content)
+            tier_info[tier]['tokens'] += sym_tokens
+            symbol_tokens += sym_tokens
+        
+        if file_tiers.get(tier):
+            files_content = self._format_files_for_cache(file_tiers[tier], file_header)
+            if files_content:
+                parts.append(files_content)
+                tier_info[tier]['files'] = len(file_tiers[tier])
+                tier_info[tier]['tokens'] += self._safe_count_tokens(files_content)
+        
+        if not parts:
+            return None
+        
+        combined = "\n\n".join(parts)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": combined,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            },
+            {"role": "assistant", "content": "Ok."},
+        ]
+        return {'messages': messages, 'symbol_tokens': symbol_tokens}
     
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire stream chunk send (non-blocking).

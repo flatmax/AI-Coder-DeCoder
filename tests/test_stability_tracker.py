@@ -4,7 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
-from ac.context.stability_tracker import StabilityTracker, StabilityInfo, TIER_CONFIG
+from ac.context.stability_tracker import StabilityTracker, StabilityInfo, TIER_CONFIG, TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS
 
 
 # Note: stability_tracker, stability_path, make_stability_info, and 
@@ -38,6 +38,41 @@ class TestStabilityTrackerInit:
         tracker = StabilityTracker(persistence_path=nested_path)
         tracker.save()
         assert nested_path.parent.exists()
+
+
+class TestTierConstants:
+    """Tests that derived tier constants are consistent with TIER_CONFIG."""
+    
+    def test_thresholds_match_tier_config(self):
+        """TIER_THRESHOLDS should be derived from TIER_CONFIG entry_n values."""
+        expected = {k: v['entry_n'] for k, v in TIER_CONFIG.items()}
+        assert TIER_THRESHOLDS == expected
+    
+    def test_tier_order_includes_all_tiers_and_active(self):
+        """TIER_ORDER should include all cache tiers plus active."""
+        assert set(TIER_ORDER) == set(CACHE_TIERS) | {'active'}
+    
+    def test_cache_tiers_excludes_active(self):
+        """CACHE_TIERS should not include 'active'."""
+        assert 'active' not in CACHE_TIERS
+        assert set(CACHE_TIERS) == set(TIER_CONFIG.keys())
+    
+    def test_tier_names_covers_all_tiers(self):
+        """TIER_NAMES should have entries for all tiers including active."""
+        assert set(TIER_NAMES.keys()) == set(TIER_ORDER)
+    
+    def test_context_builder_reexports_match(self):
+        """context_builder re-exports should be the same objects."""
+        from ac.llm.context_builder import (
+            TIER_THRESHOLDS as CB_THRESHOLDS,
+            TIER_NAMES as CB_NAMES,
+            TIER_ORDER as CB_ORDER,
+            CACHE_TIERS as CB_CACHE,
+        )
+        assert CB_THRESHOLDS is TIER_THRESHOLDS
+        assert CB_NAMES is TIER_NAMES
+        assert CB_ORDER is TIER_ORDER
+        assert CB_CACHE is CACHE_TIERS
 
 
 class TestStabilityTrackerRippleBasics:
