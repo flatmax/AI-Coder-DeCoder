@@ -185,9 +185,9 @@ export function renderPromptView(component) {
                   .value=${component.inputValue}
                   @input=${component.handleInput}
                   @keydown=${component.handleKeyDown}
-                  ?disabled=${component.isStreaming}
+                  ?disabled=${component.isStreaming || component.isCompacting}
                 ></textarea>
-                ${component.isStreaming 
+                ${component.isStreaming || component.isCompacting
                   ? html`<button class="send-btn stop-btn" @click=${() => component.stopStreaming()}>Stop</button>`
                   : html`<button class="send-btn" @click=${component.sendMessage}>Send</button>`
                 }

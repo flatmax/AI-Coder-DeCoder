@@ -24,6 +24,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
     return {
       ...super.properties,
       isStreaming: { type: Boolean },
+      isCompacting: { type: Boolean },
       _hudVisible: { type: Boolean },
       _hudData: { type: Object }
     };
@@ -32,9 +33,11 @@ export const StreamingMixin = (superClass) => class extends superClass {
   initStreaming() {
     this._streamingRequests = new Map();
     this.isStreaming = false;
+    this.isCompacting = false;
     this._hudVisible = false;
     this._hudData = null;
     this._hudTimeout = null;
+    this._streamingTimeout = null;
   }
 
   /**
@@ -55,6 +58,8 @@ export const StreamingMixin = (superClass) => class extends superClass {
   async stopStreaming() {
     if (this._streamingRequests.size === 0) return;
     
+    this._clearStreamingWatchdog();
+    
     // Get the first (and typically only) streaming request
     const [requestId] = this._streamingRequests.keys();
     
@@ -74,8 +79,8 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (event.type === 'compaction_start') {
       // Add a system message indicating compaction is starting
       this.addMessage('assistant', event.message);
-      // Disable input during compaction (same as streaming)
-      this.isStreaming = true;
+      // Disable input during compaction (separate from streaming flag)
+      this.isCompacting = true;
     } else if (event.type === 'compaction_complete') {
       // Handle compaction completion by rebuilding the message history
       const tokensSaved = event.tokens_saved.toLocaleString();
@@ -136,7 +141,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
       this.messageHistory = newHistory;
       
       // Re-enable input after compaction
-      this.isStreaming = false;
+      this.isCompacting = false;
       
       console.log(`📋 History compacted: ${event.case}, now showing ${newHistory.length} messages`);
     } else if (event.type === 'compaction_error') {
@@ -155,7 +160,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
         ];
       }
       // Re-enable input after compaction error
-      this.isStreaming = false;
+      this.isCompacting = false;
     }
   }
 
@@ -168,6 +173,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
     const request = this._streamingRequests.get(requestId);
     if (!request) return;
     
+    this._clearStreamingWatchdog();
     this._streamingRequests.delete(requestId);
     this.isStreaming = false;
     
@@ -385,6 +391,31 @@ export const StreamingMixin = (superClass) => class extends superClass {
     }
     
     return editResults;
+  }
+
+  /**
+   * Start a watchdog timer that forces recovery if streamComplete is never received.
+   */
+  _startStreamingWatchdog() {
+    this._clearStreamingWatchdog();
+    this._streamingTimeout = setTimeout(() => {
+      if (this.isStreaming) {
+        console.warn('Streaming timeout - forcing recovery');
+        this.isStreaming = false;
+        this._streamingRequests.clear();
+        this.addMessage('assistant', '⚠️ Response timed out. Please try again.');
+      }
+    }, 5 * 60 * 1000);
+  }
+
+  /**
+   * Clear the streaming watchdog timer.
+   */
+  _clearStreamingWatchdog() {
+    if (this._streamingTimeout) {
+      clearTimeout(this._streamingTimeout);
+      this._streamingTimeout = null;
+    }
   }
 
   /**
