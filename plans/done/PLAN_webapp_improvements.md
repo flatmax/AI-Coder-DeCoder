@@ -1,5 +1,5 @@
 # Plan: Webapp Code Improvements
- 
+
 ## Overview
 Address 10 identified code quality, performance, and maintainability issues in the webapp frontend.
 
@@ -125,10 +125,10 @@ Surface errors that are currently swallowed.
 
 - [x] **#6** — Add error feedback for `handleGitOperation` and `loadFileTree` failures via `addMessage()`.
 
-### Phase 5: Template Refactor (30 min)
+### Phase 5: Template Refactor (30 min) ✅
 Biggest structural change — do last when everything else is stable.
 
-- [ ] **#3** — Split PromptViewTemplate.js into focused modules
+- [x] **#3** — Split PromptViewTemplate.js into focused modules. Extracted `HudTemplate.js`, `UrlChipsTemplate.js`, `HistoryBarTemplate.js`, `SnippetTemplate.js`. `renderResizeHandles()` and `renderPanelResizer()` remain in `PromptViewTemplate.js`. Main `renderPromptView()` imports from all sub-modules.
 
 **Verify**: Full manual pass — HUD, URL chips, snippets, history bar, resize handles, all tabs, streaming. Verify no dead imports remain (grep for old import paths).
 
