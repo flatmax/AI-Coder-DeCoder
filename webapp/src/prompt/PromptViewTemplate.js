@@ -176,6 +176,17 @@ export function renderPromptView(component) {
               ` : ''}
               ${renderUrlChips(component)}
               <div class="input-area">
+                ${component._showHistorySearch && component._historySearchResults.length > 0 ? html`
+                  <div class="history-search-dropdown">
+                    ${component._historySearchResults.map((result, i) => html`
+                      <div class="history-search-item ${i === component._historySearchIndex ? 'selected' : ''}"
+                           @click=${() => component._selectHistorySearchResult(i)}
+                           @mouseenter=${() => { component._historySearchIndex = i; component.requestUpdate(); }}>
+                        <span class="history-search-preview">${result.preview}</span>
+                      </div>
+                    `)}
+                  </div>
+                ` : ''}
                 <div class="input-buttons-stack">
                   <speech-to-text @transcript=${(e) => component.handleSpeechTranscript(e)}></speech-to-text>
                   ${renderSnippetButtons(component)}
