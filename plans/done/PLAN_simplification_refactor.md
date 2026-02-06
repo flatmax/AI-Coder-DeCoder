@@ -88,26 +88,22 @@ The only value `Indexer` adds is:
 
 ---
 
-## Phase 7: Inline `FileContextMixin` (Small)
+## Phase 7: Inline `FileContextMixin` ✅ DONE
 
 ### Problem
-`FileContextMixin` in `ac/llm/file_context.py` has only 2 methods:
+`FileContextMixin` in `ac/llm/file_context.py` had only 2 methods:
 `load_files_as_context` and `list_files_in_context`. Both are simple
-`self.repo` wrappers. Having a separate mixin file for 2 methods adds
+`self.repo` wrappers. Having a separate mixin file for 2 methods added
 indirection without benefit.
 
-### Changes
-1. Move both methods directly into `LiteLLM` class body in `llm.py`.
-2. Remove `FileContextMixin` from the inheritance list.
-3. Delete `ac/llm/file_context.py`.
+### Changes (completed)
+1. Moved both methods directly into `LiteLLM` class body in `llm.py`.
+2. Removed `FileContextMixin` from the inheritance list and import.
+3. Deleted `ac/llm/file_context.py`.
 
 ### Files Modified
 - `ac/llm/llm.py`
-- `ac/llm/file_context.py` (delete)
-
-### Tests
-- Any test calling `load_files_as_context` or `list_files_in_context`
-  should pass unchanged.
+- `ac/llm/file_context.py` (deleted)
 
 ---
 

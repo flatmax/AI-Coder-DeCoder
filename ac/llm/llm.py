@@ -2,7 +2,6 @@ import os
 
 from .config import ConfigMixin
 from .context_builder import ContextBuilderMixin, TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS
-from .file_context import FileContextMixin
 from .chat import ChatMixin
 from .streaming import StreamingMixin
 from .history_mixin import HistoryMixin
@@ -10,7 +9,7 @@ from ..context import ContextManager
 from ..url_handler import URLFetcher, URLDetector, URLType, SummaryType
 
 
-class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, StreamingMixin, HistoryMixin):
+class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, HistoryMixin):
     """LiteLLM wrapper for AI completions with file context support."""
     
     def __init__(self, repo=None, config_path=None):
@@ -333,6 +332,75 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         for child in node.get('children', []):
             paths.extend(self._collect_file_paths(child, current_path))
         return paths
+    
+    def load_files_as_context(self, file_paths, version='working'):
+        """
+        Load multiple files from the repository as context.
+        
+        Args:
+            file_paths: List of file paths relative to repo root
+            version: 'working', 'HEAD', or commit hash
+        
+        Returns:
+            List of dicts with file path and content
+        """
+        if not self.repo:
+            return [{'error': 'No repository configured'}]
+        
+        files_content = []
+        for file_path in file_paths:
+            if self.repo.is_binary_file(file_path):
+                files_content.append({
+                    'path': file_path,
+                    'content': None,
+                    'is_binary': True,
+                    'error': 'Binary file - content not loaded as text'
+                })
+                continue
+            
+            content = self.repo.get_file_content(file_path, version)
+            if isinstance(content, dict) and 'error' in content:
+                files_content.append({
+                    'path': file_path,
+                    'content': None,
+                    'error': content['error']
+                })
+            else:
+                files_content.append({
+                    'path': file_path,
+                    'content': content,
+                    'is_binary': False
+                })
+        
+        return files_content
+    
+    def list_files_in_context(self, file_paths):
+        """
+        Check which files exist and can be loaded.
+        
+        Args:
+            file_paths: List of file paths to check
+        
+        Returns:
+            Dict with 'valid' and 'invalid' file lists
+        """
+        if not self.repo:
+            return {'error': 'No repository configured'}
+        
+        valid = []
+        invalid = []
+        
+        for file_path in file_paths:
+            if self.repo.file_exists(file_path):
+                is_binary = self.repo.is_binary_file(file_path)
+                valid.append({
+                    'path': file_path,
+                    'is_binary': is_binary
+                })
+            else:
+                invalid.append(file_path)
+        
+        return {'valid': valid, 'invalid': invalid}
     
     def save_symbol_map(self, file_paths=None, output_path=None):
         """
