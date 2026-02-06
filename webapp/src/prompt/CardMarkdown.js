@@ -2,7 +2,10 @@ import { LitElement, html, css } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { marked } from 'marked';
 import './PrismSetup.js';
-import { computeLineDiff, computeCharDiff } from '../utils/diff.js';
+import { escapeHtml } from '../utils/formatters.js';
+import { parseEditBlocks, getEditResultForFile } from './EditBlockParser.js';
+import { renderEditBlock, renderEditsSummary } from './EditBlockRenderer.js';
+import { highlightFileMentions, renderFilesSummary } from './FileMentionHelper.js';
 
 export class CardMarkdown extends LitElement {
   static properties = {
@@ -398,7 +401,7 @@ export class CardMarkdown extends LitElement {
     if (!this.content) return '';
     
     if (this.role === 'user') {
-      return this.escapeHtml(this.content).replace(/\n/g, '<br>');
+      return escapeHtml(this.content).replace(/\n/g, '<br>');
     }
     
     // Check if content contains edit blocks
@@ -426,186 +429,14 @@ export class CardMarkdown extends LitElement {
     return content;
   }
 
-  /**
-   * Parse edit blocks from content and return structured data.
-   * Format: file.py\n««« EDIT\n...\n═══════ REPL\n...\n»»» EDIT END
-   */
-  parseEditBlocks(content) {
-    const blocks = [];
-    const lines = content.split('\n');
-    
-    let state = 'IDLE';
-    let currentBlock = null;
-    let potentialPath = null;
-    let editLines = [];
-    let replLines = [];
-    let blockStartIndex = 0;
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-      
-      if (state === 'IDLE') {
-        if (trimmed && !trimmed.startsWith('```') && !trimmed.startsWith('#')) {
-          potentialPath = trimmed;
-          state = 'EXPECT_START';
-        }
-      } else if (state === 'EXPECT_START') {
-        if (trimmed === '««« EDIT') {
-          blockStartIndex = i - 1; // Include the file path line
-          currentBlock = { filePath: potentialPath, startIndex: blockStartIndex };
-          editLines = [];
-          state = 'EDIT_SECTION';
-        } else if (trimmed) {
-          potentialPath = trimmed;
-        } else {
-          state = 'IDLE';
-          potentialPath = null;
-        }
-      } else if (state === 'EDIT_SECTION') {
-        if (trimmed === '═══════ REPL') {
-          currentBlock.editLines = editLines.join('\n');
-          replLines = [];
-          state = 'REPL_SECTION';
-        } else {
-          editLines.push(line);
-        }
-      } else if (state === 'REPL_SECTION') {
-        if (trimmed === '»»» EDIT END') {
-          currentBlock.replLines = replLines.join('\n');
-          currentBlock.endIndex = i;
-          blocks.push(currentBlock);
-          state = 'IDLE';
-          currentBlock = null;
-          potentialPath = null;
-        } else {
-          replLines.push(line);
-        }
-      }
-    }
-    
-    return blocks;
-  }
 
-  /**
-   * Get edit result for a specific file path.
-   */
-  getEditResultForFile(filePath) {
-    if (!this.editResults || this.editResults.length === 0) return null;
-    // Normalize paths for comparison (handle ./ prefix, backslashes, etc.)
-    const normalize = (p) => p?.replace(/^\.\//, '').replace(/\\/g, '/').trim();
-    const normalizedSearch = normalize(filePath);
-    return this.editResults.find(r => normalize(r.file_path) === normalizedSearch);
-  }
-
-  /**
-   * Render an edit block as HTML with unified diff view.
-   */
-  renderEditBlock(block) {
-    const result = this.getEditResultForFile(block.filePath);
-    const status = result ? result.status : 'pending';
-    const statusLabel = status === 'applied' ? '✓ Applied' : 
-                        status === 'failed' ? '✗ Failed' : 
-                        '○ Pending';
-    
-    let errorHtml = '';
-    if (result && result.status === 'failed' && result.reason) {
-      const lineInfo = result.estimated_line ? ` (near line ${result.estimated_line})` : '';
-      errorHtml = `<div class="edit-block-error">Error: ${this.escapeHtml(result.reason)}${lineInfo}</div>`;
-    }
-    
-    const lineInfo = result && result.estimated_line 
-      ? `<span class="edit-block-line-info">line ${result.estimated_line}</span>` 
-      : '';
-    
-    // Compute unified diff
-    const diffHtml = this.formatUnifiedDiff(block.editLines, block.replLines);
-    
-    // Get search context from first non-empty line
-    const editLines = block.editLines ? block.editLines.split('\n') : [];
-    const searchContext = editLines.find(line => line.trim().length > 0) || '';
-    const encodedContext = this.escapeHtml(searchContext).replace(/"/g, '&quot;');
-    
-    return `
-      <div class="edit-block" data-file="${this.escapeHtml(block.filePath)}">
-        <div class="edit-block-header">
-          <span class="edit-block-file" data-file="${this.escapeHtml(block.filePath)}" data-context="${encodedContext}">${this.escapeHtml(block.filePath)}</span>
-          <div>
-            ${lineInfo}
-            <span class="edit-block-status ${status}">${statusLabel}</span>
-          </div>
-        </div>
-        <div class="edit-block-content">
-          ${diffHtml}
-        </div>
-        ${errorHtml}
-      </div>
-    `;
-  }
-
-  /**
-   * Format edit/repl content as unified diff HTML using LCS algorithm.
-   * Includes word-level inline highlighting for modified lines.
-   */
-  formatUnifiedDiff(editContent, replContent) {
-    const oldLines = editContent ? editContent.split('\n') : [];
-    const newLines = replContent ? replContent.split('\n') : [];
-    
-    // Handle empty cases
-    if (oldLines.length === 0 && newLines.length === 0) {
-      return '';
-    }
-    
-    const diff = computeLineDiff(oldLines, newLines);
-    
-    const lines = diff.map(entry => {
-      const prefix = entry.type === 'add' ? '+' : entry.type === 'remove' ? '-' : ' ';
-      
-      // Check if this line has inline highlighting info
-      if (entry.pair?.charDiff) {
-        const highlightedContent = this.renderInlineHighlight(entry.pair.charDiff, entry.type);
-        return `<span class="diff-line ${entry.type}"><span class="diff-line-prefix">${prefix}</span>${highlightedContent}</span>`;
-      }
-      
-      const escapedLine = this.escapeHtml(entry.line);
-      return `<span class="diff-line ${entry.type}"><span class="diff-line-prefix">${prefix}</span>${escapedLine}</span>`;
-    });
-    
-    return lines.join('\n');
-  }
-
-  /**
-   * Render line content with inline character-level highlighting.
-   * @param {Array<{type: 'same'|'add'|'remove', text: string}>} segments
-   * @param {string} lineType - 'add' or 'remove'
-   */
-  renderInlineHighlight(segments, lineType) {
-    return segments.map(segment => {
-      const escapedText = this.escapeHtml(segment.text);
-      
-      // For 'same' segments, just return the text
-      if (segment.type === 'same') {
-        return escapedText;
-      }
-      
-      // For changed segments, wrap in highlight span
-      // On remove lines, highlight 'remove' segments
-      // On add lines, highlight 'add' segments
-      if ((lineType === 'remove' && segment.type === 'remove') ||
-          (lineType === 'add' && segment.type === 'add')) {
-        return `<span class="diff-change">${escapedText}</span>`;
-      }
-      
-      return escapedText;
-    }).join('');
-  }
 
   /**
    * Process content with edit blocks by extracting them, processing markdown
    * on the remaining text, then reinserting rendered edit blocks.
    */
   processContentWithEditBlocks(content) {
-    const blocks = this.parseEditBlocks(content);
+    const blocks = parseEditBlocks(content);
     
     if (blocks.length === 0) {
       return marked.parse(content);
@@ -617,40 +448,32 @@ export class CardMarkdown extends LitElement {
     let lastEnd = 0;
     
     for (const block of blocks) {
-      // Text before this edit block
       if (block.startIndex > lastEnd) {
         const textLines = lines.slice(lastEnd, block.startIndex);
         segments.push({ type: 'text', content: textLines.join('\n') });
       }
-      // The edit block itself
       segments.push({ type: 'edit', block });
       lastEnd = block.endIndex + 1;
     }
     
-    // Text after the last edit block
     if (lastEnd < lines.length) {
       const textLines = lines.slice(lastEnd);
       segments.push({ type: 'text', content: textLines.join('\n') });
     }
     
-    // Process each segment appropriately
     let result = '';
     for (const segment of segments) {
       if (segment.type === 'text') {
         result += marked.parse(segment.content);
       } else {
-        result += this.renderEditBlock(segment.block);
+        result += renderEditBlock(segment.block, this.editResults);
       }
     }
     
     return result;
   }
 
-  escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
+
 
   wrapCodeBlocksWithCopyButton(htmlContent) {
     const preCodeRegex = /(<pre[^>]*>)(\s*<code[^>]*>)([\s\S]*?)(<\/code>\s*<\/pre>)/gi;
@@ -660,95 +483,17 @@ export class CardMarkdown extends LitElement {
   }
 
   highlightFileMentions(htmlContent) {
-    if (!this.mentionedFiles || this.mentionedFiles.length === 0) {
-      return htmlContent;
-    }
-    
-    let result = htmlContent;
-    this._foundFiles = [];  // Reset found files
-    
-    // Sort by length descending to match longer paths first
-    const sortedFiles = [...this.mentionedFiles].sort((a, b) => b.length - a.length);
-    
-    for (const filePath of sortedFiles) {
-      // Escape special regex characters in the file path
-      const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      
-      // Match the file path but not if it's already inside an HTML tag or anchor
-      // Also avoid matching inside code blocks (already processed)
-      const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
-      
-      if (regex.test(htmlContent)) {
-        this._foundFiles.push(filePath);
-        const isInContext = this.selectedFiles && this.selectedFiles.includes(filePath);
-        const contextClass = isInContext ? ' in-context' : '';
-        // Reset regex lastIndex after test()
-        regex.lastIndex = 0;
-        result = result.replace(regex, `<span class="file-mention${contextClass}" data-file="${filePath}">$1</span>`);
-      }
-    }
-    
+    const { html: result, foundFiles } = highlightFileMentions(htmlContent, this.mentionedFiles, this.selectedFiles);
+    this._foundFiles = foundFiles;
     return result;
   }
 
   renderEditsSummary() {
-    if (!this.editResults || this.editResults.length === 0) {
-      return '';
-    }
-
-    const tagsHtml = this.editResults.map(result => {
-      const isApplied = result.status === 'applied';
-      const statusClass = isApplied ? 'applied' : 'failed';
-      const icon = isApplied ? '✓' : '✗';
-      const tooltip = isApplied ? 'Applied successfully' : `Failed: ${result.reason || 'Unknown error'}`;
-      return `<span class="edit-tag ${statusClass}" title="${this.escapeHtml(tooltip)}" data-file="${this.escapeHtml(result.file_path)}"><span class="edit-tag-icon">${icon}</span>${this.escapeHtml(result.file_path)}</span>`;
-    }).join('');
-
-    const appliedCount = this.editResults.filter(r => r.status === 'applied').length;
-    const failedCount = this.editResults.length - appliedCount;
-    
-    let summaryText = '';
-    if (appliedCount > 0 && failedCount > 0) {
-      summaryText = `${appliedCount} applied, ${failedCount} failed`;
-    } else if (appliedCount > 0) {
-      summaryText = `${appliedCount} edit${appliedCount > 1 ? 's' : ''} applied`;
-    } else {
-      summaryText = `${failedCount} edit${failedCount > 1 ? 's' : ''} failed`;
-    }
-
-    return `
-      <div class="edits-summary">
-        <div class="edits-summary-header">✏️ Edits: ${summaryText}</div>
-        <div class="edits-summary-list">${tagsHtml}</div>
-      </div>
-    `;
+    return renderEditsSummary(this.editResults);
   }
 
   renderFilesSummary() {
-    if (this._foundFiles.length === 0) {
-      return '';
-    }
-
-    const notInContextFiles = this._foundFiles.filter(f => !this.selectedFiles || !this.selectedFiles.includes(f));
-    const hasFilesToAdd = notInContextFiles.length > 1;
-
-    const filesHtml = this._foundFiles.map(filePath => {
-      const isInContext = this.selectedFiles && this.selectedFiles.includes(filePath);
-      const chipClass = isInContext ? 'in-context' : 'not-in-context';
-      const icon = isInContext ? '✓' : '+';
-      return `<span class="file-chip ${chipClass}" data-file="${this.escapeHtml(filePath)}"><span class="chip-icon">${icon}</span>${this.escapeHtml(filePath)}</span>`;
-    }).join('');
-
-    const selectAllBtn = hasFilesToAdd 
-      ? `<button class="select-all-btn" data-files='${JSON.stringify(notInContextFiles)}'>+ Add All (${notInContextFiles.length})</button>`
-      : '';
-
-    return `
-      <div class="files-summary">
-        <div class="files-summary-header">📁 Files Referenced ${selectAllBtn}</div>
-        <div class="files-summary-list">${filesHtml}</div>
-      </div>
-    `;
+    return renderFilesSummary(this._foundFiles, this.selectedFiles);
   }
 
   handleClick(e) {
@@ -771,7 +516,7 @@ export class CardMarkdown extends LitElement {
       const filePath = editBlockFile.dataset.file;
       const searchContext = editBlockFile.dataset.context;
       if (filePath) {
-        const result = this.getEditResultForFile(filePath);
+        const result = getEditResultForFile(this.editResults, filePath);
         this.dispatchEvent(new CustomEvent('edit-block-click', {
           detail: { 
             path: filePath,
@@ -791,7 +536,7 @@ export class CardMarkdown extends LitElement {
     if (editTag) {
       const filePath = editTag.dataset.file;
       if (filePath) {
-        const result = this.getEditResultForFile(filePath);
+        const result = getEditResultForFile(this.editResults, filePath);
         this.dispatchEvent(new CustomEvent('edit-block-click', {
           detail: { 
             path: filePath,
@@ -844,7 +589,7 @@ export class CardMarkdown extends LitElement {
     if (editBlock) {
       const filePath = editBlock.dataset.file;
       if (filePath) {
-        const result = this.getEditResultForFile(filePath);
+        const result = getEditResultForFile(this.editResults, filePath);
         this.dispatchEvent(new CustomEvent('edit-block-click', {
           detail: { 
             path: filePath,

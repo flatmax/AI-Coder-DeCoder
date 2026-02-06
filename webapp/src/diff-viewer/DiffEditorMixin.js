@@ -199,10 +199,6 @@ export const DiffEditorMixin = (superClass) => class extends superClass {
     return true;
   }
 
-  getOpenFilePaths() {
-    return this.files.map(f => f.path);
-  }
-
   clearFiles() {
     this.files = [];
     this.selectedFile = null;
