@@ -2,7 +2,7 @@ import { LitElement, html } from 'lit';
 import { contextViewerStyles } from './ContextViewerStyles.js';
 import { renderContextViewer } from './ContextViewerTemplate.js';
 import { RpcMixin } from '../utils/rpc.js';
-import { ViewerDataMixin } from './ViewerDataMixin.js';
+import { ViewerDataMixin, ViewerDataProperties } from './ViewerDataMixin.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -16,7 +16,7 @@ export class ContextViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
   static properties = {
     visible: { type: Boolean },
     expandedSections: { type: Object },
-    ...ViewerDataMixin.mixinProperties,
+    ...ViewerDataProperties,
   };
 
   static styles = contextViewerStyles;

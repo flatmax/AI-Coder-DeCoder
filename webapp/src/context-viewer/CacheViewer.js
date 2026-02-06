@@ -3,7 +3,7 @@ import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
 import { RpcMixin } from '../utils/rpc.js';
 import { getTierColor } from '../utils/tierConfig.js';
-import { ViewerDataMixin } from './ViewerDataMixin.js';
+import { ViewerDataMixin, ViewerDataProperties } from './ViewerDataMixin.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -27,7 +27,7 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
     // Search/filter
     searchQuery: { type: String },
     
-    ...ViewerDataMixin.mixinProperties,
+    ...ViewerDataProperties,
   };
 
   static styles = cacheViewerStyles;

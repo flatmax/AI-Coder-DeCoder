@@ -9,30 +9,28 @@
  * @provides getIncludedUrls, refreshBreakdown, viewUrl, closeUrlModal,
  *   toggleUrlIncluded, isUrlIncluded, removeUrl, viewSymbolMap, closeSymbolMapModal
  */
+export const ViewerDataProperties = {
+  breakdown: { type: Object },
+  isLoading: { type: Boolean },
+  error: { type: String },
+
+  // URL modal
+  selectedUrl: { type: String },
+  showUrlModal: { type: Boolean },
+  urlContent: { type: Object },
+
+  // Symbol map modal
+  showSymbolMapModal: { type: Boolean },
+  symbolMapContent: { type: String },
+  isLoadingSymbolMap: { type: Boolean },
+
+  // From parent
+  selectedFiles: { type: Array },
+  fetchedUrls: { type: Array },
+  excludedUrls: { type: Object },
+};
+
 export const ViewerDataMixin = (superClass) => class extends superClass {
-
-  static get mixinProperties() {
-    return {
-      breakdown: { type: Object },
-      isLoading: { type: Boolean },
-      error: { type: String },
-
-      // URL modal
-      selectedUrl: { type: String },
-      showUrlModal: { type: Boolean },
-      urlContent: { type: Object },
-
-      // Symbol map modal
-      showSymbolMapModal: { type: Boolean },
-      symbolMapContent: { type: String },
-      isLoadingSymbolMap: { type: Boolean },
-
-      // From parent
-      selectedFiles: { type: Array },
-      fetchedUrls: { type: Array },
-      excludedUrls: { type: Object },
-    };
-  }
 
   initViewerData() {
     this.breakdown = null;
