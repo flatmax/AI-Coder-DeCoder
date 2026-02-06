@@ -241,13 +241,9 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         if file_paths:
             self._context_manager.file_context.clear()
             for path in file_paths:
-                try:
-                    content = self.repo.get_file_content(path) if self.repo else None
-                    if isinstance(content, dict) and 'error' in content:
-                        continue  # Skip files that don't exist
+                content = self._get_file_content_safe(path)
+                if content:
                     self._context_manager.file_context.add_file(path, content)
-                except FileNotFoundError:
-                    pass  # Skip files that don't exist
         
         # Build system prompt for token counting
         from ..prompts import build_system_prompt

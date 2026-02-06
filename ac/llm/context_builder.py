@@ -15,6 +15,33 @@ from ..context.stability_tracker import (
 class ContextBuilderMixin:
     """Mixin for building cache-tiered context structures."""
     
+    @staticmethod
+    def _is_error_response(result) -> bool:
+        """Check if a result is an error dict from the repo layer."""
+        return isinstance(result, dict) and 'error' in result
+    
+    def _get_file_content_safe(self, path: str, version='working') -> str | None:
+        """Get file content from repo, returning None on error.
+        
+        Handles the repo layer's error-dict pattern in one place.
+        
+        Args:
+            path: File path relative to repo root
+            version: 'working', 'HEAD', or commit hash
+            
+        Returns:
+            File content string, or None if unavailable
+        """
+        if not self.repo:
+            return None
+        try:
+            content = self.repo.get_file_content(path, version=version)
+            if self._is_error_response(content) or not content:
+                return None
+            return content
+        except Exception:
+            return None
+    
     def _safe_count_tokens(self, content: str) -> int:
         """Count tokens with error handling.
         
@@ -234,14 +261,8 @@ class ContextBuilderMixin:
         files_with_refs = []
         for f in all_files:
             ref_count = len(file_refs.get(f, set()))
-            try:
-                content = self.repo.get_file_content(f, version='working')
-                if content and not (isinstance(content, dict) and 'error' in content):
-                    tokens = tc.count(f"{f}\n```\n{content}\n```\n")
-                else:
-                    tokens = 0
-            except Exception:
-                tokens = 0
+            content = self._get_file_content_safe(f)
+            tokens = tc.count(f"{f}\n```\n{content}\n```\n") if content else 0
             files_with_refs.append((f, ref_count, tokens))
         
         # Also include symbol entries
@@ -276,29 +297,26 @@ class ContextBuilderMixin:
         stability = self._get_stability_tracker()
         
         for path in file_paths:
-            try:
-                content = self.repo.get_file_content(path)
-                if content and not (isinstance(content, dict) and 'error' in content):
-                    path_tokens = self._safe_count_tokens(
-                        f"{path}\n```\n{content}\n```\n"
-                    )
-                    total_tokens += path_tokens
-                    
-                    info = {'stable_count': 0, 'next_tier': 'L3', 
-                            'next_threshold': 3, 'progress': 0.0}
-                    if stability:
-                        info = stability.get_item_info(path)
-                    
-                    file_items.append({
-                        "path": path,
-                        "tokens": path_tokens,
-                        "stable_count": info['stable_count'],
-                        "next_tier": info['next_tier'],
-                        "next_threshold": info['next_threshold'],
-                        "progress": info['progress'],
-                    })
-            except Exception:
-                pass
+            content = self._get_file_content_safe(path)
+            if content:
+                path_tokens = self._safe_count_tokens(
+                    f"{path}\n```\n{content}\n```\n"
+                )
+                total_tokens += path_tokens
+                
+                info = {'stable_count': 0, 'next_tier': 'L3', 
+                        'next_threshold': 3, 'progress': 0.0}
+                if stability:
+                    info = stability.get_item_info(path)
+                
+                file_items.append({
+                    "path": path,
+                    "tokens": path_tokens,
+                    "stable_count": info['stable_count'],
+                    "next_tier": info['next_tier'],
+                    "next_threshold": info['next_threshold'],
+                    "progress": info['progress'],
+                })
         
         return file_items, total_tokens
     

@@ -182,7 +182,7 @@ class StreamingMixin:
                 for path in file_paths:
                     if self._context_manager and self.repo:
                         content = self.repo.get_file_content(path)
-                        if isinstance(content, dict) and 'error' in content:
+                        if self._is_error_response(content):
                             # Shouldn't happen after validation, but handle gracefully
                             await self._send_stream_complete(request_id, {
                                 "error": content['error'],
@@ -633,14 +633,9 @@ class StreamingMixin:
         """Format files for inclusion in a cache block."""
         parts = [header]
         for path in file_paths:
-            try:
-                content = self.repo.get_file_content(path, version='working')
-                if isinstance(content, dict) and 'error' in content:
-                    continue
-                if content:
-                    parts.append(f"{path}\n```\n{content}\n```")
-            except Exception as e:
-                print(f"⚠️ Could not read {path}: {e}")
+            content = self._get_file_content_safe(path)
+            if content:
+                parts.append(f"{path}\n```\n{content}\n```")
         
         # Return empty string if only header (no files added)
         if len(parts) == 1:
@@ -743,7 +738,7 @@ class StreamingMixin:
                 return None
             else:
                 # Regular file
-                return self.repo.get_file_content(item, version='working')
+                return self._get_file_content_safe(item)
         
         def get_item_tokens(item):
             """Get token count for an item - files or symbol blocks."""
@@ -778,12 +773,9 @@ class StreamingMixin:
                 return 0
             else:
                 # Regular file - count tokens in formatted content
-                try:
-                    content = self.repo.get_file_content(item, version='working')
-                    if content and not (isinstance(content, dict) and 'error' in content):
-                        return tc.count(f"{item}\n```\n{content}\n```\n")
-                except Exception:
-                    pass
+                content = self._get_file_content_safe(item)
+                if content:
+                    return tc.count(f"{item}\n```\n{content}\n```\n")
                 return 0
         
         # Determine modified items (files that were edited)

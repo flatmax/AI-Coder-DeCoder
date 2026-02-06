@@ -15,11 +15,10 @@ class TestStabilityTrackerInit:
     """Tests for StabilityTracker initialization."""
     
     def test_init_with_default_thresholds(self, stability_path):
-        """Default thresholds use legacy 2-tier mode."""
+        """Default thresholds use 4-tier config."""
         tracker = StabilityTracker(persistence_path=stability_path)
-        # Legacy mode: L1=3, L0=5
-        assert tracker.get_thresholds() == {'L1': 3, 'L0': 5}
-        assert tracker.get_tier_order() == ['L1', 'L0']
+        assert tracker.get_thresholds() == {'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        assert tracker.get_tier_order() == ['L3', 'L2', 'L1', 'L0']
     
     def test_init_with_custom_thresholds(self, stability_tracker):
         """Custom thresholds override legacy parameters."""
