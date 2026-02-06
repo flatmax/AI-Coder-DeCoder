@@ -3,9 +3,10 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { marked } from 'marked';
 import './PrismSetup.js';
 import { escapeHtml } from '../utils/formatters.js';
-import { parseEditBlocks, getEditResultForFile } from './EditBlockParser.js';
+import { parseEditBlocks } from './EditBlockParser.js';
 import { renderEditBlock, renderEditsSummary } from './EditBlockRenderer.js';
 import { highlightFileMentions, renderFilesSummary } from './FileMentionHelper.js';
+import { dispatchClick } from './CardClickHandler.js';
 
 export class CardMarkdown extends LitElement {
   static properties = {
@@ -497,112 +498,7 @@ export class CardMarkdown extends LitElement {
   }
 
   handleClick(e) {
-    const fileMention = e.target.closest('.file-mention');
-    if (fileMention) {
-      const filePath = fileMention.dataset.file;
-      if (filePath) {
-        this.dispatchEvent(new CustomEvent('file-mention-click', {
-          detail: { path: filePath },
-          bubbles: true,
-          composed: true
-        }));
-      }
-      return;
-    }
-    
-    // Handle edit block file path clicks - check BEFORE file-chip since edit-tag might be nested
-    const editBlockFile = e.target.closest('.edit-block-file');
-    if (editBlockFile) {
-      const filePath = editBlockFile.dataset.file;
-      const searchContext = editBlockFile.dataset.context;
-      if (filePath) {
-        const result = getEditResultForFile(this.editResults, filePath);
-        this.dispatchEvent(new CustomEvent('edit-block-click', {
-          detail: { 
-            path: filePath,
-            line: result?.estimated_line || 1,
-            status: result?.status || 'pending',
-            searchContext: searchContext || null
-          },
-          bubbles: true,
-          composed: true
-        }));
-      }
-      return;
-    }
-
-    // Handle edit tag clicks
-    const editTag = e.target.closest('.edit-tag');
-    if (editTag) {
-      const filePath = editTag.dataset.file;
-      if (filePath) {
-        const result = getEditResultForFile(this.editResults, filePath);
-        this.dispatchEvent(new CustomEvent('edit-block-click', {
-          detail: { 
-            path: filePath,
-            line: result?.estimated_line || 1,
-            status: result?.status || 'pending',
-            searchContext: null
-          },
-          bubbles: true,
-          composed: true
-        }));
-      }
-      return;
-    }
-
-    // Handle file chip clicks in summary (allow both in-context and not-in-context)
-    const fileChip = e.target.closest('.file-chip');
-    if (fileChip) {
-      const filePath = fileChip.dataset.file;
-      if (filePath) {
-        this.dispatchEvent(new CustomEvent('file-mention-click', {
-          detail: { path: filePath },
-          bubbles: true,
-          composed: true
-        }));
-      }
-      return;
-    }
-
-    // Handle select all button click
-    const selectAllBtn = e.target.closest('.select-all-btn');
-    if (selectAllBtn) {
-      try {
-        const files = JSON.parse(selectAllBtn.dataset.files || '[]');
-        // Dispatch file-mention-click for each file (same as clicking individual chips)
-        for (const filePath of files) {
-          this.dispatchEvent(new CustomEvent('file-mention-click', {
-            detail: { path: filePath },
-            bubbles: true,
-            composed: true
-          }));
-        }
-      } catch (e) {
-        console.error('Failed to parse files:', e);
-      }
-      return;
-    }
-
-    // Handle click on edit block background - navigate to the edit location
-    const editBlock = e.target.closest('.edit-block');
-    if (editBlock) {
-      const filePath = editBlock.dataset.file;
-      if (filePath) {
-        const result = getEditResultForFile(this.editResults, filePath);
-        this.dispatchEvent(new CustomEvent('edit-block-click', {
-          detail: { 
-            path: filePath,
-            line: result?.estimated_line || 1,
-            status: result?.status || 'pending',
-            searchContext: null
-          },
-          bubbles: true,
-          composed: true
-        }));
-      }
-      return;
-    }
+    dispatchClick(e, this);
   }
 
   willUpdate() {
