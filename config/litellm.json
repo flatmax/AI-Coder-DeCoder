@@ -2,8 +2,8 @@
   "env": {
     "AWS_REGION": "us-east-1"
   },
-  "model": "global.anthropic.claude-opus-4-5-20251101-v1:0",
-  "smallerModel": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "model": "bedrock/global.anthropic.claude-opus-4-6-v1",
+  "smallerModel": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0",
   "cacheMinTokens": 1024,
   "cacheBufferMultiplier": 1.5
 }
