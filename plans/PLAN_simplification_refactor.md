@@ -28,97 +28,30 @@ visualization in `get_context_breakdown` — different purpose, not duplicated.
 
 ---
 
-## Phase 3: Extract Stability Update from `_stream_chat` (Medium)
+## Phase 3: Extract Stability Update from `_stream_chat` ✅ DONE
 
-### Problem
-`_stream_chat` is ~200 lines. Lines ~280-380 handle stability tracking after
-a response: collecting active items, defining `get_item_content` and
-`get_item_tokens` closures, calling `update_after_response`, and logging
-promotions/demotions. This is a self-contained concern.
-
-### Changes
-1. Extract `_update_cache_stability(self, file_paths, files_modified)` method
-   on `StreamingMixin` that:
-   - Collects active items (file_paths + symbol entries)
-   - Defines `get_item_content` and `get_item_tokens` closures
-   - Calls `stability.update_after_response(...)`
-   - Logs promotions/demotions
-   - Returns `(promotions, demotions)` for inclusion in result
-
-2. Replace the ~100-line block in `_stream_chat` with:
-   ```python
-   if self._context_manager and self._context_manager.cache_stability:
-       self._update_cache_stability(file_paths, files_modified)
-   ```
-
-### Files Modified
-- `ac/llm/streaming.py`
-
-### Tests
-- Existing tests pass unchanged.
-- The new method can be unit-tested independently with mock stability tracker.
+Extracted `_update_cache_stability(self, file_paths, files_modified)` method
+on `StreamingMixin`. The ~100-line inline block in `_stream_chat` replaced
+with a 2-line conditional call. No behavior change.
 
 ---
 
-## Phase 4: Simplify Deprecated `summarize_history` (Small)
+## Phase 4: Simplify Deprecated `summarize_history` ✅ DONE
 
-### Problem
-`ChatMixin.summarize_history()` is 50+ lines, marked deprecated, and duplicates
-logic now handled by `ContextManager.compact_history_if_needed_sync()`.
-No callers remain — the streaming path uses compaction directly.
-
-### Changes
-1. Replace the method body with a thin wrapper that delegates to compaction:
-   ```python
-   def summarize_history(self):
-       """Deprecated: Use ContextManager.compact_history_if_needed_sync()."""
-       import warnings
-       warnings.warn(
-           "summarize_history() is deprecated. Use compact_history_if_needed_sync().",
-           DeprecationWarning, stacklevel=2
-       )
-       if not self._context_manager:
-           return {"status": "not_needed", "message": "No context manager"}
-       result = self._context_manager.compact_history_if_needed_sync()
-       if result and result.case != "none":
-           return {"status": "summarized", "token_budget": self._context_manager.get_token_budget()}
-       return {"status": "not_needed", "message": "History size is within limits"}
-   ```
-
-2. The old version returned a `summary` field with the raw summary text.
-   No current callers depend on this — the method is not called from the
-   streaming path, frontend, or tests. Safe to drop.
-
-### Files Modified
-- `ac/llm/chat.py`
-
-### Tests
-- Verify deprecation warning is emitted when called.
-- Verify it returns `{"status": "not_needed", ...}` when history is small.
+Replaced 50+ line `summarize_history()` in `ChatMixin` with a thin 10-line
+wrapper that delegates to `ContextManager.compact_history_if_needed_sync()`.
+The old version made its own LLM call for summarization — now it uses
+the compaction system. The `summary` field in the return value was dropped
+(no callers depend on it).
 
 ---
 
-## Phase 5: Move `_session_empty_tier_count` to Instance State (Small)
+## Phase 5: Move `_session_empty_tier_count` to Instance State ✅ DONE
 
-### Problem
-`StreamingMixin._session_empty_tier_count` is a class-level variable mutated
-during streaming. This means all instances share the counter, which is
-surprising and breaks test isolation.
-
-### Changes
-1. Remove the class-level `_session_empty_tier_count = 0` from `StreamingMixin`.
-2. Initialize `self._session_empty_tier_count = 0` in `LiteLLM.__init__`.
-3. Update references in `_build_streaming_messages` and `_print_cache_blocks`
-   to use `self._session_empty_tier_count` instead of `StreamingMixin._session_empty_tier_count`.
-4. Update `get_context_breakdown` in `llm.py` similarly.
-
-### Files Modified
-- `ac/llm/streaming.py`
-- `ac/llm/llm.py`
-
-### Tests
-- Verify two separate `LiteLLM` instances have independent counters.
-- Existing tests pass unchanged.
+Removed class-level `_session_empty_tier_count` from `StreamingMixin`.
+Initialized as `self._session_empty_tier_count = 0` in `LiteLLM.__init__`.
+Updated 3 references in `streaming.py` and 1 in `llm.py` to use `self.`
+instead of `StreamingMixin.`. Each `LiteLLM` instance now has its own counter.
 
 ---
 

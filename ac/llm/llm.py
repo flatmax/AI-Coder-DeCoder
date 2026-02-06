@@ -36,6 +36,9 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
         # Last request tokens for HUD display
         self._last_request_tokens = None
         
+        # Session-level tracking for empty tier statistics
+        self._session_empty_tier_count = 0
+        
         # Load configuration
         self.config = self._load_config(config_path)
         
@@ -1096,7 +1099,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, FileContextMixin, ChatMixin, Str
             "blocks": blocks,
             "promotions": promotions,
             "demotions": demotions,
-            "empty_tiers_session_total": StreamingMixin._session_empty_tier_count,
+            "empty_tiers_session_total": self._session_empty_tier_count,
             "breakdown": legacy_breakdown,
             "session_totals": {
                 "prompt_tokens": self._total_prompt_tokens,
