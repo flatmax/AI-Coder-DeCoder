@@ -105,60 +105,13 @@ class ChatMixin:
         """
         import warnings
         warnings.warn(
-            "summarize_history() is deprecated. Use ContextManager.compact_history_if_needed_sync() instead.",
+            "summarize_history() is deprecated. Use compact_history_if_needed_sync().",
             DeprecationWarning,
             stacklevel=2
         )
         if not self._context_manager:
             return {"status": "not_needed", "message": "No context manager"}
-        
-        if not self._context_manager.history_needs_summary():
-            return {"status": "not_needed", "message": "History size is within limits"}
-        
-        head, tail = self._context_manager.get_summarization_split()
-        
-        if not head:
-            return {"status": "not_needed", "message": "No messages to summarize"}
-        
-        # Build summarization prompt
-        summary_prompt = "Please provide a concise summary of the following conversation, focusing on key decisions, code changes made, and important context:\n\n"
-        for msg in head:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                summary_prompt += f"{role.upper()}: {content[:500]}...\n\n" if len(content) > 500 else f"{role.upper()}: {content}\n\n"
-        
-        # Call LLM for summarization using smaller model
-        try:
-            print(f"🤖 Calling {self.smaller_model} for summarization...")
-            response = _litellm.completion(
-                model=self.smaller_model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that summarizes conversations concisely. Focus on: 1) What files were discussed/modified, 2) Key decisions made, 3) Important context for continuing the conversation."},
-                    {"role": "user", "content": summary_prompt}
-                ]
-            )
-            
-            # Track token usage from summarization
-            self.track_token_usage(response)
-            
-            summary = response.choices[0].message.content
-            
-            # Update history with summary (context manager is single source of truth)
-            new_history = [
-                {"role": "user", "content": f"Summary of previous conversation:\n{summary}"},
-                {"role": "assistant", "content": "Ok, I understand the context."}
-            ] + tail
-            
-            self._context_manager.set_history(new_history)
-            
-            new_budget = self._context_manager.get_token_budget()
-            print(f"✓ History reduced to {new_budget.get('history_tokens', 0)} tokens")
-            
-            return {
-                "status": "summarized",
-                "summary": summary,
-                "token_budget": new_budget
-            }
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        result = self._context_manager.compact_history_if_needed_sync()
+        if result and result.case != "none":
+            return {"status": "summarized", "token_budget": self._context_manager.get_token_budget()}
+        return {"status": "not_needed", "message": "History size is within limits"}

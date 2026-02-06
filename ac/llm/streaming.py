@@ -78,9 +78,6 @@ class StreamingMixin:
     _cancelled_requests = set()
     _cancelled_lock = threading.Lock()
     
-    # Session-level tracking for empty tier statistics
-    _session_empty_tier_count = 0
-    
     def cancel_streaming(self, request_id):
         """
         Cancel an in-progress streaming request.
@@ -344,118 +341,7 @@ class StreamingMixin:
             
             # Update cache stability tracking after response (files AND symbol entries)
             if self._context_manager and self._context_manager.cache_stability:
-                stability = self._context_manager.cache_stability
-                tc = self._context_manager.token_counter
-                
-                # Collect items currently in Active context:
-                # - Files explicitly in file_paths
-                # - Symbol entries ONLY for files in file_paths (not all indexed files)
-                # 
-                # Symbol entries for files NOT in active context should NOT be in items list.
-                # They were registered during _build_streaming_messages and will "leave" Active
-                # when not included here, triggering ripple promotion.
-                active_items = []
-                
-                # Add file paths that are in active context
-                if file_paths:
-                    active_items.extend(file_paths)
-                    # Add symbol entries only for files in active context
-                    active_items.extend([f"symbol:{f}" for f in file_paths])
-                
-                def get_item_content(item):
-                    """Get content for stability hashing - files or symbol blocks."""
-                    if item.startswith("symbol:"):
-                        # Symbol entry - compute hash from symbols
-                        file_path = item.replace("symbol:", "")
-                        try:
-                            indexer = self._get_indexer()
-                            symbols = indexer._get_symbol_index().get_symbols(file_path)
-                            if symbols:
-                                return compute_file_block_hash(file_path, symbols)
-                        except Exception:
-                            pass
-                        return None
-                    else:
-                        # Regular file
-                        return self.repo.get_file_content(item, version='working')
-                
-                def get_item_tokens(item):
-                    """Get token count for an item - files or symbol blocks."""
-                    if item.startswith("symbol:"):
-                        # Symbol entry - count tokens in formatted block
-                        file_path = item.replace("symbol:", "")
-                        try:
-                            indexer = self._get_indexer()
-                            symbol_index = indexer._get_symbol_index()
-                            symbols = symbol_index.get_symbols(file_path)
-                            if symbols:
-                                from ..symbol_index.compact_format import format_file_symbol_block
-                                # Get reference data for formatting
-                                ref_index = getattr(symbol_index, '_reference_index', None)
-                                file_refs_data = {}
-                                file_imports_data = {}
-                                references_data = {}
-                                if ref_index:
-                                    file_refs_data[file_path] = ref_index.get_files_referencing(file_path)
-                                    file_imports_data[file_path] = ref_index.get_file_dependencies(file_path)
-                                    references_data[file_path] = ref_index.get_references_to_file(file_path)
-                                
-                                block = format_file_symbol_block(
-                                    file_path=file_path,
-                                    symbols=symbols,
-                                    references=references_data,
-                                    file_refs=file_refs_data,
-                                    file_imports=file_imports_data,
-                                )
-                                return tc.count(block) if block else 0
-                        except Exception:
-                            pass
-                        return 0
-                    else:
-                        # Regular file - count tokens in formatted content
-                        try:
-                            content = self.repo.get_file_content(item, version='working')
-                            if content and not (isinstance(content, dict) and 'error' in content):
-                                return tc.count(f"{item}\n```\n{content}\n```\n")
-                        except Exception:
-                            pass
-                        return 0
-                
-                # Determine modified items (files that were edited)
-                modified_items = list(files_modified) if files_modified else []
-                # Symbol entries for modified files are also considered modified
-                modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
-                
-                # Pass only active context items - the tracker will:
-                # 1. Keep these items as 'active' with N=0
-                # 2. Move previously-active items that aren't in this list to L3
-                # 3. Trigger ripple promotions for existing L3/L2/L1 items
-                # 4. With cache_target_tokens > 0: use threshold-aware promotion
-                tier_changes = stability.update_after_response(
-                    items=active_items,
-                    get_content=get_item_content,
-                    modified=modified_items,
-                    get_tokens=get_item_tokens,
-                )
-                
-                # Log promotions and demotions
-                promotions = stability.get_last_promotions()
-                demotions = stability.get_last_demotions()
-                
-                if promotions:
-                    # Format nicely, stripping symbol: prefix for display
-                    promoted_display = []
-                    for item, tier in promotions:
-                        display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
-                        promoted_display.append(f"{display_name}→{tier}")
-                    print(f"📈 Promoted: {', '.join(promoted_display)}")
-                
-                if demotions:
-                    demoted_display = []
-                    for item, tier in demotions:
-                        display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
-                        demoted_display.append(f"{display_name}→{tier}")
-                    print(f"📉 Demoted: {', '.join(demoted_display)}")
+                self._update_cache_stability(file_paths, files_modified)
             
             # Add last request token usage for the HUD (not cumulative)
             if hasattr(self, '_last_request_tokens') and self._last_request_tokens:
@@ -740,7 +626,7 @@ class StreamingMixin:
         messages.append(user_message)
         
         # Update session empty tier count
-        StreamingMixin._session_empty_tier_count += tier_info['empty_tiers']
+        self._session_empty_tier_count += tier_info['empty_tiers']
         
         return messages, user_prompt, context_map_tokens, tier_info
     
@@ -813,6 +699,130 @@ class StreamingMixin:
             {"role": "assistant", "content": "Ok."},
         ]
         return {'messages': messages, 'symbol_tokens': symbol_tokens}
+    
+    def _update_cache_stability(self, file_paths, files_modified):
+        """Update cache stability tracking after a response.
+        
+        Collects active items (files + symbol entries), computes content
+        hashes and token counts, calls the stability tracker, and logs
+        any promotions/demotions.
+        
+        Args:
+            file_paths: Files in active context this request
+            files_modified: Files that were edited by the assistant
+        """
+        stability = self._context_manager.cache_stability
+        tc = self._context_manager.token_counter
+        
+        # Collect items currently in Active context:
+        # - Files explicitly in file_paths
+        # - Symbol entries ONLY for files in file_paths (not all indexed files)
+        # 
+        # Symbol entries for files NOT in active context should NOT be in items list.
+        # They were registered during _build_streaming_messages and will "leave" Active
+        # when not included here, triggering ripple promotion.
+        active_items = []
+        
+        # Add file paths that are in active context
+        if file_paths:
+            active_items.extend(file_paths)
+            # Add symbol entries only for files in active context
+            active_items.extend([f"symbol:{f}" for f in file_paths])
+        
+        def get_item_content(item):
+            """Get content for stability hashing - files or symbol blocks."""
+            if item.startswith("symbol:"):
+                # Symbol entry - compute hash from symbols
+                file_path = item.replace("symbol:", "")
+                try:
+                    indexer = self._get_indexer()
+                    symbols = indexer._get_symbol_index().get_symbols(file_path)
+                    if symbols:
+                        return compute_file_block_hash(file_path, symbols)
+                except Exception:
+                    pass
+                return None
+            else:
+                # Regular file
+                return self.repo.get_file_content(item, version='working')
+        
+        def get_item_tokens(item):
+            """Get token count for an item - files or symbol blocks."""
+            if item.startswith("symbol:"):
+                # Symbol entry - count tokens in formatted block
+                file_path = item.replace("symbol:", "")
+                try:
+                    indexer = self._get_indexer()
+                    symbol_index = indexer._get_symbol_index()
+                    symbols = symbol_index.get_symbols(file_path)
+                    if symbols:
+                        from ..symbol_index.compact_format import format_file_symbol_block
+                        # Get reference data for formatting
+                        ref_index = getattr(symbol_index, '_reference_index', None)
+                        file_refs_data = {}
+                        file_imports_data = {}
+                        references_data = {}
+                        if ref_index:
+                            file_refs_data[file_path] = ref_index.get_files_referencing(file_path)
+                            file_imports_data[file_path] = ref_index.get_file_dependencies(file_path)
+                            references_data[file_path] = ref_index.get_references_to_file(file_path)
+                        
+                        block = format_file_symbol_block(
+                            file_path=file_path,
+                            symbols=symbols,
+                            references=references_data,
+                            file_refs=file_refs_data,
+                            file_imports=file_imports_data,
+                        )
+                        return tc.count(block) if block else 0
+                except Exception:
+                    pass
+                return 0
+            else:
+                # Regular file - count tokens in formatted content
+                try:
+                    content = self.repo.get_file_content(item, version='working')
+                    if content and not (isinstance(content, dict) and 'error' in content):
+                        return tc.count(f"{item}\n```\n{content}\n```\n")
+                except Exception:
+                    pass
+                return 0
+        
+        # Determine modified items (files that were edited)
+        modified_items = list(files_modified) if files_modified else []
+        # Symbol entries for modified files are also considered modified
+        modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
+        
+        # Pass only active context items - the tracker will:
+        # 1. Keep these items as 'active' with N=0
+        # 2. Move previously-active items that aren't in this list to L3
+        # 3. Trigger ripple promotions for existing L3/L2/L1 items
+        # 4. With cache_target_tokens > 0: use threshold-aware promotion
+        stability.update_after_response(
+            items=active_items,
+            get_content=get_item_content,
+            modified=modified_items,
+            get_tokens=get_item_tokens,
+        )
+        
+        # Log promotions and demotions
+        promotions = stability.get_last_promotions()
+        demotions = stability.get_last_demotions()
+        
+        if promotions:
+            # Format nicely, stripping symbol: prefix for display
+            promoted_display = []
+            for item, tier in promotions:
+                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                promoted_display.append(f"{display_name}→{tier}")
+            print(f"📈 Promoted: {', '.join(promoted_display)}")
+        
+        if demotions:
+            demoted_display = []
+            for item, tier in demotions:
+                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                demoted_display.append(f"{display_name}→{tier}")
+            print(f"📉 Demoted: {', '.join(demoted_display)}")
     
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire stream chunk send (non-blocking).
@@ -1024,7 +1034,7 @@ class StreamingMixin:
         
         # Show empty tiers if any
         empty_this = tier_info.get('empty_tiers', 0)
-        empty_session = StreamingMixin._session_empty_tier_count
+        empty_session = self._session_empty_tier_count
         if empty_this > 0 or empty_session > 0:
             print(f"│ Empty tiers skipped: {empty_this} (session total: {empty_session}){' ' * (14 - len(str(empty_this)) - len(str(empty_session)))}│")
         

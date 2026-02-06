@@ -1,6 +1,11 @@
 {
   "snippets": [
     {
+      "icon": "🔍",
+      "tooltip": "Check in your context for that content",
+      "message": "You are asking for some content which I believe is already in your context, please check there."
+    },
+    {
       "icon": "✏️",
       "tooltip": "Tell AI to honor edit blocks.",
       "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."
