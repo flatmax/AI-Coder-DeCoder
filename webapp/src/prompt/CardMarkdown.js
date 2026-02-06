@@ -436,7 +436,7 @@ export class CardMarkdown extends LitElement {
       const result = marked.parse(this.content);
       this._streamCacheSource = this.content;
       this._streamCache = result;
-      this._cachedContent = this.content;
+      this._cachedContent = null;
       this._cachedResult = null;
       return result;
     }
