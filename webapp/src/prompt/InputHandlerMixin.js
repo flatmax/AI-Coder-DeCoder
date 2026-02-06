@@ -321,8 +321,10 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        // Accept current state and clear @ filter
-        this._clearAtMention();
+        // Open focused file in diff viewer
+        if (filePicker.focusedFile) {
+          this.handleFileView({ detail: { path: filePicker.focusedFile } });
+        }
         return;
       }
     }
