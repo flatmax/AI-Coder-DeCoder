@@ -26,6 +26,9 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     this._inputDraft = '';     // Preserves unsent content when navigating history
     this._savedScrollRatio = 1;  // Saved scroll position for minimize/maximize
     this._savedWasAtBottom = true;
+    this._historySearchResults = [];  // Fuzzy search results
+    this._historySearchIndex = -1;    // Selected index in dropdown
+    this._showHistorySearch = false;  // Whether dropdown is visible
     
     // Image paste handling
     this._boundHandlePaste = this._handlePaste.bind(this);
@@ -91,7 +94,7 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
   // ============ History Navigation ============
 
   _getUserMessageHistory() {
-    // Get all user messages from messageHistory
+    // Get all user messages from messageHistory (most recent last)
     return this.messageHistory
       .filter(msg => msg.role === 'user')
       .map(msg => msg.content);
@@ -148,6 +151,96 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     return true;
   }
 
+  // ============ Fuzzy History Search ============
+
+  _fuzzyMatch(query, text) {
+    // Simple fuzzy match — all query chars must appear in order
+    const lowerQuery = query.toLowerCase();
+    const lowerText = text.toLowerCase();
+    let qi = 0;
+    for (let ti = 0; ti < lowerText.length && qi < lowerQuery.length; ti++) {
+      if (lowerText[ti] === lowerQuery[qi]) qi++;
+    }
+    return qi === lowerQuery.length;
+  }
+
+  _fuzzyScore(query, text) {
+    // Score: lower is better. Prefers substring matches and earlier positions.
+    const lowerQuery = query.toLowerCase();
+    const lowerText = text.toLowerCase();
+    const substringIdx = lowerText.indexOf(lowerQuery);
+    if (substringIdx !== -1) return substringIdx;  // Exact substring: best
+    // Fuzzy: sum of character positions (lower = tighter match)
+    let score = 0;
+    let qi = 0;
+    for (let ti = 0; ti < lowerText.length && qi < lowerQuery.length; ti++) {
+      if (lowerText[ti] === lowerQuery[qi]) {
+        score += ti;
+        qi++;
+      }
+    }
+    return score + 1000;  // Fuzzy matches rank after substring matches
+  }
+
+  _searchHistory(query) {
+    const userMessages = this._getUserMessageHistory();
+    if (!query || userMessages.length === 0) return [];
+
+    // Deduplicate (keep last occurrence), filter, score, sort
+    const seen = new Set();
+    const unique = [];
+    for (let i = userMessages.length - 1; i >= 0; i--) {
+      const msg = userMessages[i];
+      if (!seen.has(msg)) {
+        seen.add(msg);
+        unique.push(msg);
+      }
+    }
+
+    return unique
+      .filter(msg => this._fuzzyMatch(query, msg))
+      .sort((a, b) => this._fuzzyScore(query, a) - this._fuzzyScore(query, b))
+      .slice(0, 8)
+      .map(msg => ({
+        content: msg,
+        preview: msg.length > 120 ? msg.substring(0, 120) + '…' : msg
+      }));
+  }
+
+  _openHistorySearch() {
+    const query = this.inputValue.trim();
+    const results = this._searchHistory(query);
+    this._historySearchResults = results;
+    this._historySearchIndex = results.length > 0 ? 0 : -1;
+    this._showHistorySearch = results.length > 0;
+    this.requestUpdate();
+  }
+
+  _closeHistorySearch() {
+    this._showHistorySearch = false;
+    this._historySearchResults = [];
+    this._historySearchIndex = -1;
+    this.requestUpdate();
+  }
+
+  _selectHistorySearchResult(index) {
+    const result = this._historySearchResults[index];
+    if (!result) return;
+
+    this.inputValue = result.content;
+    this._closeHistorySearch();
+
+    this.updateComplete.then(() => {
+      const textarea = this.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.value = this.inputValue;
+        this._autoResizeTextarea(textarea);
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+        textarea.focus();
+      }
+    });
+  }
+
   _resetHistoryNavigation() {
     this._historyIndex = -1;
     this._inputDraft = '';
@@ -190,28 +283,70 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
   }
 
   handleKeyDown(e) {
+    // Handle history search dropdown navigation
+    if (this._showHistorySearch) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        this._historySearchIndex = Math.max(0, this._historySearchIndex - 1);
+        this.requestUpdate();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        this._historySearchIndex = Math.min(
+          this._historySearchResults.length - 1,
+          this._historySearchIndex + 1
+        );
+        this.requestUpdate();
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (this._historySearchIndex >= 0) {
+          this._selectHistorySearchResult(this._historySearchIndex);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this._closeHistorySearch();
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this.sendMessage();
       this._resetHistoryNavigation();
+      this._closeHistorySearch();
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      this._closeHistorySearch();
       return;
     }
 
     const textarea = e.target;
     
-    // Up arrow - navigate to older messages
+    // Up arrow - fuzzy search or cycle history
     if (e.key === 'ArrowUp') {
-      // Only navigate if cursor is at the start of the textarea
       if (textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
-        if (this._navigateHistory(-1)) {
+        if (this.inputValue.trim()) {
+          // Text present: open fuzzy search
           e.preventDefault();
+          this._openHistorySearch();
+        } else {
+          // Empty: cycle through history
+          if (this._navigateHistory(-1)) {
+            e.preventDefault();
+          }
         }
       }
     }
     
-    // Down arrow - navigate to newer messages
+    // Down arrow - navigate to newer messages (only when no search dropdown)
     if (e.key === 'ArrowDown') {
-      // Only navigate if cursor is at the end of the textarea
       if (textarea.selectionStart === textarea.value.length && 
           textarea.selectionEnd === textarea.value.length) {
         if (this._navigateHistory(1)) {
@@ -225,6 +360,15 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     this.inputValue = e.target.value;
     this._handleAtMention(e.target.value);
     this._autoResizeTextarea(e.target);
+    
+    // Live-update fuzzy search if dropdown is open
+    if (this._showHistorySearch) {
+      if (this.inputValue.trim()) {
+        this._openHistorySearch();
+      } else {
+        this._closeHistorySearch();
+      }
+    }
     
     // Detect URLs in input (if mixin is present)
     if (this.detectUrlsInInput) {
