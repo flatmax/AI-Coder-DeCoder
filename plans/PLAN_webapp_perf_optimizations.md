@@ -9,27 +9,22 @@ Reduce unnecessary re-renders, RPC calls, and allocations in the webapp — part
 
 These are safe, isolated changes with clear wins and no behavioral risk.
 
-#### 1a. Stabilize array props passed to assistant-card
-**Files:** `webapp/src/PromptView.js`, `webapp/src/prompt/PromptViewTemplate.js`
+#### 1a. Stabilize empty-array allocations in PromptViewTemplate
+**Files:** `webapp/src/prompt/PromptViewTemplate.js`
 
-**Problem:** `PromptViewTemplate` passes `component._addableFiles` and `component.selectedFiles` to every `<assistant-card>`. When either array reference changes (e.g. checkbox toggle), Lit re-renders *all* assistant cards even though their content hasn't changed.
+**Problem:** In the `repeat()` loop, `message.editResults || []` and `message.images || []` create a **new empty array on every render** for messages without those properties. This defeats reference equality in `shouldUpdate` — every assistant-card sees a "changed" `editResults` prop on every render cycle.
 
-**Fix:**
-- In `PromptView.willUpdate`, the `_stableSelectedFiles` logic already exists but `_addableFiles` is only reference-compared against itself. Ensure both arrays are frozen references that only change when contents actually differ.
-- In `AssistantCard`, expand `shouldUpdate` to also short-circuit when `editResults`, `mentionedFiles`, and `selectedFiles` are reference-equal to previous values.
+**Fix:** Define a module-level `const EMPTY_ARRAY = [];` and use it as the fallback:
+```js
+const EMPTY_ARRAY = [];
+// ...
+.editResults=${message.editResults || EMPTY_ARRAY}
+.images=${message.images || EMPTY_ARRAY}
+```
 
-**Impact:** High — largest single perf win for conversations with 10+ messages.
+**Impact:** High — prerequisite for `shouldUpdate` optimizations to work. Without this, reference equality checks always fail for messages without edit results/images.
 
-#### 1b. Guard getAddableFiles tree walk
-**Files:** `webapp/src/PromptView.js`
-
-**Problem:** `willUpdate` calls `getAddableFiles()` which walks the entire file tree on every `fileTree` property change. Since `loadFileTree` always creates a new object, this runs on every tree refresh even when the tree structure is unchanged.
-
-**Fix:** Compare `fileTree` reference before calling `getAddableFiles()`. The existing code already does a length+element comparison on the result — just need to skip the walk entirely when the tree ref hasn't changed.
-
-**Impact:** Medium — avoids O(n) tree walk on every file tree refresh.
-
-#### 1c. Skip ViewerDataMixin timer when refresh in-flight
+#### 1b. Skip ViewerDataMixin timer when refresh in-flight
 **Files:** `webapp/src/context-viewer/ViewerDataMixin.js`
 
 **Problem:** `_viewerDataWillUpdate` sets a new 100ms timer even while `_refreshPromise` is still pending, causing back-to-back RPC calls.
@@ -41,7 +36,7 @@ if (this.rpcCall && this.visible && !this._refreshPromise) {
 
 **Impact:** Low-Medium — saves redundant RPC round-trips when multiple properties change.
 
-#### 1d. Deduplicate PromptView._refreshHistoryBar
+#### 1c. Deduplicate PromptView._refreshHistoryBar
 **Files:** `webapp/src/PromptView.js`
 
 **Problem:** Called from `setupDone`, `loadLastSession`, `handleLoadSession`, and tab switches. Multiple calls can overlap with no dedup.
@@ -63,7 +58,7 @@ async _refreshHistoryBar() {
 #### 2a. Expand AssistantCard.shouldUpdate
 **Files:** `webapp/src/prompt/AssistantCard.js`
 
-**Problem:** `shouldUpdate` only short-circuits when `content` is the sole changed property with the same value. During streaming, `selectedFiles` or `mentionedFiles` array reference changes cause all cards to re-render.
+**Problem:** `shouldUpdate` only short-circuits when `content` is the sole changed property with the same value. During streaming, `selectedFiles` or `mentionedFiles` array reference changes cause all cards to re-render even though the values are identical.
 
 **Fix:**
 ```js
@@ -74,18 +69,20 @@ shouldUpdate(changedProperties) {
   return false;
 }
 ```
-This uses reference equality for all properties — arrays that haven't changed keep the same reference (guaranteed by Phase 1a).
+This uses reference equality for all properties. Combined with Phase 1a (stable empty-array references), arrays that haven't actually changed keep the same reference and are correctly skipped.
 
-**Impact:** Medium — reduces child re-renders during streaming and file selection changes.
+**Impact:** High — largest single perf win for conversations with 10+ messages. Prevents re-rendering all assistant cards when file selection changes or during streaming.
 
-#### 2b. Improve collectFilesInDir cache invalidation
-**Files:** `webapp/src/file-picker/FileSelectionMixin.js`
+**Note:** `PromptView.willUpdate` already stabilizes `_addableFiles` and `_stableSelectedFiles` with proper length+element comparison, so those references only change when contents actually differ. Phase 1a ensures `editResults` and `images` fallbacks are also stable.
 
-**Problem:** The memoization cache is keyed by `currentPath` but invalidated whenever the `tree` *reference* changes. Since `loadFileTree` always returns a new object, the cache is blown on every refresh even when tree content is unchanged.
+#### 2b. Stabilize fileTree reference in loadFileTree
+**Files:** `webapp/src/prompt/FileHandlerMixin.js`
 
-**Fix:** Instead of comparing tree reference, compare a lightweight signature (e.g. count of children at root, or a hash of file paths). Alternatively, have `loadFileTree` in `FileHandlerMixin` preserve the old tree reference when content is structurally equal.
+**Problem:** `loadFileTree` always assigns `this.fileTree = data.tree`, creating a new object reference even when the tree content is unchanged. This triggers:
+- `PromptView.willUpdate` to re-run `getAddableFiles()` (O(n) tree walk)
+- `FileSelectionMixin`'s `collectFilesInDir` cache to be blown (keyed on tree reference)
 
-Preferred approach — in `FileHandlerMixin.loadFileTree`, compare `JSON.stringify(data.tree)` against cached string and reuse the old object:
+**Fix:** Compare `JSON.stringify(data.tree)` against a cached string and reuse the old object when unchanged:
 ```js
 const treeJson = JSON.stringify(data.tree);
 if (treeJson !== this._lastTreeJson) {
@@ -94,23 +91,23 @@ if (treeJson !== this._lastTreeJson) {
 }
 ```
 
-**Impact:** Medium — avoids re-walking tree for directory selection state.
+**Impact:** Medium — avoids O(n) tree walk and cache invalidation on every tree refresh. The `JSON.stringify` cost is far cheaper than the downstream walks it prevents.
 
 #### 2c. Cancel stale search requests
 **Files:** `webapp/src/history-browser/HistoryBrowser.js`, `webapp/src/find-in-files/FindInFiles.js`
 
-**Problem:** Rapid typing can result in multiple concurrent RPC search calls. Earlier results may arrive after later ones, showing stale results.
+**Problem:** Rapid typing can result in multiple concurrent RPC search calls. Earlier results may arrive after later ones, showing stale results. The `debounce` limits frequency but doesn't prevent overlapping in-flight requests.
 
 **Fix:** Use a generation counter. Increment on each search call, ignore results from older generations:
 ```js
 this._searchGen = (this._searchGen || 0) + 1;
 const gen = this._searchGen;
-const result = await this._rpcWithState(...);
+const result = await this._rpc(...);
 if (gen !== this._searchGen) return; // stale
 this.results = result || [];
 ```
 
-**Impact:** Low — prevents rare stale-result display.
+**Impact:** Low — correctness fix for a rare edge case more than a perf issue.
 
 ### Phase 3 — Higher-effort, optional
 
@@ -119,7 +116,7 @@ this.results = result || [];
 
 **Problem:** `willUpdate` iterates all `<pre>` elements on every update to save scroll positions, even when no code blocks exist in the message.
 
-**Fix:** Set a `_hasCodeBlocks` flag in `processContent` when code fences are detected, skip the `querySelectorAll` loop when false.
+**Fix:** Check `this.content?.includes('```')` directly in `willUpdate` before doing the `querySelectorAll` loop. This is a cheap string search that avoids DOM traversal for messages without code blocks. (Note: cannot use a flag set in `processContent` because `willUpdate` runs before `render`.)
 
 **Impact:** Low — micro-optimization, only matters for very long conversations.
 
@@ -143,11 +140,11 @@ this.results = result || [];
 
 ## Implementation order
 
-1. Phase 1a + 1b + 1c + 1d (batch — all low-risk, independent)
-2. Phase 2a (depends on 1a for stable references)
-3. Phase 2b (independent)
-4. Phase 2c (independent)
-5. Phase 3 items (optional, as time permits)
+1. **Phase 1a + 1b + 1c** (batch — all trivial, independent, no behavioral risk)
+2. **Phase 2a** (biggest single win — depends on 1a for stable references)
+3. **Phase 2b** (independent — stabilizes tree reference)
+4. **Phase 2c** (independent — optional correctness fix)
+5. **Phase 3** items (optional, as time permits)
 
 ## Testing
 
@@ -158,4 +155,4 @@ this.results = result || [];
 
 ## Risk assessment
 
-All Phase 1 changes are reference-equality checks or guard clauses — they reduce work without changing behavior. Phase 2a relies on Phase 1a providing stable references; if a reference unexpectedly changes, the card would still re-render (safe fallback). Phase 2b's tree comparison adds a `JSON.stringify` cost on each refresh, but this is far cheaper than the downstream tree walks it prevents. Phase 3 items are optional polish.
+All Phase 1 changes are constant replacements or guard clauses — they reduce work without changing behavior. Phase 2a relies on Phase 1a providing stable array references; if a reference unexpectedly changes, the card would still re-render (safe fallback — `shouldUpdate` returns true). Phase 2b's `JSON.stringify` comparison adds a small cost on each tree refresh, but this is far cheaper than the downstream tree walks and cache invalidations it prevents. Phase 3 items are optional polish.
