@@ -60,17 +60,28 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
   async refreshBreakdown() {
     if (!this.rpcCall) return;
 
-    const result = await this._rpcWithState(
-      'LiteLLM.get_context_breakdown',
-      {},
-      this.selectedFiles || [],
-      this.getIncludedUrls()
-    );
+    // Deduplicate: if a refresh is already in flight, return that promise
+    if (this._refreshPromise) return this._refreshPromise;
 
-    if (result) {
-      this._onBreakdownResult(result);
-      this.breakdown = result;
-    }
+    this._refreshPromise = (async () => {
+      try {
+        const result = await this._rpcWithState(
+          'LiteLLM.get_context_breakdown',
+          {},
+          this.selectedFiles || [],
+          this.getIncludedUrls()
+        );
+
+        if (result) {
+          this._onBreakdownResult(result);
+          this.breakdown = result;
+        }
+      } finally {
+        this._refreshPromise = null;
+      }
+    })();
+
+    return this._refreshPromise;
   }
 
   /**

@@ -416,16 +416,34 @@ export class CardMarkdown extends LitElement {
     
     const isStreaming = !this.final;
     
-    // During streaming: just run marked.parse() — skip expensive
-    // post-processing (edit blocks, file mentions, copy buttons)
-    // which are only useful once the message is complete.
+    // During streaming: skip expensive post-processing (edit blocks,
+    // file mentions, copy buttons) which are only useful once complete.
+    // Also skip full re-parse when the new delta contains no markdown
+    // boundaries — just append the delta as plain text to the cached HTML.
     if (isStreaming) {
+      if (this._streamCache && this.content.startsWith(this._streamCacheSource)) {
+        const delta = this.content.slice(this._streamCacheSource.length);
+        // If delta has no markdown-significant chars, append escaped text
+        if (delta && !/[`#*_\[\]!<>\-|\\~\n]/.test(delta)) {
+          this._streamCacheSource = this.content;
+          this._streamCache += escapeHtml(delta);
+          this._cachedContent = this.content;
+          this._cachedResult = null;
+          return this._streamCache;
+        }
+      }
+      // Full re-parse needed (first chunk, or delta has markdown chars)
+      const result = marked.parse(this.content);
+      this._streamCacheSource = this.content;
+      this._streamCache = result;
       this._cachedContent = this.content;
-      this._cachedResult = null;  // Invalidate final cache
-      return marked.parse(this.content);
+      this._cachedResult = null;
+      return result;
     }
     
-    // Final render: full processing pipeline
+    // Final render: full processing pipeline — clear streaming cache
+    this._streamCache = null;
+    this._streamCacheSource = null;
     this._cachedContent = this.content;
     
     const hasEditBlocks = this.content.includes('««« EDIT');
