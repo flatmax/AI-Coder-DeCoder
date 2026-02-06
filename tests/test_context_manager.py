@@ -97,48 +97,26 @@ class TestContextManagerHistory:
 
 
 class TestContextManagerSummarization:
-    """Tests for summarization support."""
+    """Tests for compaction support (replaced legacy summarization)."""
     
-    def test_history_needs_summary_empty(self):
+    def test_should_compact_empty(self):
         mgr = ContextManager("gpt-4")
-        assert mgr.history_needs_summary() is False
+        assert mgr.should_compact() is False
     
-    def test_history_needs_summary_small(self):
+    def test_should_compact_small(self):
         mgr = ContextManager("gpt-4")
         mgr.add_message("user", "Short message")
-        assert mgr.history_needs_summary() is False
+        assert mgr.should_compact() is False
     
-    def test_history_needs_summary_large(self):
+    def test_should_compact_disabled_by_default(self):
         mgr = ContextManager("gpt-4")
-        # Add enough messages to exceed budget
-        large_content = "word " * 2000  # ~2000 tokens
-        for i in range(10):
-            mgr.add_message("user", large_content)
-        
-        assert mgr.history_needs_summary() is True
-    
-    def test_get_summarization_split_not_needed(self):
-        mgr = ContextManager("gpt-4")
-        mgr.add_message("user", "Small message")
-        
-        head, tail = mgr.get_summarization_split()
-        
-        assert head == []
-        assert tail == mgr.get_history()
-    
-    def test_get_summarization_split_returns_tuples(self):
-        mgr = ContextManager("gpt-4")
-        # Add enough to trigger summarization
+        # Add large content - but compaction is disabled without config
         large_content = "word " * 2000
         for i in range(10):
             mgr.add_message("user", large_content)
-            mgr.add_message("assistant", large_content)
         
-        head, tail = mgr.get_summarization_split()
-        
-        assert isinstance(head, list)
-        assert isinstance(tail, list)
-        assert len(head) + len(tail) == len(mgr.get_history())
+        # should_compact returns False when compaction is disabled
+        assert mgr.should_compact() is False
 
 
 class TestContextManagerTokenCounting:

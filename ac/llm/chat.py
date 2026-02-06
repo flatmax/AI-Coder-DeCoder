@@ -86,32 +86,3 @@ class ChatMixin:
         if self._context_manager:
             return self._context_manager.get_token_budget()
         return {"used": 0, "max_input": 128000, "remaining": 128000}
-    
-    def check_history_needs_summarization(self):
-        """Check if conversation history needs summarization."""
-        if self._context_manager:
-            return self._context_manager.history_needs_summary()
-        return False
-    
-    def summarize_history(self):
-        """
-        Summarize conversation history if it's too large.
-        
-        DEPRECATED: Use ContextManager.compact_history_if_needed_sync() instead.
-        This method is kept for backwards compatibility but will be removed in a future version.
-        
-        Returns:
-            Dict with status and new token count
-        """
-        import warnings
-        warnings.warn(
-            "summarize_history() is deprecated. Use compact_history_if_needed_sync().",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        if not self._context_manager:
-            return {"status": "not_needed", "message": "No context manager"}
-        result = self._context_manager.compact_history_if_needed_sync()
-        if result and result.case != "none":
-            return {"status": "summarized", "token_budget": self._context_manager.get_token_budget()}
-        return {"status": "not_needed", "message": "History size is within limits"}

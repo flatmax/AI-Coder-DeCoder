@@ -216,53 +216,6 @@ class ContextManager:
             "percent_used": min(percent, 100),
         }
     
-    # ========== Summarization (Legacy) ==========
-    
-    def history_needs_summary(self) -> bool:
-        """
-        Check if history exceeds token budget and needs summarization.
-        
-        Note: This is the legacy method. Prefer should_compact() for
-        topic-aware compaction.
-        
-        Returns:
-            True if history tokens exceed max_history_tokens
-        """
-        if not self._history:
-            return False
-        return self.history_token_count() > self.max_history_tokens
-    
-    def get_summarization_split(self) -> tuple[list[dict], list[dict]]:
-        """
-        Split history for summarization.
-        
-        Returns:
-            Tuple of (head, tail) where:
-            - head: Messages to summarize (~75% of history)
-            - tail: Recent messages to keep verbatim (~25%)
-        """
-        if not self.history_needs_summary():
-            return [], self._history.copy()
-        
-        # Keep ~25% of budget as tail
-        tail_budget = self.max_history_tokens // 4
-        tail = []
-        tail_tokens = 0
-        
-        # Build tail from most recent messages
-        for msg in reversed(self._history):
-            msg_tokens = self.token_counter.count(msg)
-            if tail_tokens + msg_tokens > tail_budget:
-                break
-            tail.insert(0, msg)
-            tail_tokens += msg_tokens
-        
-        # Head is everything before tail
-        head_count = len(self._history) - len(tail)
-        head = self._history[:head_count]
-        
-        return head, tail
-    
     # ========== Token Counting ==========
     
     def count_tokens(self, content) -> int:
@@ -292,7 +245,7 @@ class ContextManager:
             "max_history_tokens": self.max_history_tokens,
             "max_input_tokens": max_input,
             "remaining": max_input - history_tokens,
-            "needs_summary": self.history_needs_summary()
+            "needs_summary": self.should_compact()
         }
     
     # ========== HUD Output ==========
@@ -321,7 +274,8 @@ class ContextManager:
         total_tokens = system_tokens + symbol_map_tokens + file_tokens + history_tokens
         
         # History status
-        history_status = "⚠️  NEEDS SUMMARY" if self.history_needs_summary() else "✓"
+        needs_compact = self.should_compact()
+        history_status = "⚠️  NEEDS COMPACTION" if needs_compact else "✓"
         
         print("\n" + "=" * 60)
         print(f"📊 CONTEXT HUD - {self.model_name}")
@@ -385,7 +339,7 @@ class ContextManager:
         history_tokens = self.history_token_count()
         
         pct = history_tokens * 100 // self.max_history_tokens if self.max_history_tokens else 0
-        history_warn = " ⚠️SUMMARIZE" if self.history_needs_summary() else ""
+        history_warn = " ⚠️COMPACT" if self.should_compact() else ""
         
         # Session totals if available
         session_info = ""
