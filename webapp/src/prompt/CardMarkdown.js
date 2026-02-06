@@ -563,15 +563,18 @@ export class CardMarkdown extends LitElement {
   }
 
   willUpdate() {
-    // Save horizontal scroll positions of all code blocks before re-render
+    // Save horizontal scroll positions of all code blocks before re-render.
+    // Skip DOM traversal entirely for messages without code blocks.
     this._codeScrollPositions.clear();
-    const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
-    if (codeBlocks) {
-      codeBlocks.forEach((pre, index) => {
-        if (pre.scrollLeft > 0) {
-          this._codeScrollPositions.set(index, pre.scrollLeft);
-        }
-      });
+    if (this.content?.includes('```')) {
+      const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
+      if (codeBlocks) {
+        codeBlocks.forEach((pre, index) => {
+          if (pre.scrollLeft > 0) {
+            this._codeScrollPositions.set(index, pre.scrollLeft);
+          }
+        });
+      }
     }
   }
 

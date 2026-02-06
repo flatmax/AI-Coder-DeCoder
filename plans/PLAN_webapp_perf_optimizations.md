@@ -1,5 +1,5 @@
 # Plan: Webapp Performance Optimizations
-
+ 
 ## Goal
 Reduce unnecessary re-renders, RPC calls, and allocations in the webapp — particularly during streaming and for large conversations.
 
@@ -140,11 +140,17 @@ this.results = result || [];
 
 ## Implementation order
 
-1. **Phase 1a + 1b + 1c** (batch — all trivial, independent, no behavioral risk)
-2. **Phase 2a** (biggest single win — depends on 1a for stable references)
-3. **Phase 2b** (independent — stabilizes tree reference)
-4. **Phase 2c** (independent — optional correctness fix)
-5. **Phase 3** items (optional, as time permits)
+All phases implemented:
+
+- [x] **Phase 1a** — Stable `EMPTY_ARRAY` fallbacks in `PromptViewTemplate.js`
+- [x] **Phase 1b** — Guard `_viewerDataWillUpdate` timer in `ViewerDataMixin.js`
+- [x] **Phase 1c** — Deduplicate `_refreshHistoryBar` in `PromptView.js`
+- [x] **Phase 2a** — Generic reference-equality `shouldUpdate` in `AssistantCard.js`
+- [x] **Phase 2b** — Stabilize `fileTree` reference in `FileHandlerMixin.js`
+- [x] **Phase 2c** — Generation counters in `FindInFiles.js` and `HistoryBrowser.js`
+- [x] **Phase 3a** — Guard `willUpdate` DOM traversal in `CardMarkdown.js`
+- [x] **Phase 3b** — Reduce diff LRU cache to 12 entries in `diff.js`
+- [ ] **Phase 3c** — Lazy-load Prism grammars (deferred — low impact, Prism is small)
 
 ## Testing
 

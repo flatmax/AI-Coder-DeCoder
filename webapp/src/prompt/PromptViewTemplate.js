@@ -12,6 +12,8 @@ import { renderUrlChips } from './UrlChipsTemplate.js';
 import { renderHistoryBar } from './HistoryBarTemplate.js';
 import { renderSnippetButtons } from './SnippetTemplate.js';
 
+const EMPTY_ARRAY = [];
+
 function renderResizeHandles(component) {
   if (component.minimized) return '';
   
@@ -150,9 +152,9 @@ export function renderPromptView(component) {
                     (message) => message.id,
                     (message) => {
                       if (message.role === 'user') {
-                        return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
+                        return html`<user-card .content=${message.content} .images=${message.images || EMPTY_ARRAY}></user-card>`;
                       } else if (message.role === 'assistant') {
-                        return html`<assistant-card .content=${message.content} .final=${message.final !== false} .mentionedFiles=${component._addableFiles} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
+                        return html`<assistant-card .content=${message.content} .final=${message.final !== false} .mentionedFiles=${component._addableFiles} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || EMPTY_ARRAY}></assistant-card>`;
                       }
                     }
                   )}

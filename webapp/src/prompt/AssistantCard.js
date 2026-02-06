@@ -11,11 +11,13 @@ export class AssistantCard extends LitElement {
   };
 
   shouldUpdate(changedProperties) {
-    // Skip re-render if only content changed but value is identical (streaming sibling updates)
-    if (changedProperties.size === 1 && changedProperties.has('content')) {
-      return changedProperties.get('content') !== this.content;
+    // Skip re-render when all "changed" properties have identical references.
+    // Combined with stable empty-array fallbacks (EMPTY_ARRAY in PromptViewTemplate),
+    // this prevents re-rendering all cards when file selection changes or during streaming.
+    for (const [key, oldVal] of changedProperties) {
+      if (this[key] !== oldVal) return true;
     }
-    return true;
+    return false;
   }
 
   static styles = css`

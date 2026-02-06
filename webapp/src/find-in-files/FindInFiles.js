@@ -146,6 +146,9 @@ export class FindInFiles extends RpcMixin(LitElement) {
     this.error = null;
     this.focusedIndex = -1;
 
+    this._searchGen = (this._searchGen || 0) + 1;
+    const gen = this._searchGen;
+
     try {
       const response = await this._rpc(
         'Repo.search_files',
@@ -155,6 +158,8 @@ export class FindInFiles extends RpcMixin(LitElement) {
         this.ignoreCase,
         4  // context_lines
       );
+      
+      if (gen !== this._searchGen) return; // stale result — discard
       
       const results = extractResponse(response);
       
@@ -167,6 +172,7 @@ export class FindInFiles extends RpcMixin(LitElement) {
         this.results = [];
       }
     } catch (e) {
+      if (gen !== this._searchGen) return; // stale error — discard
       this.error = e.message || 'Search failed';
       this.results = [];
     }
