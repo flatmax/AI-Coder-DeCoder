@@ -543,11 +543,13 @@ export class PromptView extends MixedBase {
       this.inputValue += message;
     }
     
-    // Focus textarea after appending
+    // Focus textarea and resize after Lit has updated the DOM
     this.updateComplete.then(() => {
       const textarea = this.shadowRoot?.querySelector('textarea');
       if (textarea) {
         textarea.focus();
+        // Ensure textarea.value is in sync before measuring
+        textarea.value = this.inputValue;
         // Move cursor to end
         textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
         // Trigger resize
