@@ -157,19 +157,18 @@ class ContextBuilderMixin:
             if not all_files:
                 return symbol_map_content, symbol_files_by_tier, legend, legend_tokens
             
-            indexer = self._get_indexer()
-            symbols_by_file = indexer.index_files(all_files)
+            si = self._get_symbol_index()
+            symbols_by_file = si.index_files(all_files)
             
             # Build references for cross-file information
-            indexer.build_references(all_files)
-            symbol_index = indexer._get_symbol_index()
+            si.build_references(all_files)
             
             # Get reference data
             file_refs = {}
             file_imports = {}
             references = {}
-            if hasattr(symbol_index, '_reference_index') and symbol_index._reference_index:
-                ref_index = symbol_index._reference_index
+            if hasattr(si, '_reference_index') and si._reference_index:
+                ref_index = si._reference_index
                 for f in all_files:
                     file_refs[f] = ref_index.get_files_referencing(f)
                     file_imports[f] = ref_index.get_file_dependencies(f)

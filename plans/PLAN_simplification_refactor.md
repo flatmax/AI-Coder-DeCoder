@@ -55,7 +55,7 @@ instead of `StreamingMixin.`. Each `LiteLLM` instance now has its own counter.
 
 ---
 
-## Phase 6: Eliminate `Indexer` Wrapper (Medium)
+## Phase 6: Eliminate `Indexer` Wrapper ✅ DONE
 
 ### Problem
 `ac/indexer.py` is a thin pass-through to `SymbolIndex`. Every method is
@@ -71,40 +71,20 @@ The only value `Indexer` adds is:
 - `get_symbol_map_with_refs()` — just builds references + calls `to_compact`
   + writes to file. A convenience function, not a class.
 
-### Changes
-1. `SymbolIndex` already has `save_compact()`. Add a `save_compact_with_refs()`
-   method that combines `build_references` + `to_compact(include_references=True)`
-   + write. This absorbs `Indexer.get_symbol_map_with_refs()`.
-
-2. In `LiteLLM`, replace `self._get_indexer()` with `self._get_symbol_index()`
-   that returns a `SymbolIndex` directly:
-   ```python
-   def _get_symbol_index(self):
-       if self._symbol_index is None:
-           from ac.symbol_index import SymbolIndex
-           repo_root = self.repo.get_repo_root() if self.repo else None
-           self._symbol_index = SymbolIndex(str(repo_root))
-       return self._symbol_index
-   ```
-
-3. Update all call sites in `llm.py` and `streaming.py` from
-   `self._get_indexer()` to `self._get_symbol_index()`. Remove the
-   `indexer._get_symbol_index()` reach-through pattern in `streaming.py`.
-
-4. Reduce `ac/indexer.py` to a thin deprecation shim that imports from
-   `SymbolIndex`, or remove entirely. Update `ac/scripts/test_symbol_map.py`
-   if it uses `Indexer` directly.
+### Changes (completed)
+1. `save_compact_with_refs()` already existed on `SymbolIndex`.
+2. `LiteLLM._get_symbol_index()` returns `SymbolIndex` directly.
+3. All call sites in `llm.py`, `streaming.py`, and `context_builder.py`
+   updated from `self._get_indexer()` to `self._get_symbol_index()`.
+   Reach-through `indexer._get_symbol_index()` patterns eliminated.
+4. `ac/indexer.py` reduced to a thin deprecation shim with `__getattr__`.
+5. `ac/scripts/test_symbol_map.py` already used `SymbolIndex` directly.
 
 ### Files Modified
 - `ac/llm/llm.py`
 - `ac/llm/streaming.py`
-- `ac/symbol_index/symbol_index.py` (add `save_compact_with_refs`)
-- `ac/indexer.py` (deprecate or remove)
-- `ac/scripts/test_symbol_map.py` (update if it uses Indexer)
-
-### Tests
-- `tests/test_symbol_index_order.py` should still pass.
-- Verify `save_symbol_map` still writes to `.aicoder/symbol_map.txt`.
+- `ac/llm/context_builder.py`
+- `ac/indexer.py` (reduced to deprecation shim)
 
 ---
 
@@ -134,9 +114,9 @@ indirection without benefit.
 ## Implementation Order
 
 ```
-Phase 1 ✅ → Phase 2 ✅ → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7
-                            ↑         ↑         ↑         ↑         ↑
-                          medium    small     small     medium    small
+Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅ → Phase 5 ✅ → Phase 6 ✅ → Phase 7
+                                                                                 ↑
+                                                                               small
 ```
 
 Each phase is independently deployable and testable. No phase depends on

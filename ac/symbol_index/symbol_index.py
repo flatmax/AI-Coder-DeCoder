@@ -576,6 +576,36 @@ class SymbolIndex:
         
         return output_path
     
+    def save_compact_with_refs(self, output_path: str = None, file_paths: List[str] = None) -> str:
+        """Save compact format with cross-file references to disk.
+        
+        Builds references first, then generates and saves compact format.
+        
+        Args:
+            output_path: Path to save the map. If None, uses DEFAULT_SYMBOL_MAP_PATH.
+            file_paths: List of files to include. If None, uses cached files.
+            
+        Returns:
+            Path to the saved file
+        """
+        if output_path is None:
+            output_path = str(self.repo_root / self.DEFAULT_SYMBOL_MAP_PATH)
+        
+        # Ensure directory exists
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
+        if file_paths:
+            self.build_references(file_paths)
+        
+        compact = self.to_compact(file_paths=file_paths, include_references=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(compact)
+        
+        return output_path
+    
     def to_lsp(self, file_path: str = None) -> Dict:
         """Generate LSP-compatible format for Monaco.
         
