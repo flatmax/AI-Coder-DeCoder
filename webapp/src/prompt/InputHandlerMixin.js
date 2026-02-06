@@ -1,6 +1,24 @@
 /**
  * Mixin for input handling (keyboard, text input, image paste).
  */
+/**
+ * Mixin for input handling (keyboard, paste, images, history navigation, resize).
+ *
+ * @mixin InputHandlerMixin
+ * @requires {Function} this.sendMessage - Sends current message (from ChatActionsMixin)
+ * @requires {Function} this._handleAtMention - Handles @-mention detection (from FileHandlerMixin)
+ * @requires {Function} this.detectUrlsInInput - Detects URLs in input text (from PromptView)
+ * @requires {Array} this.messageHistory - Chat message history (from MessageHandler)
+ * @requires {String} this.inputValue - Current textarea input value
+ * @requires {Array} this.pastedImages - Pasted image data
+ * @requires {Boolean} this.minimized - Whether the dialog is minimized
+ * @provides {Function} initInputHandler - Sets up paste listener
+ * @provides {Function} destroyInputHandler - Cleans up paste listener
+ * @provides {Function} handleKeyDown - Keyboard event handler
+ * @provides {Function} handleInput - Input event handler
+ * @provides {Function} getImagesForSend - Returns images and clears them
+ * @provides {Function} toggleMinimize - Toggles minimized state
+ */
 export const InputHandlerMixin = (superClass) => class extends superClass {
 
   initInputHandler() {

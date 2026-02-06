@@ -1,5 +1,5 @@
 # Plan: Webapp Code Improvements
-
+ 
 ## Overview
 Address 10 identified code quality, performance, and maintainability issues in the webapp frontend.
 
@@ -102,36 +102,28 @@ Replace magic strings with constant references.
 
 ## Phased Implementation
 
-### Phase 1: Quick Cleanup (5 min, zero risk)
+### Phase 1: Quick Cleanup (5 min, zero risk) ✅
 Low-effort fixes that can't break anything.
 
-- [ ] **#2** — Remove console.log debug spam
+- [x] **#2** — Remove console.log debug spam (was already clean)
 
-**Verify**: App loads, send a message, check console is clean.
-
-### Phase 2: Render Performance (15 min)
+### Phase 2: Render Performance (15 min) ✅
 Eliminate unnecessary work on every render cycle.
 
-- [ ] **#5** — Memoize `_getSelectedObject`
-- [ ] **#4** — Cache `getAddableFiles`
+- [x] **#5** — Memoize `_getSelectedObject` (was already implemented)
+- [x] **#4** — Cache `getAddableFiles` (was already implemented)
 
-**Verify**: File picker updates when files change, assistant cards show "add file" buttons. Confirm fewer re-renders via Lit dev tools or `updated()` logging.
-
-### Phase 3: Code Hygiene (30 min)
+### Phase 3: Code Hygiene (30 min) ✅
 Improve maintainability without changing behavior.
 
-- [ ] **#1** — Deduplicate `extractResponse` — **investigate first**: `PromptView.extractResponse` may be called remotely by the server via JRPC as an RPC endpoint method. Verify whether the server invokes it before removing. If it is a JRPC callback, keep the method but have it delegate to the shared utility.
-- [ ] **#9** — Define tab name constants
-- [ ] **#8** — Document mixin contracts
+- [x] **#1** — Deduplicate `extractResponse` — Confirmed NOT a JRPC callback. PromptView.extractResponse now delegates to shared `_extractResponse` from `utils/rpc.js`. Kept as thin wrapper since mixins call `this.extractResponse()`.
+- [x] **#9** — Define tab name constants in `webapp/src/utils/constants.js`. Replaced all magic strings in `PromptView.js`, `PromptViewTemplate.js`, and `AppShell.js`.
+- [x] **#8** — Document mixin contracts with JSDoc `@requires`/`@provides` on all 5 mixins.
 
-**Verify**: All tabs switch correctly. Grep for remaining magic tab strings. Send a message to confirm JRPC callbacks still work.
-
-### Phase 4: User Experience (15 min)
+### Phase 4: User Experience (15 min) ✅
 Surface errors that are currently swallowed.
 
-- [ ] **#6** — Add error feedback for failed RPC operations
-
-**Verify**: Simulate failures (e.g., stop server, try git ops) and confirm user sees feedback.
+- [x] **#6** — Add error feedback for `handleGitOperation` and `loadFileTree` failures via `addMessage()`.
 
 ### Phase 5: Template Refactor (30 min)
 Biggest structural change — do last when everything else is stable.

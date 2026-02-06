@@ -1,5 +1,25 @@
 /**
  * Mixin for chat actions (send, clear, token report, commit).
+ *
+ * @mixin ChatActionsMixin
+ * @requires {Function} this.call - JRPC call object for RPC methods
+ * @requires {Function} this.extractResponse - Extracts result from RPC response
+ * @requires {Function} this.addMessage - Adds a message to chat (from MessageHandler)
+ * @requires {Function} this.loadFileTree - Refreshes file tree (from FileHandlerMixin)
+ * @requires {Function} this.clearAllUrlState - Clears URL detection state (from PromptView)
+ * @requires {Function} this.getImagesForSend - Gets pasted images (from InputHandlerMixin)
+ * @requires {Function} this.getFetchedUrlsForMessage - Gets fetched URLs (from PromptView)
+ * @requires {Function} this.clearUrlState - Clears URL state after send (from PromptView)
+ * @requires {Function} this._generateRequestId - Generates stream request ID (from StreamingMixin)
+ * @requires {Array} this.selectedFiles - Currently selected file paths
+ * @requires {String} this.inputValue - Current textarea input value
+ * @requires {Boolean} this.isStreaming - Whether a stream is in progress
+ * @provides {Function} handleResetHard - Git reset --hard
+ * @provides {Function} clearContext - Clears conversation and URL state
+ * @provides {Function} showTokenReport - Shows token usage report
+ * @provides {Function} copyGitDiff - Copies git diff to clipboard
+ * @provides {Function} handleCommit - Generates commit message and commits
+ * @provides {Function} sendMessage - Sends user message to LLM
  */
 export const ChatActionsMixin = (superClass) => class extends superClass {
 

@@ -1,5 +1,22 @@
 /**
  * Mixin for handling streaming responses from the server.
+ *
+ * @mixin StreamingMixin
+ * @requires {Function} this.streamWrite - Writes streaming content to UI (from MessageHandler)
+ * @requires {Function} this.addMessage - Adds a message to chat (from MessageHandler)
+ * @requires {Function} this.call - JRPC call object for RPC methods
+ * @requires {Function} this.loadFileTree - Refreshes file tree (from FileHandlerMixin)
+ * @requires {Function} this.loadPromptSnippets - Reloads prompt snippets (from PromptView)
+ * @requires {Array} this.messageHistory - Chat message history (from MessageHandler)
+ * @requires {Array} this.selectedFiles - Currently selected file paths
+ * @requires {Boolean} this.isStreaming - Whether a stream is in progress
+ * @provides {Function} initStreaming - Sets up streaming state
+ * @provides {Function} streamChunk - Handles incoming stream chunks (JRPC callback)
+ * @provides {Function} streamComplete - Handles stream completion (JRPC callback)
+ * @provides {Function} compactionEvent - Handles compaction events (JRPC callback)
+ * @provides {Function} stopStreaming - Cancels current stream
+ * @provides {Function} _generateRequestId - Generates unique request ID
+ * @provides {Function} _showHud - Shows token usage HUD overlay
  */
 export const StreamingMixin = (superClass) => class extends superClass {
 
