@@ -1,109 +1,138 @@
 # Plan: Message List Scrolling Behavior
 
+## Status: PENDING
+
 ## Overview
 
-Fix and verify scrolling behavior in the chat message list to ensure a consistent, predictable UX.
+Replace unreliable `scrollTop = scrollHeight` scrolling with a sentinel-based approach that works correctly with `content-visibility: auto`.
 
 ## Critical Context: `content-visibility: auto`
 
-The CSS property `content-visibility: auto` was recently added to `.messages` and individual message cards in `PromptViewStyles.js` to fix textarea lag with long message histories (222+ messages). This optimization tells the browser to skip rendering off-screen messages, which dramatically improves input responsiveness.
+The CSS property `content-visibility: auto` is applied to `.messages` and individual message cards in `PromptViewStyles.js` to fix textarea lag with long message histories (222+ messages). This optimization tells the browser to skip rendering off-screen messages, which dramatically improves input responsiveness.
 
 **However, this breaks scrolling in several ways:**
 
-1. **`scrollHeight` is inaccurate** - Based on estimated `contain-intrinsic-size` values, not actual content
-2. **Distance-from-bottom checks fail** - The 50px threshold in `handleWheel()` may misfire
-3. **Scroll-to-bottom may not reach true bottom** - Content renders after scroll, revealing more below
-4. **Programmatic scrolling is unreliable** - `container.scrollTop = container.scrollHeight` may not reach the end
+1. **`scrollHeight` is inaccurate** — based on estimated `contain-intrinsic-size` values, not actual content
+2. **Distance-from-bottom checks fail** — the 50px threshold in `handleWheel()` may misfire
+3. **Scroll-to-bottom may not reach true bottom** — content renders after scroll, revealing more below
+4. **Programmatic scrolling is unreliable** — `container.scrollTop = container.scrollHeight` may not reach the end
 
-**We must keep `content-visibility: auto` in place** for performance, so the scrolling logic needs to be updated to work correctly with estimated scroll heights.
+**We must keep `content-visibility: auto` in place** for performance.
 
-### Potential Solutions
+## Solution: Sentinel + `scrollIntoView` + `IntersectionObserver`
 
-1. **Multiple scroll attempts** - Scroll, wait for render, scroll again
-2. **Use `scrollIntoView()` on last message** - More reliable than `scrollTop = scrollHeight`
-3. **Observe content changes** - Use ResizeObserver or MutationObserver to re-scroll after content renders
-4. **Adjust threshold calculations** - Account for estimation inaccuracy in bottom detection
+### Key idea
+
+Add an invisible sentinel `<div>` as the last child of `.messages`. Use `scrollIntoView()` to scroll to it (forces browser to render the target, bypassing `content-visibility` estimation). Use `IntersectionObserver` on the sentinel to accurately detect "at bottom" state, replacing the fragile 50px `scrollHeight` threshold.
+
+### Why this works
+
+- `scrollIntoView()` forces the browser to render the target element even under `content-visibility: auto`, then scrolls to it. No dependency on `scrollHeight` accuracy.
+- `IntersectionObserver` fires when the sentinel enters/leaves the viewport, providing reliable "at bottom" detection regardless of estimated sizes.
+- Eliminates all `scrollHeight`-dependent math.
 
 ## Requirements
 
 ### R1: Auto-scroll on new messages
-- When `addMessage()` is called, scroll to bottom automatically
-- When `streamWrite()` streams content, scroll to bottom on each chunk
-- **Exception**: Do not auto-scroll if user has manually scrolled up (R2)
+- `addMessage()` and `streamWrite()` scroll to bottom via sentinel
+- **Exception**: do not auto-scroll if user has manually scrolled up (R2)
 
 ### R2: Pause auto-scroll when user scrolls up
-- Detect upward mouse wheel scroll (`deltaY < 0`)
-- Set `_userHasScrolledUp = true`
-- Show floating "scroll to bottom" button (`_showScrollButton = true`)
-- Prevent all auto-scroll until user returns to bottom
+- `handleWheel()` detects upward scroll (`deltaY < 0`)
+- Sets `_userHasScrolledUp = true`, shows scroll button
+- All auto-scroll suppressed until user returns to bottom
 
-### R3: Resume auto-scroll when user scrolls to bottom
-- Detect downward scroll (`deltaY > 0`)
-- Check if within threshold (50px) of bottom
-- If at bottom: reset `_userHasScrolledUp = false`, hide button
-- Resume auto-scrolling behavior
+### R3: Resume auto-scroll when user reaches bottom
+- `IntersectionObserver` on sentinel detects when bottom is visible
+- Resets `_userHasScrolledUp = false`, hides scroll button
+- Replaces the old `handleWheel` downward-scroll + 50px threshold check
 
 ### R4: Manual scroll-to-bottom button
-- Floating button appears when user has scrolled up
-- Clicking calls `scrollToBottomNow()`
-- Forces immediate scroll to bottom
-- Resets `_userHasScrolledUp = false`, hides button
+- Clicking calls `scrollToBottomNow()` which uses `sentinel.scrollIntoView()`
+- Resets state, hides button
 
 ### R5: Reset scroll state on history clear
-- `clearHistory()` resets all scroll state
-- `_userHasScrolledUp = false`
-- `_showScrollButton = false`
+- `clearHistory()` resets `_userHasScrolledUp`, `_showScrollButton`
 
-### R6: Scroll to bottom on initial load (BUG - NOT IMPLEMENTED)
-- When app starts and `loadLastSession()` loads previous messages
-- Should scroll to bottom after all messages are rendered
-- Currently stays at top - user must manually scroll
+### R6: Scroll to bottom on initial load
+- After `loadLastSession()` loads messages, scroll to sentinel
+- After `handleLoadSession()` loads session, scroll to sentinel
 
 ### R7: Preserve scroll position during tab switches
-- When switching away from chat tab, save scroll position
-- When switching back, restore position if user was scrolled up
-- If user was at bottom, scroll to bottom (may have new content)
-
-## Current Implementation
-
-**Location**: `webapp/src/MessageHandler.js`
-
-| Method | Purpose | Status |
-|--------|---------|--------|
-| `_scrollToBottom()` | Auto-scroll respecting user preference | ✅ Works |
-| `scrollToBottomNow()` | Force scroll, reset state | ✅ Works |
-| `handleWheel()` | Detect user scroll, toggle state | ✅ Works |
-| `addMessage()` | Add message, trigger scroll | ✅ Works |
-| `streamWrite()` | Stream chunk, trigger scroll | ✅ Works |
-| `clearHistory()` | Reset state | ✅ Works |
-
-**Location**: `webapp/src/PromptView.js`
-
-| Method | Purpose | Status |
-|--------|---------|--------|
-| `loadLastSession()` | Load messages on startup | ❌ Missing scroll |
-| `handleLoadSession()` | Load session from history browser | ❌ Missing scroll |
-| `switchTab()` | Tab switching with scroll preserve | ⚠️ Partial |
+- Save `scrollTop` + `_wasScrolledUp` when leaving chat tab
+- Restore position or scroll to sentinel when returning
 
 ## Implementation Plan
 
-### Phase 1: Fix initial load scroll (R6)
+### Phase 1: Add sentinel element to template
 
-1. In `PromptView.js`, after `loadLastSession()` completes:
-   - Wait for `updateComplete`
-   - Call `scrollToBottomNow()` to scroll to end
+**File: `webapp/src/prompt/PromptViewTemplate.js`**
 
-2. In `PromptView.js`, after `handleLoadSession()` completes:
-   - Same fix - scroll to bottom after loading session
+1. Add `<div id="scroll-sentinel"></div>` as last child inside `.messages` container (after the `repeat()` block)
+2. Style it invisible: zero height, no margin
 
-### Phase 2: Verify tab switch behavior (R7)
+**File: `webapp/src/prompt/PromptViewStyles.js`**
 
-1. Review `switchTab()` in `PromptView.js`
-2. Ensure `_wasScrolledUp` logic correctly handles:
-   - Saving position when leaving chat
-   - Restoring position OR scrolling to bottom when returning
+1. Add style for `#scroll-sentinel`: `height: 0; margin: 0; padding: 0;`
 
-### Phase 3: Testing checklist
+### Phase 2: Replace scroll logic in MessageHandler
+
+**File: `webapp/src/MessageHandler.js`**
+
+1. **`_scrollToBottom()`** — replace `container.scrollTop = container.scrollHeight` with:
+   ```js
+   const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+   if (sentinel) sentinel.scrollIntoView({ block: 'end' });
+   ```
+
+2. **`scrollToBottomNow()`** — same replacement
+
+3. **`handleWheel()`** — simplify:
+   - Keep the upward scroll detection (`deltaY < 0` → set `_userHasScrolledUp = true`)
+   - **Remove** the downward scroll + 50px threshold check entirely (IntersectionObserver handles this)
+
+4. **`setupScrollObserver()`** — replace `ResizeObserver` with `IntersectionObserver`:
+   ```js
+   const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+   this._intersectionObserver = new IntersectionObserver(([entry]) => {
+     if (entry.isIntersecting) {
+       this._userHasScrolledUp = false;
+       this._showScrollButton = false;
+     }
+   }, { root: container });
+   this._intersectionObserver.observe(sentinel);
+   ```
+
+   **Important**: The `IntersectionObserver` only handles the *resume* direction — when the sentinel becomes visible, it resets scroll state. It must **never** set `_userHasScrolledUp = true` when the sentinel leaves the viewport. Only `handleWheel()` sets that flag (explicit user intent). This prevents false positives when content above expands (e.g., image loads, code block renders) and briefly pushes the sentinel out of view.
+
+5. **`disconnectScrollObserver()`** — disconnect `IntersectionObserver` instead of `ResizeObserver`
+
+### Phase 3: Fix initial load and session load scroll
+
+**File: `webapp/src/PromptView.js`**
+
+1. **`loadLastSession()`** — after loading messages, use `updateComplete` + double `rAF` + sentinel scroll. The double `requestAnimationFrame` is needed because `content-visibility: auto` may require an extra frame to finalize layout before `scrollIntoView` can target the sentinel accurately:
+   ```js
+   await this.updateComplete;
+   requestAnimationFrame(() => {
+     requestAnimationFrame(() => this.scrollToBottomNow());
+   });
+   ```
+
+2. **`handleLoadSession()`** — already calls `scrollToBottomNow()` after `updateComplete` + `rAF`. Update to use double `rAF` for consistency:
+   ```js
+   await this.updateComplete;
+   requestAnimationFrame(() => {
+     requestAnimationFrame(() => this.scrollToBottomNow());
+   });
+   ```
+
+3. **`switchTab()`** — when returning to FILES tab:
+   - If `_wasScrolledUp`: restore `scrollTop` position
+   - If not: call `scrollToBottomNow()` (uses sentinel)
+   - Reconnect `IntersectionObserver` after restoring scroll
+
+### Phase 4: Testing checklist
 
 - [ ] App startup: messages load, view scrolls to bottom
 - [ ] New message: view scrolls to bottom
@@ -114,16 +143,25 @@ The CSS property `content-visibility: auto` was recently added to `.messages` an
 - [ ] Clear history: scroll state resets
 - [ ] Load session from history browser: scrolls to bottom
 - [ ] Switch tabs and back: position preserved or scrolled to bottom
+- [ ] 200+ messages: no performance regression from sentinel
+- [ ] content-visibility still working (check devtools rendering stats)
 
 ## Files to Modify
 
-1. `webapp/src/PromptView.js` - Add scroll calls after session load
-2. `webapp/src/MessageHandler.js` - No changes expected (logic is correct)
+1. `webapp/src/prompt/PromptViewTemplate.js` — add sentinel element
+2. `webapp/src/prompt/PromptViewStyles.js` — sentinel style
+3. `webapp/src/MessageHandler.js` — replace scroll logic
+4. `webapp/src/PromptView.js` — fix initial load scroll, tab switch reconnection
+
+## Execution Order
+
+1 → 2 → 3 → 4 (phases are sequential, each builds on previous)
 
 ## Estimated Effort
 
-- Phase 1: 15 minutes
-- Phase 2: 15 minutes  
-- Phase 3: 30 minutes testing
+- Phase 1: 5 minutes
+- Phase 2: 20 minutes
+- Phase 3: 15 minutes
+- Phase 4: 30 minutes testing
 
 Total: ~1 hour
