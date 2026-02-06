@@ -46,10 +46,8 @@ export const StreamingMixin = (superClass) => class extends superClass {
    * @param {string} content - Accumulated content so far
    */
   streamChunk(requestId, content) {
-    const request = this._streamingRequests.get(requestId);
-    if (request) {
-      this.streamWrite(content, false, 'assistant');
-    }
+    if (!this._streamingRequests.has(requestId)) return;
+    this.streamWrite(content, false, 'assistant');
   }
 
   /**
@@ -170,8 +168,7 @@ export const StreamingMixin = (superClass) => class extends superClass {
    * @param {object} result - The final result with edits
    */
   async streamComplete(requestId, result) {
-    const request = this._streamingRequests.get(requestId);
-    if (!request) return;
+    if (!this._streamingRequests.has(requestId)) return;
     
     this._clearStreamingWatchdog();
     this._streamingRequests.delete(requestId);

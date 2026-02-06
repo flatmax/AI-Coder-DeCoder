@@ -143,6 +143,7 @@ export const promptViewStyles = css`
     display: flex;
     flex: 1;
     overflow: hidden;
+    position: relative;
   }
 
   .picker-panel {
@@ -167,8 +168,21 @@ export const promptViewStyles = css`
     overflow: hidden;
   }
 
+  .files-tab-panel {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
   .tab-hidden {
-    display: none !important;
+    visibility: hidden !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    pointer-events: none !important;
+    z-index: -1 !important;
   }
 
   .embedded-panel find-in-files,
