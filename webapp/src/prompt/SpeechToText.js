@@ -65,15 +65,13 @@ export class SpeechToText extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Re-initialize recognition when component is connected
-    if (!this.recognition && this.isSupported) {
+    if (!this.isSupported) return;
+    if (!this.recognition) {
       this._initSpeechRecognition();
     }
   }
 
   disconnectedCallback() {
-    super.disconnectedCallback();
-    // Stop recognition and clean up when component is disconnected
     if (this.recognition) {
       try {
         this.recognition.stop();
@@ -81,12 +79,12 @@ export class SpeechToText extends LitElement {
         // Ignore errors when stopping
       }
     }
+    super.disconnectedCallback();
   }
 
   _initSpeechRecognition() {
     if (!this.isSupported) return;
 
-    // Initialize speech recognition
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     this.recognition = new SpeechRecognition();
     

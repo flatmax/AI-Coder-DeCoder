@@ -13,7 +13,23 @@ export const FileSelectionMixin = (superClass) => class extends superClass {
     this.dispatchEvent(new CustomEvent('selection-change', { detail: this.selectedFiles }));
   }
 
+  // Memoized cache for collectFilesInDir — cleared when tree changes
+  _dirFilesCache = new Map();
+  _dirFilesCacheTree = null;
+
   collectFilesInDir(node, currentPath = '') {
+    // Invalidate cache when tree reference changes
+    const root = this.tree;
+    if (root !== this._dirFilesCacheTree) {
+      this._dirFilesCache.clear();
+      this._dirFilesCacheTree = root;
+    }
+
+    const cacheKey = currentPath || '__root__';
+    if (this._dirFilesCache.has(cacheKey)) {
+      return this._dirFilesCache.get(cacheKey);
+    }
+
     const files = [];
     if (node.path) {
       files.push(node.path);
@@ -24,6 +40,8 @@ export const FileSelectionMixin = (superClass) => class extends superClass {
         files.push(...this.collectFilesInDir(child, childPath));
       }
     }
+
+    this._dirFilesCache.set(cacheKey, files);
     return files;
   }
 

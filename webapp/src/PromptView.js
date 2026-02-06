@@ -182,6 +182,15 @@ export class PromptView extends MixedBase {
         selected[path] = true;
       }
       this._selectedObject = selected;
+
+      // Stabilize array reference — only replace if contents actually changed
+      const prev = this._stableSelectedFiles;
+      const curr = this.selectedFiles || [];
+      if (!prev || prev.length !== curr.length || curr.some((f, i) => f !== prev[i])) {
+        this._stableSelectedFiles = curr;
+      } else {
+        this.selectedFiles = prev;
+      }
     }
     if (changedProperties.has('fileTree')) {
       // Memoize: only rebuild if tree actually changed
