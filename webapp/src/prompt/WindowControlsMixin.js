@@ -1,5 +1,14 @@
 /**
  * Mixin for making elements draggable and resizable.
+ *
+ * @mixin WindowControlsMixin
+ * @requires {Number} this.dialogX - Dialog X position
+ * @requires {Number} this.dialogY - Dialog Y position
+ * @requires {Function} this.toggleMinimize - Toggles minimized state (from InputHandlerMixin)
+ * @requires {Function} this.requestUpdate - Triggers Lit re-render
+ * @provides {Function} initWindowControls - Sets up drag/resize state
+ * @provides {Function} destroyWindowControls - Cleans up global listeners
+ * @provides {Function} getResizeStyle - Returns CSS style string for current size
  */
 export const WindowControlsMixin = (superClass) => class extends superClass {
 

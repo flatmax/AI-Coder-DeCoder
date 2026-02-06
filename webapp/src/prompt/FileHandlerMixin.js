@@ -49,6 +49,7 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       await this.loadFileTree();
     } catch (err) {
       console.error(`Git operation "${operation}" failed:`, err);
+      this.addMessage('assistant', `⚠️ **Git operation failed:** ${operation}\n\n${err.message || err}`);
     }
   }
 
@@ -70,6 +71,7 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
       }
     } catch (e) {
       console.error('Error loading file tree:', e);
+      this.addMessage('assistant', `⚠️ **Failed to load file tree.** The server may be unavailable.`);
     }
   }
 

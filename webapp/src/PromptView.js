@@ -8,6 +8,8 @@ import { InputHandlerMixin } from './prompt/InputHandlerMixin.js';
 import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import { UrlService } from './services/UrlService.js';
+import { extractResponse as _extractResponse } from './utils/rpc.js';
+import { TABS } from './utils/constants.js';
 import './file-picker/FilePicker.js';
 import './history-browser/HistoryBrowser.js';
 import './find-in-files/FindInFiles.js';
@@ -76,10 +78,12 @@ export class PromptView extends MixedBase {
     this.fetchingUrls = {};
     this.fetchedUrls = {};
     this.excludedUrls = new Set();
-    this.activeLeftTab = 'files';
+    this.activeLeftTab = TABS.FILES;
     this.promptSnippets = [];
     this.snippetDrawerOpen = false;
     this.filePickerExpanded = {};
+    this._selectedObject = {};
+    this._addableFiles = [];
     this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
     this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
     this._filePickerScrollTop = 0;
@@ -171,16 +175,17 @@ export class PromptView extends MixedBase {
     return this._urlService?.getUrlDisplayName(urlInfo) || urlInfo.url;
   }
 
-  /**
-   * Convert selectedFiles array to selection object for FilePicker.
-   * @returns {Object} Selection object with file paths as keys and true as values
-   */
-  _getSelectedObject() {
-    const selected = {};
-    for (const path of this.selectedFiles || []) {
-      selected[path] = true;
+  willUpdate(changedProperties) {
+    if (changedProperties.has('selectedFiles')) {
+      const selected = {};
+      for (const path of this.selectedFiles || []) {
+        selected[path] = true;
+      }
+      this._selectedObject = selected;
     }
-    return selected;
+    if (changedProperties.has('fileTree')) {
+      this._addableFiles = this.getAddableFiles();
+    }
   }
 
   // ============ History Browser ============
@@ -232,7 +237,6 @@ export class PromptView extends MixedBase {
     }
     
     this.showHistoryBrowser = false;
-    console.log(`📜 Loaded ${messages.length} messages from session`);
     
     // Reset saved scroll positions to avoid stale values after session load
     this._filePickerScrollTop = 0;
@@ -286,7 +290,7 @@ export class PromptView extends MixedBase {
    */
   switchTab(tab) {
     // Save scroll positions before switching away from files tab
-    if (this.activeLeftTab === 'files') {
+    if (this.activeLeftTab === TABS.FILES) {
       const filePicker = this.shadowRoot?.querySelector('file-picker');
       if (filePicker) {
         this._filePickerScrollTop = filePicker.getScrollTop();
@@ -306,7 +310,7 @@ export class PromptView extends MixedBase {
     this.activeLeftTab = tab;
 
     // Restore scroll positions when switching back to files tab
-    if (tab === 'files') {
+    if (tab === TABS.FILES) {
       // Use double rAF to ensure DOM is fully rendered after tab switch
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -333,22 +337,22 @@ export class PromptView extends MixedBase {
           }
         });
       });
-    } else if (tab === 'search') {
+    } else if (tab === TABS.SEARCH) {
       this.updateComplete.then(() => {
         const findInFiles = this.shadowRoot?.querySelector('find-in-files');
         if (findInFiles) {
           findInFiles.focusInput();
         }
       });
-    } else if (tab === 'context') {
+    } else if (tab === TABS.CONTEXT) {
       this.updateComplete.then(() => {
         this._refreshContextViewer();
       });
-    } else if (tab === 'cache') {
+    } else if (tab === TABS.CACHE) {
       this.updateComplete.then(() => {
         this._refreshCacheViewer();
       });
-    } else if (tab === 'settings') {
+    } else if (tab === TABS.SETTINGS) {
       this.updateComplete.then(() => {
         this._refreshSettingsPanel();
       });
@@ -621,26 +625,20 @@ export class PromptView extends MixedBase {
     try {
       // Get list of sessions (most recent first)
       const sessionsResponse = await this.call['LiteLLM.history_list_sessions'](1);
-      console.log('📜 Sessions response:', sessionsResponse);
       const sessions = this.extractResponse(sessionsResponse);
-      console.log('📜 Extracted sessions:', sessions);
       
       if (sessions && sessions.length > 0) {
         const lastSessionId = sessions[0].session_id;
-        console.log('📜 Loading session:', lastSessionId);
         
         // Load the session messages AND populate context manager for token counting
         const messagesResponse = await this.call['LiteLLM.load_session_into_context'](lastSessionId);
-        console.log('📜 Messages response:', messagesResponse);
         const messages = this.extractResponse(messagesResponse);
-        console.log('📜 Extracted messages:', messages);
         
         if (messages && messages.length > 0) {
           // Load messages into chat history
           for (const msg of messages) {
             this.addMessage(msg.role, msg.content, msg.images || null, msg.edit_results || null);
           }
-          console.log(`📜 Loaded ${messages.length} messages from last session`);
           
           // Scroll to bottom after loading session
           this.scrollToBottomNow();
@@ -660,13 +658,7 @@ export class PromptView extends MixedBase {
   }
 
   extractResponse(response) {
-    if (response && typeof response === 'object') {
-      const keys = Object.keys(response);
-      if (keys.length > 0) {
-        return response[keys[0]];
-      }
-    }
-    return response;
+    return _extractResponse(response);
   }
 
   /**

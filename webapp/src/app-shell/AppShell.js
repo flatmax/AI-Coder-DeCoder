@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'lit';
+import { TABS } from '../utils/constants.js';
 import '../diff-viewer/DiffViewer.js';
 import '../PromptView.js';
 import '../context-viewer/UrlContentModal.js';
@@ -117,7 +118,7 @@ export class AppShell extends LitElement {
       e.preventDefault();
       const promptView = this.shadowRoot?.querySelector('prompt-view');
       if (promptView) {
-        promptView.switchTab('search');
+        promptView.switchTab(TABS.SEARCH);
       }
     }
     // Ctrl+B to toggle back to files
@@ -125,7 +126,7 @@ export class AppShell extends LitElement {
       e.preventDefault();
       const promptView = this.shadowRoot?.querySelector('prompt-view');
       if (promptView) {
-        promptView.switchTab('files');
+        promptView.switchTab(TABS.FILES);
       }
     }
   }

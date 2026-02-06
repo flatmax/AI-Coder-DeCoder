@@ -8,6 +8,7 @@ import '../context-viewer/ContextViewer.js';
 import '../context-viewer/CacheViewer.js';
 import { formatTokens } from '../utils/formatters.js';
 import { TIER_THRESHOLDS, getTierColor } from '../utils/tierConfig.js';
+import { TABS } from '../utils/constants.js';
 
 function renderCacheTiers(data) {
   const tierInfo = data.tier_info;
@@ -366,41 +367,41 @@ export function renderPromptView(component) {
       ${renderResizeHandles(component)}
       <div class="header" @mousedown=${(e) => component._handleDragStart(e)}>
         <div class="header-section header-left" @click=${component.toggleMinimize}>
-          <span>${component.activeLeftTab === 'files' ? '💬 Chat' : 
-                  component.activeLeftTab === 'search' ? '🔍 Search' : 
-                  component.activeLeftTab === 'context' ? '📊 Context' :
-                  component.activeLeftTab === 'cache' ? '🗄️ Cache' :
+          <span>${component.activeLeftTab === TABS.FILES ? '💬 Chat' : 
+                  component.activeLeftTab === TABS.SEARCH ? '🔍 Search' : 
+                  component.activeLeftTab === TABS.CONTEXT ? '📊 Context' :
+                  component.activeLeftTab === TABS.CACHE ? '🗄️ Cache' :
                   '⚙️ Settings'}</span>
         </div>
         <div class="header-section header-tabs">
           <button 
-            class="header-tab ${component.activeLeftTab === 'files' ? 'active' : ''}"
-            @click=${(e) => { e.stopPropagation(); component.switchTab('files'); }}
+            class="header-tab ${component.activeLeftTab === TABS.FILES ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab(TABS.FILES); }}
             title="Files & Chat"
           >📁</button>
           <button 
-            class="header-tab ${component.activeLeftTab === 'search' ? 'active' : ''}"
-            @click=${(e) => { e.stopPropagation(); component.switchTab('search'); }}
+            class="header-tab ${component.activeLeftTab === TABS.SEARCH ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab(TABS.SEARCH); }}
             title="Search"
           >🔍</button>
           <button 
-            class="header-tab ${component.activeLeftTab === 'context' ? 'active' : ''}"
-            @click=${(e) => { e.stopPropagation(); component.switchTab('context'); }}
+            class="header-tab ${component.activeLeftTab === TABS.CONTEXT ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab(TABS.CONTEXT); }}
             title="Context Budget"
           >📊</button>
           <button 
-            class="header-tab ${component.activeLeftTab === 'cache' ? 'active' : ''}"
-            @click=${(e) => { e.stopPropagation(); component.switchTab('cache'); }}
+            class="header-tab ${component.activeLeftTab === TABS.CACHE ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab(TABS.CACHE); }}
             title="Cache Tiers"
           >🗄️</button>
           <button 
-            class="header-tab ${component.activeLeftTab === 'settings' ? 'active' : ''}"
-            @click=${(e) => { e.stopPropagation(); component.switchTab('settings'); }}
+            class="header-tab ${component.activeLeftTab === TABS.SETTINGS ? 'active' : ''}"
+            @click=${(e) => { e.stopPropagation(); component.switchTab(TABS.SETTINGS); }}
             title="Settings"
           >⚙️</button>
         </div>
         <div class="header-section header-git">
-          ${!component.minimized && component.activeLeftTab === 'files' ? html`
+          ${!component.minimized && component.activeLeftTab === TABS.FILES ? html`
             <button class="header-btn" @click=${component.copyGitDiff} title="Copy git diff HEAD to clipboard">
               📋
             </button>
@@ -413,7 +414,7 @@ export function renderPromptView(component) {
           ` : ''}
         </div>
         <div class="header-section header-right">
-          ${!component.minimized && component.activeLeftTab === 'files' ? html`
+          ${!component.minimized && component.activeLeftTab === TABS.FILES ? html`
             <button class="header-btn" @click=${component.toggleHistoryBrowser} title="View conversation history">
               📜
             </button>
@@ -426,7 +427,7 @@ export function renderPromptView(component) {
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">
-          ${component.activeLeftTab === 'files' ? html`
+          ${component.activeLeftTab === TABS.FILES ? html`
             ${component.showFilePicker && !component.leftPanelCollapsed ? html`
               <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
@@ -436,7 +437,7 @@ export function renderPromptView(component) {
                   .untracked=${component.untrackedFiles}
                   .diffStats=${component.diffStats}
                   .viewingFile=${component.viewingFile}
-                  .selected=${component._getSelectedObject()}
+                  .selected=${component._selectedObject}
                   .expanded=${component.filePickerExpanded}
                   @selection-change=${component.handleSelectionChange}
                   @expanded-change=${component.handleExpandedChange}
@@ -458,7 +459,7 @@ export function renderPromptView(component) {
                       if (message.role === 'user') {
                         return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
                       } else if (message.role === 'assistant') {
-                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component.getAddableFiles()} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
+                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component._addableFiles} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
                       }
                     }
                   )}
@@ -499,7 +500,7 @@ export function renderPromptView(component) {
                 }
               </div>
             </div>
-          ` : component.activeLeftTab === 'search' ? html`
+          ` : component.activeLeftTab === TABS.SEARCH ? html`
             <div class="embedded-panel">
               <find-in-files
                 .rpcCall=${component.call}
@@ -507,7 +508,7 @@ export function renderPromptView(component) {
                 @file-selected=${(e) => component.handleSearchFileSelected(e)}
               ></find-in-files>
             </div>
-          ` : component.activeLeftTab === 'context' ? html`
+          ` : component.activeLeftTab === TABS.CONTEXT ? html`
             <div class="embedded-panel">
               <context-viewer
                 .rpcCall=${component.call}
@@ -518,7 +519,7 @@ export function renderPromptView(component) {
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
               ></context-viewer>
             </div>
-          ` : component.activeLeftTab === 'cache' ? html`
+          ` : component.activeLeftTab === TABS.CACHE ? html`
             <div class="embedded-panel">
               <cache-viewer
                 .rpcCall=${component.call}
