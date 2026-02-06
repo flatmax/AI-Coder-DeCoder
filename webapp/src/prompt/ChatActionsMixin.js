@@ -191,6 +191,10 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
 
+    // Reset scroll state so auto-scroll works for the new exchange
+    this._userHasScrolledUp = false;
+    this._showScrollButton = false;
+
     const userContent = this.inputValue;
     const imagesToSend = this.getImagesForSend();
     const imagesToStore = this.pastedImages.length > 0 ? [...this.pastedImages] : null;

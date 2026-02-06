@@ -34,6 +34,7 @@ export class MessageHandler extends JRPCClient {
   scrollToBottomNow() {
     this._userHasScrolledUp = false;
     this._showScrollButton = false;
+    this._scrollPending = false;
     const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
     if (sentinel) {
       sentinel.scrollIntoView({ block: 'end' });
@@ -98,18 +99,22 @@ export class MessageHandler extends JRPCClient {
   }
 
   _scrollToBottom() {
-    if (this._userHasScrolledUp || this._scrollPending) return;
+    if (this._userHasScrolledUp) return;
+    // Coalesce: only one pending scroll at a time
+    if (this._scrollPending) return;
     this._scrollPending = true;
     
-    // Single rAF per batch — no updateComplete needed since we only
-    // need the sentinel element which is always in the DOM.
-    requestAnimationFrame(() => {
-      this._scrollPending = false;
-      if (this._userHasScrolledUp) return;
-      const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
-      if (sentinel) {
-        sentinel.scrollIntoView({ block: 'end' });
-      }
+    // Wait for Lit to commit DOM changes, then scroll.
+    // This ensures new messages are in the DOM before we scroll to them.
+    this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        this._scrollPending = false;
+        if (this._userHasScrolledUp) return;
+        const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+        if (sentinel) {
+          sentinel.scrollIntoView({ block: 'end' });
+        }
+      });
     });
   }
 

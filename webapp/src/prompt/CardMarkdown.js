@@ -389,6 +389,7 @@ export class CardMarkdown extends LitElement {
     this._codeScrollPositions = new Map();
     this._cachedContent = null;
     this._cachedResult = null;
+    this._cachedFinal = null;
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -410,7 +411,8 @@ export class CardMarkdown extends LitElement {
     }
     
     // Fast cache hit — content hasn't changed at all
-    if (this._cachedContent === this.content && this._cachedResult) {
+    // Also check that final status hasn't changed (streaming → complete needs re-processing)
+    if (this._cachedContent === this.content && this._cachedResult && this._cachedFinal === this.final) {
       return this._cachedResult;
     }
     
@@ -464,6 +466,7 @@ export class CardMarkdown extends LitElement {
     processed = this.wrapCodeBlocksWithCopyButton(processed);
     processed = this.highlightFileMentions(processed);
     this._cachedResult = processed;
+    this._cachedFinal = this.final;
     
     return processed;
   }

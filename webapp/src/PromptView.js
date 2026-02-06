@@ -230,8 +230,10 @@ export class PromptView extends MixedBase {
   async handleLoadSession(e) {
     const { messages, sessionId } = e.detail;
     
-    // Clear current history
+    // Clear current history (also resets scroll state)
     this.clearHistory();
+    this._userHasScrolledUp = false;
+    this._showScrollButton = false;
     
     // If we have a sessionId, use load_session_into_context to populate context manager
     if (sessionId) {
@@ -266,7 +268,8 @@ export class PromptView extends MixedBase {
     this.initWindowControls();
     this.initStreaming();
     this._initUrlService();
-    this.setupScrollObserver();
+    // Defer scroll observer setup until DOM is rendered
+    this.updateComplete.then(() => this.setupScrollObserver());
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
@@ -314,6 +317,11 @@ export class PromptView extends MixedBase {
 
     this._visitedTabs.add(tab);
     this.activeLeftTab = tab;
+
+    // Re-establish scroll observer when switching back to chat tab
+    if (tab === TABS.FILES) {
+      this.updateComplete.then(() => this.setupScrollObserver());
+    }
 
     if (tab === TABS.SEARCH) {
       this.updateComplete.then(() => {
