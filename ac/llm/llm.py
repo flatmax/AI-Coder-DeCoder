@@ -261,12 +261,6 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
             read_only_files=read_only_files
         )
     
-    def _get_indexer(self):
-        """DEPRECATED: Use _get_symbol_index() directly."""
-        import warnings
-        warnings.warn("_get_indexer() is deprecated, use _get_symbol_index()", DeprecationWarning, stacklevel=2)
-        return self._get_symbol_index()
-    
     def _get_symbol_index(self):
         """Get or create the SymbolIndex instance."""
         if self._symbol_index is None:
@@ -1100,7 +1094,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
                 "count": history_count,
                 "tokens": history_tokens,
                 "max_tokens": self._context_manager.max_history_tokens,
-                "needs_summary": self._context_manager.history_needs_summary()
+                "needs_summary": self._context_manager.should_compact()
             })
             active_tokens += history_tokens
         
@@ -1147,7 +1141,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
                 "message_count": history_count,
                 "max_tokens": self._context_manager.max_history_tokens,
                 "compaction_threshold": self._context_manager._compactor.config.compaction_trigger_tokens if self._context_manager._compactor else self._context_manager.max_history_tokens,
-                "needs_summary": self._context_manager.history_needs_summary()
+                "needs_summary": self._context_manager.should_compact()
             }
         }
         

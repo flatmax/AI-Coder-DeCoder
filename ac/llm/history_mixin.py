@@ -8,7 +8,10 @@ from typing import Optional
 
 
 class HistoryMixin:
-    """Mixin for history storage operations."""
+    """Mixin for history storage operations.
+    
+    All public methods safely return None/[] when no history store is available.
+    """
     
     def _init_history_store(self):
         """Initialize the history store if we have a repo."""
@@ -21,122 +24,42 @@ class HistoryMixin:
             except Exception as e:
                 print(f"Warning: Could not initialize history store: {e}")
     
-    def store_user_message(
-        self,
-        content: str,
-        images: Optional[list] = None,
-        files: Optional[list] = None
-    ) -> Optional[dict]:
-        """
-        Store a user message in history.
-        
-        Args:
-            content: The message content
-            images: Optional list of images
-            files: Optional list of files in context
-            
-        Returns:
-            The stored message dict, or None if no history store
-        """
+    def _with_store(self, method_name: str, *args, default=None, **kwargs):
+        """Call a method on the history store, returning default if unavailable."""
         if not self._history_store:
-            return None
-        
-        return self._history_store.append(
-            role='user',
-            content=content,
-            images=images,
-            files=files
-        )
+            return default
+        return getattr(self._history_store, method_name)(*args, **kwargs)
     
-    def store_assistant_message(
-        self,
-        content: str,
-        files_modified: Optional[list] = None,
-        edit_results: Optional[list] = None
-    ) -> Optional[dict]:
-        """
-        Store an assistant message in history.
-        
-        Args:
-            content: The message content
-            files_modified: Optional list of files that were modified
-            edit_results: Optional list of edit results with status info
-            
-        Returns:
-            The stored message dict, or None if no history store
-        """
-        if not self._history_store:
-            return None
-        
-        return self._history_store.append(
-            role='assistant',
-            content=content,
-            files_modified=files_modified,
-            edit_results=edit_results
-        )
+    def store_user_message(self, content: str, images: Optional[list] = None,
+                           files: Optional[list] = None) -> Optional[dict]:
+        """Store a user message in history."""
+        return self._with_store('append', role='user', content=content,
+                                images=images, files=files)
+    
+    def store_assistant_message(self, content: str, files_modified: Optional[list] = None,
+                                edit_results: Optional[list] = None) -> Optional[dict]:
+        """Store an assistant message in history."""
+        return self._with_store('append', role='assistant', content=content,
+                                files_modified=files_modified, edit_results=edit_results)
     
     def history_search(self, query: str, role: Optional[str] = None, limit: int = 100) -> list:
-        """
-        Search message history.
-        
-        Args:
-            query: Search string
-            role: Optional filter by role
-            limit: Maximum results
-            
-        Returns:
-            List of matching messages
-        """
-        if not self._history_store:
-            return []
-        return self._history_store.search(query, role, limit)
+        """Search message history."""
+        return self._with_store('search', query, role, limit, default=[])
     
     def history_get_session(self, session_id: str) -> list:
-        """
-        Get all messages from a session.
-        
-        Args:
-            session_id: The session ID
-            
-        Returns:
-            List of messages
-        """
-        if not self._history_store:
-            return []
-        return self._history_store.get_session(session_id)
+        """Get all messages from a session."""
+        return self._with_store('get_session', session_id, default=[])
     
     def history_list_sessions(self, limit: int = 50) -> list:
-        """
-        List recent sessions.
-        
-        Args:
-            limit: Maximum sessions to return
-            
-        Returns:
-            List of session summaries
-        """
-        if not self._history_store:
-            return []
-        return self._history_store.list_sessions(limit)
+        """List recent sessions."""
+        return self._with_store('list_sessions', limit, default=[])
     
     def history_new_session(self) -> Optional[str]:
-        """
-        Start a new history session.
-        
-        Returns:
-            The new session ID, or None if no history store
-        """
-        if not self._history_store:
-            return None
-        return self._history_store.new_session()
+        """Start a new history session."""
+        return self._with_store('new_session')
     
     def history_get_current_session_id(self) -> Optional[str]:
-        """
-        Get the current session ID.
-        
-        Returns:
-            The session ID, or None if no history store
-        """
+        """Get the current session ID."""
         if not self._history_store:
             return None
         return self._history_store.session_id
