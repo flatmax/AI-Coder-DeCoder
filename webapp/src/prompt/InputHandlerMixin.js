@@ -324,6 +324,12 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
 
     if (e.key === 'Escape') {
       this._closeHistorySearch();
+      // Clear file picker filter if active
+      const filePicker = this.shadowRoot?.querySelector('file-picker');
+      if (filePicker && filePicker.filter) {
+        filePicker.filter = '';
+        return;
+      }
       return;
     }
 
