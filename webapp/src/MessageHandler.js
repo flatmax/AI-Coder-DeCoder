@@ -83,21 +83,18 @@ export class MessageHandler extends JRPCClient {
   }
 
   _scrollToBottom() {
-    if (this._userHasScrolledUp) return;
-    
-    // Throttle to one scroll per animation frame to avoid layout thrashing
-    // during rapid streaming chunks
-    if (this._scrollPending) return;
+    if (this._userHasScrolledUp || this._scrollPending) return;
     this._scrollPending = true;
     
-    this.updateComplete.then(() => {
-      requestAnimationFrame(() => {
-        this._scrollPending = false;
-        const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
-        if (sentinel) {
-          sentinel.scrollIntoView({ block: 'end' });
-        }
-      });
+    // Single rAF per batch — no updateComplete needed since we only
+    // need the sentinel element which is always in the DOM.
+    requestAnimationFrame(() => {
+      this._scrollPending = false;
+      if (this._userHasScrolledUp) return;
+      const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
+      if (sentinel) {
+        sentinel.scrollIntoView({ block: 'end' });
+      }
     });
   }
 

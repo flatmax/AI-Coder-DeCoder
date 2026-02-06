@@ -101,11 +101,25 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
     if (changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
         changedProperties.has('excludedUrls')) {
-      if (this.rpcCall && this.visible !== false) {
+      if (this.rpcCall && this.visible) {
         if (this._refreshTimer) clearTimeout(this._refreshTimer);
         this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
       }
     }
+  }
+
+  /**
+   * Clean up pending timers when disconnected from the DOM.
+   */
+  disconnectedCallback() {
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+    if (this._refreshPromise) {
+      this._refreshPromise = null;
+    }
+    super.disconnectedCallback();
   }
 
   // ========== URL Modal ==========

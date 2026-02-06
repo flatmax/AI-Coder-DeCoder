@@ -43,14 +43,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
   async show() {
     this.visible = true;
-    await this.loadSessions();
+    this.loadSessions(); // non-blocking; TTL cache prevents redundant fetches
     
     // Restore scroll positions after render
-    await this.updateComplete;
-    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
-    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
-    if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
-    if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
+    this.updateComplete.then(() => {
+      const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+      const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+      if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
+      if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
+    });
   }
 
   hide() {

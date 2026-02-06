@@ -16,8 +16,13 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
   const foundFiles = [];
   const selectedSet = selectedFiles ? new Set(selectedFiles) : new Set();
 
-  // Sort by length descending to match longer paths first
-  const sortedFiles = [...mentionedFiles].sort((a, b) => b.length - a.length);
+  // Sort by length descending to match longer paths first.
+  // Reuse previous sort if the input array reference is the same.
+  if (mentionedFiles !== highlightFileMentions._lastInput) {
+    highlightFileMentions._lastInput = mentionedFiles;
+    highlightFileMentions._lastSorted = [...mentionedFiles].sort((a, b) => b.length - a.length);
+  }
+  const sortedFiles = highlightFileMentions._lastSorted;
 
   // Pre-filter: skip files whose path doesn't even appear as a substring.
   // This avoids expensive regex construction + execution for the vast majority
