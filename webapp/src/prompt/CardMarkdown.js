@@ -389,7 +389,6 @@ export class CardMarkdown extends LitElement {
     this._codeScrollPositions = new Map();
     this._cachedContent = null;
     this._cachedResult = null;
-    this._diffCache = new Map();  // Memoize LCS diffs for edit blocks
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -415,81 +414,34 @@ export class CardMarkdown extends LitElement {
       return this._cachedResult;
     }
     
-    // During streaming, use incremental parsing: if the new content is
-    // an append-only extension of the previous content (which it always
-    // is during streaming), only re-parse from the last complete block.
-    const isStreaming = this._isStreaming();
-    const hasEditBlocks = this.content.includes('««« EDIT');
+    const isStreaming = !this.final;
     
-    if (isStreaming && !hasEditBlocks && this._cachedContent 
-        && this.content.startsWith(this._cachedContent)
-        && this._cachedParsedPrefix) {
-      // Find the last paragraph/block boundary in the previously parsed content
-      // to avoid re-parsing everything. We re-parse only the last block + new text
-      // because markdown context (lists, emphasis) can span blocks.
-      const prevLen = this._cachedContent.length;
-      const lastDoubleNewline = this._cachedContent.lastIndexOf('\n\n');
-      
-      if (lastDoubleNewline > 0) {
-        const stableContent = this._cachedContent.substring(0, lastDoubleNewline);
-        const tailContent = this.content.substring(lastDoubleNewline);
-        
-        // Only use incremental if the stable prefix hasn't changed
-        if (this._lastStablePrefix === stableContent && this._lastStableParsed) {
-          const tailParsed = marked.parse(tailContent);
-          const result = this._lastStableParsed + tailParsed;
-          this._cachedContent = this.content;
-          this._cachedParsedPrefix = result;
-          return result;
-        }
-      }
+    // During streaming: just run marked.parse() — skip expensive
+    // post-processing (edit blocks, file mentions, copy buttons)
+    // which are only useful once the message is complete.
+    if (isStreaming) {
+      this._cachedContent = this.content;
+      this._cachedResult = null;  // Invalidate final cache
+      return marked.parse(this.content);
     }
     
+    // Final render: full processing pipeline
     this._cachedContent = this.content;
     
+    const hasEditBlocks = this.content.includes('««« EDIT');
+    let processed;
+    
     if (hasEditBlocks) {
-      let processed = this.processContentWithEditBlocks(this.content);
-      processed = this.wrapCodeBlocksWithCopyButton(processed);
-      processed = this.highlightFileMentions(processed);
-      if (!isStreaming) {
-        this._cachedResult = processed;
-      }
-      return processed;
-    }
-    
-    let content = this.protectSearchReplaceBlocks(this.content);
-    let processed = marked.parse(content);
-    
-    // Cache the stable prefix for incremental parsing on next chunk
-    if (isStreaming) {
-      const lastDoubleNewline = this.content.lastIndexOf('\n\n');
-      if (lastDoubleNewline > 0) {
-        this._lastStablePrefix = this.content.substring(0, lastDoubleNewline);
-        this._lastStableParsed = marked.parse(this._lastStablePrefix);
-      }
-      this._cachedParsedPrefix = processed;
+      processed = this.processContentWithEditBlocks(this.content);
     } else {
-      processed = this.wrapCodeBlocksWithCopyButton(processed);
-      processed = this.highlightFileMentions(processed);
-      this._cachedResult = processed;
-      this._lastStablePrefix = null;
-      this._lastStableParsed = null;
-      this._cachedParsedPrefix = null;
+      processed = marked.parse(this.content);
     }
+    
+    processed = this.wrapCodeBlocksWithCopyButton(processed);
+    processed = this.highlightFileMentions(processed);
+    this._cachedResult = processed;
     
     return processed;
-  }
-
-  /**
-   * Check if this card's message is still streaming (not yet final).
-   */
-  _isStreaming() {
-    return !this.final;
-  }
-
-  protectSearchReplaceBlocks(content) {
-    // Pass through content unchanged - let markdown handle it naturally
-    return content;
   }
 
 
@@ -568,11 +520,6 @@ export class CardMarkdown extends LitElement {
 
 
   wrapCodeBlocksWithCopyButton(htmlContent) {
-    // Skip wrapping during streaming — the copy button regex is expensive
-    // and the content is changing every chunk anyway
-    if (this._isStreaming()) {
-      return htmlContent;
-    }
     const preCodeRegex = /(<pre[^>]*>)(\s*<code[^>]*>)([\s\S]*?)(<\/code>\s*<\/pre>)/gi;
     return htmlContent.replace(preCodeRegex, (match, pre, code, content, closing) => {
       return `<div class="code-wrapper">${pre}${code}${content}${closing}<button class="copy-btn" onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button></div>`;
@@ -580,12 +527,6 @@ export class CardMarkdown extends LitElement {
   }
 
   highlightFileMentions(htmlContent) {
-    // Skip expensive regex-based file mention highlighting during streaming —
-    // it runs O(files × content_length) per render and the results change
-    // on every chunk anyway. Only apply on final render.
-    if (this._isStreaming()) {
-      return htmlContent;
-    }
     const { html: result, foundFiles } = highlightFileMentions(htmlContent, this.mentionedFiles, this.selectedFiles);
     this._foundFiles = foundFiles;
     return result;
