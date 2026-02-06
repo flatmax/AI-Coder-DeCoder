@@ -1,4 +1,5 @@
 import { html } from 'lit';
+import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
 import './SpeechToText.js';
@@ -144,7 +145,10 @@ export function renderPromptView(component) {
             <div class="chat-panel">
               <div class="messages-wrapper">
                 <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)} @wheel=${(e) => component.handleWheel(e)}>
-                  ${component.messageHistory.map(message => {
+                  ${repeat(
+                    component.messageHistory,
+                    (message) => message.id,
+                    (message) => {
                       if (message.role === 'user') {
                         return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
                       } else if (message.role === 'assistant') {
