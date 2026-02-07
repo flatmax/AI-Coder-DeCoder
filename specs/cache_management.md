@@ -184,14 +184,77 @@ Items demote to active (N = 0) when:
 
 Demotion removes the item from its cached tier — that tier's block changes on the next request (cache miss), which constitutes a ripple.
 
-## Initialization from References
+## Initialization from Reference Graph Clustering
 
-On first run (no stability data), the tracker initializes tier assignments heuristically from reference counts (`←refs` in the symbol map):
+On startup (and every restart), the tracker initializes tier assignments from the cross-file reference graph. **There is no persistence** — stability data is rebuilt fresh each session.
 
-- **With threshold-aware mode** (`cache_target_tokens > 0`): Fill tiers top-down (L1 → L2 → L3) until each meets the token target. Most-referenced files go to L1.
-- **Without threshold mode** (legacy): Top 20% by refs → L1, next 30% → L2, bottom 50% → L3.
+### Why No Persistence
 
-L0 is never assigned heuristically — it must be earned through stability. Files in active context are excluded from initialization.
+Persisting stability data across sessions causes stale state problems — files accumulate high N values and reach L0 in one session, then remain there even when the project focus shifts. A fresh start each session is simpler and more predictable: tiers rebuild from the reference graph in 1-2 requests, and the graph already encodes the structural relationships that matter.
+
+### Data Source
+
+The `ReferenceIndex` in `references.py` provides two directed graphs:
+- `_file_deps[A]` — set of files that A references (A uses symbols from these files)
+- `_file_refs[A]` — set of files that reference A (these files use symbols from A)
+
+These capture all cross-file symbol usage: function calls, class inheritance, variable references, type annotations. This is broader than a strict call graph, which is desirable — it captures the coupling that determines whether editing one file invalidates another's symbol block.
+
+### Clustering Algorithm
+
+#### Step 1: Build Mutual Reference Graph
+
+Extract **bidirectional edges only** — pairs where A references B **and** B references A. One-way references (e.g., many files import `models.py` but `models.py` imports nothing) are excluded from clustering edges.
+
+Why bidirectional only: Transitive closure over all reference edges creates one giant component in most codebases. A utility file like `models.py` is referenced by 15+ files, connecting them all transitively. Bidirectional edges identify **mutual coupling** — files that are tightly interdependent and likely to be edited together. Files like `models.py` that are widely imported but import nothing back remain isolated, which is correct — editing `models.py` should invalidate its own tier, not drag half the codebase with it.
+
+Example bidirectional pairs in this repo:
+- `streaming.py` ↔ `context_builder.py` (mutual imports)
+- `stability_tracker.py` ↔ `context_builder.py` (mutual imports)
+- `fetcher.py` ↔ `cache.py` (mutual references within url_handler)
+
+Example one-way (excluded from edges):
+- `models.py` ← many files (widely imported, imports nothing back)
+- `extensions.py` ← several files (utility, no back-references)
+
+#### Step 2: Find Connected Components
+
+Build connected components from the bidirectional edge graph. Each component is a cluster of mutually coupled files.
+
+This naturally produces:
+- **Language separation**: JS and Python never have bidirectional references, so they form separate clusters.
+- **Subsystem separation**: Within Python, `url_handler/*.py` forms its own cluster separate from `llm/*.py` because they don't mutually reference each other.
+- **Reasonable cluster sizes**: Without transitive one-way edges, clusters stay small (typically 2-6 files). Isolated files (no bidirectional edges) form singleton clusters.
+
+#### Step 3: Distribute Clusters Across L1, L2, L3
+
+Estimate tokens for each cluster (sum of symbol block tokens for all files in the cluster). Sort clusters by token count descending.
+
+Use **greedy bin-packing**: assign each cluster to the tier (L1, L2, or L3) with the fewest tokens so far. This keeps the three tiers approximately balanced.
+
+The key constraint is that **each cluster stays together in one tier**. When you edit a file in one cluster, only that cluster's tier invalidates. The other two tiers remain cached.
+
+#### Step 4: Respect Minimum Tokens
+
+Each tier must meet `cache_target_tokens` from config (default: `cacheMinTokens × cacheBufferMultiplier`). If total symbol content is insufficient to fill all three tiers above the minimum:
+
+- Fill fewer tiers, preferring L1 first, then L2, then L3
+- An empty tier is better than a tier below the provider's cache minimum (e.g., 1024 tokens for Anthropic)
+- If all content fits in one tier, put it all in L1
+
+### What This Achieves
+
+- **Locality of invalidation**: Working on one subsystem invalidates only that subsystem's cache tier. The other tiers remain cached.
+- **Language separation**: JS and Python code naturally land in different tiers since they never have bidirectional references.
+- **Subsystem separation**: Within a language, loosely coupled subsystems (e.g., url_handler vs llm) land in different tiers.
+- **Even cache utilization**: Balanced token distribution means each cache block is a similar size, maximizing cache hit efficiency.
+- **Utility file isolation**: Widely-imported files like `models.py` form singleton clusters and are distributed independently, so editing them doesn't cascade.
+
+### Constraints
+
+- **L0 is never assigned on initialization** — it must be earned through stability (ripple promotion during the session).
+- **Files in active context are excluded** — they have full content included separately.
+- **Symbol entries only** — initialization assigns `symbol:` prefixed entries. File entries start in active and graduate through the normal stability flow.
 
 ## Configuration
 
@@ -206,11 +269,13 @@ The effective `cache_target_tokens = cacheMinTokens × cacheBufferMultiplier`.
 
 Setting `cacheMinTokens` to 0 disables threshold-aware behavior — all promotions happen without token gating, and history never graduates (stays active).
 
-## Persistence
+## No Persistence
 
-Stability data is persisted to `.aicoder/stability.json` in the repository root. The file stores:
-- `response_count`: Total responses tracked
+Stability data is **not persisted** across sessions. On each application startup, the tracker begins empty and initializes from the reference graph (see "Initialization from Reference Graph Clustering" above).
+
+Within a session, the tracker maintains in-memory state:
+- `response_count`: Total responses this session
 - `last_active_items`: Items in active on the last request
 - `items`: Map of item key → `{content_hash, n_value, tier}`
 
-Data survives restarts. On restart, `_last_active_file_symbol_items` in `llm.py` resets to empty set, so the first request with files selected detects a ripple (empty ≠ current files).
+On startup, `_last_active_file_symbol_items` in `llm.py` is empty, so the first request with files selected detects a ripple (empty ≠ current files). Tiers rebuild from the reference graph within 1-2 requests.
