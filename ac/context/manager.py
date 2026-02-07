@@ -137,6 +137,20 @@ class ContextManager:
     def clear_history(self) -> None:
         """Clear conversation history."""
         self._history = []
+        # Purge history entries from stability tracker
+        if self.cache_stability:
+            self.cache_stability.remove_by_prefix('history:')
+    
+    def reregister_history_items(self) -> None:
+        """Re-register history items in the stability tracker after compaction.
+        
+        Removes all existing history:* entries and registers current history
+        messages as new active items (N=0). They will promote normally from there.
+        """
+        if not self.cache_stability:
+            return
+        self.cache_stability.remove_by_prefix('history:')
+        # New entries will be registered on next _update_cache_stability call
     
     def history_token_count(self) -> int:
         """Get token count of current history."""

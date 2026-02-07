@@ -634,6 +634,30 @@ class StabilityTracker:
         if self._persistence_path.exists():
             self._persistence_path.unlink()
     
+    def remove_by_prefix(self, prefix: str) -> list[str]:
+        """Remove all tracked items whose key starts with prefix.
+        
+        Used for lifecycle events like history clear/compaction/session load
+        where a category of items needs to be purged.
+        
+        Args:
+            prefix: Key prefix to match (e.g., 'history:')
+            
+        Returns:
+            List of removed item keys
+        """
+        to_remove = [k for k in self._stability if k.startswith(prefix)]
+        for k in to_remove:
+            del self._stability[k]
+        # Also clean from last_active_items
+        self._last_active_items = {
+            item for item in self._last_active_items
+            if not item.startswith(prefix)
+        }
+        if to_remove:
+            self.save()
+        return to_remove
+    
     def get_last_promotions(self) -> list[tuple[str, str]]:
         """Get items promoted in the last update.
         

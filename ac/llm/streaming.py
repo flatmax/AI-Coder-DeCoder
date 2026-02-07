@@ -540,6 +540,17 @@ class StreamingMixin:
                 tier_info['L0']['files'] = len(file_tiers['L0'])
                 tier_info['L0']['tokens'] += self._safe_count_tokens(l0_files_content)
         
+        # Get history message tier assignments
+        history_tiers = self._get_history_tiers()
+        
+        # Add L0 history to the L0 block
+        if history_tiers.get('L0'):
+            l0_history_content = self._format_history_for_cache(history_tiers['L0'], 'L0')
+            if l0_history_content:
+                l0_content += "\n\n" + l0_history_content
+                tier_info['L0']['history'] = len(history_tiers['L0'])
+                tier_info['L0']['tokens'] += self._safe_count_tokens(l0_history_content)
+        
         messages.append({
             "role": "system",
             "content": [
@@ -560,7 +571,8 @@ class StreamingMixin:
         for tier in ['L1', 'L2', 'L3']:
             result = self._build_tier_cache_block(
                 tier, symbol_map_content, symbol_files_by_tier,
-                file_tiers, tier_info, tier_file_headers[tier]
+                file_tiers, tier_info, tier_file_headers[tier],
+                history_tiers=history_tiers
             )
             if result:
                 messages.extend(result['messages'])
@@ -602,14 +614,24 @@ class StreamingMixin:
                 tier_info['active']['files'] = len(file_tiers['active'])
                 tier_info['active']['tokens'] += self._safe_count_tokens(active_content)
         
-        # Add conversation history
-        if self.conversation_history:
-            tier_info['active']['has_history'] = True
-            for msg in self.conversation_history:
-                tier_info['active']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+        # Add conversation history - only active (uncached) messages as raw pairs
+        active_history_indices = set(history_tiers.get('active', []))
+        cached_history_count = sum(
+            len(indices) for tier, indices in history_tiers.items() if tier != 'active'
+        )
         
-        for msg in self.conversation_history:
-            messages.append(msg)
+        if self.conversation_history:
+            for i, msg in enumerate(self.conversation_history):
+                if i in active_history_indices:
+                    messages.append(msg)
+                    tier_info['active']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+            
+            if active_history_indices:
+                tier_info['active']['has_history'] = True
+                tier_info['active']['history'] = len(active_history_indices)
+            
+            if cached_history_count > 0:
+                print(f"💬 History: {cached_history_count} cached, {len(active_history_indices)} active")
         
         # Build user message with images if provided
         if images:
@@ -645,8 +667,80 @@ class StreamingMixin:
             return ""
         return "\n\n".join(parts)
     
+    def _format_history_for_cache(self, message_indices: list[int], tier: str) -> str:
+        """Format history messages for inclusion in a cached tier block.
+        
+        History messages in cached tiers are formatted as quoted content
+        (not as separate user/assistant message pairs, since they must be
+        inside a single cached user message block).
+        
+        Args:
+            message_indices: Indices into self.conversation_history
+            tier: Tier name for the header
+            
+        Returns:
+            Formatted history string, or empty string if no messages
+        """
+        history = self.conversation_history
+        if not message_indices or not history:
+            return ""
+        
+        parts = [f"\n## Conversation History ({tier})\n"]
+        for idx in message_indices:
+            if idx >= len(history):
+                continue
+            msg = history[idx]
+            role = msg.get('role', 'user').title()
+            content = msg.get('content', '')
+            parts.append(f"### {role}\n{content}")
+        
+        if len(parts) == 1:
+            return ""
+        return "\n\n".join(parts)
+    
+    def _get_history_tiers(self) -> dict[str, list[int]]:
+        """Get history message indices organized by stability tier.
+        
+        Returns:
+            Dict mapping tier names to lists of message indices
+        """
+        from ..context.stability_tracker import TIER_ORDER
+        
+        history = self.conversation_history
+        tiers = {tier: [] for tier in TIER_ORDER}
+        
+        if not history or not self._context_manager or not self._context_manager.cache_stability:
+            tiers['active'] = list(range(len(history))) if history else []
+            return tiers
+        
+        stability = self._context_manager.cache_stability
+        history_items = [f"history:{i}" for i in range(len(history))]
+        tracked = stability.get_items_by_tier(history_items)
+        
+        for tier in TIER_ORDER:
+            tier_items = tracked.get(tier, [])
+            for item in tier_items:
+                if item.startswith("history:"):
+                    idx = int(item.split(":")[1])
+                    if idx < len(history):
+                        tiers[tier].append(idx)
+            # Sort indices to maintain message order
+            tiers[tier].sort()
+        
+        # Any untracked messages go to active
+        tracked_indices = set()
+        for indices in tiers.values():
+            tracked_indices.update(indices)
+        for i in range(len(history)):
+            if i not in tracked_indices:
+                tiers['active'].append(i)
+        tiers['active'].sort()
+        
+        return tiers
+    
     def _build_tier_cache_block(self, tier, symbol_map_content, symbol_files_by_tier,
-                                file_tiers, tier_info, file_header):
+                                file_tiers, tier_info, file_header,
+                                history_tiers=None):
         """Build a cache block for a single tier (L1/L2/L3).
         
         Args:
@@ -656,6 +750,7 @@ class StreamingMixin:
             file_tiers: Dict of tier -> file path lists (full content files)
             tier_info: Mutable dict tracking per-tier token counts
             file_header: Header string for the file section
+            history_tiers: Optional dict of tier -> message index lists
             
         Returns:
             Dict with 'messages' and 'symbol_tokens', or None if tier is empty
@@ -677,6 +772,14 @@ class StreamingMixin:
                 parts.append(files_content)
                 tier_info[tier]['files'] = len(file_tiers[tier])
                 tier_info[tier]['tokens'] += self._safe_count_tokens(files_content)
+        
+        # Add cached history messages for this tier
+        if history_tiers and history_tiers.get(tier):
+            history_content = self._format_history_for_cache(history_tiers[tier], tier)
+            if history_content:
+                parts.append(history_content)
+                tier_info[tier]['history'] = len(history_tiers[tier])
+                tier_info[tier]['tokens'] += self._safe_count_tokens(history_content)
         
         if not parts:
             return None
@@ -700,9 +803,9 @@ class StreamingMixin:
     def _update_cache_stability(self, file_paths, files_modified):
         """Update cache stability tracking after a response.
         
-        Collects active items (files + symbol entries), computes content
-        hashes and token counts, calls the stability tracker, and logs
-        any promotions/demotions.
+        Collects active items (files + symbol entries + history messages),
+        computes content hashes and token counts, calls the stability tracker,
+        and logs any promotions/demotions.
         
         Args:
             file_paths: Files in active context this request
@@ -714,6 +817,7 @@ class StreamingMixin:
         # Collect items currently in Active context:
         # - Files explicitly in file_paths
         # - Symbol entries ONLY for files in file_paths (not all indexed files)
+        # - All history messages (history:0, history:1, ...)
         # 
         # Symbol entries for files NOT in active context should NOT be in items list.
         # They were registered during _build_streaming_messages and will "leave" Active
@@ -726,9 +830,21 @@ class StreamingMixin:
             # Add symbol entries only for files in active context
             active_items.extend([f"symbol:{f}" for f in file_paths])
         
+        # Add history messages as tracked items
+        history = self._context_manager.get_history()
+        for i, msg in enumerate(history):
+            active_items.append(f"history:{i}")
+        
         def get_item_content(item):
-            """Get content for stability hashing - files or symbol blocks."""
-            if item.startswith("symbol:"):
+            """Get content for stability hashing - files, symbol blocks, or history."""
+            if item.startswith("history:"):
+                # History message - hash from role + content
+                idx = int(item.split(":")[1])
+                if idx < len(history):
+                    msg = history[idx]
+                    return f"{msg.get('role', '')}:{msg.get('content', '')}"
+                return None
+            elif item.startswith("symbol:"):
                 # Symbol entry - compute hash from symbols
                 file_path = item.replace("symbol:", "")
                 try:
@@ -744,8 +860,19 @@ class StreamingMixin:
                 return self._get_file_content_safe(item)
         
         def get_item_tokens(item):
-            """Get token count for an item - files or symbol blocks."""
-            if item.startswith("symbol:"):
+            """Get token count for an item - files, symbol blocks, or history."""
+            if item.startswith("history:"):
+                # History message - count tokens in formatted content
+                idx = int(item.split(":")[1])
+                if idx < len(history):
+                    msg = history[idx]
+                    content = msg.get('content', '')
+                    role = msg.get('role', '')
+                    # Approximate the formatted size (role header + content)
+                    formatted = f"### {role.title()}\n{content}\n\n"
+                    return tc.count(formatted) if formatted else 0
+                return 0
+            elif item.startswith("symbol:"):
                 # Symbol entry - count tokens in formatted block
                 file_path = item.replace("symbol:", "")
                 try:
@@ -991,6 +1118,8 @@ class StreamingMixin:
                 contents.append(f"{info['symbols']} symbols")
             if info['files'] > 0:
                 contents.append(f"{info['files']} file{'s' if info['files'] != 1 else ''}")
+            if info.get('history', 0) > 0:
+                contents.append(f"{info['history']} history msg{'s' if info['history'] != 1 else ''}")
             if info.get('has_tree'):
                 contents.append('tree')
             if info.get('has_urls'):
@@ -1103,6 +1232,11 @@ class StreamingMixin:
             if compaction_result and compaction_result.case != "none":
                 print(f"📝 History compacted: {compaction_result.case} "
                       f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
+                
+                # Re-register history items after compaction
+                # Old history:* entries are purged, new ones will register on next request
+                if self._context_manager:
+                    self._context_manager.reregister_history_items()
                 
                 # Build the compacted messages for the frontend
                 # Format: list of {role, content} dicts

@@ -154,7 +154,7 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
     def clear_history(self):
         """Clear the conversation history and start a new history session."""
         if self._context_manager:
-            self._context_manager.clear_history()
+            self._context_manager.clear_history()  # Also purges history:* from stability tracker
         # Start a new history session
         if self._history_store:
             new_session = self._history_store.new_session()
@@ -962,8 +962,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
     
     # ========== Context Visualization Methods ==========
     
-    def _build_tier_block(self, tier, symbol_map_content, symbol_files_by_tier, file_tiers):
-        """Build a single tier block with symbols and files."""
+    def _build_tier_block(self, tier, symbol_map_content, symbol_files_by_tier, file_tiers, history_tiers=None):
+        """Build a single tier block with symbols, files, and history."""
         contents = []
         tier_tokens = 0
         
@@ -992,6 +992,18 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
                     "items": file_items
                 })
                 tier_tokens += file_tokens
+        
+        # History
+        if history_tiers and history_tiers.get(tier):
+            history_items, history_tokens = self._build_history_items(history_tiers[tier])
+            if history_tokens:
+                contents.append({
+                    "type": "history",
+                    "count": len(history_tiers[tier]),
+                    "tokens": history_tokens,
+                    "items": history_items
+                })
+                tier_tokens += history_tokens
         
         return {
             "tier": tier,
@@ -1027,6 +1039,9 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         symbol_map_content, symbol_files_by_tier, legend, legend_tokens = \
             self._get_symbol_map_data(active_context_files, file_paths)
         
+        # Get history tier assignments
+        history_tiers = self._get_history_tiers()
+        
         # Build system prompt
         system_prompt = build_system_prompt()
         system_tokens = self._safe_count_tokens(system_prompt)
@@ -1037,7 +1052,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         cached_tokens = 0
         
         l0_block, l0_tokens = self._build_tier_block(
-            'L0', symbol_map_content, symbol_files_by_tier, file_tiers
+            'L0', symbol_map_content, symbol_files_by_tier, file_tiers,
+            history_tiers=history_tiers
         )
         # Prepend system and legend to L0
         l0_block['contents'] = [{"type": "system", "tokens": system_tokens}] + \
@@ -1051,7 +1067,8 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         # Build L1-L3 blocks
         for tier in ['L1', 'L2', 'L3']:
             block, tokens = self._build_tier_block(
-                tier, symbol_map_content, symbol_files_by_tier, file_tiers
+                tier, symbol_map_content, symbol_files_by_tier, file_tiers,
+                history_tiers=history_tiers
             )
             blocks.append(block)
             total_tokens += tokens
@@ -1085,18 +1102,32 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
             })
             active_tokens += url_tokens
         
-        # History
-        history_tokens = self._context_manager.history_token_count()
-        history_count = len(self._context_manager.get_history())
-        if history_tokens > 0:
+        # History (only active/uncached messages in the active block)
+        total_history_tokens = self._context_manager.history_token_count()
+        total_history_count = len(self._context_manager.get_history())
+        active_history_indices = history_tiers.get('active', []) if history_tiers else list(range(total_history_count))
+        
+        if active_history_indices:
+            active_history_items, active_history_tokens = self._build_history_items(active_history_indices)
+            if active_history_tokens:
+                active_contents.append({
+                    "type": "history",
+                    "count": len(active_history_indices),
+                    "tokens": active_history_tokens,
+                    "max_tokens": self._context_manager.max_history_tokens,
+                    "needs_summary": self._context_manager.should_compact(),
+                    "items": active_history_items
+                })
+                active_tokens += active_history_tokens
+        elif total_history_tokens > 0:
+            # Fallback: all history is cached in tiers, show summary in active
             active_contents.append({
                 "type": "history",
-                "count": history_count,
-                "tokens": history_tokens,
+                "count": 0,
+                "tokens": 0,
                 "max_tokens": self._context_manager.max_history_tokens,
                 "needs_summary": self._context_manager.should_compact()
             })
-            active_tokens += history_tokens
         
         blocks.append({
             "tier": "active",
@@ -1136,9 +1167,11 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
             },
             "urls": {"tokens": url_tokens, "label": f"URLs ({len(url_items)})", "items": url_items},
             "history": {
-                "tokens": history_tokens,
-                "label": f"History ({history_count} messages)",
-                "message_count": history_count,
+                "tokens": total_history_tokens,
+                "label": f"History ({total_history_count} messages)",
+                "message_count": total_history_count,
+                "cached_count": total_history_count - len(active_history_indices),
+                "active_count": len(active_history_indices),
                 "max_tokens": self._context_manager.max_history_tokens,
                 "compaction_threshold": self._context_manager._compactor.config.compaction_trigger_tokens if self._context_manager._compactor else self._context_manager.max_history_tokens,
                 "needs_summary": self._context_manager.should_compact()
