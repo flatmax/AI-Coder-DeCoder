@@ -32,7 +32,7 @@ Every item tracked by the system has an **N value** — a counter that measures 
 1. **New item appears in active context**: N = 0
 2. **Item unchanged in active context**: N increments by 1 each request
 3. **Item content changes** (hash mismatch or explicit modification): N resets to 0, demotes to active
-4. **Item reaches N ≥ 3**: Eligible for graduation from active to L3
+4. **Item reaches N ≥ 3**: Eligible for graduation from active to L3 (files and symbols only — history is eligible immediately since it is immutable)
 
 ### Content Hashing
 
@@ -53,13 +53,17 @@ Files and symbol entries with N ≥ 3 are **always** graduated — they are excl
 
 When a file graduates, its symbol entry (prefixed `symbol:`) also graduates independently (symbols and files are tracked separately since a file in active context has its full content included while its symbol entry is excluded from the symbol map).
 
+File graduation itself counts as a ripple — when files leave the active set, this triggers piggybacking for history messages (see below).
+
 ### History Messages
 
-History graduation is **controlled** to avoid unnecessary cache churn. Unlike files, graduating history changes the content of a cached tier block, which invalidates that block for the current request. History graduates only when:
+History messages are **immutable** — once written to the conversation, their content never changes. Unlike files and symbols, there is no need to wait for N ≥ 3 to confirm stability. Any history message still in the active tier is immediately eligible for graduation.
 
-1. **Piggybacking on an existing ripple**: If files or symbols are already changing the active set (file selection changed, file/symbol graduation happening), eligible history graduates for free — the cache blocks are already being invalidated.
+However, history graduation is **controlled** to avoid unnecessary cache churn. Graduating history changes the content of a cached tier block, which invalidates that block for the current request. History graduates only when:
 
-2. **Token threshold met**: If total eligible history tokens exceed `cache_target_tokens`, the oldest eligible messages graduate. This ensures the resulting cache block meets provider minimums (e.g., 1024 tokens for Anthropic).
+1. **Piggybacking on an existing ripple**: If files or symbols are already changing the active set (file selection changed, file/symbol graduation happening), all eligible history graduates for free — the cache blocks are already being invalidated.
+
+2. **Token threshold met**: If total eligible history tokens exceed `cache_target_tokens`, the oldest eligible messages graduate even without a ripple. This ensures the resulting cache block meets provider minimums (e.g., 1024 tokens for Anthropic).
 
 3. **Never** (if `cache_target_tokens = 0`): With the default configuration, history stays in active permanently. Set `cacheMinTokens` and `cacheBufferMultiplier` in `litellm.json` to enable.
 
@@ -90,13 +94,24 @@ This ensures each cache block meets the provider's minimum token requirement whi
 
 ### Ripple Detection
 
-A ripple is detected when the set of active file/symbol items changes between requests:
+A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
 
-```
-has_file_symbol_ripple = (last_active_items != current_active_items)
-```
+1. **File selection ripple**: The user changed which files are in active context (added, removed, or swapped files):
+   ```
+   has_file_symbol_ripple = (last_active_items != current_active_items)
+   ```
+   This is a symmetric check — both additions and removals trigger it.
 
-This fires on any change — adding a file, removing a file, swapping files, or files/symbols graduating out of active. File graduation itself counts as a ripple, allowing history to piggyback.
+2. **Graduation ripple**: Files or symbols with N ≥ 3 graduated out of active on this request, shrinking the active set:
+   ```
+   has_graduation_ripple = (active_file_symbols != file_symbol_items)
+   ```
+   This fires when the controlled graduation logic excludes eligible items from the active list.
+
+Either source of ripple allows history to piggyback. The combined check is:
+```
+has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
+```
 
 ## Cache Block Structure
 

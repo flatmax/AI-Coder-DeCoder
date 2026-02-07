@@ -916,11 +916,12 @@ class StreamingMixin:
             # Graduation disabled — all history stays active (original behavior)
             active_history = all_history
         else:
-            # Find eligible history: N >= 3 AND still in active tier
+            # Find eligible history: any history still in active tier.
+            # History messages are immutable (content never changes), so unlike
+            # files/symbols there's no need to wait for N >= 3 to confirm stability.
             eligible = [
                 h for h in all_history
-                if stability.get_n_value(h) >= 3
-                and stability.get_tier(h) == 'active'
+                if stability.get_tier(h) == 'active'
             ]
             
             # File/symbol graduation counts as a ripple for piggybacking
