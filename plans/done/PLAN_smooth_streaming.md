@@ -1,14 +1,33 @@
 # Smooth Streaming Rendering Plan
 
-## Status: IN PROGRESS
+
+### Files
+- `EditBlockRenderer.js`: Enhance `renderInProgressEditBlock()` to accept
+  partial content lines and render them as diff lines
+- `CardMarkdown.js`: Extract partial content from unclosed edit block and
+  pass to renderer
+═══════ REPL
+## Status: COMPLETE
 
 ## Completed
 - ✅ Step 1: Streaming cursor (blinking ▌ via CSS)
 - ✅ Step 2: Progressive edit block rendering (diffs during streaming + in-progress placeholder)
 - ✅ Step 3: Streaming attribute plumbing (AssistantCard → CardMarkdown)
+- ✅ Step 4: Incremental markdown parsing (only parse new complete segments per frame)
+- ✅ Step 5: Live partial diff in in-progress edit blocks
+- ⏭️ CSS smooth growth — skipped, rejected per plan analysis (unsafeHTML replaces DOM each frame, animations would flicker)
 
-## Next
-- Step 3 (plan): Incremental markdown parsing — only parse new complete segments per frame instead of full re-parse. Highest impact on performance but highest risk. The `final` render always does a full re-parse as safety net.
+## Summary of Changes
+- `AssistantCard.js`: Pass `?streaming` attribute to `card-markdown`
+- `CardMarkdown.js`: Streaming property, cursor CSS, incremental parsing (`_incrementalParse`, `_findSafeSplit`), progressive edit block rendering (`_processStreamingWithEditBlocks`), in-progress pulse CSS
+- `EditBlockRenderer.js`: `renderInProgressEditBlock()` with live partial diff, `renderPartialDiff()` helper
+═══════ REPL
+
+### Files
+- `EditBlockRenderer.js`: Enhance `renderInProgressEditBlock()` to accept
+  partial content lines and render them as diff lines
+- `CardMarkdown.js`: Extract partial content from unclosed edit block and
+  pass to renderer
 
 ## Problem
 

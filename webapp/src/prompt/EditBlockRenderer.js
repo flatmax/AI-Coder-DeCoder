@@ -135,11 +135,33 @@ export function renderInlineHighlight(segments, lineType) {
 }
 
 /**
- * Render an in-progress edit block placeholder (during streaming).
+ * Render an in-progress edit block with live partial diff (during streaming).
  * @param {string} filePath - File path being edited
+ * @param {string[]} [partialLines] - Lines received so far inside the edit block
  * @returns {string} HTML string
  */
-export function renderInProgressEditBlock(filePath) {
+export function renderInProgressEditBlock(filePath, partialLines) {
+  let contentHtml = '<div class="streaming-edit-pulse"></div>';
+
+  if (partialLines && partialLines.length > 0) {
+    const replMarkerIndex = partialLines.findIndex(l => l.startsWith('═══════'));
+
+    if (replMarkerIndex === -1) {
+      // Only EDIT section so far — show as context lines
+      contentHtml = partialLines
+        .map(line => `<span class="diff-line context"><span class="diff-line-prefix"> </span>${escapeHtml(line)}</span>`)
+        .join('\n');
+    } else {
+      // Have both EDIT and (partial) REPL sections — render as diff
+      const editLines = partialLines.slice(0, replMarkerIndex);
+      const replLines = partialLines.slice(replMarkerIndex + 1);
+      contentHtml = renderPartialDiff(editLines, replLines);
+    }
+
+    // Add pulse at the end to show more content is expected
+    contentHtml += '\n<div class="streaming-edit-pulse"></div>';
+  }
+
   return `
     <div class="edit-block in-progress">
       <div class="edit-block-header">
@@ -149,8 +171,44 @@ export function renderInProgressEditBlock(filePath) {
         </div>
       </div>
       <div class="edit-block-content">
-        <div class="streaming-edit-pulse"></div>
+        ${contentHtml}
       </div>
     </div>
   `;
+}
+
+/**
+ * Render a partial diff from EDIT and REPL lines during streaming.
+ * Computes a shared prefix (context lines) and shows remaining
+ * EDIT lines as removals and REPL lines as additions.
+ * @param {string[]} editLines
+ * @param {string[]} replLines
+ * @returns {string} HTML string
+ */
+function renderPartialDiff(editLines, replLines) {
+  // Find shared prefix (context lines)
+  let prefixLen = 0;
+  const maxPrefix = Math.min(editLines.length, replLines.length);
+  while (prefixLen < maxPrefix && editLines[prefixLen] === replLines[prefixLen]) {
+    prefixLen++;
+  }
+
+  const lines = [];
+
+  // Context lines (shared prefix)
+  for (let i = 0; i < prefixLen; i++) {
+    lines.push(`<span class="diff-line context"><span class="diff-line-prefix"> </span>${escapeHtml(editLines[i])}</span>`);
+  }
+
+  // Remove lines (remaining EDIT lines after prefix)
+  for (let i = prefixLen; i < editLines.length; i++) {
+    lines.push(`<span class="diff-line remove"><span class="diff-line-prefix">-</span>${escapeHtml(editLines[i])}</span>`);
+  }
+
+  // Add lines (remaining REPL lines after prefix)
+  for (let i = prefixLen; i < replLines.length; i++) {
+    lines.push(`<span class="diff-line add"><span class="diff-line-prefix">+</span>${escapeHtml(replLines[i])}</span>`);
+  }
+
+  return lines.join('\n');
 }
