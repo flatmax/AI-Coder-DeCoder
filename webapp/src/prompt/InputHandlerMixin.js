@@ -503,17 +503,20 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
       // About to maximize - restore saved scroll position
       this.minimized = false;
       
+      // Double rAF to wait for content-visibility to fully lay out all messages
       this.updateComplete.then(() => {
         requestAnimationFrame(() => {
-          const container = this.shadowRoot?.querySelector('#messages-container');
-          if (!container) return;
-          
-          if (this._savedWasAtBottom) {
-            container.scrollTop = container.scrollHeight;
-          } else {
-            const maxScroll = container.scrollHeight - container.clientHeight;
-            container.scrollTop = maxScroll * this._savedScrollRatio;
-          }
+          requestAnimationFrame(() => {
+            const container = this.shadowRoot?.querySelector('#messages-container');
+            if (!container) return;
+            
+            if (this._savedWasAtBottom) {
+              container.scrollTop = container.scrollHeight;
+            } else {
+              const maxScroll = container.scrollHeight - container.clientHeight;
+              container.scrollTop = maxScroll * this._savedScrollRatio;
+            }
+          });
         });
       });
     }
