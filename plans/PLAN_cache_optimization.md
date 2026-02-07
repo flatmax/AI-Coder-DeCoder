@@ -1,6 +1,6 @@
 # Cache Optimization Plan
 
-## Status: IN PROGRESS
+## Status: COMPLETE
 
 ## Problem
 
@@ -326,7 +326,7 @@ zero ongoing benefit. Not worth the disruption.
 
 ## Implementation Order
 
-1. **#1** - Controlled graduation logic for history caching
+1. **#1** - Controlled graduation logic for history caching ✅ COMPLETE
 
 ## Implementation Plan
 
@@ -350,18 +350,14 @@ The following infrastructure is already implemented and working:
   `_build_streaming_messages` places history into tier blocks,
   `_update_cache_stability` registers history items.
 
-### What remains: controlled graduation logic
+### Controlled graduation logic — COMPLETE ✅
 
-Currently all history messages are always included in the active items list
-passed to `update_after_response`. This means each message enters L3
-individually after N=3, causing a ripple every round in long conversations.
-
-The remaining work adds graduation gating to `_update_cache_stability` in
+Implemented controlled graduation gating in `_update_cache_stability` in
 `streaming.py`:
 
-1. **`ac/llm/streaming.py`** — `_update_cache_stability`: add controlled
-   graduation logic. Instead of unconditionally including all history in
-   the active items list, determine which should graduate based on:
+1. ✅ **`ac/llm/streaming.py`** — `_update_cache_stability`: controlled
+   graduation logic implemented. Instead of unconditionally including all
+   history in the active items list, determines which should graduate based on:
    - **Opportunistic piggybacking**: if files/symbols are already causing
      a ripple (items leaving active), include all eligible history (N >= 3)
      in the same batch.
@@ -370,31 +366,36 @@ The remaining work adds graduation gating to `_update_cache_stability` in
      messages keeping the most recent `cache_target_tokens` worth active.
    - **Otherwise**: all history stays active, no ripple.
 
-   Add `_select_history_to_graduate` helper method: given a list of eligible
-   history items sorted by index (oldest first), accumulate tokens from the
-   newest end, keep the last `cache_target_tokens` worth in active, return
-   the rest as graduated. This ensures the most recent eligible messages
-   stay active (they're most likely to be referenced by the LLM) while
-   graduating older ones that have accumulated enough tokens to justify a
-   cache block.
+   Added `_select_history_to_graduate` helper method: given a list of eligible
+   history items sorted by index (oldest first), accumulates tokens from the
+   newest end, keeps the last `cache_target_tokens` worth in active, returns
+   the rest as graduated.
 
-2. **`ac/llm/llm.py`** — Add `self._last_active_file_symbol_items = set()`
-   in `__init__` alongside existing session-level tracking variables
-   (e.g., `_session_empty_tier_count`). This tracks which file+symbol items
-   were in the active items list last round, used to detect file/symbol
-   churn for the piggybacking logic.
+2. ✅ **`ac/llm/llm.py`** — Added `self._last_active_file_symbol_items = set()`
+   in `__init__` for file/symbol churn detection in piggybacking logic.
 
-3. **Tests**: Add tests for graduation gating behavior:
+3. ✅ **`ac/context/stability_tracker.py`** — Removed auto-promotion from
+   active at N≥3. Items now only enter L3 when they **leave** the active
+   items list (are excluded from the `items` parameter). This was necessary
+   to give the caller full control over graduation timing. Without this,
+   history messages would auto-promote to L3 after 3 rounds regardless of
+   the graduation gate.
+
+4. ✅ **Tests** (`tests/test_history_graduation.py`): Added tests for:
+   - `_select_history_to_graduate` helper (8 unit tests)
    - Short conversation: all history stays active, zero ripple
    - Piggyback: file leaving context triggers history graduation
    - Token threshold: standalone graduation when enough tokens accumulate
    - Below threshold: eligible history stays active
-   - Mixed: piggyback takes precedence over threshold check
-   - Token window: newest eligible messages kept active, oldest graduated
-   - Graduation disabled: `cache_target_tokens == 0` means all history
-     stays active regardless of N values (original behavior preserved)
+   - Piggyback takes all eligible (not just threshold worth)
+   - Mixed eligible/ineligible history
+   - Graduation disabled: `cache_target_tokens == 0` preserves original behavior
 
-### Implementation notes for graduation logic
+5. ✅ **Tests** (`tests/test_stability_tracker.py`): Updated existing tests
+   for new behavior (items stay active while in items list, caller controls
+   graduation). Added `TestStabilityTrackerHistoryGraduation` class.
+
+### Implementation notes for graduation logic — DONE
 
 The graduation logic lives in `_update_cache_stability` in `streaming.py`,
 NOT in the stability tracker itself. The tracker is a general-purpose ripple
@@ -406,6 +407,16 @@ The key change: instead of always including all `history:*` items in the
 `active_items` list passed to `update_after_response`, the caller computes
 which history messages should remain active and which should be omitted
 (allowing them to "leave active" and enter L3 via the normal mechanism).
+
+**Additional change not in original plan**: Removed auto-promotion from
+active at N≥3 in `stability_tracker.py`. Previously, items that reached
+N≥3 while still in the active items list would auto-promote to L3. This
+was incompatible with the graduation gate — history messages would bypass
+the caller's control and enter L3 every round after 3 exchanges. Now items
+only enter L3 when they leave the active items list, giving the caller full
+control. This change also applies to files and symbol entries, but is
+harmless — files that stay in active context are being actively used and
+don't need to auto-promote.
 
 **Initialization** in `LiteLLM.__init__` (in `llm.py`):
 

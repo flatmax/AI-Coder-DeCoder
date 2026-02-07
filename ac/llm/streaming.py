@@ -803,9 +803,12 @@ class StreamingMixin:
     def _update_cache_stability(self, file_paths, files_modified):
         """Update cache stability tracking after a response.
         
-        Collects active items (files + symbol entries + history messages),
-        computes content hashes and token counts, calls the stability tracker,
-        and logs any promotions/demotions.
+        Implements controlled graduation for history messages:
+        - Files and symbol entries leave/enter active normally
+        - History messages accumulate N while active but only graduate to L3 when:
+          a) Piggybacking on a file/symbol ripple (zero additional cost), or
+          b) Eligible history tokens exceed cache_target_tokens (standalone graduation)
+        - This prevents per-request ripple churn from history in long conversations
         
         Args:
             file_paths: Files in active context this request
@@ -813,39 +816,19 @@ class StreamingMixin:
         """
         stability = self._context_manager.cache_stability
         tc = self._context_manager.token_counter
-        
-        # Collect items currently in Active context:
-        # - Files explicitly in file_paths
-        # - Symbol entries ONLY for files in file_paths (not all indexed files)
-        # - All history messages (history:0, history:1, ...)
-        # 
-        # Symbol entries for files NOT in active context should NOT be in items list.
-        # They were registered during _build_streaming_messages and will "leave" Active
-        # when not included here, triggering ripple promotion.
-        active_items = []
-        
-        # Add file paths that are in active context
-        if file_paths:
-            active_items.extend(file_paths)
-            # Add symbol entries only for files in active context
-            active_items.extend([f"symbol:{f}" for f in file_paths])
-        
-        # Add history messages as tracked items
         history = self._context_manager.get_history()
-        for i, msg in enumerate(history):
-            active_items.append(f"history:{i}")
+        
+        # --- Build content/token callbacks (shared by both phases) ---
         
         def get_item_content(item):
             """Get content for stability hashing - files, symbol blocks, or history."""
             if item.startswith("history:"):
-                # History message - hash from role + content
                 idx = int(item.split(":")[1])
                 if idx < len(history):
                     msg = history[idx]
                     return f"{msg.get('role', '')}:{msg.get('content', '')}"
                 return None
             elif item.startswith("symbol:"):
-                # Symbol entry - compute hash from symbols
                 file_path = item.replace("symbol:", "")
                 try:
                     si = self._get_symbol_index()
@@ -856,31 +839,26 @@ class StreamingMixin:
                     pass
                 return None
             else:
-                # Regular file
                 return self._get_file_content_safe(item)
         
         def get_item_tokens(item):
             """Get token count for an item - files, symbol blocks, or history."""
             if item.startswith("history:"):
-                # History message - count tokens in formatted content
                 idx = int(item.split(":")[1])
                 if idx < len(history):
                     msg = history[idx]
                     content = msg.get('content', '')
                     role = msg.get('role', '')
-                    # Approximate the formatted size (role header + content)
                     formatted = f"### {role.title()}\n{content}\n\n"
                     return tc.count(formatted) if formatted else 0
                 return 0
             elif item.startswith("symbol:"):
-                # Symbol entry - count tokens in formatted block
                 file_path = item.replace("symbol:", "")
                 try:
                     si = self._get_symbol_index()
                     symbols = si.get_symbols(file_path)
                     if symbols:
                         from ..symbol_index.compact_format import format_file_symbol_block
-                        # Get reference data for formatting
                         ref_index = getattr(si, '_reference_index', None)
                         file_refs_data = {}
                         file_imports_data = {}
@@ -902,22 +880,64 @@ class StreamingMixin:
                     pass
                 return 0
             else:
-                # Regular file - count tokens in formatted content
                 content = self._get_file_content_safe(item)
                 if content:
                     return tc.count(f"{item}\n```\n{content}\n```\n")
                 return 0
         
+        # --- Phase 1: Detect file/symbol churn for piggybacking ---
+        
+        file_symbol_items = set(file_paths or []) | {f"symbol:{f}" for f in (file_paths or [])}
+        has_file_symbol_ripple = bool(
+            self._last_active_file_symbol_items - file_symbol_items
+        )
+        self._last_active_file_symbol_items = file_symbol_items.copy()
+        
+        # --- Phase 2: Controlled history graduation ---
+        
+        all_history = [f"history:{i}" for i in range(len(history))]
+        cache_target = stability.get_cache_target_tokens()
+        
+        if not cache_target:
+            # Graduation disabled — all history stays active (original behavior)
+            active_history = all_history
+        else:
+            # Find eligible history: N >= 3 AND still in active tier
+            eligible = [
+                h for h in all_history
+                if stability.get_n_value(h) >= 3
+                and stability.get_tier(h) == 'active'
+            ]
+            
+            if has_file_symbol_ripple and eligible:
+                # Piggyback: ripple already happening from file/symbol churn,
+                # graduate all eligible history at zero additional cache cost
+                graduated = set(eligible)
+                active_history = [h for h in all_history if h not in graduated]
+            elif eligible:
+                # Check token threshold for standalone graduation
+                eligible_tokens = sum(get_item_tokens(item) for item in eligible)
+                if eligible_tokens >= cache_target:
+                    # Graduate oldest, keeping recent cache_target worth active
+                    graduated = self._select_history_to_graduate(
+                        eligible, get_item_tokens, cache_target
+                    )
+                    active_history = [h for h in all_history if h not in graduated]
+                else:
+                    # Not enough tokens to justify a cache block
+                    active_history = all_history
+            else:
+                # Nothing eligible yet
+                active_history = all_history
+        
+        # --- Phase 3: Build active items list and update tracker ---
+        
+        active_items = list(file_symbol_items) + active_history
+        
         # Determine modified items (files that were edited)
         modified_items = list(files_modified) if files_modified else []
-        # Symbol entries for modified files are also considered modified
         modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
         
-        # Pass only active context items - the tracker will:
-        # 1. Keep these items as 'active' with N=0
-        # 2. Move previously-active items that aren't in this list to L3
-        # 3. Trigger ripple promotions for existing L3/L2/L1 items
-        # 4. With cache_target_tokens > 0: use threshold-aware promotion
         stability.update_after_response(
             items=active_items,
             get_content=get_item_content,
@@ -925,24 +945,63 @@ class StreamingMixin:
             get_tokens=get_item_tokens,
         )
         
-        # Log promotions and demotions
+        # --- Phase 4: Log promotions and demotions ---
+        
         promotions = stability.get_last_promotions()
         demotions = stability.get_last_demotions()
         
         if promotions:
-            # Format nicely, stripping symbol: prefix for display
             promoted_display = []
             for item, tier in promotions:
-                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                if item.startswith("symbol:"):
+                    display_name = f"📦 {item[7:]}"
+                elif item.startswith("history:"):
+                    display_name = f"💬 msg {item[8:]}"
+                else:
+                    display_name = item
                 promoted_display.append(f"{display_name}→{tier}")
             print(f"📈 Promoted: {', '.join(promoted_display)}")
         
         if demotions:
             demoted_display = []
             for item, tier in demotions:
-                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
+                if item.startswith("symbol:"):
+                    display_name = f"📦 {item[7:]}"
+                elif item.startswith("history:"):
+                    display_name = f"💬 msg {item[8:]}"
+                else:
+                    display_name = item
                 demoted_display.append(f"{display_name}→{tier}")
             print(f"📉 Demoted: {', '.join(demoted_display)}")
+    
+    def _select_history_to_graduate(self, eligible, get_tokens, keep_tokens):
+        """Select which eligible history messages to graduate from active.
+        
+        Keeps the most recent `keep_tokens` worth of eligible messages in
+        active (they're most likely to be referenced by the LLM). Graduates
+        the rest (older messages) so they enter L3 via ripple promotion.
+        
+        Args:
+            eligible: History item keys sorted by index ascending (oldest first)
+            get_tokens: Callable to get token count for an item
+            keep_tokens: Token budget to keep in active
+            
+        Returns:
+            Set of items to graduate (exclude from active_items)
+        """
+        kept_tokens = 0
+        keep_set = set()
+        
+        # Walk from newest to oldest, accumulating a "keep" budget
+        for item in reversed(eligible):
+            item_tokens = get_tokens(item)
+            if kept_tokens + item_tokens <= keep_tokens:
+                kept_tokens += item_tokens
+                keep_set.add(item)
+            else:
+                break  # Budget exhausted, graduate the rest
+        
+        return set(eligible) - keep_set
     
     def _fire_stream_chunk(self, request_id, content, loop):
         """Fire stream chunk send (non-blocking, fire-and-forget).
