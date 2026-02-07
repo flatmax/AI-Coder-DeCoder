@@ -179,11 +179,28 @@ function renderUrlItem(component, item, tier) {
   `;
 }
 
+function renderHistoryItem(component, item, tier) {
+  const roleBadge = item.role === 'user' ? 'U' : 'A';
+  const roleClass = item.role === 'user' ? 'role-user' : 'role-assistant';
+  const preview = item.preview
+    ? (item.preview.length > 60 ? item.preview.substring(0, 60) + '…' : item.preview)
+    : '(empty)';
+  return html`
+    <div class="item-row history-item">
+      <span class="history-role ${roleClass}">${roleBadge}</span>
+      <span class="item-path" title="${item.preview || ''}">${preview}</span>
+      <span class="item-tokens">${formatTokens(item.tokens)}</span>
+      ${renderStabilityBar(item, tier)}
+    </div>
+  `;
+}
+
 // Group configuration registry
 const GROUP_CONFIG = {
   symbols: { type: 'symbols', icon: '📦', label: 'Symbols', renderItem: null },
   files: { type: 'files', icon: '📄', label: 'Files', renderItem: renderFileItem },
   urls: { type: 'urls', icon: '🔗', label: 'URLs', renderItem: renderUrlItem },
+  history: { type: 'history', icon: '💬', label: 'History', renderItem: renderHistoryItem },
 };
 
 function renderHistoryGroup(component, tier, content) {
@@ -272,7 +289,9 @@ function renderTierBlock(component, block) {
               case 'urls':
                 return renderContentGroup(component, block.tier, content, GROUP_CONFIG[content.type]);
               case 'history':
-                return renderHistoryGroup(component, block.tier, content);
+                return block.tier === 'active'
+                  ? renderHistoryGroup(component, block.tier, content)
+                  : renderContentGroup(component, block.tier, content, GROUP_CONFIG['history']);
               default:
                 return '';
             }

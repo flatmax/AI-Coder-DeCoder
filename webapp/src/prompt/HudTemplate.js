@@ -32,7 +32,9 @@ export function renderCacheTiers(data) {
     if (symbols > 0) contents.push(`${symbols}sym`);
     if (files > 0) contents.push(`${files}f`);
     if (info.has_urls) contents.push('urls');
-    if (info.has_history) contents.push('hist');
+    const histCount = info.history || 0;
+    if (histCount > 0) contents.push(`${histCount}hist`);
+    else if (info.has_history) contents.push('hist');
     
     const contentsStr = contents.length > 0 ? contents.join('+') : '—';
     const tierLabel = tier === 'active' ? 'active' : `${tier}`;

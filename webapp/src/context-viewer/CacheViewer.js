@@ -175,9 +175,14 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
     if (!this.searchQuery || !items) return items;
     
     return items.filter(item => {
-      const searchStr = type === 'urls' 
-        ? (item.title || item.url || '')
-        : (item.path || '');
+      let searchStr;
+      if (type === 'urls') {
+        searchStr = item.title || item.url || '';
+      } else if (type === 'history') {
+        searchStr = `${item.role || ''} ${item.preview || ''}`;
+      } else {
+        searchStr = item.path || '';
+      }
       return this.fuzzyMatch(this.searchQuery, searchStr);
     });
   }

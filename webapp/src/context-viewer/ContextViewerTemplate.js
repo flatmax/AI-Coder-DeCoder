@@ -162,11 +162,31 @@ function renderExpandedItems(component, key, data) {
     `;
   }
 
-  if (key === 'history' && data.needs_summary) {
+  if (key === 'history') {
+    const tierCounts = data.tier_counts || {};
+    const hasTierData = Object.keys(tierCounts).length > 0;
+    
     return html`
-      <div class="history-warning">
-        ⚠️ History exceeds budget (${formatTokens(data.tokens)} / ${formatTokens(data.max_tokens)}) - consider summarizing
-      </div>
+      ${data.needs_summary ? html`
+        <div class="history-warning">
+          ⚠️ History exceeds budget (${formatTokens(data.tokens)} / ${formatTokens(data.max_tokens)}) - consider summarizing
+        </div>
+      ` : ''}
+      ${hasTierData ? html`
+        <div class="expanded-items">
+          <div class="history-tier-distribution">
+            ${Object.entries(tierCounts).map(([tier, count]) => html`
+              <div class="item-row">
+                <span class="item-path">${tier}</span>
+                <span class="item-tokens">${count} message${count !== 1 ? 's' : ''}</span>
+                <span class="tier-badge ${tier === 'active' ? 'uncached' : 'cached'}">
+                  ${tier === 'active' ? '○' : '🔒'}
+                </span>
+              </div>
+            `)}
+          </div>
+        </div>
+      ` : ''}
     `;
   }
 
