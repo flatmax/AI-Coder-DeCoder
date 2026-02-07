@@ -141,7 +141,9 @@ export function renderPromptView(component) {
             ` : component.showFilePicker && component.leftPanelCollapsed ? html`
               ${renderPanelResizer(component)}
             ` : ''}
-            <div class="chat-panel">
+            <div class="chat-panel"
+                 @dragover=${(e) => component._handleDragOver(e)}
+                 @drop=${(e) => component._handleDrop(e)}>
               <div class="messages-wrapper">
                 <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)} @wheel=${(e) => component.handleWheel(e)}>
                   ${repeat(
