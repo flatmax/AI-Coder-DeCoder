@@ -418,6 +418,9 @@ export class CardMarkdown extends LitElement {
     this._cachedContent = null;
     this._cachedResult = null;
     this._cachedFinal = null;
+    this._incrementalHtml = '';
+    this._incrementalParsedTo = 0;
+    this._incrementalFenceOpen = false;
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -460,20 +463,8 @@ export class CardMarkdown extends LitElement {
         return result;
       }
 
-      if (this._streamCache && this.content.startsWith(this._streamCacheSource)) {
-        const delta = this.content.slice(this._streamCacheSource.length);
-        // If delta has no markdown-significant chars, append escaped text.
-        // Allow newlines (very common in streaming) — convert to <br>.
-        if (delta && !/[`#*_\[\]!<>\-|\\~]/.test(delta)) {
-          this._streamCacheSource = this.content;
-          this._streamCache += escapeHtml(delta).replace(/\n/g, '<br>');
-          this._cachedContent = this.content;
-          this._cachedResult = null;
-          return this._streamCache;
-        }
-      }
-      // Full re-parse needed (first chunk, or delta has markdown chars)
-      const result = marked.parse(this.content);
+      // Incremental markdown parsing: only parse new complete segments
+      const result = this._incrementalParse(this.content);
       this._streamCacheSource = this.content;
       this._streamCache = result;
       this._cachedContent = null;
@@ -499,6 +490,9 @@ export class CardMarkdown extends LitElement {
     
     this._streamCache = null;
     this._streamCacheSource = null;
+    this._incrementalHtml = '';
+    this._incrementalParsedTo = 0;
+    this._incrementalFenceOpen = false;
     
     processed = this.wrapCodeBlocksWithCopyButton(processed);
     processed = this.highlightFileMentions(processed);
@@ -584,6 +578,83 @@ export class CardMarkdown extends LitElement {
 
 
   /**
+   * Incremental markdown parsing for streaming.
+   * Only parses new complete segments (at safe paragraph/block boundaries)
+   * and appends to cached HTML. Trailing incomplete content is rendered
+   * as escaped text. The final render always does a full re-parse.
+   */
+  _incrementalParse(content) {
+    // If content was replaced (not appended), reset
+    if (this._incrementalParsedTo > 0 && !content.startsWith(content.slice(0, this._incrementalParsedTo))) {
+      this._incrementalHtml = '';
+      this._incrementalParsedTo = 0;
+      this._incrementalFenceOpen = false;
+    }
+
+    const unparsed = content.slice(this._incrementalParsedTo);
+    const safeSplit = this._findSafeSplit(unparsed);
+
+    if (safeSplit > 0) {
+      const segment = unparsed.slice(0, safeSplit);
+      this._incrementalHtml += marked.parse(segment);
+      this._incrementalParsedTo += safeSplit;
+    }
+
+    // Render: cached HTML + raw-escaped tail for unparsed remainder
+    const tail = content.slice(this._incrementalParsedTo);
+    if (!tail) return this._incrementalHtml;
+
+    const tailHtml = escapeHtml(tail).replace(/\n/g, '<br>');
+    return this._incrementalHtml + tailHtml;
+  }
+
+  /**
+   * Find the last safe split point in text for incremental parsing.
+   * A split is safe at a blank-line boundary (paragraph break) where
+   * no code fence is open. Returns the index to split at, or 0 if
+   * no safe split exists.
+   */
+  _findSafeSplit(text) {
+    let lastSafe = 0;
+    let fenceOpen = this._incrementalFenceOpen;
+    const lines = text.split('\n');
+    let pos = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trimStart();
+
+      // Track code fence state
+      if (trimmed.startsWith('```')) {
+        fenceOpen = !fenceOpen;
+      }
+
+      pos += line.length + 1; // +1 for \n
+
+      // A blank line outside a code fence is a safe paragraph boundary
+      if (!fenceOpen && trimmed === '' && i > 0) {
+        lastSafe = pos;
+      }
+    }
+
+    // Update fence tracking state only for the portion we'll actually parse
+    if (lastSafe > 0) {
+      // Recount fences up to lastSafe to get accurate state
+      let fenceState = this._incrementalFenceOpen;
+      const safePortion = text.slice(0, lastSafe);
+      const safeLines = safePortion.split('\n');
+      for (const l of safeLines) {
+        if (l.trimStart().startsWith('```')) {
+          fenceState = !fenceState;
+        }
+      }
+      this._incrementalFenceOpen = fenceState;
+    }
+
+    return lastSafe;
+  }
+
+  /**
    * Process content during streaming when edit block markers are present.
    * Renders completed edit blocks as diffs (pending status) and shows
    * an in-progress placeholder for any unclosed edit block.
@@ -636,7 +707,12 @@ export class CardMarkdown extends LitElement {
             segments.push({ type: 'text', content: textLines.join('\n') });
           }
         }
-        segments.push({ type: 'in-progress', filePath: unclosedFilePath });
+        // Extract partial lines inside the unclosed edit block
+        const editMarkerLineIdx = lines.findIndex((l, i) => i >= lastEnd && l.trim() === '««« EDIT');
+        const partialLines = editMarkerLineIdx !== -1
+          ? lines.slice(editMarkerLineIdx + 1)
+          : [];
+        segments.push({ type: 'in-progress', filePath: unclosedFilePath, partialLines });
       } else {
         const textLines = lines.slice(lastEnd);
         segments.push({ type: 'text', content: textLines.join('\n') });
@@ -653,7 +729,7 @@ export class CardMarkdown extends LitElement {
       } else if (segment.type === 'edit') {
         result += renderEditBlock(segment.block, []);
       } else if (segment.type === 'in-progress') {
-        result += renderInProgressEditBlock(segment.filePath);
+        result += renderInProgressEditBlock(segment.filePath, segment.partialLines);
       }
     }
 
