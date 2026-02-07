@@ -33,6 +33,10 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
     // Image paste handling
     this._boundHandlePaste = this._handlePaste.bind(this);
     document.addEventListener('paste', this._boundHandlePaste);
+
+    // Image drag-and-drop handling
+    this._boundHandleDragOver = this._handleDragOver.bind(this);
+    this._boundHandleDrop = this._handleDrop.bind(this);
   }
 
   destroyInputHandler() {
@@ -54,6 +58,30 @@ export const InputHandlerMixin = (superClass) => class extends superClass {
         }
         break;
       }
+    }
+  }
+
+  _handleDragOver(e) {
+    // Check if the drag contains files
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  }
+
+  _handleDrop(e) {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    let hasImage = false;
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
+        hasImage = true;
+        this.processImageFile(file);
+      }
+    }
+    if (hasImage) {
+      e.preventDefault();
     }
   }
 
