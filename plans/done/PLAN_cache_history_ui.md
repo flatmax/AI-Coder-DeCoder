@@ -1,12 +1,15 @@
 # Cache History UI Plan
 
-## Status: TODO
+## Status: COMPLETE (already implemented)
 
 ## Origin
 
 Extracted from the UI design notes in `plans/done/PLAN_cache_optimization.md`
 (the cache history backend implementation plan). The backend work is complete;
 this plan covers the remaining frontend visualization.
+
+All five changes were found to be already implemented in the codebase at the
+time this plan was written. This plan documents them for completeness.
 
 ## Problem
 
@@ -171,11 +174,11 @@ In `tierHasMatches(block)`, ensure history content is checked when searching.
 
 ## Implementation Order
 
-1. **#3** — HUD history count (trivial, one-line change)
-2. **#4** — Backend tier_counts (trivial, 4 lines)
-3. **#1** — CacheViewer per-item history (small, ~40 lines)
-4. **#5** — CacheViewer search support (small, ~10 lines)
-5. **#2** — ContextViewer tier distribution (small, ~25 lines)
+1. **#3** — HUD history count (trivial, one-line change) ✅
+2. **#4** — Backend tier_counts (trivial, 4 lines) ✅
+3. **#1** — CacheViewer per-item history (small, ~40 lines) ✅
+4. **#5** — CacheViewer search support (small, ~10 lines) ✅
+5. **#2** — ContextViewer tier distribution (small, ~25 lines) ✅
 
 ## Testing
 

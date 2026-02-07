@@ -1178,7 +1178,12 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
                 "active_count": len(active_history_indices),
                 "max_tokens": self._context_manager.max_history_tokens,
                 "compaction_threshold": self._context_manager._compactor.config.compaction_trigger_tokens if self._context_manager._compactor else self._context_manager.max_history_tokens,
-                "needs_summary": self._context_manager.should_compact()
+                "needs_summary": self._context_manager.should_compact(),
+                "tier_counts": {
+                    tier: len(history_tiers.get(tier, []))
+                    for tier in ['L0', 'L1', 'L2', 'L3', 'active']
+                    if history_tiers.get(tier)
+                }
             }
         }
         
