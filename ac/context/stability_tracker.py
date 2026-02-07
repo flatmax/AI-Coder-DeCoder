@@ -230,12 +230,12 @@ class StabilityTracker:
                 if info.tier == 'active':
                     items_entering_l3.append(item)
         
-        # Veteran items that reached L3 threshold (N >= 3) while still in Active
-        for item in current_active:
-            if item in self._stability:
-                info = self._stability[item]
-                if info.tier == 'active' and info.n_value >= TIER_CONFIG['L3']['entry_n']:
-                    items_entering_l3.append(item)
+        # Note: Items that reach N >= 3 while still in the active items list
+        # do NOT auto-promote to L3. They stay active with their accumulated N.
+        # This allows the caller to control graduation timing (e.g., for history
+        # messages that should only graduate when piggybacking on a file/symbol
+        # ripple or when a token threshold is met). Items enter L3 only when
+        # they leave the active items list.
         
         # Process all items entering L3 as a batch (triggers ripple promotions)
         if items_entering_l3:

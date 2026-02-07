@@ -1080,7 +1080,7 @@ class TestStabilityTrackerHistoryItems:
         assert stability_tracker.get_n_value("history:2") == 0
     
     def test_history_items_never_modified(self, stability_tracker):
-        """History items never change content, so they always promote."""
+        """History items never change content, so N always increases."""
         content = {"history:0": "user:Hello"}
         
         # Simulate several rounds with same history item always present
@@ -1092,8 +1092,8 @@ class TestStabilityTrackerHistoryItems:
         
         # N should be 3 (first round N=0, then 3 increments)
         assert stability_tracker.get_n_value("history:0") == 3
-        # Should have entered L3 since N >= 3
-        assert stability_tracker.get_tier("history:0") == 'L3'
+        # Items stay active while in the active items list — caller controls graduation
+        assert stability_tracker.get_tier("history:0") == 'active'
     
     def test_history_coexists_with_files(self, stability_tracker):
         """History items and file items tracked independently."""
@@ -1155,16 +1155,24 @@ class TestStabilityTrackerHistoryItems:
         content = {
             "history:0": "user:old message",
             "history:1": "assistant:old reply",
+            "other": "x",
         }
         
-        # Build up some stability
+        # Build up some stability while in active items list
         for _ in range(4):
             stability_tracker.update_after_response(
                 items=["history:0", "history:1"],
                 get_content=lambda x: content[x]
             )
         
-        # history:0 should be in L3 by now
+        # Items stay active while in items list (caller controls graduation)
+        assert stability_tracker.get_n_value("history:0") == 3
+        
+        # Now let them leave active to enter L3
+        stability_tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x]
+        )
         assert stability_tracker.get_tier("history:0") == 'L3'
         
         # Simulate compaction: remove old entries
@@ -1180,6 +1188,132 @@ class TestStabilityTrackerHistoryItems:
         # Should start fresh at active
         assert stability_tracker.get_tier("history:0") == 'active'
         assert stability_tracker.get_n_value("history:0") == 0
+
+
+class TestStabilityTrackerHistoryGraduation:
+    """Tests for controlled history graduation logic.
+    
+    These test the graduation policy that would be called by streaming.py.
+    The policy is: history stays active until piggybacking on a file/symbol
+    ripple, or until eligible history tokens exceed cache_target_tokens.
+    """
+    
+    def test_short_conversation_no_graduation(self, stability_tracker_with_threshold):
+        """In a short conversation, all history stays active — zero ripple."""
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        # Simulate 3 exchanges, all history always in active items
+        content = {}
+        for round_num in range(3):
+            items = []
+            for i in range(round_num + 1):
+                key = f"history:{i}"
+                content[key] = f"user:message {i}"
+                items.append(key)
+            
+            tracker.update_after_response(
+                items=items,
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: 100,  # 100 tokens each
+            )
+        
+        # All history should still be active (300 tokens < 1000 target)
+        for i in range(3):
+            assert tracker.get_tier(f"history:{i}") == 'active'
+    
+    def test_eligible_history_stays_active_below_threshold(self, stability_tracker_with_threshold):
+        """History with N >= 3 stays active if total tokens below threshold."""
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        content = {"history:0": "user:hello", "history:1": "assistant:hi"}
+        
+        # Run enough rounds for N to reach 3
+        for _ in range(4):
+            tracker.update_after_response(
+                items=["history:0", "history:1"],
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: 100,
+            )
+        
+        # N should be 3 (first round N=0, then 3 increments)
+        assert tracker.get_n_value("history:0") == 3
+        assert tracker.get_n_value("history:1") == 3
+        
+        # But they should still be in active because we kept them in items list
+        # (the caller's graduation logic would keep them active since 200 < 1000)
+        assert tracker.get_tier("history:0") == 'active'
+        assert tracker.get_tier("history:1") == 'active'
+    
+    def test_history_graduates_when_excluded_from_items(self, stability_tracker_with_threshold):
+        """History graduates to L3 when excluded from the active items list."""
+        tracker = stability_tracker_with_threshold
+        
+        content = {"history:0": "user:hello", "history:1": "assistant:hi", "other": "x"}
+        
+        # Build up N to 3
+        for _ in range(4):
+            tracker.update_after_response(
+                items=["history:0", "history:1"],
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: 100,
+            )
+        
+        assert tracker.get_n_value("history:0") == 3
+        assert tracker.get_tier("history:0") == 'active'
+        
+        # Now exclude history:0 from items (simulating graduation decision)
+        tracker.update_after_response(
+            items=["history:1", "other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: 100,
+        )
+        
+        # history:0 left active, should enter L3
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_n_value("history:0") == 3
+    
+    def test_file_leaving_active_triggers_ripple(self, stability_tracker_with_threshold):
+        """When a file leaves active, it causes a ripple that history can piggyback on."""
+        tracker = stability_tracker_with_threshold
+        
+        content = {
+            "file.py": "content",
+            "history:0": "user:hello",
+            "history:1": "assistant:hi",
+            "other": "x",
+        }
+        
+        # Round 1: file and history in active
+        tracker.update_after_response(
+            items=["file.py", "history:0", "history:1"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: 200,
+        )
+        
+        # Rounds 2-4: same items, building N
+        for _ in range(3):
+            tracker.update_after_response(
+                items=["file.py", "history:0", "history:1"],
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: 200,
+            )
+        
+        # N should be 3 for all items
+        assert tracker.get_n_value("history:0") == 3
+        assert tracker.get_n_value("file.py") == 3
+        
+        # Round 5: file.py leaves active (simulating piggybacking -
+        # caller would also exclude eligible history from items)
+        tracker.update_after_response(
+            items=["other"],  # Both file and history excluded
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: 200,
+        )
+        
+        # Both file and history should be in L3
+        assert tracker.get_tier("file.py") == 'L3'
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
 
 
 class TestStabilityTrackerScenarios:

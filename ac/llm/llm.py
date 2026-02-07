@@ -37,6 +37,10 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         # Session-level tracking for empty tier statistics
         self._session_empty_tier_count = 0
         
+        # Track file/symbol items from last round for churn detection
+        # Used by controlled history graduation logic
+        self._last_active_file_symbol_items = set()
+        
         # Load configuration
         self.config = self._load_config(config_path)
         
