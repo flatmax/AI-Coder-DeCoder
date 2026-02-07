@@ -148,77 +148,107 @@ Either source of ripple allows history to piggyback. The combined check is:
 has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
 ```
 
-### Ripple Detection
-
-A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
-
-1. **File selection ripple**: The user changed which files are in active context (added, removed, or swapped files):
-   ```
-   has_file_symbol_ripple = (last_active_items != current_active_items)
-   ```
-   This is a symmetric check — both additions and removals trigger it.
-
-2. **Graduation ripple**: Files or symbols with N ≥ 3 graduated out of active on this request, shrinking the active set:
-   ```
-   has_graduation_ripple = (active_file_symbols != file_symbol_items)
-   ```
-   This fires when the controlled graduation logic excludes eligible items from the active list.
-
-Either source of ripple allows history to piggyback. The combined check is:
-```
-has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
-```
+Note: Ripple detection determines whether **active items graduate into L3** and whether **history piggybacks**. The tier-to-tier promotion cascade is triggered separately — it fires whenever a tier's content changes (demotion, graduation into the tier, or content hash mismatch), regardless of whether the active set rippled.
 
 ## Cache Block Structure
 
-Each request sends messages organized as:
+Each request sends messages organized as a linear sequence. Anthropic caches everything up to each `cache_control` marker as a prefix, so the order matters — cached tiers come first, active content last.
 
 ```
-Message 1 (system, cached):
-  L0: system prompt + legend + L0 symbols + L0 files + L0 history
+Message 1 (system, cache_control):
+  L0: system prompt + legend + L0 symbols + L0 files
 
-Message 2-3 (user+assistant, cached):
-  L1: L1 symbols + L1 files + L1 history
+Messages 2+ (native user/assistant pairs):
+  L0 history (if any), cache_control on last message
 
-Message 4-5 (user+assistant, cached):
-  L2: L2 symbols + L2 files + L2 history
+Messages N+ (user+assistant, cache_control on last):
+  L1: symbols + files as user/assistant pair
 
-Message 6-7 (user+assistant, cached):
-  L3: L3 symbols + L3 files + L3 history
+Messages N+ (native user/assistant pairs):
+  L1 history (if any), cache_control on last message
 
-Message 8-9 (user+assistant, uncached):
+Messages N+ (user+assistant, cache_control on last):
+  L2: symbols + files as user/assistant pair
+
+Messages N+ (native user/assistant pairs):
+  L2 history (if any), cache_control on last message
+
+Messages N+ (user+assistant, cache_control on last):
+  L3: symbols + files as user/assistant pair
+
+Messages N+ (native user/assistant pairs):
+  L3 history (if any), cache_control on last message
+
+Messages N+ (user+assistant, uncached):
   File tree
 
-Message 10-11 (user+assistant, uncached):
+Messages N+ (user+assistant, uncached):
   URL context (if any)
 
-Message 12-13 (user+assistant, uncached):
+Messages N+ (user+assistant, uncached):
   Active files
 
-Messages 14+ (alternating user/assistant, uncached):
-  Active history (raw conversation turns)
+Messages N+ (native user/assistant pairs, uncached):
+  Active history
 
 Final message (user):
   Current user prompt
 ```
 
-Empty tiers are skipped (no messages emitted). The number of cache breakpoints is bounded by the number of non-empty tiers (max 4 for L0-L3).
+Empty tiers are skipped (no messages emitted). Each `cache_control` marker tells Anthropic to cache the entire prefix up to that point.
 
-### History Format in Cached vs Active
+### History as Native Message Pairs
 
-- **Cached history** (in tier blocks): Formatted as markdown within the tier's user message:
-  ```
-  ## Conversation History (L3)
+History messages are **always** sent as native user/assistant message pairs, whether cached or active. They are never flattened into markdown strings inside a wrapper message.
 
-  ### User
-  content
+**Why native pairs:**
+- The LLM sees real conversation turns, maintaining its assistant persona
+- Better comprehension than quoted markdown (the model treats `### Assistant` text differently from an actual assistant message)
+- Simpler code — no formatting/unformatting logic needed
 
-  ### Assistant
-  content
-  ```
-  This preserves conversational structure while fitting inside a single cached message block.
+**Cache marker placement:** The `cache_control: {"type": "ephemeral"}` marker goes on the **last message** in each tier's sequence. Anthropic caches the entire prefix up to that point, so a single marker on the last L3 history message caches all L0 + L1 + L2 + L3 content preceding it.
 
-- **Active history**: Raw `{"role": "user/assistant", "content": "..."}` message pairs, maintaining full conversational turn structure.
+**Example — L3 tier with history:**
+```json
+[
+  // ... L0, L1, L2 blocks above ...
+
+  // L3 symbols/files
+  {"role": "user", "content": "# Repository Structure (continued)\n..."},
+  {"role": "assistant", "content": "Ok."},
+
+  // L3 history (native pairs)
+  {"role": "user", "content": "Hi, I have a bug."},
+  {"role": "assistant", "content": "What is the error?"},
+  {"role": "user", "content": "It is a 404 error."},
+  {"role": "assistant", "content": [
+    {
+      "type": "text",
+      "text": "I see. Let's check the routing.",
+      "cache_control": {"type": "ephemeral"}
+    }
+  ]},
+
+  // Active content follows (uncached)
+  {"role": "user", "content": "Here are the files:\n..."},
+  {"role": "assistant", "content": "Ok."},
+
+  // Active history (native pairs, uncached)
+  {"role": "user", "content": "Can you fix the route?"},
+  {"role": "assistant", "content": "Sure, here's the edit..."},
+
+  // Current prompt
+  {"role": "user", "content": "Now add a test for it."}
+]
+```
+
+### Cache Breakpoint Budget
+
+Anthropic allows up to 4 `cache_control` breakpoints per request. Each non-empty tier (L0-L3) uses one breakpoint. If a tier has both symbols/files and history, the history's last message carries the breakpoint (since it comes after the symbols/files in the sequence, caching the entire tier as one prefix).
+
+If a tier has symbols/files but no history, the `cache_control` goes on the assistant's "Ok." response after the symbols/files user message.
+
+Blocks under 1024 tokens won't actually be cached by Anthropic (the breakpoint is silently ignored). This is why empty tiers are skipped and the minimum token threshold exists — don't waste a breakpoint on a block too small to cache.
 
 ## Symbol Map Exclusion
 
@@ -239,6 +269,18 @@ Items demote to active (N = 0) when:
 3. **Symbol invalidation**: When a file is modified, both the file and its `symbol:` entry are marked as modified
 
 Demotion removes the item from its cached tier — that tier's block changes on the next request (cache miss), which constitutes a ripple.
+
+## History Compaction Interaction
+
+When history compaction runs (post-response, via `TopicDetector` + `HistoryCompactor`), many old messages are removed and replaced with a summary message. This invalidates all cached history entries:
+
+1. **Purge all `history:*` entries** from the stability tracker via `remove_by_prefix("history:")`
+2. **Re-index**: On the next request, the compacted history (summary + retained messages) appears as new active items with N = 0
+3. **Graduation restarts**: The compacted messages re-enter the normal active → L3 → L2 → L1 flow from scratch
+
+This means compaction causes a one-time cache miss for all tiers that contained history. This is unavoidable — the old messages no longer exist, so their cached content is invalid. The cost is temporary; the new (smaller) history re-stabilizes within a few requests.
+
+Compaction runs **after** the response is delivered to the user, so the cache miss doesn't affect the current request — only subsequent ones.
 
 ## Initialization from Reference Graph Clustering
 
