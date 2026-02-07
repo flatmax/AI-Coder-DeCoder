@@ -1,6 +1,14 @@
 # Smooth Streaming Rendering Plan
 
-## Status: PENDING
+## Status: IN PROGRESS
+
+## Completed
+- ✅ Step 1: Streaming cursor (blinking ▌ via CSS)
+- ✅ Step 2: Progressive edit block rendering (diffs during streaming + in-progress placeholder)
+- ✅ Step 3: Streaming attribute plumbing (AssistantCard → CardMarkdown)
+
+## Next
+- Step 3 (plan): Incremental markdown parsing — only parse new complete segments per frame instead of full re-parse. Highest impact on performance but highest risk. The `final` render always does a full re-parse as safety net.
 
 ## Problem
 
