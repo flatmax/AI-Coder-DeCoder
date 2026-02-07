@@ -133,3 +133,24 @@ export function renderInlineHighlight(segments, lineType) {
     return escapedText;
   }).join('');
 }
+
+/**
+ * Render an in-progress edit block placeholder (during streaming).
+ * @param {string} filePath - File path being edited
+ * @returns {string} HTML string
+ */
+export function renderInProgressEditBlock(filePath) {
+  return `
+    <div class="edit-block in-progress">
+      <div class="edit-block-header">
+        <span class="edit-block-file">${escapeHtml(filePath)}</span>
+        <div>
+          <span class="edit-block-status pending">⏳ Writing...</span>
+        </div>
+      </div>
+      <div class="edit-block-content">
+        <div class="streaming-edit-pulse"></div>
+      </div>
+    </div>
+  `;
+}
