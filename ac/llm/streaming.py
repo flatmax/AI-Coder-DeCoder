@@ -888,15 +888,29 @@ class StreamingMixin:
         # --- Phase 1: Detect file/symbol churn for piggybacking ---
         
         file_symbol_items = set(file_paths or []) | {f"symbol:{f}" for f in (file_paths or [])}
-        has_file_symbol_ripple = bool(
-            self._last_active_file_symbol_items - file_symbol_items
+        has_file_symbol_ripple = (
+            self._last_active_file_symbol_items != file_symbol_items
         )
         self._last_active_file_symbol_items = file_symbol_items.copy()
         
-        # --- Phase 2: Controlled history graduation ---
+        # --- Phase 2: Controlled graduation (files, symbols, history) ---
+        # Items with N >= 3 that are still in active tier can graduate to L3.
+        # For files/symbols: always graduate eligible items (stable files should cache).
+        # For history: graduate on piggyback (ripple) or when token threshold is met.
         
         all_history = [f"history:{i}" for i in range(len(history))]
         cache_target = stability.get_cache_target_tokens()
+        
+        # Graduate eligible files and symbols (always - no reason to hold them back)
+        active_file_symbols = set()
+        for item in file_symbol_items:
+            n_val = stability.get_n_value(item)
+            tier = stability.get_tier(item)
+            if n_val >= 3 and tier == 'active':
+                # Eligible: exclude from active so it leaves and enters L3
+                pass
+            else:
+                active_file_symbols.add(item)
         
         if not cache_target:
             # Graduation disabled — all history stays active (original behavior)
@@ -909,7 +923,12 @@ class StreamingMixin:
                 and stability.get_tier(h) == 'active'
             ]
             
-            if has_file_symbol_ripple and eligible:
+            # File/symbol graduation counts as a ripple for piggybacking
+            has_graduation_ripple = has_file_symbol_ripple or (
+                active_file_symbols != file_symbol_items
+            )
+            
+            if has_graduation_ripple and eligible:
                 # Piggyback: ripple already happening from file/symbol churn,
                 # graduate all eligible history at zero additional cache cost
                 graduated = set(eligible)
@@ -932,7 +951,7 @@ class StreamingMixin:
         
         # --- Phase 3: Build active items list and update tracker ---
         
-        active_items = list(file_symbol_items) + active_history
+        active_items = list(active_file_symbols) + active_history
         
         # Determine modified items (files that were edited)
         modified_items = list(files_modified) if files_modified else []
