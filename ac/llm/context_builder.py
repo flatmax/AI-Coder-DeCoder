@@ -351,6 +351,63 @@ class ContextBuilderMixin:
         
         return items
     
+    def _build_history_items(
+        self,
+        message_indices: list[int],
+    ) -> tuple[list[dict], int]:
+        """Build history items with token counts and stability info.
+        
+        Args:
+            message_indices: Indices into conversation history
+            
+        Returns:
+            Tuple of (history_items, total_tokens)
+        """
+        history_items = []
+        total_tokens = 0
+        
+        if not self._context_manager:
+            return history_items, total_tokens
+        
+        history = self._context_manager.get_history()
+        stability = self._get_stability_tracker()
+        tc = self._context_manager.token_counter
+        
+        for idx in message_indices:
+            if idx >= len(history):
+                continue
+            msg = history[idx]
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            
+            # Count tokens for the formatted message
+            formatted = f"### {role.title()}\n{content}\n\n"
+            tokens = tc.count(formatted) if formatted else 0
+            total_tokens += tokens
+            
+            # Get stability info
+            item_key = f"history:{idx}"
+            info = {'stable_count': 0, 'next_tier': 'L3',
+                    'next_threshold': 3, 'progress': 0.0}
+            if stability:
+                info = stability.get_item_info(item_key)
+            
+            # Truncate preview
+            preview = content[:100] + '...' if len(content) > 100 else content
+            
+            history_items.append({
+                "index": idx,
+                "role": role,
+                "preview": preview,
+                "tokens": tokens,
+                "stable_count": info['stable_count'],
+                "next_tier": info['next_tier'],
+                "next_threshold": info['next_threshold'],
+                "progress": info['progress'],
+            })
+        
+        return history_items, total_tokens
+    
     def _build_url_items(
         self,
         fetched_urls: list[str],
@@ -414,12 +471,12 @@ class ContextBuilderMixin:
             Dict with per-tier tracking structures
         """
         return {
-            'L0': {'tokens': 0, 'symbols': 0, 'files': 0, 
+            'L0': {'tokens': 0, 'symbols': 0, 'files': 0, 'history': 0,
                    'has_system': False, 'has_legend': False, 'has_tree': False},
-            'L1': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'L2': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'L3': {'tokens': 0, 'symbols': 0, 'files': 0, 'has_tree': False},
-            'active': {'tokens': 0, 'symbols': 0, 'files': 0, 
+            'L1': {'tokens': 0, 'symbols': 0, 'files': 0, 'history': 0, 'has_tree': False},
+            'L2': {'tokens': 0, 'symbols': 0, 'files': 0, 'history': 0, 'has_tree': False},
+            'L3': {'tokens': 0, 'symbols': 0, 'files': 0, 'history': 0, 'has_tree': False},
+            'active': {'tokens': 0, 'symbols': 0, 'files': 0, 'history': 0,
                        'has_tree': False, 'has_urls': False, 'has_history': False},
             'empty_tiers': 0,
         }

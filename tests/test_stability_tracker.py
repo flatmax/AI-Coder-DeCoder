@@ -967,6 +967,221 @@ class TestStabilityTrackerThresholdAwareInit:
         assert assignments["c.py"] == 'L2'
 
 
+class TestStabilityTrackerRemoveByPrefix:
+    """Tests for remove_by_prefix method."""
+    
+    def test_remove_by_prefix_basic(self, tracker_with_items):
+        """Remove all items matching a prefix."""
+        tracker = tracker_with_items({
+            "history:0": (3, 'L3'),
+            "history:1": (5, 'L3'),
+            "history:2": (0, 'active'),
+            "file.py": (6, 'L2'),
+        })
+        
+        removed = tracker.remove_by_prefix("history:")
+        
+        assert set(removed) == {"history:0", "history:1", "history:2"}
+        assert tracker.get_tier("history:0") == 'active'  # Gone, returns default
+        assert tracker.get_tier("history:1") == 'active'
+        assert tracker.get_tier("file.py") == 'L2'  # Untouched
+    
+    def test_remove_by_prefix_cleans_last_active(self, tracker_with_items):
+        """Prefix removal also cleans _last_active_items."""
+        tracker = tracker_with_items({
+            "history:0": (0, 'active'),
+            "history:1": (0, 'active'),
+            "file.py": (0, 'active'),
+        }, last_active={"history:0", "history:1", "file.py"})
+        
+        tracker.remove_by_prefix("history:")
+        
+        assert "history:0" not in tracker._last_active_items
+        assert "history:1" not in tracker._last_active_items
+        assert "file.py" in tracker._last_active_items
+    
+    def test_remove_by_prefix_no_matches(self, stability_tracker):
+        """No-op when prefix matches nothing."""
+        stability_tracker._stability["file.py"] = StabilityInfo(
+            content_hash="abc", n_value=3, tier='L3'
+        )
+        
+        removed = stability_tracker.remove_by_prefix("history:")
+        
+        assert removed == []
+        assert "file.py" in stability_tracker._stability
+    
+    def test_remove_by_prefix_persists(self, stability_path):
+        """Removal is persisted to disk."""
+        tracker = StabilityTracker(
+            persistence_path=stability_path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        tracker._stability = {
+            "history:0": StabilityInfo(content_hash="a", n_value=5, tier='L3'),
+            "file.py": StabilityInfo(content_hash="b", n_value=6, tier='L2'),
+        }
+        tracker.save()
+        
+        tracker.remove_by_prefix("history:")
+        
+        # Reload from disk
+        tracker2 = StabilityTracker(
+            persistence_path=stability_path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
+        )
+        assert "history:0" not in tracker2._stability
+        assert "file.py" in tracker2._stability
+    
+    def test_remove_by_prefix_empty_tracker(self, stability_tracker):
+        """Works on empty tracker without error."""
+        removed = stability_tracker.remove_by_prefix("history:")
+        assert removed == []
+
+
+class TestStabilityTrackerHistoryItems:
+    """Tests for history items tracked via ripple promotion."""
+    
+    def test_history_items_start_active(self, stability_tracker):
+        """History items start in active like any other item."""
+        content = {"history:0": "user:Hello", "history:1": "assistant:Hi"}
+        stability_tracker.update_after_response(
+            items=["history:0", "history:1"],
+            get_content=lambda x: content[x]
+        )
+        
+        assert stability_tracker.get_tier("history:0") == 'active'
+        assert stability_tracker.get_tier("history:1") == 'active'
+    
+    def test_history_items_promote_to_l3(self, stability_tracker):
+        """History items promote to L3 when they leave active context."""
+        content = {
+            "history:0": "user:Hello",
+            "history:1": "assistant:Hi",
+            "history:2": "user:New question",
+        }
+        
+        # Round 1: Two history messages in active
+        stability_tracker.update_after_response(
+            items=["history:0", "history:1"],
+            get_content=lambda x: content[x]
+        )
+        
+        # Round 2: New message added, old ones still present
+        # All three are "active" - they're all in the items list
+        stability_tracker.update_after_response(
+            items=["history:0", "history:1", "history:2"],
+            get_content=lambda x: content[x]
+        )
+        
+        # history:0 and history:1 are veterans, get N++
+        assert stability_tracker.get_n_value("history:0") == 1
+        assert stability_tracker.get_n_value("history:1") == 1
+        assert stability_tracker.get_n_value("history:2") == 0
+    
+    def test_history_items_never_modified(self, stability_tracker):
+        """History items never change content, so they always promote."""
+        content = {"history:0": "user:Hello"}
+        
+        # Simulate several rounds with same history item always present
+        for _ in range(4):
+            stability_tracker.update_after_response(
+                items=["history:0"],
+                get_content=lambda x: content[x]
+            )
+        
+        # N should be 3 (first round N=0, then 3 increments)
+        assert stability_tracker.get_n_value("history:0") == 3
+        # Should have entered L3 since N >= 3
+        assert stability_tracker.get_tier("history:0") == 'L3'
+    
+    def test_history_coexists_with_files(self, stability_tracker):
+        """History items and file items tracked independently."""
+        content = {
+            "history:0": "user:Hello",
+            "test.py": "print('hello')",
+        }
+        
+        stability_tracker.update_after_response(
+            items=["history:0", "test.py"],
+            get_content=lambda x: content[x]
+        )
+        
+        assert stability_tracker.get_tier("history:0") == 'active'
+        assert stability_tracker.get_tier("test.py") == 'active'
+        
+        tiers = stability_tracker.get_items_by_tier(["history:0", "test.py"])
+        assert "history:0" in tiers['active']
+        assert "test.py" in tiers['active']
+    
+    def test_history_cascade_promotion(self, tracker_with_items):
+        """History items participate in cascade promotion like any item."""
+        tracker = tracker_with_items({
+            "history:0": (5, 'L3'),  # One away from promotion
+            "history:1": (0, 'active'),
+        }, last_active={"history:1"})
+        
+        content = {"history:0": "user:old", "history:1": "assistant:old", "other": "x"}
+        
+        # history:1 leaves active, enters L3
+        # history:0 is veteran in L3, gets N++ → N=6, promotes to L2
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content.get(x, "x")
+        )
+        
+        assert tracker.get_tier("history:0") == 'L2'
+        assert tracker.get_n_value("history:0") == 6
+        assert tracker.get_tier("history:1") == 'L3'
+        assert tracker.get_n_value("history:1") == 3
+    
+    def test_history_clear_removes_all_history(self, tracker_with_items):
+        """Clearing history removes all history:* items."""
+        tracker = tracker_with_items({
+            "history:0": (9, 'L1'),
+            "history:1": (6, 'L2'),
+            "history:2": (3, 'L3'),
+            "file.py": (6, 'L2'),
+        })
+        
+        removed = tracker.remove_by_prefix("history:")
+        
+        assert len(removed) == 3
+        assert tracker.get_tier("file.py") == 'L2'  # Untouched
+        assert tracker.get_tier("history:0") == 'active'  # Gone
+    
+    def test_history_reregistration_after_compaction(self, stability_tracker):
+        """After compaction, old history is removed and new history starts fresh."""
+        content = {
+            "history:0": "user:old message",
+            "history:1": "assistant:old reply",
+        }
+        
+        # Build up some stability
+        for _ in range(4):
+            stability_tracker.update_after_response(
+                items=["history:0", "history:1"],
+                get_content=lambda x: content[x]
+            )
+        
+        # history:0 should be in L3 by now
+        assert stability_tracker.get_tier("history:0") == 'L3'
+        
+        # Simulate compaction: remove old entries
+        stability_tracker.remove_by_prefix("history:")
+        
+        # Re-register with compacted content
+        compacted = {"history:0": "system:Summary of conversation"}
+        stability_tracker.update_after_response(
+            items=["history:0"],
+            get_content=lambda x: compacted[x]
+        )
+        
+        # Should start fresh at active
+        assert stability_tracker.get_tier("history:0") == 'active'
+        assert stability_tracker.get_n_value("history:0") == 0
+
+
 class TestStabilityTrackerScenarios:
     """Integration tests for realistic scenarios."""
     
