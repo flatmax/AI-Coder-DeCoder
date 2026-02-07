@@ -84,7 +84,7 @@ The parser handles embedded backticks correctly. Never add outer fencing "for sa
 
 **Why**: Edits apply sequentially to the file. Edit B's anchor text may not exist after Edit A modifies the region.
 
-**Also beware**: If two locations in a file have similar code, an earlier edit may make them identical, causing a later edit to fail as ambiguous. Use enough surrounding context to ensure uniqueness, or merge into one block.
+**Also beware**: Files may contain duplicate or near-identical sections. An edit will fail as ambiguous if its anchor matches more than one location. Use enough surrounding context to ensure uniqueness, or merge into one block. Earlier edits can also *create* duplicates—check that your edit doesn't make two sections identical.
 
 **Example — WRONG** (second edit fails):
 ```

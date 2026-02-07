@@ -71,15 +71,39 @@ The `cache_target_tokens` is computed as `cacheMinTokens × cacheBufferMultiplie
 
 ## Ripple Promotion
 
-When items enter a tier, existing items (veterans) in that tier may promote to the next tier. This cascading behavior is called **ripple promotion**.
+When a tier's cache block is invalidated (an item is demoted or removed), veterans in the tier below may promote upward. This cascading behavior is called **ripple promotion**. Crucially, promotions **only happen into tiers that are already broken** — stable tiers are never disturbed.
 
 ### How It Works
 
-1. Items entering a tier get that tier's `entry_n` value
-2. Veterans (items already in the tier) get N incremented by 1
-3. If a veteran's N reaches the tier's `promotion_threshold`, it promotes to the next tier
-4. Promoted items become entries for the next tier, potentially triggering further ripples
-5. If no veterans promote, higher tiers remain unchanged (ripple stops)
+1. A tier breaks (cache miss) because an item was demoted, removed, or had content change
+2. The most stable veterans (highest N) from the tier below promote into the broken tier
+3. This breaks the source tier, allowing its own veterans from below to promote
+4. The cascade continues downward: L1 break → L2 promotes into L1 → L2 breaks → L3 promotes into L2 → L3 breaks → active graduates into L3
+5. If a tier is **not broken**, nothing above or below it moves — the cascade stops
+
+### Why This Works
+
+The cost of cascading is temporary — you pay for multiple cache misses on one request. But each tier's content becomes more optimal:
+
+- The most stable content floats to L1/L0 over time
+- After a few requests, all tiers resettle and cache hit rates improve
+- Eventually L1 contains rock-solid content that rarely changes, so breaks become rare
+- When everything is stable, **nothing moves** — all tiers stay cached
+
+Without promotion, items stay wherever they were initialized. If the initial clustering was slightly wrong, you're stuck with a suboptimal layout for the entire session.
+
+### Promotion Threshold
+
+Veterans promote when their N value reaches the tier's `promotion_threshold`:
+
+| Tier | Promotion N | Destination |
+|------|-------------|-------------|
+| L3 | 6 | L2 |
+| L2 | 9 | L1 |
+| L1 | 12 | L0 |
+| L0 | — | Terminal (no further promotion) |
+
+When a veteran promotes, it enters the destination tier with that tier's `entry_n` value and begins accumulating stability again.
 
 ### Threshold-Aware Promotion
 
@@ -91,6 +115,38 @@ When `cache_target_tokens > 0`, promotion is threshold-aware:
 4. Veterans past the threshold get N++ and can promote
 
 This ensures each cache block meets the provider's minimum token requirement while still allowing veteran content to progress toward higher tiers.
+
+### The Guard: Only Promote Into Broken Tiers
+
+This is the critical rule that prevents unnecessary cache invalidation:
+
+- If L1 is stable (no cache miss), **nothing promotes into L1** — L2 and L3 stay cached
+- If L1 breaks, L2 veterans can promote into L1 — this breaks L2
+- If L2 breaks (from the cascade), L3 veterans can promote into L2 — this breaks L3
+- If L3 breaks (from the cascade), eligible active items can graduate into L3
+
+The result: in steady state, all tiers are cached. Only an actual content change triggers movement, and the cascade ensures each tier ends up with progressively more stable content.
+
+### Ripple Detection
+
+A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
+
+1. **File selection ripple**: The user changed which files are in active context (added, removed, or swapped files):
+   ```
+   has_file_symbol_ripple = (last_active_items != current_active_items)
+   ```
+   This is a symmetric check — both additions and removals trigger it.
+
+2. **Graduation ripple**: Files or symbols with N ≥ 3 graduated out of active on this request, shrinking the active set:
+   ```
+   has_graduation_ripple = (active_file_symbols != file_symbol_items)
+   ```
+   This fires when the controlled graduation logic excludes eligible items from the active list.
+
+Either source of ripple allows history to piggyback. The combined check is:
+```
+has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
+```
 
 ### Ripple Detection
 
