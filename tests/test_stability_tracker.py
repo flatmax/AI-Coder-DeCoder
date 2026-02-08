@@ -2046,6 +2046,101 @@ class TestConnectedComponents:
         assert pair_found
 
 
+class TestSessionScopedPersistence:
+    """Tests for session-scoped persistence (fresh start each session)."""
+    
+    def test_fresh_start_on_context_manager_init(self, tmp_path):
+        """ContextManager clears stability data on init (no cross-session persistence)."""
+        from ac.context.manager import ContextManager
+        
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        aicoder_dir = repo_root / ".aicoder"
+        aicoder_dir.mkdir()
+        
+        # Pre-populate stability data (simulating a previous session)
+        stability_path = aicoder_dir / "cache_stability.json"
+        tracker = StabilityTracker(
+            persistence_path=stability_path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+        )
+        tracker._stability["old_file.py"] = StabilityInfo(
+            content_hash="old", n_value=12, tier='L0'
+        )
+        tracker.save()
+        assert stability_path.exists()
+        
+        # Create ContextManager — should clear the old data
+        cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
+        
+        assert cm.cache_stability is not None
+        assert cm.cache_stability.is_initialized() is False
+        assert cm.cache_stability.get_tier("old_file.py") == 'active'  # Gone
+    
+    def test_first_request_after_fresh_start(self, tmp_path):
+        """After fresh start, tracker is empty and ready for initialization."""
+        from ac.context.manager import ContextManager
+        
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".aicoder").mkdir()
+        
+        # Pre-populate with stale data
+        stability_path = repo_root / ".aicoder" / "cache_stability.json"
+        old_tracker = StabilityTracker(
+            persistence_path=stability_path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+        )
+        old_tracker._stability["stale.py"] = StabilityInfo(
+            content_hash="stale", n_value=9, tier='L1'
+        )
+        old_tracker.save()
+        
+        # New session
+        cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
+        
+        # Tracker should be empty — is_initialized() returns False
+        assert not cm.cache_stability.is_initialized()
+        
+        # First update creates fresh entries
+        cm.cache_stability.update_after_response(
+            items=["new_file.py"],
+            get_content=lambda x: "new content",
+        )
+        
+        assert cm.cache_stability.is_initialized() is True
+        assert cm.cache_stability.get_tier("new_file.py") == 'active'
+        assert cm.cache_stability.get_tier("stale.py") == 'active'  # Gone
+    
+    def test_within_session_save_still_works(self, tmp_path):
+        """Within a session, save() still writes state for crash resilience."""
+        from ac.context.manager import ContextManager
+        
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".aicoder").mkdir()
+        
+        cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
+        
+        # Do some work
+        cm.cache_stability.update_after_response(
+            items=["file.py"],
+            get_content=lambda x: "content",
+        )
+        
+        # Data should be saved to disk
+        stability_path = repo_root / ".aicoder" / "cache_stability.json"
+        assert stability_path.exists()
+        
+        # Reload from disk — data should be there
+        reloaded = StabilityTracker(
+            persistence_path=stability_path,
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+        )
+        assert reloaded.get_tier("file.py") == 'active'
+        assert reloaded.is_initialized() is True
+
+
 class TestStabilityTrackerScenarios:
     """Integration tests for realistic scenarios."""
     
