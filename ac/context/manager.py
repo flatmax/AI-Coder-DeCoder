@@ -61,6 +61,8 @@ class ContextManager:
         
         # Unified cache stability tracker for files AND symbol map entries
         # (4-tier for Bedrock compatibility: L0-L3 cached, active uncached)
+        # Fresh start each session — tiers rebuild from reference graph on first request.
+        # No cross-session persistence: prevents stale L0 assignments from prior sessions.
         self.cache_stability: Optional[StabilityTracker] = None
         if repo_root:
             stability_path = Path(repo_root) / '.aicoder' / 'cache_stability.json'
@@ -70,6 +72,7 @@ class ContextManager:
                 initial_tier='L3',
                 cache_target_tokens=cache_target_tokens,
             )
+            self.cache_stability.clear()
         
         # History compaction
         self._compaction_enabled = False
