@@ -429,22 +429,41 @@ class StabilityTracker:
                             key=lambda x: self._stability[x].n_value
                         )
                         
+                        # First pass: compute total tier tokens (entering + all veterans)
+                        tier_total_tokens = accumulated_tokens
+                        veteran_tokens = {}
+                        for veteran_item in veterans_sorted:
+                            try:
+                                vt = get_tokens(veteran_item)
+                                veteran_tokens[veteran_item] = vt
+                                tier_total_tokens += vt
+                            except Exception:
+                                veteran_tokens[veteran_item] = 0
+                        
+                        # Second pass: process veterans with retention guard
+                        # Track tokens that would remain if promotions happen
+                        remaining_tokens = tier_total_tokens
+                        
                         for veteran_item in veterans_sorted:
                             veteran_info = self._stability[veteran_item]
+                            vt = veteran_tokens.get(veteran_item, 0)
                             
                             if accumulated_tokens < self._cache_target_tokens:
                                 # Below threshold: veteran anchors tier (no N++)
-                                try:
-                                    accumulated_tokens += get_tokens(veteran_item)
-                                except Exception:
-                                    pass
+                                accumulated_tokens += vt
                             else:
                                 # Threshold met: N++ and can potentially promote
                                 veteran_info.n_value += 1
                                 
                                 if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
                                     if next_tier_is_promotable:
-                                        items_to_promote.append(veteran_item)
+                                        # Only promote if tier retains enough tokens
+                                        if remaining_tokens - vt >= self._cache_target_tokens:
+                                            items_to_promote.append(veteran_item)
+                                            remaining_tokens -= vt
+                                        else:
+                                            # Can't promote — would drain tier below threshold
+                                            veteran_info.n_value = promotion_threshold
                                     else:
                                         veteran_info.n_value = promotion_threshold
                     else:

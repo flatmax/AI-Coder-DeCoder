@@ -142,6 +142,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
       this.isCompacting = false;
       
       console.log(`📋 History compacted: ${event.case}, now showing ${newHistory.length} messages`);
+      
+      // Trigger cache viewer refresh to reflect dropped/new history items
+      this._refreshCacheViewer();
     } else if (event.type === 'compaction_error') {
       // Handle compaction failure
       const lastMessage = this.messageHistory[this.messageHistory.length - 1];
@@ -294,6 +297,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
       this.loadPromptSnippets();
     }
     
+    // Refresh cache viewer to reflect stability changes from this response
+    this._refreshCacheViewer();
+    
     // Focus the textarea for next input after a brief delay
     // to ensure DOM updates and any other focus changes have settled
     setTimeout(() => {
@@ -422,6 +428,27 @@ export const StreamingMixin = (superClass) => class extends superClass {
     if (this._streamingTimeout) {
       clearTimeout(this._streamingTimeout);
       this._streamingTimeout = null;
+    }
+  }
+
+  /**
+   * Trigger a cache viewer refresh (e.g. after compaction or session load).
+   * Marks breakdown data stale so the next tab switch or visible viewer refreshes.
+   */
+  _refreshCacheViewer() {
+    const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
+    if (cacheViewer) {
+      cacheViewer._breakdownStale = true;
+      if (cacheViewer.visible) {
+        cacheViewer.refreshBreakdown();
+      }
+    }
+    const contextViewer = this.shadowRoot?.querySelector('context-viewer');
+    if (contextViewer) {
+      contextViewer._breakdownStale = true;
+      if (contextViewer.visible) {
+        contextViewer.refreshBreakdown();
+      }
     }
   }
 
