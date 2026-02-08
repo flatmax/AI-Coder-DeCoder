@@ -122,13 +122,13 @@ N increments are **not** a global end-of-request step. They happen inside the pe
 
 The algorithm for a single tier:
 
-1. **Merge** incoming items into the existing veteran list. Veterans are already ordered by N descending from previous requests. Incoming items enter with the tier's `entry_n` value and are inserted at their correct position (typically the bottom, since `entry_n` is the tier's minimum N). The ordering is **maintained across requests** — no full re-sort is needed.
-2. **Walk the ordered list from the top** (highest N first), accumulating tokens:
+1. **Merge** incoming items into the existing veteran list. Incoming items enter with the tier's `entry_n` value. The combined list is ordered by N ascending (lowest first).
+2. **Walk the list from the bottom** (lowest N first — starting from the newest incoming entries), accumulating tokens:
    - **While accumulated tokens < `cache_target_tokens`**: these items are **held back** to meet the minimum. Their N is **frozen** — no increment. They remain in the tier to ensure the cache block meets the provider's minimum (e.g., 1024 tokens for Anthropic).
-   - **Once the minimum is met**: remaining items (those not needed to fill the budget) receive **N++**
+   - **Once the minimum is met**: remaining items (higher-N veterans not needed to fill the budget) receive **N++**, but N is **capped at the tier's promotion threshold** while the tier above is stable.
 3. **After N++**, check each incremented item against the tier's promotion threshold:
    - If the **tier above is invalidated** and the item's new N exceeds the promotion threshold → the item **promotes out** (becomes an outgoing item, enters the tier above with that tier's `entry_n`)
-   - If the **tier above is NOT invalidated** → N++ still applies but is **capped at the promotion threshold**. The item cannot leave, so its N does not accumulate past the maximum valid value for this tier. This prevents artificial N inflation when an item is stuck.
+   - If the **tier above is NOT invalidated** → N is **capped at the promotion threshold**. The item cannot leave, so its N does not accumulate past the maximum valid value for this tier. This prevents artificial N inflation when an item is stuck.
 4. **Outgoing items** become the incoming items for the next tier up in the cascade
 
 **Key properties:**
