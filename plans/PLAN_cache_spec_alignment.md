@@ -72,7 +72,7 @@ The `specs/cache_management.md` spec describes a mature cache management system.
 
 ## Implementation Plan
 
-### Phase 1: Broken Tier Guard and N Cap (Gaps 4, 5)
+### Phase 1: Broken Tier Guard and N Cap (Gaps 4, 5) — ✅ DONE
 
 **Files**: `ac/context/stability_tracker.py`, `tests/test_stability_tracker.py`
 
@@ -160,12 +160,18 @@ Currently `_process_tier_entries` is only called when `items_entering_l3` is non
 
 After collecting `broken_tiers` from demotions, check whether any cached tier below the broken tier has veterans that could promote. The simplest approach: always call `_process_tier_entries` with `items_entering_l3` (which may be empty), and let the cascade logic handle it. The cascade loop already processes each tier bottom-up. With `broken_tiers` available, the loop can check whether veterans in L3 can promote into a broken L2 even if no items entered L3 this cycle.
 
-To support this, the cascade loop needs a restructure. Instead of starting from an initial tier with entering items and following promotions upward, it should iterate through all tiers bottom-up and process each tier that either (a) received entering items, or (b) has veterans eligible to promote into a broken tier above:
+To support this, the cascade loop needs a restructure. Instead of starting from an initial tier with entering items and following promotions upward, it should iterate through all tiers bottom-up **repeatedly** until no more promotions occur. A single bottom-up pass is insufficient because a promotion at a higher tier (e.g., L2→L1) breaks L2, which creates an opportunity for L3 veterans — but L3 was already processed in this pass.
+
+Example: L1 is broken from a demotion. L2 has a veteran at threshold. L3 has a veteran at threshold.
+- Pass 1: Process L3 — L2 is not broken, skip. Process L2 — L1 IS broken, veteran promotes into L1. This breaks L2.
+- Pass 2: Process L3 — L2 IS now broken, veteran promotes into L2. Process L2 — nothing new. Done.
+
+The loop converges in at most 4 iterations (one per tier level). In practice most cascades complete in 1-2 passes.
 
 ```python
 def _process_tier_entries(self, entering_l3_items, tier_changes, 
                           get_tokens=None, broken_tiers=None):
-    """Process tier entries with cascade, bottom-up."""
+    """Process tier entries with cascade, multi-pass bottom-up."""
     if broken_tiers is None:
         broken_tiers = set()
     
@@ -174,63 +180,65 @@ def _process_tier_entries(self, entering_l3_items, tier_changes,
         if not any(1 for info in self._stability.values() if info.tier == tier):
             broken_tiers.add(tier)
     
-    # Process tiers bottom-up: L3 → L2 → L1 → L0
+    # Seed: items entering L3 from active graduation
     entering_items_for_tier = {
         'L3': list(entering_l3_items) if entering_l3_items else [],
         'L2': [], 'L1': [], 'L0': [],
     }
     
-    for current_tier in TIER_PROMOTION_ORDER:
-        entering_items = entering_items_for_tier[current_tier]
+    # Multi-pass: repeat until no promotions occur
+    any_promoted = True
+    while any_promoted:
+        any_promoted = False
         
-        # Skip if nothing entering AND tier above isn't broken
-        next_tier = self._get_next_tier(current_tier)
-        if not entering_items and (not next_tier or next_tier not in broken_tiers):
-            continue
-        
-        # ... process entering items and veterans as before ...
-        # ... collect items_to_promote ...
-        
-        if items_to_promote and next_tier:
-            entering_items_for_tier[next_tier] = items_to_promote
+        for current_tier in TIER_PROMOTION_ORDER:
+            entering_items = entering_items_for_tier[current_tier]
+            entering_items_for_tier[current_tier] = []  # Consume
+            
+            next_tier = self._get_next_tier(current_tier)
+            
+            # Skip if nothing entering AND tier above isn't broken
+            if not entering_items and (not next_tier or next_tier not in broken_tiers):
+                continue
+            
+            # ... process entering items and veterans ...
+            # ... collect items_to_promote (guarded by next_tier in broken_tiers) ...
+            # ... cap N at promotion_threshold when next_tier is stable ...
+            
+            if items_to_promote and next_tier:
+                entering_items_for_tier[next_tier].extend(items_to_promote)
+                broken_tiers.add(current_tier)  # Items left this tier
+                any_promoted = True
 ```
 
-This ensures that even when nothing enters L3, if L2 is broken from a demotion, the loop still processes L3's veterans to see if any can promote into L2.
+This ensures that cascades propagate fully: a break at L1 eventually pulls veterans up from L3 through L2, even though L3 is processed before L2 in each pass.
 
-#### 1f. Update tests
+#### 1f. Update tests — DONE
+
+**Implementation notes:**
+
+Key design decisions made during implementation:
+- **Two-set tracking**: `broken_tiers` (tiers with content changes from demotions/entering/leaving) vs `promotable_tiers` (broken_tiers + empty tiers). Empty tiers are safe to promote INTO but don't trigger veteran N++ processing in other tiers.
+- **`tiers_processed` set**: Prevents veterans from getting N++ multiple times across multi-pass iterations. Veterans are processed exactly once per cascade cycle.
+- **`needs_veteran_processing` condition**: A tier's veterans are processed when (a) the tier itself is in broken_tiers (content changed), OR (b) the tier above is in broken_tiers (veterans could promote). This correctly handles demotion-triggered cascades.
+- **Promotion guard uses `promotable_tiers`**: Veterans can promote into broken OR empty tiers. But N++ processing only triggers when the cascade actually touches the tier (via `broken_tiers`).
+- **Updated `test_scenario_from_plan`**: Round 3 now expects C gets N++→4 (B's demotion from L3 breaks the tier, triggering veteran processing). This is correct per spec — the cascade reaches L3 because it's broken.
 
 **Existing tests that still pass unchanged:**
-- `test_cascade_promotion`: Sets up trigger.py leaving active → enters L3 (breaks L3) → l3_item promotes to L2 (breaks L2) → l2_item promotes to L1 (breaks L1) → l1_item promotes to L0. Each step breaks the destination, so the cascade propagates fully. ✅
+- `test_cascade_promotion` → renamed to `test_cascade_promotion_into_empty_tiers` and `test_cascade_promotion_with_broken_tiers`: Tests split to cover both empty-tier and broken-tier cascade paths. ✅
 - `test_entry_triggers_n_increment`: Items entering L3 trigger N++ for veterans. ✅
 - `test_promotion_at_threshold`: Trigger enters L3, veteran promotes to L2. L2 was empty so the promotion just adds to it. ✅
 - All threshold-aware tests: Same cascade logic, just with token gating. ✅
 
-**New tests to add:**
-1. `test_no_promotion_into_stable_tier`: Veteran in L3 at N=5. Nothing enters L3 this round (no items leave active). An item enters L2 from elsewhere (e.g., demotion of an L1 item). Veteran in L3 should NOT promote to L2 because L3 was never touched by the cascade — L3 is stable.
-
-   Actually, this scenario is subtle. The cascade only runs when items enter L3 from active. If L3 is never reached by the cascade, its veterans don't get N++ at all, so they can't reach the threshold. The guard matters when: L3 IS touched (items enter), a veteran promotes to L2, but L2 is stable. In that case, the veteran's promotion should be blocked.
-
-   Correct test: Set up veteran_a in L3 at N=5, veteran_b in L2 at N=8. Item leaves active, enters L3. veteran_a gets N++→6, wants to promote to L2. But L2 is not broken (nothing was demoted from L2, no items entered L2). Result: veteran_a's N is capped at 6 (promotion threshold), stays in L3. veteran_b in L2 is untouched (N stays 8).
-
-2. `test_n_capped_at_promotion_threshold`: Same setup as above. Run multiple rounds where new items keep entering L3 but L2 stays stable. Veteran's N should stay at 6 (L3's promotion threshold), never going higher. Verifies the cap prevents artificial inflation.
-
-3. `test_cascade_stops_at_stable_boundary`: Set up: veteran in L3 at N=5, veteran in L2 at N=8, veteran in L1 at N=11, content in L0. New item enters L3, veteran in L3 gets N++→6, promotes to L2 (L2 becomes broken from receiving it). Veteran in L2 gets N++→9, wants to promote to L1. But L1 is NOT broken (nothing was demoted from L1, nothing entered L1 from above). Result: L2 veteran's N is capped at 9, stays in L2. L1 and L0 are untouched.
-
-4. `test_demotion_breaks_tier`: Item in L2 is modified → demoted to active. L2 is now broken. On this same update cycle, a new item enters L3, veteran in L3 (N=5) gets N++→6, and CAN promote into L2 because L2 is broken from the demotion. Validates that demotions create openings for promotion.
-
-5. `test_promotion_into_empty_tier`: Veteran in L3 at N=5. New item enters L3, veteran gets N++→6. L2 is empty (no items). The veteran promotes to L2 — even though L2 was "stable" (it had no cache block), the promotion is allowed because there's nothing to invalidate. This verifies empty tiers are treated as available.
-
-   Implementation: before the cascade loop starts in `_process_tier_entries`, pre-populate `broken_tiers` with all tiers that currently have zero items. An empty tier has no cached content to protect, so entering it is always free. This is a simple scan:
-   ```python
-   # Empty tiers are always available for promotion
-   for tier in TIER_PROMOTION_ORDER:
-       if not any(1 for info in self._stability.values() if info.tier == tier):
-           broken_tiers.add(tier)
-   ```
-
-6. `test_demotion_triggers_cascade_without_active_graduation`: Item in L2 is demoted → L2 is broken. Nothing leaves active this round. Veterans in L3 (at promotion threshold) should still promote into L2 because the cascade runs bottom-up and detects the broken L2. This tests the 1e fix — the cascade runs even without items entering L3.
-
-7. `test_cascade_skips_stable_tiers_between_broken`: Item demoted from L1 (breaks L1). L2 has veterans at threshold. L2 should NOT process its veterans because L2 itself is not broken — items entering L2 would break L2, but nothing is entering L2. The cascade only promotes L3→L2 if L2 is broken, and L2→L1 if L1 is broken. If only L1 is broken and L2 is stable, L2's veterans can promote into L1 (since L1 is broken), which then breaks L2, which allows L3 veterans to promote into L2. This validates correct bottom-up cascade order.
+**New tests added (all passing):**
+1. `test_no_promotion_into_stable_tier` ✅
+2. `test_n_capped_at_promotion_threshold` ✅
+3. `test_cascade_stops_at_stable_boundary` ✅
+4. `test_demotion_breaks_tier_for_promotion` ✅
+5. `test_promotion_into_empty_tier` ✅
+6. `test_demotion_triggers_cascade_without_active_graduation` ✅
+7. `test_cascade_propagates_downward_through_breaks` ✅
+8. `test_cascade_with_threshold_respects_guard` ✅ (threshold-aware + guard interaction)
 
 ### Phase 2: Native History Pairs in Cached Tiers (Gaps 2, 8)
 
@@ -572,7 +580,7 @@ Phases are ordered to minimize risk: stability_tracker.py changes first (pure lo
 
 | Order | Phase | Gaps | Risk | Effort | Description |
 |-------|-------|------|------|--------|-------------|
-| 1st | 1 | 4, 5 | Low | Small | Broken tier guard + N cap in stability_tracker.py |
+| 1st | 1 | 4, 5 | Low | Small | ✅ DONE — Broken tier guard + N cap in stability_tracker.py |
 | 2nd | 5 | 9 | Low | Small | Item removal from cached tiers |
 | 3rd | 3 | 1, 7 | Medium | Medium | Reference graph clustering for initialization |
 | 4th | 4 | 6 | Low | Small | Session-scoped persistence (depends on Phase 3) |

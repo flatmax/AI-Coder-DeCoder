@@ -206,28 +206,63 @@ class TestStabilityTrackerRipplePromotion:
         assert tracker.get_tier("trigger.py") == 'L3'
         assert tracker.get_n_value("trigger.py") == 3
     
-    def test_cascade_promotion(self, tracker_with_items):
-        """Promotions cascade through tiers when veterans reach thresholds."""
-        # Set up items close to promotion thresholds
+    def test_cascade_promotion_into_empty_tiers(self, tracker_with_items):
+        """Promotions cascade through empty tiers (empty = always available)."""
+        # With the broken tier guard, promotions only happen into broken/empty tiers.
+        # Empty tiers are pre-marked as broken (nothing to invalidate).
+        # Set up items close to promotion thresholds with EMPTY destination tiers.
         tracker = tracker_with_items({
             "trigger.py": (0, 'active'),
-            "l3_item.py": (5, 'L3'),   # N=5, promotes at 6
-            "l2_item.py": (8, 'L2'),   # N=8, promotes at 9
-            "l1_item.py": (11, 'L1'),  # N=11, promotes at 12
+            "l3_item.py": (5, 'L3'),   # N=5, promotes at 6 → L2 (empty)
+            # L2 is empty → l3_item can promote
+            # L1 is empty → l2 entrant can promote
+            # L0 is empty → l1 entrant can promote
         }, last_active={"trigger.py"})
         
         content = {"trigger.py": "trigger", "other.py": "other"}
         
-        # Round: trigger.py leaves Active, enters L3 with N=3
-        # - l3_item is veteran in L3, gets N++ -> N=6, promotes to L2
-        # - l3_item entering L2 makes l2_item a veteran, gets N++ -> N=9, promotes to L1
-        # - l2_item entering L1 makes l1_item a veteran, gets N++ -> N=12, promotes to L0
+        # trigger.py leaves Active, enters L3 with N=3
+        # l3_item gets N++ → 6, L2 is empty (broken) → promotes to L2
+        # L2 now has l3_item, but L1 is empty (broken) — however l3_item just entered L2
+        # with N=6 (entry_n for L2), which is below L2's promotion threshold of 9.
+        # So no further cascade.
         tracker.update_after_response(
             items=["other.py"],
             get_content=lambda x: content.get(x, "")
         )
         
-        # Check cascade results
+        assert tracker.get_tier("trigger.py") == 'L3'
+        assert tracker.get_n_value("trigger.py") == 3
+        
+        assert tracker.get_tier("l3_item.py") == 'L2'
+        assert tracker.get_n_value("l3_item.py") == 6
+    
+    def test_cascade_promotion_with_broken_tiers(self, tracker_with_items):
+        """Full cascade when all destination tiers are broken (from demotions)."""
+        # Pre-break L2, L1, L0 by having items demoted from each
+        tracker = tracker_with_items({
+            "trigger.py": (0, 'active'),
+            "l3_item.py": (5, 'L3'),   # N=5, promotes at 6
+            "l2_item.py": (8, 'L2'),   # N=8, promotes at 9
+            "l1_item.py": (11, 'L1'),  # N=11, promotes at 12
+            "l2_demoted.py": (6, 'L2'),  # Will be demoted → breaks L2
+            "l1_demoted.py": (9, 'L1'),  # Will be demoted → breaks L1
+            "l0_demoted.py": (12, 'L0'), # Will be demoted → breaks L0
+        }, last_active={"trigger.py", "l2_demoted.py", "l1_demoted.py", "l0_demoted.py"})
+        
+        content = {
+            "trigger.py": "trigger", "other.py": "other",
+            "l2_demoted.py": "CHANGED", "l1_demoted.py": "CHANGED", "l0_demoted.py": "CHANGED",
+        }
+        
+        # Demotions break L2, L1, L0. Trigger enters L3.
+        tracker.update_after_response(
+            items=["l2_demoted.py", "l1_demoted.py", "l0_demoted.py", "other.py"],
+            get_content=lambda x: content.get(x, ""),
+            modified=["l2_demoted.py", "l1_demoted.py", "l0_demoted.py"]
+        )
+        
+        # Full cascade through broken tiers
         assert tracker.get_tier("trigger.py") == 'L3'
         assert tracker.get_n_value("trigger.py") == 3
         
@@ -239,6 +274,248 @@ class TestStabilityTrackerRipplePromotion:
         
         assert tracker.get_tier("l1_item.py") == 'L0'
         assert tracker.get_n_value("l1_item.py") == 12
+
+
+class TestStabilityTrackerBrokenTierGuard:
+    """Tests for the broken tier guard and N cap."""
+    
+    def test_no_promotion_into_stable_tier(self, tracker_with_items):
+        """Veterans can't promote into a tier that isn't broken."""
+        # veteran_a in L3 at N=5. Item enters L3 (trigger leaves active).
+        # veteran_a gets N++→6, reaches promotion threshold for L2.
+        # But L2 is NOT broken (nothing demoted from L2, nothing entered L2).
+        # Result: veteran_a stays in L3 with N capped at 6.
+        tracker = tracker_with_items({
+            "veteran_a.py": (5, 'L3'),
+            "veteran_b.py": (8, 'L2'),  # Existing L2 content
+            "trigger.py": (0, 'active'),
+        }, last_active={"trigger.py"})
+        
+        content = {"veteran_a.py": "a", "veteran_b.py": "b", "trigger.py": "t", "other.py": "o"}
+        
+        # trigger.py leaves active, enters L3
+        tracker.update_after_response(
+            items=["other.py"],
+            get_content=lambda x: content[x]
+        )
+        
+        # veteran_a reached threshold but L2 is stable → capped, stays in L3
+        assert tracker.get_tier("veteran_a.py") == 'L3'
+        assert tracker.get_n_value("veteran_a.py") == 6  # Capped at promotion threshold
+        
+        # veteran_b untouched (L2 was never processed)
+        assert tracker.get_tier("veteran_b.py") == 'L2'
+        assert tracker.get_n_value("veteran_b.py") == 8
+    
+    def test_n_capped_at_promotion_threshold(self, tracker_with_items):
+        """N doesn't accumulate past promotion threshold when tier above is stable."""
+        # Run multiple rounds where new items keep entering L3 but L2 stays stable.
+        # Veteran's N should stay at 6 (L3 promotion threshold).
+        tracker = tracker_with_items({
+            "veteran.py": (5, 'L3'),
+            "blocker.py": (7, 'L2'),  # Keeps L2 stable
+        })
+        
+        content = {"veteran.py": "v", "blocker.py": "b"}
+        
+        for i in range(3):
+            trigger_name = f"trigger{i}.py"
+            content[trigger_name] = f"t{i}"
+            content["other.py"] = "o"
+            
+            # Add trigger to active, then remove it next round
+            tracker._stability[trigger_name] = StabilityInfo(
+                content_hash=trigger_name, n_value=0, tier='active'
+            )
+            tracker._last_active_items = {trigger_name}
+            
+            tracker.update_after_response(
+                items=["other.py"],
+                get_content=lambda x: content[x]
+            )
+        
+        # N should be capped at 6 (promotion threshold), not 8
+        assert tracker.get_tier("veteran.py") == 'L3'
+        assert tracker.get_n_value("veteran.py") == 6
+    
+    def test_cascade_stops_at_stable_boundary(self, tracker_with_items):
+        """Cascade stops when it reaches a tier that isn't broken."""
+        # L3 veteran at N=5, L2 veteran at N=8. Item enters L3.
+        # L3 veteran promotes to L2 (L2 was empty? No — L2 has veteran_b).
+        # Actually L2 is NOT broken, so L3 veteran can't promote.
+        # Let's set up properly: L2 is broken (item demoted from L2).
+        # But L1 is stable.
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "l2_vet.py": (8, 'L2'),
+            "l1_content.py": (10, 'L1'),  # Keeps L1 stable
+            "trigger.py": (0, 'active'),
+            "demoted.py": (6, 'L2'),  # Will be demoted, breaking L2
+        }, last_active={"trigger.py", "demoted.py"})
+        
+        content = {
+            "l3_vet.py": "a", "l2_vet.py": "b", "l1_content.py": "c",
+            "trigger.py": "t", "demoted.py": "CHANGED", "other.py": "o"
+        }
+        
+        # demoted.py is modified → demoted from L2 → L2 is broken
+        # trigger.py leaves active → enters L3
+        # l3_vet gets N++→6, L2 IS broken → promotes to L2
+        # l2_vet gets N++→9, but L1 is NOT broken → N capped at 9, stays in L2
+        tracker.update_after_response(
+            items=["demoted.py", "other.py"],
+            get_content=lambda x: content[x],
+            modified=["demoted.py"]
+        )
+        
+        assert tracker.get_tier("trigger.py") == 'L3'
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+        
+        assert tracker.get_tier("l2_vet.py") == 'L2'
+        assert tracker.get_n_value("l2_vet.py") == 9  # Capped at L2 promotion threshold
+        
+        assert tracker.get_tier("l1_content.py") == 'L1'
+        assert tracker.get_n_value("l1_content.py") == 10  # Untouched
+    
+    def test_demotion_breaks_tier_for_promotion(self, tracker_with_items):
+        """Demotion from a tier marks it broken, allowing promotions into it."""
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),     # Ready to promote to L2
+            "l2_item.py": (7, 'L2'),    # Will be demoted
+            "trigger.py": (0, 'active'),
+        }, last_active={"trigger.py", "l2_item.py"})
+        
+        content = {
+            "l3_vet.py": "a", "l2_item.py": "CHANGED",
+            "trigger.py": "t", "other.py": "o"
+        }
+        
+        # l2_item modified → demoted from L2 → L2 is broken
+        # trigger leaves active → enters L3, l3_vet gets N++→6
+        # l3_vet can promote to L2 (L2 is broken from demotion)
+        tracker.update_after_response(
+            items=["l2_item.py", "other.py"],
+            get_content=lambda x: content[x],
+            modified=["l2_item.py"]
+        )
+        
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+        assert tracker.get_tier("l2_item.py") == 'active'
+        assert tracker.get_n_value("l2_item.py") == 0
+    
+    def test_promotion_into_empty_tier(self, tracker_with_items):
+        """Empty tiers are always available for promotion (nothing to invalidate)."""
+        # L2 is completely empty. L3 veteran at promotion threshold.
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "trigger.py": (0, 'active'),
+        }, last_active={"trigger.py"})
+        
+        content = {"l3_vet.py": "a", "trigger.py": "t", "other.py": "o"}
+        
+        tracker.update_after_response(
+            items=["other.py"],
+            get_content=lambda x: content[x]
+        )
+        
+        # L2 was empty → treated as broken → l3_vet promotes
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_demotion_triggers_cascade_without_active_graduation(self, tracker_with_items):
+        """Cascade runs from demotion even when nothing leaves active."""
+        # Item in L2 is demoted. Nothing leaves active.
+        # L3 veteran at threshold should promote into L2.
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "l2_item.py": (7, 'L2'),
+        })
+        # No items in active, no last_active — so nothing graduates
+        tracker._last_active_items = set()
+        
+        content = {"l3_vet.py": "a", "l2_item.py": "CHANGED"}
+        
+        # l2_item is in current items but modified → demoted, L2 broken
+        # Nothing leaves active (empty last_active)
+        # But cascade should still process L3 → L2
+        tracker.update_after_response(
+            items=["l2_item.py"],
+            get_content=lambda x: content[x],
+            modified=["l2_item.py"]
+        )
+        
+        assert tracker.get_tier("l2_item.py") == 'active'
+        # l3_vet gets N++ → 6, L2 is broken → promotes
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_cascade_propagates_downward_through_breaks(self, tracker_with_items):
+        """Multi-pass cascade: break at L1 pulls veterans up from L3 through L2."""
+        # L1 broken from demotion. L2 veteran at threshold. L3 veteran at threshold.
+        # Pass 1: L3 skipped (L2 not broken), L2 promotes into L1 → breaks L2
+        # Pass 2: L3 promotes into L2 (now broken)
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "l2_vet.py": (8, 'L2'),
+            "l1_item.py": (10, 'L1'),  # Will be demoted
+        })
+        tracker._last_active_items = set()
+        
+        content = {"l3_vet.py": "a", "l2_vet.py": "b", "l1_item.py": "CHANGED"}
+        
+        # l1_item modified → demoted from L1 → L1 broken
+        tracker.update_after_response(
+            items=["l1_item.py"],
+            get_content=lambda x: content[x],
+            modified=["l1_item.py"]
+        )
+        
+        assert tracker.get_tier("l1_item.py") == 'active'
+        
+        # L2 veteran promoted into L1 (L1 was broken)
+        assert tracker.get_tier("l2_vet.py") == 'L1'
+        assert tracker.get_n_value("l2_vet.py") == 9
+        
+        # L3 veteran promoted into L2 (L2 broken by l2_vet leaving)
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_cascade_with_threshold_respects_guard(self, stability_tracker_with_threshold):
+        """Threshold-aware promotion also respects broken tier guard."""
+        tracker = stability_tracker_with_threshold
+        
+        # cache_target_tokens=1000. trigger(100 tokens) enters L3.
+        # veteran(200 tokens) is below threshold (100+200=300 < 1000) → anchors.
+        # Even if veteran could get N++, L2 is not broken → would be capped.
+        # With larger tokens to exceed threshold, veteran gets N++ but L2 blocks.
+        tracker._stability = {
+            "veteran.py": StabilityInfo(content_hash="v", n_value=5, tier='L3'),
+            "blocker.py": StabilityInfo(content_hash="b", n_value=7, tier='L2'),
+            "trigger.py": StabilityInfo(content_hash="t", n_value=0, tier='active'),
+            "anchor.py": StabilityInfo(content_hash="x", n_value=3, tier='L3'),
+        }
+        tracker._last_active_items = {"trigger.py"}
+        
+        content = {"veteran.py": "v", "blocker.py": "b", "trigger.py": "t",
+                    "anchor.py": "x", "other": "o"}
+        token_counts = {"veteran.py": 200, "blocker.py": 500, "trigger.py": 800,
+                        "anchor.py": 300, "other": 100}
+        
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # trigger(800) enters L3. accumulated=800.
+        # Veterans sorted by N: anchor(N=3), veteran(N=5)
+        # anchor: 800 < 1000 → anchors, accumulated=1100
+        # veteran: 1100 >= 1000 → N++→6, but L2 not broken → capped at 6
+        assert tracker.get_tier("veteran.py") == 'L3'
+        assert tracker.get_n_value("veteran.py") == 6  # Capped at promotion threshold
+        assert tracker.get_tier("blocker.py") == 'L2'
 
 
 class TestStabilityTrackerUpdate:
@@ -814,28 +1091,25 @@ class TestStabilityTrackerThresholdAware:
         assert tracker.get_n_value("C") == 6  # N++ triggered promotion
     
     def test_threshold_aware_cascade_promotion(self, stability_tracker_with_threshold):
-        """Threshold-aware promotion cascades through tiers."""
+        """Threshold-aware promotion cascades through broken tiers."""
         tracker = stability_tracker_with_threshold
         
-        # Set up items close to promotion in multiple tiers
+        # Set up items close to promotion in multiple tiers.
+        # L2 and L1 must be broken for the cascade to propagate.
+        # Use empty L2 and L1 (empty = always broken).
         tracker._stability = {
             "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
             "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),  # Will anchor
             "l3_promote": StabilityInfo(content_hash="l3p", n_value=5, tier='L3'),  # Will promote to L2
-            "l2_anchor": StabilityInfo(content_hash="l2a", n_value=7, tier='L2'),  # Will anchor
-            "l2_promote": StabilityInfo(content_hash="l2p", n_value=8, tier='L2'),  # Will promote to L1
         }
         tracker._last_active_items = {"trigger"}
         
         content = {k: k for k in tracker._stability}
         content["other"] = "other"
-        # Token counts designed to have one anchor and one promoter per tier
         token_counts = {
             "trigger": 200,
             "l3_anchor": 900,   # This alone will meet threshold
             "l3_promote": 100,  # Past threshold, will get N++ and promote
-            "l2_anchor": 900,   # This alone will meet threshold  
-            "l2_promote": 100,  # Past threshold, will get N++ and promote
             "other": 100,
         }
         
@@ -848,15 +1122,59 @@ class TestStabilityTrackerThresholdAware:
         # trigger → L3 with N=3
         assert tracker.get_tier("trigger") == 'L3'
         
-        # L3: l3_anchor(N=4) anchors, l3_promote(N=5) gets N++→6, promotes
+        # L3: l3_anchor(N=4) anchors, l3_promote(N=5) gets N++→6
+        # L2 is empty (broken) → l3_promote promotes to L2
         assert tracker.get_n_value("l3_anchor") == 4  # Anchored
         assert tracker.get_tier("l3_promote") == 'L2'  # Promoted!
         assert tracker.get_n_value("l3_promote") == 6
+    
+    def test_threshold_aware_cascade_with_broken_tiers(self, stability_tracker_with_threshold):
+        """Threshold-aware cascade through non-empty broken tiers."""
+        tracker = stability_tracker_with_threshold
         
-        # L2: l2_anchor(N=7) anchors, l2_promote(N=8) gets N++→9, promotes
-        # Note: l3_promote enters L2, triggering veteran processing
-        assert tracker.get_n_value("l2_anchor") == 7  # Anchored
-        assert tracker.get_tier("l2_promote") == 'L1'  # Promoted!
+        # L2 broken from demotion, L1 will break from L2 promotion
+        tracker._stability = {
+            "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
+            "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),
+            "l3_promote": StabilityInfo(content_hash="l3p", n_value=5, tier='L3'),
+            "l2_anchor": StabilityInfo(content_hash="l2a", n_value=7, tier='L2'),
+            "l2_promote": StabilityInfo(content_hash="l2p", n_value=8, tier='L2'),
+            "l2_demoted": StabilityInfo(content_hash="l2d", n_value=6, tier='L2'),  # Will be demoted
+        }
+        tracker._last_active_items = {"trigger", "l2_demoted"}
+        
+        content = {k: k for k in tracker._stability}
+        content["l2_demoted"] = "CHANGED"
+        content["other"] = "other"
+        token_counts = {
+            "trigger": 200,
+            "l3_anchor": 900,
+            "l3_promote": 100,
+            "l2_anchor": 900,
+            "l2_promote": 100,
+            "l2_demoted": 500,
+            "other": 100,
+        }
+        
+        tracker.update_after_response(
+            items=["l2_demoted", "other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+            modified=["l2_demoted"],
+        )
+        
+        # trigger → L3
+        assert tracker.get_tier("trigger") == 'L3'
+        
+        # L3: l3_anchor anchors, l3_promote promotes to L2 (broken from demotion)
+        assert tracker.get_n_value("l3_anchor") == 4
+        assert tracker.get_tier("l3_promote") == 'L2'
+        assert tracker.get_n_value("l3_promote") == 6
+        
+        # L2: l2_anchor anchors, l2_promote gets N++→9
+        # L1 is empty (broken) → l2_promote promotes to L1
+        assert tracker.get_n_value("l2_anchor") == 7
+        assert tracker.get_tier("l2_promote") == 'L1'
         assert tracker.get_n_value("l2_promote") == 9
     
     def test_without_get_tokens_uses_original_behavior(self, stability_tracker_with_threshold):
@@ -1116,6 +1434,7 @@ class TestStabilityTrackerHistoryItems:
     
     def test_history_cascade_promotion(self, tracker_with_items):
         """History items participate in cascade promotion like any item."""
+        # L2 must be empty (broken) for history:0 to promote into it
         tracker = tracker_with_items({
             "history:0": (5, 'L3'),  # One away from promotion
             "history:1": (0, 'active'),
@@ -1124,7 +1443,8 @@ class TestStabilityTrackerHistoryItems:
         content = {"history:0": "user:old", "history:1": "assistant:old", "other": "x"}
         
         # history:1 leaves active, enters L3
-        # history:0 is veteran in L3, gets N++ → N=6, promotes to L2
+        # history:0 is veteran in L3, gets N++ → N=6
+        # L2 is empty (broken) → history:0 promotes to L2
         tracker.update_after_response(
             items=["other"],
             get_content=lambda x: content.get(x, "x")
@@ -1360,8 +1680,10 @@ class TestStabilityTrackerScenarios:
         assert stability_tracker.get_n_value("A") == 2  # Still veteran in Active, N++
         assert stability_tracker.get_tier("B") == 'active'
         assert stability_tracker.get_n_value("B") == 0  # Reset due to modification
-        assert stability_tracker.get_tier("C") == 'L3'  # C stays in L3, no entries so no N++
-        assert stability_tracker.get_n_value("C") == 3  # No change - no items entered L3 this round
+        assert stability_tracker.get_tier("C") == 'L3'  # C stays in L3
+        # B's demotion from L3 broke the tier, so the cascade reaches L3
+        # and C (veteran in L3) gets N++
+        assert stability_tracker.get_n_value("C") == 4
     
     def test_demote_from_l0_to_active(self, stability_tracker):
         """Modified L0 item drops to active."""
