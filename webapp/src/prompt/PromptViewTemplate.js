@@ -202,6 +202,7 @@ export function renderPromptView(component) {
                            .value=${component._historySearchQuery || ''}
                            @input=${(e) => component._handleHistoryOverlayInput(e)}
                            @keydown=${(e) => component._handleHistoryOverlayKeydown(e)}
+                           @blur=${() => setTimeout(() => component._closeHistorySearch(), 150)}
                     />
                   </div>
                 ` : ''}
