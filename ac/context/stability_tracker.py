@@ -182,6 +182,8 @@ class StabilityTracker:
         self._last_demotions = []
         
         # Phase 1: Update hashes for all items and handle modifications
+        broken_tiers = set()
+        
         for item in items:
             try:
                 content = get_content(item)
@@ -209,6 +211,7 @@ class StabilityTracker:
                     # Reset N and demote to active
                     info.n_value = 0
                     if old_tier != 'active':
+                        broken_tiers.add(old_tier)  # Tier lost an item
                         info.tier = 'active'
                         tier_changes[item] = 'active'
                         self._last_demotions.append((item, 'active'))
@@ -237,9 +240,11 @@ class StabilityTracker:
         # ripple or when a token threshold is met). Items enter L3 only when
         # they leave the active items list.
         
-        # Process all items entering L3 as a batch (triggers ripple promotions)
-        if items_entering_l3:
-            self._process_tier_entries(items_entering_l3, 'L3', tier_changes, get_tokens)
+        # Run cascade: process tier entries with broken tier guard.
+        # The cascade runs even if nothing enters L3 — demotions from cached
+        # tiers create openings that veterans below can fill.
+        self._process_tier_entries(items_entering_l3, tier_changes, get_tokens,
+                                   broken_tiers=broken_tiers)
         
         # Update tracking for next round
         self._last_active_items = current_active.copy()
@@ -249,113 +254,166 @@ class StabilityTracker:
     
     def _process_tier_entries(
         self,
-        initial_entering_items: list[str],
-        initial_tier: str,
+        entering_l3_items: list[str],
         tier_changes: dict[str, str],
         get_tokens: Callable[[str], int] = None,
+        broken_tiers: set[str] = None,
     ) -> None:
         """
         Process items entering cache tiers with ripple promotion.
         
-        Ripple promotion is computed independently per tier:
-        1. Items entering a tier get that tier's entry_n value
-        2. With threshold-aware mode (cache_target_tokens > 0):
-           a. Accumulate tokens from entering items
-           b. Sort veterans by N ascending (lowest first)
-           c. Veterans below token threshold anchor the tier (no N++)
-           d. Veterans past threshold get N++ and can promote
-        3. Without threshold mode: all veterans get N++ once per cycle
-        4. If any veteran reaches promotion_threshold, they promote to the next tier
-        5. Promoted items become direct entries for the next tier
-        6. If no promotions occur, higher tiers remain unchanged
-        
-        Each tier's computation depends only on direct entries to that tier,
-        not on activity in other tiers.
+        Uses multi-pass bottom-up cascade with broken tier guard:
+        1. Items entering L3 get that tier's entry_n value
+        2. Each tier is processed bottom-up (L3 → L2 → L1 → L0)
+        3. Veterans only promote into tiers that are broken (invalidated)
+        4. When items enter or leave a tier, that tier is marked broken
+        5. N is capped at the promotion threshold when the tier above is stable
+        6. With threshold-aware mode: low-N veterans anchor, high-N can promote
+        7. Multi-pass repeats until no promotions occur (cascade converges)
         
         Args:
-            initial_entering_items: Items initially entering (from Active leaving or threshold)
-            initial_tier: The first tier being entered (typically 'L3')
+            entering_l3_items: Items entering L3 from active graduation
             tier_changes: Dict to record tier changes (mutated)
             get_tokens: Optional function to get token count for items
+            broken_tiers: Set of tiers already invalidated (e.g., from demotions).
+                         Mutated during cascade as tiers gain/lose items.
         """
-        if not initial_entering_items or initial_tier not in TIER_CONFIG:
-            return
+        if broken_tiers is None:
+            broken_tiers = set()
         
-        # Process tiers in order, starting from initial_tier
-        current_tier = initial_tier
-        entering_items = list(initial_entering_items)
+        # Separate tracking: broken_tiers tracks tiers whose cache block content
+        # changed (demotions, items entering/leaving). promotable_tiers includes
+        # broken_tiers PLUS empty tiers (safe to promote into — no cache to break).
+        promotable_tiers = set(broken_tiers)
+        for tier in TIER_PROMOTION_ORDER:
+            if not any(1 for info in self._stability.values() if info.tier == tier):
+                promotable_tiers.add(tier)
         
-        while entering_items and current_tier and current_tier in TIER_CONFIG:
-            config = TIER_CONFIG[current_tier]
-            entry_n = config['entry_n']
-            promotion_threshold = config['promotion_threshold']
+        # Seed: items entering L3 from active graduation
+        entering_items_for_tier = {
+            'L3': list(entering_l3_items) if entering_l3_items else [],
+            'L2': [], 'L1': [], 'L0': [],
+        }
+        
+        # Track which tiers have had their veterans processed this cascade.
+        # Veterans get N++ at most once per cascade cycle.
+        tiers_processed = set()
+        
+        # Multi-pass bottom-up: repeat until no promotions occur.
+        # Multiple passes handle the case where a higher-tier promotion
+        # breaks a tier that a lower tier's veterans could promote into.
+        # Example: L1 broken → L2 vet promotes to L1 → L2 broken →
+        #          pass 2: L3 vet promotes into L2
+        any_promoted = True
+        while any_promoted:
+            any_promoted = False
             
-            # Snapshot veterans (items already in this tier before this cycle)
-            veterans_in_tier = [
-                item for item, info in self._stability.items()
-                if info.tier == current_tier and item not in entering_items
-            ]
-            
-            # Move all entering items to this tier with entry_n
-            accumulated_tokens = 0
-            for item in entering_items:
-                if item not in self._stability:
-                    continue
+            for current_tier in TIER_PROMOTION_ORDER:
+                entering_items = entering_items_for_tier[current_tier]
+                entering_items_for_tier[current_tier] = []  # Consume
                 
-                info = self._stability[item]
-                old_tier = info.tier
-                info.tier = current_tier
-                info.n_value = entry_n
-                tier_changes[item] = current_tier
-                if self._is_promotion(old_tier, current_tier):
-                    self._last_promotions.append((item, current_tier))
+                config = TIER_CONFIG[current_tier]
+                entry_n = config['entry_n']
+                promotion_threshold = config['promotion_threshold']
+                next_tier = self._get_next_tier(current_tier)
                 
-                # Accumulate tokens from entering items
-                if get_tokens and self._cache_target_tokens > 0:
-                    try:
-                        accumulated_tokens += get_tokens(item)
-                    except Exception:
-                        pass
-            
-            # Process veterans with threshold-aware logic
-            items_to_promote = []
-            
-            if self._cache_target_tokens > 0 and get_tokens:
-                # Threshold-aware mode: sort veterans by N ascending (lowest first)
-                # Low-N veterans anchor the tier, high-N veterans can promote
-                veterans_sorted = sorted(
-                    veterans_in_tier,
-                    key=lambda x: self._stability[x].n_value
+                # Process this tier if:
+                # 1. Items are entering (new content to place), OR
+                # 2. Veterans haven't been processed yet AND the tier was
+                #    touched by the cascade (in broken_tiers — content changed)
+                #    or the tier above is broken (veterans could promote into it)
+                needs_veteran_processing = (
+                    current_tier not in tiers_processed
+                    and (current_tier in broken_tiers
+                         or (next_tier and next_tier in broken_tiers))
                 )
                 
-                for veteran_item in veterans_sorted:
-                    veteran_info = self._stability[veteran_item]
+                if not entering_items and not needs_veteran_processing:
+                    continue
+                
+                # Snapshot veterans (items already in this tier, not entering)
+                entering_set = set(entering_items)
+                veterans_in_tier = [
+                    item for item, info in self._stability.items()
+                    if info.tier == current_tier and item not in entering_set
+                ]
+                
+                # Move all entering items to this tier with entry_n
+                accumulated_tokens = 0
+                if entering_items:
+                    broken_tiers.add(current_tier)  # Tier content changed
+                    promotable_tiers.add(current_tier)
+                
+                for item in entering_items:
+                    if item not in self._stability:
+                        continue
                     
-                    if accumulated_tokens < self._cache_target_tokens:
-                        # Below threshold: veteran anchors tier (no N++)
+                    info = self._stability[item]
+                    old_tier = info.tier
+                    info.tier = current_tier
+                    info.n_value = entry_n
+                    tier_changes[item] = current_tier
+                    if self._is_promotion(old_tier, current_tier):
+                        self._last_promotions.append((item, current_tier))
+                    
+                    # Accumulate tokens from entering items
+                    if get_tokens and self._cache_target_tokens > 0:
                         try:
-                            accumulated_tokens += get_tokens(veteran_item)
+                            accumulated_tokens += get_tokens(item)
                         except Exception:
                             pass
-                        # No N++ for anchoring veterans
-                    else:
-                        # Threshold met: veteran gets N++ and can potentially promote
-                        veteran_info.n_value += 1
-                        
-                        if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
-                            items_to_promote.append(veteran_item)
-            else:
-                # Original behavior: all veterans get N++ once per cycle
-                for veteran_item in veterans_in_tier:
-                    veteran_info = self._stability[veteran_item]
-                    veteran_info.n_value += 1
+                
+                # Process veterans (only once per cascade cycle)
+                items_to_promote = []
+                next_tier_is_promotable = next_tier and next_tier in promotable_tiers
+                
+                if current_tier not in tiers_processed:
+                    tiers_processed.add(current_tier)
                     
-                    if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
-                        items_to_promote.append(veteran_item)
-            
-            # Promoted veterans become direct entries for the next tier
-            entering_items = items_to_promote
-            current_tier = self._get_next_tier(current_tier)
+                    if self._cache_target_tokens > 0 and get_tokens:
+                        # Threshold-aware mode: sort veterans by N ascending
+                        # Low-N veterans anchor the tier, high-N can promote
+                        veterans_sorted = sorted(
+                            veterans_in_tier,
+                            key=lambda x: self._stability[x].n_value
+                        )
+                        
+                        for veteran_item in veterans_sorted:
+                            veteran_info = self._stability[veteran_item]
+                            
+                            if accumulated_tokens < self._cache_target_tokens:
+                                # Below threshold: veteran anchors tier (no N++)
+                                try:
+                                    accumulated_tokens += get_tokens(veteran_item)
+                                except Exception:
+                                    pass
+                            else:
+                                # Threshold met: N++ and can potentially promote
+                                veteran_info.n_value += 1
+                                
+                                if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
+                                    if next_tier_is_promotable:
+                                        items_to_promote.append(veteran_item)
+                                    else:
+                                        veteran_info.n_value = promotion_threshold
+                    else:
+                        # Non-threshold mode: all veterans get N++ once
+                        for veteran_item in veterans_in_tier:
+                            veteran_info = self._stability[veteran_item]
+                            veteran_info.n_value += 1
+                            
+                            if promotion_threshold is not None and veteran_info.n_value >= promotion_threshold:
+                                if next_tier_is_promotable:
+                                    items_to_promote.append(veteran_item)
+                                else:
+                                    veteran_info.n_value = promotion_threshold
+                
+                # Promoted veterans become entries for the next tier
+                if items_to_promote and next_tier:
+                    entering_items_for_tier[next_tier].extend(items_to_promote)
+                    broken_tiers.add(current_tier)  # Items left this tier
+                    promotable_tiers.add(current_tier)
+                    any_promoted = True
     
     def _get_next_tier(self, tier: str) -> str | None:
         """Get the next tier in promotion order, or None if at L0."""
