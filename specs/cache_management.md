@@ -127,16 +127,16 @@ The algorithm for a single tier:
    - **While accumulated tokens < `cache_target_tokens`**: these items are **held back** to meet the minimum. Their N is **frozen** — no increment. They remain in the tier to ensure the cache block meets the provider's minimum (e.g., 1024 tokens for Anthropic).
    - **Once the minimum is met**: remaining items (higher-N veterans not needed to fill the budget) receive **N++**, but N is **capped at the tier's promotion threshold** while the tier above is stable.
 3. **After N++**, check each incremented item against the tier's promotion threshold:
-   - If the **tier above is invalidated** and the item's new N exceeds the promotion threshold → the item **promotes out**, but only if the tier would **retain at least `cache_target_tokens`** after the item leaves. If promoting would drain the tier below the minimum, the item's N is **capped at the promotion threshold** and it stays — first in line to promote when the tier gets more content.
+   - If the **tier above is invalidated** and the item's new N exceeds the promotion threshold → the item **promotes out**. The anchoring phase already reserved `cache_target_tokens` worth of low-N items, so promoting high-N items cannot drain the tier below the minimum.
    - If the **tier above is NOT invalidated** → N is **capped at the promotion threshold**. The item cannot leave, so its N does not accumulate past the maximum valid value for this tier. This prevents artificial N inflation when an item is stuck.
 4. **Outgoing items** become the incoming items for the next tier up in the cascade
 
 **Key properties:**
 
-- The **retention guard** is the primary throttle on promotion velocity — veterans can only promote out if the source tier retains enough tokens to meet the provider's cache minimum. This prevents a cascade of promotions from draining a tier below `cache_target_tokens`, which would waste the cache breakpoint on a block too small to be cached.
-- Items held back by the retention guard retain N at the promotion threshold, preserving their priority. As new content enters the tier on subsequent requests and fills the token budget, previously held-back veterans become eligible to promote.
-- Items held back to meet the minimum (low-N anchors) retain their current N with no increment, preserving their relative ordering. As new content enters the tier and fills the token budget, previously held-back veterans become eligible for N++ and eventual promotion.
+- The **anchoring phase** is the primary throttle on promotion velocity — the lowest-N items (including newly entered items) are reserved first to meet the provider's cache minimum. Only items past this anchor budget get N++ and can promote. This eliminates the need for a separate retention guard.
+- Items held back as anchors retain their current N with no increment, preserving their relative ordering. As new content enters the tier and fills the anchor budget, previously held-back veterans become eligible for N++ and eventual promotion.
 - The N cap when the tier above is stable prevents veterans from accumulating arbitrarily high N values while stuck — when the tier above finally breaks, they promote immediately rather than overshooting.
+- **Post-cascade consolidation**: After the cascade completes, any tier whose total tokens fell below `cache_target_tokens` has its items demoted one tier down (L3 → active). This prevents wasting a cache breakpoint on a block too small for the provider to cache. Demoted items keep their N values and re-promote naturally when enough content accumulates in their destination tier.
 
 ### The Guard: Only Promote Into Broken Tiers
 
