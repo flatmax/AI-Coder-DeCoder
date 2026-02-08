@@ -337,7 +337,7 @@ Add to `tests/test_history_graduation.py` or a new test file:
 3. Test L0 with and without history
 4. Test that cache breakpoint count ≤ 4
 
-### Phase 3: Reference Graph Clustering (Gaps 1, 7)
+### Phase 3: Reference Graph Clustering (Gaps 1, 7) — ✅ DONE
 
 **Files**: `ac/symbol_index/references.py`, `ac/context/stability_tracker.py`, `ac/llm/context_builder.py`, `tests/test_stability_tracker.py`
 
@@ -464,23 +464,39 @@ The `ReferenceIndex` is accessible via `si._reference_index` after `build_refere
 
 Don't remove the existing percentile/threshold-based method. It serves as a fallback when reference data isn't available (e.g., first indexing hasn't completed).
 
-#### 3f. Tests
+#### 3f. Tests — DONE
 
-New test class `TestStabilityTrackerClusterInit` in `test_stability_tracker.py`:
+**Implementation notes:**
 
-1. `test_clusters_stay_together`: Two files in a cluster → both land in same tier
-2. `test_balanced_distribution`: Three equal-size clusters → one per tier
-3. `test_large_cluster_fills_tier`: One large cluster exceeds target → fills one tier, rest distributed normally
-4. `test_isolated_files_distributed`: Singleton clusters distributed across tiers
-5. `test_l0_never_assigned`: Verify no cluster lands in L0
-6. `test_exclude_active_files`: Active files removed from clusters before assignment
-7. `test_insufficient_content_fewer_tiers`: When total tokens only fill 1-2 tiers
+- `get_bidirectional_edges()` added to `ReferenceIndex` — O(E) scan of `_file_deps`, canonical edge ordering via `sorted()`
+- `find_connected_components()` added as module-level function in `stability_tracker.py` — union-find with path compression
+- `initialize_from_clusters()` added to `StabilityTracker` — greedy bin-packing across L1/L2/L3, underfilled tier consolidation
+- `_initialize_stability_from_refs()` in `context_builder.py` updated to try graph clustering first (when `ref_index` available), with percentile-based fallback
+- Token estimation for symbol entries now uses `format_file_symbol_block()` for accuracy
+- `ref_index` variable explicitly initialized to `None` before conditional assignment in `_get_symbol_map_data`
 
-New tests in `tests/test_references.py` (or added to existing test file):
+**TestStabilityTrackerClusterInit (all ✅):**
+1. `test_clusters_stay_together` — cluster members land in same tier
+2. `test_balanced_distribution` — three equal clusters → one per tier
+3. `test_greedy_assigns_largest_first` — largest cluster assigned first
+4. `test_isolated_files_distributed` — singletons round-robin across tiers
+5. `test_l0_never_assigned` — L0 never in assignments
+6. `test_exclude_active_files` — excluded items absent from assignments
+7. `test_exclude_removes_from_cluster` — partial cluster exclusion works
+8. `test_n_values_set_correctly` — L1=9, L2=6, L3=3
+9. `test_skips_if_data_exists` — no-op when tracker has data
+10. `test_empty_clusters` — empty input → empty output
+11. `test_consolidate_underfilled_tiers` — underfilled tiers merge into fuller ones
+12. `test_single_cluster_all_content` — single cluster → L1
 
-1. `test_bidirectional_edges`: A→B and B→A produces edge (A,B). A→C alone produces no edge.
-2. `test_connected_components_basic`: Simple graph with 2 components
-3. `test_connected_components_isolated`: Files with no edges are singletons
+**TestConnectedComponents (all ✅):**
+1. `test_basic_two_components` — two separate pairs
+2. `test_single_component` — chain merges into one
+3. `test_isolated_nodes` — singletons from all_nodes
+4. `test_empty_edges` — empty and singleton-only cases
+5. `test_triangle` — triangle = one component
+6. `test_chain_merges` — bridging edge merges two pairs
+7. `test_many_isolated_with_one_pair` — 10 singletons + 1 pair
 
 ### Phase 4: Session-Scoped Persistence (Gap 6)
 
@@ -599,7 +615,7 @@ Phases are ordered to minimize risk: stability_tracker.py changes first (pure lo
 |-------|-------|------|------|--------|-------------|
 | 1st | 1 | 4, 5 | Low | Small | ✅ DONE — Broken tier guard + N cap in stability_tracker.py |
 | 2nd | 5 | 9 | Low | Small | ✅ DONE — Item removal from cached tiers |
-| 3rd | 3 | 1, 7 | Medium | Medium | Reference graph clustering for initialization |
+| 3rd | 3 | 1, 7 | Medium | Medium | ✅ DONE — Reference graph clustering for initialization |
 | 4th | 4 | 6 | Low | Small | Session-scoped persistence (depends on Phase 3) |
 | 5th | 2 | 2, 8 | Medium | Medium | Native history pairs in cached tiers |
 

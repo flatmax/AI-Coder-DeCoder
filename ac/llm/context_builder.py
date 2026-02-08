@@ -194,6 +194,7 @@ class ContextBuilderMixin:
             file_refs = {}
             file_imports = {}
             references = {}
+            ref_index = None
             if hasattr(si, '_reference_index') and si._reference_index:
                 ref_index = si._reference_index
                 for f in all_files:
@@ -206,7 +207,8 @@ class ContextBuilderMixin:
             if stability and not stability.is_initialized():
                 self._initialize_stability_from_refs(
                     stability, all_files, symbols_by_file, file_refs,
-                    active_context_files, file_paths
+                    active_context_files, file_paths,
+                    ref_index=ref_index if hasattr(si, '_reference_index') else None,
                 )
             
             # Compute path aliases for the legend
@@ -243,8 +245,14 @@ class ContextBuilderMixin:
         file_refs: dict,
         active_context_files: set[str],
         file_paths: list[str] = None,
+        ref_index=None,
     ) -> None:
-        """Initialize stability tracker from reference counts.
+        """Initialize stability tracker from reference graph clustering.
+        
+        Uses bidirectional reference edges to find mutually coupled file
+        clusters, then distributes clusters across L1/L2/L3 via greedy
+        bin-packing. Falls back to percentile-based initialization when
+        no reference index is available.
         
         Args:
             stability: StabilityTracker instance
@@ -253,11 +261,62 @@ class ContextBuilderMixin:
             file_refs: Dict of file -> referencing files
             active_context_files: Files to exclude from initialization
             file_paths: Current context file paths
+            ref_index: Optional ReferenceIndex for graph clustering
         """
+        from ..symbol_index.compact_format import format_file_symbol_block
+        
         tc = self._context_manager.token_counter if self._context_manager else None
         if not tc:
             return
         
+        # Build token estimator for symbol entries
+        def get_symbol_tokens(item):
+            """Get token count for a symbol entry."""
+            file_path = item.replace("symbol:", "") if item.startswith("symbol:") else item
+            symbols = symbols_by_file.get(file_path)
+            if not symbols:
+                return 0
+            try:
+                block = format_file_symbol_block(
+                    file_path=file_path,
+                    symbols=symbols,
+                    references=ref_index.get_references_to_file(file_path) if ref_index else {},
+                    file_refs={file_path: file_refs.get(file_path, set())},
+                    file_imports={},
+                )
+                return tc.count(block) if block else 0
+            except Exception:
+                return self._safe_count_tokens(str(symbols))
+        
+        # Try graph clustering if reference index is available
+        if ref_index is not None and hasattr(ref_index, 'get_bidirectional_edges'):
+            from ..context.stability_tracker import find_connected_components
+            
+            edges = ref_index.get_bidirectional_edges()
+            
+            # Build symbol-prefixed edges and node set
+            symbol_edges = set()
+            for a, b in edges:
+                symbol_edges.add((f"symbol:{a}", f"symbol:{b}"))
+            
+            all_symbol_nodes = {f"symbol:{f}" for f in symbols_by_file.keys()}
+            
+            clusters = find_connected_components(symbol_edges, all_nodes=all_symbol_nodes)
+            
+            # Exclude active context files
+            exclude = {f"symbol:{f}" for f in active_context_files} | active_context_files
+            
+            tier_assignments = stability.initialize_from_clusters(
+                clusters=clusters,
+                get_tokens=get_symbol_tokens,
+                target_tokens=stability.get_cache_target_tokens(),
+                exclude_active=exclude,
+            )
+            if tier_assignments:
+                print(f"📊 Initialized {len(tier_assignments)} items from reference graph clustering")
+            return
+        
+        # Fallback: percentile-based initialization from ref counts
         files_with_refs = []
         for f in all_files:
             ref_count = len(file_refs.get(f, set()))
@@ -265,11 +324,9 @@ class ContextBuilderMixin:
             tokens = tc.count(f"{f}\n```\n{content}\n```\n") if content else 0
             files_with_refs.append((f, ref_count, tokens))
         
-        # Also include symbol entries
         for f in symbols_by_file.keys():
             ref_count = len(file_refs.get(f, set()))
-            # Estimate tokens for symbol block
-            tokens = self._safe_count_tokens(str(symbols_by_file[f]))
+            tokens = get_symbol_tokens(f"symbol:{f}")
             files_with_refs.append((f"symbol:{f}", ref_count, tokens))
         
         tier_assignments = stability.initialize_from_refs(

@@ -24,6 +24,7 @@ With threshold-aware promotion:
 
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Literal, Optional
@@ -55,6 +56,57 @@ TIER_NAMES = {
 }
 TIER_ORDER = ['L0', 'L1', 'L2', 'L3', 'active']
 CACHE_TIERS = ['L0', 'L1', 'L2', 'L3']
+
+
+def find_connected_components(
+    edges: set[tuple[str, str]],
+    all_nodes: set[str] = None,
+) -> list[set[str]]:
+    """Find connected components using union-find.
+    
+    Args:
+        edges: Set of (node_a, node_b) undirected edges
+        all_nodes: Complete node set (to include isolated nodes as singletons).
+                   If None, only nodes appearing in edges are included.
+    
+    Returns:
+        List of sets, each a connected component. Isolated nodes
+        (not in any edge) are singleton sets.
+    """
+    parent = {}
+    
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # Path compression
+            x = parent[x]
+        return x
+    
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    
+    # Initialize all nodes
+    nodes = set()
+    if all_nodes:
+        nodes.update(all_nodes)
+    for a, b in edges:
+        nodes.add(a)
+        nodes.add(b)
+    
+    for node in nodes:
+        parent[node] = node
+    
+    # Union edges
+    for a, b in edges:
+        union(a, b)
+    
+    # Collect components
+    components = defaultdict(set)
+    for node in nodes:
+        components[find(node)].add(node)
+    
+    return list(components.values())
 
 
 @dataclass
@@ -681,6 +733,111 @@ class StabilityTracker:
                 tier_assignments[file_path] = tier
         
         self.save()
+        return tier_assignments
+    
+    def initialize_from_clusters(
+        self,
+        clusters: list[set[str]],
+        get_tokens: Callable[[str], int],
+        target_tokens: int = 0,
+        exclude_active: set[str] = None,
+    ) -> dict[str, str]:
+        """Initialize tiers by distributing clusters across L1/L2/L3.
+        
+        Uses greedy bin-packing: sort clusters by total tokens descending,
+        assign each to the tier (L1, L2, L3) with the fewest tokens so far.
+        Each cluster stays together in one tier.
+        
+        L0 is never assigned — must be earned through ripple promotion.
+        
+        If total content is insufficient to fill all three tiers above
+        target_tokens, fill fewer tiers (L1 first, then L2, then L3).
+        An empty tier is better than a tier below the provider minimum.
+        
+        Only runs if stability data is empty (fresh start).
+        
+        Args:
+            clusters: List of sets, each containing item keys (e.g., "symbol:file.py")
+            get_tokens: Function to get token count for an item
+            target_tokens: Minimum tokens per tier (0 = no minimum)
+            exclude_active: Items to exclude (e.g., files in active context)
+            
+        Returns:
+            Dict mapping item keys to their assigned tiers
+        """
+        if self._stability:
+            return {}
+        
+        if not clusters:
+            return {}
+        
+        exclude = exclude_active or set()
+        
+        # Filter excluded items from clusters and remove empty clusters
+        filtered_clusters = []
+        for cluster in clusters:
+            filtered = cluster - exclude
+            if filtered:
+                filtered_clusters.append(filtered)
+        
+        if not filtered_clusters:
+            return {}
+        
+        # Compute total tokens per cluster
+        cluster_tokens = []
+        for cluster in filtered_clusters:
+            total = sum(get_tokens(item) for item in cluster)
+            cluster_tokens.append((cluster, total))
+        
+        # Sort by total tokens descending (largest clusters first)
+        cluster_tokens.sort(key=lambda x: x[1], reverse=True)
+        
+        # Greedy bin-packing: assign each cluster to tier with fewest tokens
+        tiers = ['L1', 'L2', 'L3']
+        tier_n_values = {'L1': 9, 'L2': 6, 'L3': 3}
+        tier_totals = {t: 0 for t in tiers}
+        tier_items = {t: [] for t in tiers}
+        
+        for cluster, tokens in cluster_tokens:
+            # Pick tier with minimum tokens
+            best_tier = min(tiers, key=lambda t: tier_totals[t])
+            tier_totals[best_tier] += tokens
+            tier_items[best_tier].extend(cluster)
+        
+        # Consolidate underfilled tiers: merge tiers below target into fewer, fuller ones
+        if target_tokens > 0:
+            # Collect items from tiers that don't meet minimum, starting from L3
+            # Prefer fewer fuller tiers over many thin ones
+            for merge_from in reversed(tiers):  # L3, L2, L1
+                if tier_totals[merge_from] > 0 and tier_totals[merge_from] < target_tokens:
+                    # Find the best tier to merge into (smallest that isn't this one)
+                    candidates = [t for t in tiers if t != merge_from and tier_totals[t] > 0]
+                    if candidates:
+                        merge_into = min(candidates, key=lambda t: tier_totals[t])
+                        tier_totals[merge_into] += tier_totals[merge_from]
+                        tier_items[merge_into].extend(tier_items[merge_from])
+                        tier_totals[merge_from] = 0
+                        tier_items[merge_from] = []
+                    elif tier_totals[merge_from] > 0:
+                        # No other tier has content — this is the only tier, keep it
+                        pass
+        
+        # Assign items to stability tracker
+        tier_assignments = {}
+        for tier in tiers:
+            n_value = tier_n_values[tier]
+            for item in tier_items[tier]:
+                content_hash = f"cluster:{item}"
+                self._stability[item] = StabilityInfo(
+                    content_hash=content_hash,
+                    n_value=n_value,
+                    tier=tier,
+                )
+                tier_assignments[item] = tier
+        
+        if tier_assignments:
+            self.save()
+        
         return tier_assignments
     
     def is_initialized(self) -> bool:
