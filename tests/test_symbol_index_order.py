@@ -33,51 +33,30 @@ def symbol_index(temp_repo):
 
 
 class TestOrderPersistence:
-    """Test that file order is persisted and loaded correctly."""
+    """Test that file order is stored and retrieved correctly (in-memory)."""
     
-    def test_save_order_creates_file(self, symbol_index, temp_repo):
+    def test_set_order_stores_order(self, symbol_index):
         order = ["a_first.py", "b_second.py"]
-        symbol_index._save_order(order)
+        symbol_index._set_order(order)
         
-        order_path = temp_repo / ".aicoder" / "symbol_map_order.json"
-        assert order_path.exists()
-        
-        with open(order_path) as f:
-            data = json.load(f)
-        assert data["order"] == order
+        assert symbol_index._get_order() == order
     
-    def test_load_order_returns_saved_order(self, symbol_index, temp_repo):
+    def test_get_order_returns_set_order(self, symbol_index):
         order = ["c_third.py", "a_first.py"]
-        symbol_index._save_order(order)
+        symbol_index._set_order(order)
         
-        # Clear cached order to force reload
-        symbol_index._file_order = None
-        
-        loaded = symbol_index._load_order()
+        loaded = symbol_index._get_order()
         assert loaded == order
     
-    def test_load_order_returns_empty_if_no_file(self, symbol_index):
-        loaded = symbol_index._load_order()
+    def test_get_order_returns_empty_initially(self, symbol_index):
+        loaded = symbol_index._get_order()
         assert loaded == []
     
-    def test_load_order_handles_corrupted_json(self, symbol_index, temp_repo):
-        order_path = temp_repo / ".aicoder" / "symbol_map_order.json"
-        order_path.write_text("not valid json {{{")
+    def test_set_order_replaces_previous(self, symbol_index):
+        symbol_index._set_order(["a_first.py"])
+        symbol_index._set_order(["b_second.py", "c_third.py"])
         
-        loaded = symbol_index._load_order()
-        assert loaded == []
-    
-    def test_load_order_caches_result(self, symbol_index, temp_repo):
-        order = ["a_first.py"]
-        symbol_index._save_order(order)
-        symbol_index._file_order = None
-        
-        # Load twice
-        first_load = symbol_index._load_order()
-        second_load = symbol_index._load_order()
-        
-        # Should be same object (cached)
-        assert first_load is second_load
+        assert symbol_index._get_order() == ["b_second.py", "c_third.py"]
 
 
 class TestGetOrderedFiles:
@@ -92,21 +71,19 @@ class TestGetOrderedFiles:
     
     def test_preserves_existing_order(self, symbol_index):
         """Existing order is preserved for files still available."""
-        # Establish an order
-        symbol_index._save_order(["c_third.py", "a_first.py", "b_second.py"])
-        symbol_index._file_order = None
+        # Establish an order via _set_order
+        symbol_index._set_order(["c_third.py", "a_first.py", "b_second.py"])
         
         available = ["a_first.py", "b_second.py", "c_third.py"]
         result = symbol_index.get_ordered_files(available)
         
-        # Should maintain the saved order
+        # Should maintain the existing order
         assert result == ["c_third.py", "a_first.py", "b_second.py"]
     
     def test_new_files_appended_at_bottom(self, symbol_index):
         """New files are appended at the bottom, sorted among themselves."""
         # Establish an order with only some files
-        symbol_index._save_order(["b_second.py"])
-        symbol_index._file_order = None
+        symbol_index._set_order(["b_second.py"])
         
         available = ["a_first.py", "b_second.py", "c_third.py"]
         result = symbol_index.get_ordered_files(available)
@@ -116,8 +93,7 @@ class TestGetOrderedFiles:
     
     def test_unavailable_files_filtered_out(self, symbol_index):
         """Files in saved order but not available are filtered out."""
-        symbol_index._save_order(["a_first.py", "deleted.py", "b_second.py"])
-        symbol_index._file_order = None
+        symbol_index._set_order(["a_first.py", "deleted.py", "b_second.py"])
         
         available = ["a_first.py", "b_second.py"]
         result = symbol_index.get_ordered_files(available)
@@ -125,17 +101,13 @@ class TestGetOrderedFiles:
         assert result == ["a_first.py", "b_second.py"]
         assert "deleted.py" not in result
     
-    def test_saves_updated_order(self, symbol_index, temp_repo):
-        """get_ordered_files saves the updated order."""
+    def test_updates_in_memory_order(self, symbol_index):
+        """get_ordered_files updates the in-memory order."""
         available = ["c_third.py", "a_first.py"]
         symbol_index.get_ordered_files(available)
         
-        # Check the saved file
-        order_path = temp_repo / ".aicoder" / "symbol_map_order.json"
-        with open(order_path) as f:
-            data = json.load(f)
-        
-        assert data["order"] == ["a_first.py", "c_third.py"]
+        # Check the in-memory order was updated
+        assert symbol_index._get_order() == ["a_first.py", "c_third.py"]
 
 
 class TestCompactFormatFileOrder:
@@ -357,9 +329,8 @@ class TestSymbolIndexToCompactOrdering:
         # Index the files
         files = ["a_first.py", "b_second.py", "c_third.py"]
         
-        # Establish a non-alphabetical order
-        symbol_index._save_order(["c_third.py", "b_second.py", "a_first.py"])
-        symbol_index._file_order = None
+        # Establish a non-alphabetical order via _set_order
+        symbol_index._set_order(["c_third.py", "b_second.py", "a_first.py"])
         
         result = symbol_index.to_compact(files)
         
@@ -1269,9 +1240,8 @@ class TestSymbolIndexToCompactChunked:
         """to_compact_chunked should respect saved file order."""
         files = ["a_first.py", "b_second.py", "c_third.py"]
         
-        # Establish a non-alphabetical order
-        symbol_index._save_order(["c_third.py", "b_second.py", "a_first.py"])
-        symbol_index._file_order = None
+        # Establish a non-alphabetical order via _set_order
+        symbol_index._set_order(["c_third.py", "b_second.py", "a_first.py"])
         
         chunks = symbol_index.to_compact_chunked(files, min_chunk_tokens=0)
         

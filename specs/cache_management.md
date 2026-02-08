@@ -65,9 +65,9 @@ The difference between history and files/symbols exists **only in the active tie
 
 However, the active set changes **every exchange** (new user/assistant messages are added), so graduating history on every request would break the cache every time. To avoid this churn, history graduation from active to L3 is **controlled**:
 
-1. **Piggybacking on an existing ripple**: If files or symbols are already changing the active set (file selection changed, file/symbol graduation happening), all eligible active history graduates for free — the cache blocks are already being invalidated by the file/symbol changes.
+1. **Piggybacking on L3 invalidation**: If L3 will be invalidated this cycle anyway — because files/symbols are graduating into L3, or items are being demoted from L3, or stale items were removed from L3 — all eligible active history graduates for free. The L3 cache block is already being rebuilt, so adding history has zero additional cache cost.
 
-2. **Token threshold met**: If total eligible history tokens exceed `cache_target_tokens`, the oldest eligible messages graduate even without a ripple. This ensures the resulting cache block meets provider minimums (e.g., 1024 tokens for Anthropic).
+2. **Token threshold met**: If total eligible history tokens exceed `cache_target_tokens`, the oldest eligible messages graduate even without an L3 invalidation. This ensures the resulting cache block meets provider minimums (e.g., 1024 tokens for Anthropic).
 
 3. **Never** (if `cache_target_tokens = 0`): With the default configuration, history stays in active permanently. Set `cacheMinTokens` and `cacheBufferMultiplier` in `litellm.json` to enable.
 
@@ -151,26 +151,25 @@ The result: in steady state, all tiers are cached. Only an actual content change
 
 **Empty active set**: If no files are selected, the active set is empty and nothing graduates into L3. However, the cascade still operates on cached tiers — if a tier is invalidated (e.g., a file was unchecked, removing its entry from a cached tier), veterans in lower tiers can still promote upward through the normal cascade rules, provided each tier meets its minimum token requirement.
 
-### Ripple Detection and Cascade Trigger
+### L3 Invalidation Detection for History Graduation
 
-A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
+History graduation from active to L3 piggybacks on L3 invalidation — when L3 is being rebuilt anyway, adding history has zero additional cache cost. L3 invalidation is detected from three sources:
 
-1. **File selection ripple**: The user changed which files are in active context (added, removed, or swapped files):
-   ```
-   has_file_symbol_ripple = (last_active_items != current_active_items)
-   ```
-   This is a symmetric check — both additions and removals trigger it.
+1. **File/symbol graduation**: Files or symbols with N ≥ 3 are graduating from active into L3. Their entry changes L3's content, causing a cache miss.
 
-2. **Graduation ripple**: Files or symbols with N ≥ 3 graduated out of active on this request, shrinking the active set:
-   ```
-   has_graduation_ripple = (active_file_symbols != file_symbol_items)
-   ```
-   This fires when the controlled graduation logic excludes eligible items from the active list.
+2. **L3 demotion**: An item currently in L3 has been modified (content hash mismatch or in the `files_modified` list). It will be demoted to active, changing L3's content.
 
-Either source of ripple allows history to piggyback. The combined check is:
+3. **Stale removal from L3**: A deleted file's entry was removed from L3 during stale item cleanup.
+
+```python
+l3_will_invalidate = (
+    bool(graduating_file_symbols) or l3_demotions or l3_stale
+)
 ```
-has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
-```
+
+If any of these conditions are true, all eligible active history graduates for free. If none are true, standalone graduation requires `eligible_tokens >= cache_target_tokens`.
+
+Note: L3 invalidation detection governs **history graduation** — whether active history piggybacks into L3. The tier-to-tier veteran cascade is driven by **tier invalidation** during `update_after_response` and runs regardless of the history graduation decision.
 
 ### How the Cascade Executes
 
@@ -435,9 +434,9 @@ Each request processes stability updates in this sequence:
 
 5. **Graduate eligible files/symbols**: Files and symbols with N ≥ 3 are removed from active and placed into L3.
 
-6. **Detect ripple**: Compare current active file/symbol set against last request's set. If different, a ripple exists.
+6. **Detect L3 invalidation**: Check whether L3 will be invalidated this cycle — from file/symbol graduation into L3, demotion of an L3 item, or stale removal from L3.
 
-7. **Graduate eligible history**: If a ripple exists or the token threshold is met, eligible active history messages graduate to L3.
+7. **Graduate eligible history**: If L3 will be invalidated (free piggyback) or the token threshold is met, eligible active history messages graduate to L3.
 
 8. **Run cascade bottom-up**: Starting from active, evaluate each tier using the per-tier promotion algorithm (see "Threshold-Aware Promotion"). The algorithm merges incoming items with veterans, applies N++ to eligible items (those past the token minimum), and promotes items whose N exceeds the promotion threshold into the tier above (if invalidated). N increments happen **inside** this algorithm — there is no separate global N++ step.
 

@@ -486,6 +486,7 @@ class TestStabilityTrackerBrokenTierGuard:
         # veteran(200 tokens) is below threshold (100+200=300 < 1000) → anchors.
         # Even if veteran could get N++, L2 is not broken → would be capped.
         # With larger tokens to exceed threshold, veteran gets N++ but L2 blocks.
+        # blocker.py needs >= 1000 tokens to survive consolidation in L2.
         tracker._stability = {
             "veteran.py": StabilityInfo(content_hash="v", n_value=5, tier='L3'),
             "blocker.py": StabilityInfo(content_hash="b", n_value=7, tier='L2'),
@@ -496,7 +497,7 @@ class TestStabilityTrackerBrokenTierGuard:
         
         content = {"veteran.py": "v", "blocker.py": "b", "trigger.py": "t",
                     "anchor.py": "x", "other": "o"}
-        token_counts = {"veteran.py": 200, "blocker.py": 500, "trigger.py": 800,
+        token_counts = {"veteran.py": 200, "blocker.py": 1100, "trigger.py": 800,
                         "anchor.py": 300, "other": 100}
         
         tracker.update_after_response(
@@ -511,6 +512,7 @@ class TestStabilityTrackerBrokenTierGuard:
         # veteran: 1100 >= 1000 → N++→6, but L2 not broken → capped at 6
         assert tracker.get_tier("veteran.py") == 'L3'
         assert tracker.get_n_value("veteran.py") == 6  # Capped at promotion threshold
+        # blocker.py stays in L2 (1100 tokens >= 1000 target, survives consolidation)
         assert tracker.get_tier("blocker.py") == 'L2'
 
 
@@ -977,6 +979,7 @@ class TestStabilityTrackerThresholdAware:
         # veteran C in L3 with N=5 (third - same N as B, but will be past threshold)
         # entering item E (200 tokens)
         # Target: 1000 tokens
+        # C needs enough tokens to fill L2 after promotion (survives consolidation).
         
         tracker._stability = {
             "A": StabilityInfo(content_hash="a", n_value=4, tier='L3'),
@@ -987,7 +990,7 @@ class TestStabilityTrackerThresholdAware:
         tracker._last_active_items = {"E"}
         
         content = {"A": "a", "B": "b", "C": "c", "E": "e", "other": "o"}
-        token_counts = {"A": 400, "B": 500, "C": 300, "E": 200, "other": 100}
+        token_counts = {"A": 400, "B": 500, "C": 1100, "E": 200, "other": 100}
         
         # E leaves Active, enters L3
         tracker.update_after_response(
@@ -1005,6 +1008,7 @@ class TestStabilityTrackerThresholdAware:
         # A(N=4): 200 < 1000 → A anchors, accumulated=200+400=600
         # B(N=5): 600 < 1000 → B anchors, accumulated=600+500=1100
         # C(N=5): 1100 >= 1000 → threshold met! C gets N++ → N=6, promotes to L2
+        # C has 1100 tokens >= 1000 target, L2 survives consolidation
         
         assert tracker.get_n_value("A") == 4  # Anchored, no N++
         assert tracker.get_n_value("B") == 5  # Anchored, no N++
@@ -1018,6 +1022,7 @@ class TestStabilityTrackerThresholdAware:
         # Set up items close to promotion in multiple tiers.
         # L2 and L1 must be broken for the cascade to propagate.
         # Use empty L2 and L1 (empty = always broken).
+        # Use large token values so promoted item fills destination tier.
         tracker._stability = {
             "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
             "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),  # Will anchor
@@ -1029,8 +1034,8 @@ class TestStabilityTrackerThresholdAware:
         content["other"] = "other"
         token_counts = {
             "trigger": 200,
-            "l3_anchor": 900,   # This alone will meet threshold
-            "l3_promote": 100,  # Past threshold, will get N++ and promote
+            "l3_anchor": 900,    # This alone will meet threshold
+            "l3_promote": 1100,  # Past threshold, large enough to fill L2 after promotion
             "other": 100,
         }
         
@@ -1045,6 +1050,7 @@ class TestStabilityTrackerThresholdAware:
         
         # L3: l3_anchor(N=4) anchors, l3_promote(N=5) gets N++→6
         # L2 is empty (broken) → l3_promote promotes to L2
+        # l3_promote has 1100 tokens >= 1000 target, so L2 survives consolidation
         assert tracker.get_n_value("l3_anchor") == 4  # Anchored
         assert tracker.get_tier("l3_promote") == 'L2'  # Promoted!
         assert tracker.get_n_value("l3_promote") == 6
@@ -1053,7 +1059,9 @@ class TestStabilityTrackerThresholdAware:
         """Threshold-aware cascade through non-empty broken tiers."""
         tracker = stability_tracker_with_threshold
         
-        # L2 broken from demotion, L1 will break from L2 promotion
+        # L2 broken from demotion, L1 will break from L2 promotion.
+        # Use large token values so promoted items fill destination tiers
+        # and survive post-cascade consolidation.
         tracker._stability = {
             "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
             "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),
@@ -1070,9 +1078,9 @@ class TestStabilityTrackerThresholdAware:
         token_counts = {
             "trigger": 200,
             "l3_anchor": 900,
-            "l3_promote": 100,
+            "l3_promote": 1100,   # Large enough to fill L2 after promotion
             "l2_anchor": 900,
-            "l2_promote": 100,
+            "l2_promote": 1100,   # Large enough to fill L1 after promotion
             "l2_demoted": 500,
             "other": 100,
         }
@@ -1088,13 +1096,16 @@ class TestStabilityTrackerThresholdAware:
         assert tracker.get_tier("trigger") == 'L3'
         
         # L3: l3_anchor anchors, l3_promote promotes to L2 (broken from demotion)
+        # l3_promote has 1100 tokens >= 1000 target, L2 survives consolidation
         assert tracker.get_n_value("l3_anchor") == 4
         assert tracker.get_tier("l3_promote") == 'L2'
         assert tracker.get_n_value("l3_promote") == 6
         
-        # L2: l2_anchor anchors, l2_promote gets N++→9
-        # L1 is empty (broken) → l2_promote promotes to L1
-        assert tracker.get_n_value("l2_anchor") == 7
+        # L2: l3_promote(entering, 1100) anchors (acc=1100 >= 1000 after adding)
+        # l2_anchor(veteran, 900): acc=1100 >= 1000 → N++→8 (below threshold 9, stays)
+        # l2_promote(veteran, 1100): acc=1100 >= 1000 → N++→9, L1 empty → promotes to L1
+        # l2_promote has 1100 tokens >= 1000 target, L1 survives consolidation
+        assert tracker.get_n_value("l2_anchor") == 8
         assert tracker.get_tier("l2_promote") == 'L1'
         assert tracker.get_n_value("l2_promote") == 9
     
@@ -1117,7 +1128,7 @@ class TestStabilityTrackerThresholdAware:
         tracker.update_after_response(
             items=["other"],
             get_content=lambda x: content[x],
-            # get_tokens not provided
+            # get_tokens not provided — no consolidation runs either
         )
         
         # All veterans should get N++ (original behavior)
@@ -1125,6 +1136,43 @@ class TestStabilityTrackerThresholdAware:
         assert tracker.get_n_value("B") == 5  # N++ applied
         # A promotes to L2 (N=6 >= promotion threshold of 6)
         assert tracker.get_tier("A") == 'L2'
+    
+    def test_post_cascade_consolidation_demotes_underfilled(self, stability_tracker_with_threshold):
+        """Post-cascade consolidation demotes items from tiers below cache_target_tokens."""
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        # Set up: small item promotes to L2 but is too small to justify a cache block.
+        tracker._stability = {
+            "trigger": StabilityInfo(content_hash="t", n_value=0, tier='active'),
+            "l3_anchor": StabilityInfo(content_hash="l3a", n_value=4, tier='L3'),
+            "l3_small": StabilityInfo(content_hash="l3s", n_value=5, tier='L3'),
+        }
+        tracker._last_active_items = {"trigger"}
+        
+        content = {k: k for k in tracker._stability}
+        content["other"] = "other"
+        token_counts = {
+            "trigger": 200,
+            "l3_anchor": 900,
+            "l3_small": 100,   # Promotes to L2, but only 100 tokens — below 1000 threshold
+            "other": 100,
+        }
+        
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # l3_small promoted to L2 during cascade (N++→6, L2 empty=broken)
+        # But L2 now has only 100 tokens < 1000 target
+        # Post-cascade consolidation demotes it back to L3
+        assert tracker.get_tier("l3_small") == 'L3'
+        assert tracker.get_n_value("l3_small") == 6  # Keeps its N value
+        
+        # L3 still has enough content: trigger(200) + l3_anchor(900) + l3_small(100) = 1200
+        assert tracker.get_tier("trigger") == 'L3'
+        assert tracker.get_tier("l3_anchor") == 'L3'
 
 
 class TestStabilityTrackerThresholdAwareInit:
@@ -1481,12 +1529,13 @@ class TestStabilityTrackerHistoryGraduation:
         
         content = {"history:0": "user:hello", "history:1": "assistant:hi", "other": "x"}
         
-        # Build up N to 3
+        # Build up N to 3. Use tokens large enough so L3 meets cache_target (1000).
+        # history:0 alone enters L3 needing >= 1000 tokens to survive consolidation.
         for _ in range(4):
             tracker.update_after_response(
                 items=["history:0", "history:1"],
                 get_content=lambda x: content[x],
-                get_tokens=lambda x: 100,
+                get_tokens=lambda x: 1100,
             )
         
         assert tracker.get_n_value("history:0") == 3
@@ -1496,10 +1545,10 @@ class TestStabilityTrackerHistoryGraduation:
         tracker.update_after_response(
             items=["history:1", "other"],
             get_content=lambda x: content[x],
-            get_tokens=lambda x: 100,
+            get_tokens=lambda x: 1100,
         )
         
-        # history:0 left active, should enter L3
+        # history:0 left active, should enter L3 (1100 tokens >= 1000 target)
         assert tracker.get_tier("history:0") == 'L3'
         assert tracker.get_n_value("history:0") == 3
     
@@ -1515,10 +1564,11 @@ class TestStabilityTrackerHistoryGraduation:
         }
         
         # Round 1: file and history in active
+        # Use large enough token values so L3 meets cache_target_tokens (1000)
         tracker.update_after_response(
             items=["file.py", "history:0", "history:1"],
             get_content=lambda x: content[x],
-            get_tokens=lambda x: 200,
+            get_tokens=lambda x: 400,
         )
         
         # Rounds 2-4: same items, building N
@@ -1526,25 +1576,186 @@ class TestStabilityTrackerHistoryGraduation:
             tracker.update_after_response(
                 items=["file.py", "history:0", "history:1"],
                 get_content=lambda x: content[x],
-                get_tokens=lambda x: 200,
+                get_tokens=lambda x: 400,
             )
         
         # N should be 3 for all items
         assert tracker.get_n_value("history:0") == 3
         assert tracker.get_n_value("file.py") == 3
         
-        # Round 5: file.py leaves active (simulating piggybacking -
-        # caller would also exclude eligible history from items)
+        # Round 5: file.py leaves active — it enters L3, invalidating L3.
+        # Caller (streaming.py) detects this L3 invalidation and also
+        # excludes eligible history from items to piggyback on the invalidation.
         tracker.update_after_response(
             items=["other"],  # Both file and history excluded
             get_content=lambda x: content[x],
-            get_tokens=lambda x: 200,
+            get_tokens=lambda x: 400,
         )
         
-        # Both file and history should be in L3
+        # All three enter L3: 400*3 = 1200 tokens >= 1000 target, survives consolidation
         assert tracker.get_tier("file.py") == 'L3'
         assert tracker.get_tier("history:0") == 'L3'
         assert tracker.get_tier("history:1") == 'L3'
+
+
+class TestStabilityTrackerHistoryL3Invalidation:
+    """Tests for history graduation triggered by L3 invalidation.
+    
+    History is immutable and can graduate from active to L3 any time
+    L3 is being invalidated — from demotion, stale removal, or entry.
+    These tests verify the tracker-level behavior; the graduation decision
+    itself is made by streaming.py's _update_cache_stability.
+    """
+    
+    def test_history_piggybacks_on_l3_entry(self, stability_tracker_with_threshold):
+        """History graduates when a file/symbol enters L3 (invalidating it)."""
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        content = {
+            "file.py": "content",
+            "history:0": "user:hello",
+            "history:1": "assistant:hi",
+            "other": "x",
+        }
+        token_counts = {
+            "file.py": 400,
+            "history:0": 400,
+            "history:1": 400,
+            "other": 100,
+        }
+        
+        # Build stability: file.py and history in active
+        for _ in range(4):
+            tracker.update_after_response(
+                items=["file.py", "history:0", "history:1"],
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: token_counts.get(x, 0),
+            )
+        
+        assert tracker.get_n_value("file.py") == 3
+        
+        # file.py graduates (excluded from items) → enters L3, invalidating it.
+        # Caller also excludes history to piggyback on the L3 invalidation.
+        tracker.update_after_response(
+            items=["other"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        assert tracker.get_tier("file.py") == 'L3'
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
+    
+    def test_history_piggybacks_on_l3_demotion(self, stability_tracker_with_threshold):
+        """History graduates when an L3 item is demoted (invalidating L3).
+        
+        This is the key case: even without file/symbol graduation,
+        if an L3 item is modified and demoted, L3 is invalidated and
+        history can piggyback for free.
+        """
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        # Set up: l3_item in L3, history in active
+        # History tokens must be large enough so L3 meets cache_target (1000)
+        # after consolidation, otherwise they get demoted back to active.
+        tracker._stability = {
+            "l3_item.py": StabilityInfo(
+                content_hash=tracker.compute_hash("original"),
+                n_value=4, tier='L3'
+            ),
+            "history:0": StabilityInfo(
+                content_hash=tracker.compute_hash("user:hello"),
+                n_value=2, tier='active'
+            ),
+            "history:1": StabilityInfo(
+                content_hash=tracker.compute_hash("assistant:hi"),
+                n_value=2, tier='active'
+            ),
+        }
+        tracker._last_active_items = {"l3_item.py", "history:0", "history:1"}
+        
+        content = {
+            "l3_item.py": "MODIFIED",  # Changed content → demotion from L3
+            "history:0": "user:hello",
+            "history:1": "assistant:hi",
+        }
+        token_counts = {"l3_item.py": 500, "history:0": 600, "history:1": 600}
+        
+        # l3_item is modified → demoted from L3 → L3 invalidated.
+        # Caller detects L3 invalidation and excludes history from items.
+        # History enters L3 piggybacking on the invalidation.
+        # L3 total after: history:0(600) + history:1(600) = 1200 >= 1000 target
+        tracker.update_after_response(
+            items=["l3_item.py"],  # Only l3_item in active, history excluded
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+            modified=["l3_item.py"],
+        )
+        
+        # l3_item demoted to active
+        assert tracker.get_tier("l3_item.py") == 'active'
+        assert tracker.get_n_value("l3_item.py") == 0
+        
+        # History entered L3 via piggybacking (1200 tokens >= 1000 target, survives consolidation)
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
+    
+    def test_history_piggybacks_on_stale_removal_from_l3(self, stability_tracker_with_threshold):
+        """History graduates when stale items are removed from L3."""
+        tracker = stability_tracker_with_threshold
+        
+        tracker._stability = {
+            "history:0": StabilityInfo(
+                content_hash=tracker.compute_hash("user:hello"),
+                n_value=2, tier='active'
+            ),
+            "history:1": StabilityInfo(
+                content_hash=tracker.compute_hash("assistant:hi"),
+                n_value=2, tier='active'
+            ),
+        }
+        tracker._last_active_items = {"history:0", "history:1"}
+        
+        content = {"history:0": "user:hello", "history:1": "assistant:hi"}
+        token_counts = {"history:0": 600, "history:1": 600}
+        
+        # L3 pre-broken from stale removal. History excluded from items.
+        tracker.update_after_response(
+            items=[],  # History excluded to piggyback
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: token_counts.get(x, 0),
+            broken_tiers={"L3"},
+        )
+        
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
+    
+    def test_history_stays_active_when_l3_stable(self, stability_tracker_with_threshold):
+        """History stays in active when L3 is not invalidated and tokens below threshold."""
+        tracker = stability_tracker_with_threshold  # cache_target_tokens=1000
+        
+        tracker._stability = {
+            "l3_item.py": StabilityInfo(
+                content_hash="stable", n_value=4, tier='L3'
+            ),
+            "history:0": StabilityInfo(
+                content_hash=tracker.compute_hash("user:hello"),
+                n_value=2, tier='active'
+            ),
+        }
+        tracker._last_active_items = {"history:0"}
+        
+        content = {"l3_item.py": "stable", "history:0": "user:hello"}
+        
+        # L3 is stable (l3_item unchanged), history tokens (100) < cache_target (1000)
+        # History should stay active
+        tracker.update_after_response(
+            items=["history:0"],
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: 100,
+        )
+        
+        assert tracker.get_tier("history:0") == 'active'
 
 
 class TestStabilityTrackerStaleItemRemoval:
