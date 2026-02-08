@@ -4,7 +4,10 @@ import json
 import pytest
 from pathlib import Path
 
-from ac.context.stability_tracker import StabilityTracker, StabilityInfo, TIER_CONFIG, TIER_THRESHOLDS, TIER_NAMES, TIER_ORDER, CACHE_TIERS
+from ac.context.stability_tracker import (
+    StabilityTracker, StabilityInfo, TIER_CONFIG, TIER_THRESHOLDS,
+    TIER_NAMES, TIER_ORDER, CACHE_TIERS, find_connected_components,
+)
 
 
 # Note: stability_tracker, stability_path, make_stability_info, and 
@@ -1741,6 +1744,306 @@ class TestStabilityTrackerStaleItemRemoval:
         
         assert stability_tracker.get_tier("file.py") == 'active'
         assert stability_tracker.get_n_value("file.py") == 0
+
+
+class TestStabilityTrackerClusterInit:
+    """Tests for reference graph clustering initialization."""
+    
+    def test_clusters_stay_together(self, stability_tracker):
+        """Files in the same cluster land in the same tier."""
+        clusters = [
+            {"symbol:a.py", "symbol:b.py"},  # Cluster 1
+            {"symbol:c.py", "symbol:d.py"},  # Cluster 2
+        ]
+        token_counts = {
+            "symbol:a.py": 300, "symbol:b.py": 200,
+            "symbol:c.py": 300, "symbol:d.py": 200,
+        }
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # a.py and b.py should be in the same tier
+        assert assignments["symbol:a.py"] == assignments["symbol:b.py"]
+        # c.py and d.py should be in the same tier
+        assert assignments["symbol:c.py"] == assignments["symbol:d.py"]
+    
+    def test_balanced_distribution(self, stability_tracker):
+        """Three equal-size clusters distribute one per tier."""
+        clusters = [
+            {"symbol:a.py"},
+            {"symbol:b.py"},
+            {"symbol:c.py"},
+        ]
+        token_counts = {
+            "symbol:a.py": 500,
+            "symbol:b.py": 500,
+            "symbol:c.py": 500,
+        }
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # Each cluster should be in a different tier
+        tiers = {assignments[f"symbol:{f}.py"] for f in "abc"}
+        assert len(tiers) == 3
+        assert tiers == {'L1', 'L2', 'L3'}
+    
+    def test_greedy_assigns_largest_first(self, stability_tracker):
+        """Greedy bin-packing assigns largest cluster first, then balances."""
+        clusters = [
+            {"symbol:big1.py", "symbol:big2.py"},  # Large cluster
+            {"symbol:med.py"},                       # Medium
+            {"symbol:small.py"},                     # Small
+        ]
+        token_counts = {
+            "symbol:big1.py": 400, "symbol:big2.py": 400,
+            "symbol:med.py": 300,
+            "symbol:small.py": 100,
+        }
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # All items assigned
+        assert len(assignments) == 4
+        # Big cluster stays together
+        assert assignments["symbol:big1.py"] == assignments["symbol:big2.py"]
+    
+    def test_isolated_files_distributed(self, stability_tracker):
+        """Singleton clusters (isolated files) are distributed across tiers."""
+        clusters = [
+            {"symbol:a.py"},
+            {"symbol:b.py"},
+            {"symbol:c.py"},
+            {"symbol:d.py"},
+            {"symbol:e.py"},
+            {"symbol:f.py"},
+        ]
+        token_counts = {f"symbol:{c}.py": 200 for c in "abcdef"}
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # All assigned
+        assert len(assignments) == 6
+        # Should be distributed across all three tiers (2 each)
+        tier_counts = {}
+        for tier in assignments.values():
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        assert set(tier_counts.keys()) == {'L1', 'L2', 'L3'}
+        assert tier_counts['L1'] == 2
+        assert tier_counts['L2'] == 2
+        assert tier_counts['L3'] == 2
+    
+    def test_l0_never_assigned(self, stability_tracker):
+        """L0 is never assigned by clustering."""
+        clusters = [{"symbol:a.py"}, {"symbol:b.py"}, {"symbol:c.py"}]
+        token_counts = {f"symbol:{c}.py": 1000 for c in "abc"}
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        assert 'L0' not in assignments.values()
+    
+    def test_exclude_active_files(self, stability_tracker):
+        """Active files are excluded from cluster assignment."""
+        clusters = [
+            {"symbol:a.py", "symbol:b.py"},
+            {"symbol:c.py"},
+        ]
+        token_counts = {
+            "symbol:a.py": 300, "symbol:b.py": 200,
+            "symbol:c.py": 300,
+        }
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+            exclude_active={"symbol:a.py"},
+        )
+        
+        assert "symbol:a.py" not in assignments
+        assert "symbol:b.py" in assignments
+        assert "symbol:c.py" in assignments
+    
+    def test_exclude_removes_from_cluster(self, stability_tracker):
+        """Excluding one member of a cluster doesn't break the rest."""
+        clusters = [
+            {"symbol:a.py", "symbol:b.py", "symbol:c.py"},
+        ]
+        token_counts = {
+            "symbol:a.py": 300, "symbol:b.py": 200, "symbol:c.py": 100,
+        }
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+            exclude_active={"symbol:a.py"},
+        )
+        
+        # b and c still assigned together
+        assert "symbol:b.py" in assignments
+        assert "symbol:c.py" in assignments
+        assert assignments["symbol:b.py"] == assignments["symbol:c.py"]
+    
+    def test_n_values_set_correctly(self, stability_tracker):
+        """Items get correct N values for their assigned tier."""
+        clusters = [{"symbol:a.py"}, {"symbol:b.py"}, {"symbol:c.py"}]
+        token_counts = {f"symbol:{c}.py": 500 for c in "abc"}
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        for item, tier in assignments.items():
+            n = stability_tracker.get_n_value(item)
+            if tier == 'L1':
+                assert n == 9
+            elif tier == 'L2':
+                assert n == 6
+            elif tier == 'L3':
+                assert n == 3
+    
+    def test_skips_if_data_exists(self, stability_tracker, make_stability_info):
+        """Clustering skipped if tracker already has data."""
+        stability_tracker._stability["existing.py"] = make_stability_info(
+            content_hash="abc", n_value=5, tier='L3'
+        )
+        
+        clusters = [{"symbol:a.py"}]
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: 100,
+        )
+        
+        assert assignments == {}
+    
+    def test_empty_clusters(self, stability_tracker):
+        """Empty cluster list returns empty assignments."""
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=[],
+            get_tokens=lambda x: 0,
+        )
+        assert assignments == {}
+    
+    def test_consolidate_underfilled_tiers(self, stability_tracker_with_threshold):
+        """Tiers below target_tokens are merged into fuller tiers."""
+        tracker = stability_tracker_with_threshold  # target=1000
+        
+        # Two clusters: one large (1200 tokens), one tiny (100 tokens)
+        clusters = [
+            {"symbol:big.py"},
+            {"symbol:tiny.py"},
+        ]
+        token_counts = {"symbol:big.py": 1200, "symbol:tiny.py": 100}
+        
+        assignments = tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+            target_tokens=1000,
+        )
+        
+        # tiny.py (100 tokens) is below threshold in its tier
+        # It should be merged with big.py's tier
+        assert assignments["symbol:big.py"] == assignments["symbol:tiny.py"]
+    
+    def test_single_cluster_all_content(self, stability_tracker):
+        """Single cluster puts everything in one tier."""
+        clusters = [
+            {"symbol:a.py", "symbol:b.py", "symbol:c.py"},
+        ]
+        token_counts = {f"symbol:{c}.py": 200 for c in "abc"}
+        
+        assignments = stability_tracker.initialize_from_clusters(
+            clusters=clusters,
+            get_tokens=lambda x: token_counts.get(x, 0),
+        )
+        
+        # All in same tier
+        tiers = set(assignments.values())
+        assert len(tiers) == 1
+        assert tiers.pop() == 'L1'  # Single cluster goes to L1 (smallest total initially)
+
+
+class TestConnectedComponents:
+    """Tests for the find_connected_components utility."""
+    
+    def test_basic_two_components(self):
+        """Two separate components."""
+        edges = {("a", "b"), ("c", "d")}
+        components = find_connected_components(edges)
+        
+        assert len(components) == 2
+        component_sets = [frozenset(c) for c in components]
+        assert frozenset({"a", "b"}) in component_sets
+        assert frozenset({"c", "d"}) in component_sets
+    
+    def test_single_component(self):
+        """All nodes connected."""
+        edges = {("a", "b"), ("b", "c"), ("c", "d")}
+        components = find_connected_components(edges)
+        
+        assert len(components) == 1
+        assert components[0] == {"a", "b", "c", "d"}
+    
+    def test_isolated_nodes(self):
+        """Nodes with no edges are singleton components."""
+        edges = {("a", "b")}
+        all_nodes = {"a", "b", "c", "d"}
+        components = find_connected_components(edges, all_nodes=all_nodes)
+        
+        assert len(components) == 3  # {a,b}, {c}, {d}
+        component_sets = [frozenset(c) for c in components]
+        assert frozenset({"a", "b"}) in component_sets
+        assert frozenset({"c"}) in component_sets
+        assert frozenset({"d"}) in component_sets
+    
+    def test_empty_edges(self):
+        """No edges returns empty or singletons only."""
+        components = find_connected_components(set())
+        assert components == []
+        
+        components = find_connected_components(set(), all_nodes={"a", "b"})
+        assert len(components) == 2
+    
+    def test_triangle(self):
+        """Three nodes forming a triangle are one component."""
+        edges = {("a", "b"), ("b", "c"), ("a", "c")}
+        components = find_connected_components(edges)
+        
+        assert len(components) == 1
+        assert components[0] == {"a", "b", "c"}
+    
+    def test_chain_merges(self):
+        """Chain of edges merges into one component."""
+        edges = {("a", "b"), ("c", "d"), ("b", "c")}
+        components = find_connected_components(edges)
+        
+        assert len(components) == 1
+        assert components[0] == {"a", "b", "c", "d"}
+    
+    def test_many_isolated_with_one_pair(self):
+        """Many isolated nodes with one connected pair."""
+        edges = {("x", "y")}
+        all_nodes = {f"node{i}" for i in range(10)} | {"x", "y"}
+        components = find_connected_components(edges, all_nodes=all_nodes)
+        
+        # 1 pair + 10 singletons = 11 components
+        assert len(components) == 11
+        pair_found = any(c == {"x", "y"} for c in components)
+        assert pair_found
 
 
 class TestStabilityTrackerScenarios:

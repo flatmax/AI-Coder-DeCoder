@@ -250,6 +250,25 @@ class ReferenceIndex:
         """
         return self._file_deps.get(file_path, set())
     
+    def get_bidirectional_edges(self) -> set[tuple[str, str]]:
+        """Get pairs of files with mutual references (A→B and B→A).
+        
+        Bidirectional edges identify mutually coupled files — files that
+        are tightly interdependent and likely to be edited together.
+        One-way references (e.g., many files import models.py but models.py
+        imports nothing back) are excluded.
+        
+        Returns:
+            Set of (file_a, file_b) tuples where file_a < file_b (canonical order)
+        """
+        edges = set()
+        for file_a, deps in self._file_deps.items():
+            for file_b in deps:
+                if file_a in self._file_deps.get(file_b, set()):
+                    edge = tuple(sorted([file_a, file_b]))
+                    edges.add(edge)
+        return edges
+    
     def get_reference_summary(self, file_path: str) -> dict:
         """Get a summary of references for a file.
         
