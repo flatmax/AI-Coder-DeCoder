@@ -224,8 +224,8 @@ Both viewers inherit from ViewerDataMixin:
 - **Recent changes** — individual items listed with tier transition and file name
   - Promotions shown with 📈, demotions with 📉
   - Shows changes from the most recent response only (matches terminal behavior)
-  - Auto-expire after 30 seconds
-  - Deduplicates via fingerprint to avoid re-adding on same refresh
+  - Backend returns changes once then clears (consume-once pattern)
+  - Replaced on each new response; persists until the next response
 
 ### Content Group Config
 

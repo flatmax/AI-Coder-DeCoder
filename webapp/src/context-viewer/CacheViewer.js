@@ -54,13 +54,10 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
   // ========== Promotion/Demotion Tracking ==========
 
   _onBreakdownResult(result) {
-    if (result.promotions?.length || result.demotions?.length) {
-      // Build a fingerprint to avoid re-adding the same changes on every refresh
-      const fingerprint = JSON.stringify([result.promotions, result.demotions]);
-      if (fingerprint !== this._lastChangeFingerprint) {
-        this._lastChangeFingerprint = fingerprint;
-        this._addRecentChanges(result.promotions, result.demotions);
-      }
+    const hasChanges = result.promotions?.length || result.demotions?.length;
+    if (hasChanges) {
+      // Backend returns changes once then clears, so always apply when present
+      this._addRecentChanges(result.promotions, result.demotions);
     }
   }
 

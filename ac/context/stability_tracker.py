@@ -907,18 +907,28 @@ class StabilityTracker:
     def get_last_promotions(self) -> list[tuple[str, str]]:
         """Get items promoted in the last update.
         
-        Returns:
-            List of (item, new_tier) tuples
-        """
-        return self._last_promotions.copy()
-    
-    def get_last_demotions(self) -> list[tuple[str, str]]:
-        """Get items demoted in the last update.
+        Returns once, then clears — subsequent calls return empty
+        until the next update_after_response.
         
         Returns:
             List of (item, new_tier) tuples
         """
-        return self._last_demotions.copy()
+        result = self._last_promotions.copy()
+        self._last_promotions = []
+        return result
+    
+    def get_last_demotions(self) -> list[tuple[str, str]]:
+        """Get items demoted in the last update.
+        
+        Returns once, then clears — subsequent calls return empty
+        until the next update_after_response.
+        
+        Returns:
+            List of (item, new_tier) tuples
+        """
+        result = self._last_demotions.copy()
+        self._last_demotions = []
+        return result
     
     def get_thresholds(self) -> dict[str, int]:
         """Get the tier thresholds (entry_n values).

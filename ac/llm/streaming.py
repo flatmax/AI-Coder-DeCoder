@@ -968,32 +968,35 @@ class StreamingMixin:
                     return tc.count(f"{item}\n```\n{content}\n```\n")
                 return 0
         
-        # --- Phase 1: Detect file/symbol churn for piggybacking ---
+        # --- Phase 1: Detect file/symbol churn ---
         
         file_symbol_items = set(file_paths or []) | {f"symbol:{f}" for f in (file_paths or [])}
-        has_file_symbol_ripple = (
-            self._last_active_file_symbol_items != file_symbol_items
-        )
         self._last_active_file_symbol_items = file_symbol_items.copy()
         
         # --- Phase 2: Controlled graduation (files, symbols, history) ---
-        # Items with N >= 3 that are still in active tier can graduate to L3.
         # For files/symbols: always graduate eligible items (stable files should cache).
-        # For history: graduate on piggyback (ripple) or when token threshold is met.
+        # For history: graduate when L3 will be invalidated anyway (free piggyback),
+        #   or when eligible history tokens exceed cache_target (standalone graduation).
+        # Active context has no minimum token requirement — it's uncached.
         
         all_history = [f"history:{i}" for i in range(len(history))]
         cache_target = stability.get_cache_target_tokens()
         
         # Graduate eligible files and symbols (always - no reason to hold them back)
         active_file_symbols = set()
+        graduating_file_symbols = set()
         for item in file_symbol_items:
             n_val = stability.get_n_value(item)
             tier = stability.get_tier(item)
             if n_val >= 3 and tier == 'active':
                 # Eligible: exclude from active so it leaves and enters L3
-                pass
+                graduating_file_symbols.add(item)
             else:
                 active_file_symbols.add(item)
+        
+        # Determine modified items (files that were edited) — needed for L3 invalidation check
+        modified_items = list(files_modified) if files_modified else []
+        modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
         
         if not cache_target:
             # Graduation disabled — all history stays active (original behavior)
@@ -1002,19 +1005,29 @@ class StreamingMixin:
             # Find eligible history: any history still in active tier.
             # History messages are immutable (content never changes), so unlike
             # files/symbols there's no need to wait for N >= 3 to confirm stability.
+            # They can graduate any time L3 is invalidated.
             eligible = [
                 h for h in all_history
                 if stability.get_tier(h) == 'active'
             ]
             
-            # File/symbol graduation counts as a ripple for piggybacking
-            has_graduation_ripple = has_file_symbol_ripple or (
-                active_file_symbols != file_symbol_items
+            # Detect whether L3 will be invalidated this cycle.
+            # L3 invalidation sources:
+            # 1. Files/symbols graduating from active → L3
+            # 2. Items demoted FROM L3 (content changed while in L3)
+            # 3. Stale items removed from L3
+            l3_demotions = any(
+                stability.get_tier(item) == 'L3'
+                for item in modified_items
+            )
+            l3_stale = 'L3' in stale_broken_tiers
+            l3_will_invalidate = (
+                bool(graduating_file_symbols) or l3_demotions or l3_stale
             )
             
-            if has_graduation_ripple and eligible:
-                # Piggyback: ripple already happening from file/symbol churn,
-                # graduate all eligible history at zero additional cache cost
+            if l3_will_invalidate and eligible:
+                # Piggyback: L3 is already being invalidated by file/symbol
+                # changes, so graduating history adds zero additional cache cost
                 graduated = set(eligible)
                 active_history = [h for h in all_history if h not in graduated]
             elif eligible:
@@ -1036,10 +1049,6 @@ class StreamingMixin:
         # --- Phase 3: Build active items list and update tracker ---
         
         active_items = list(active_file_symbols) + active_history
-        
-        # Determine modified items (files that were edited)
-        modified_items = list(files_modified) if files_modified else []
-        modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
         
         stability.update_after_response(
             items=active_items,
