@@ -647,7 +647,7 @@ class TestStabilityTrackerPromotionDemotion:
         
         demotions = stability_tracker.get_last_demotions()
         assert len(demotions) == 1
-        assert demotions[0] == ("test.py", "active")
+        assert demotions[0] == ("test.py", "L3")
     
     def test_is_promotion(self, stability_tracker):
         """_is_promotion correctly identifies promotions."""
@@ -2212,7 +2212,7 @@ class TestStabilityTrackerScenarios:
         assert stability_tracker.get_n_value("test.py") == 0
         
         demotions = stability_tracker.get_last_demotions()
-        assert ("test.py", "active") in demotions
+        assert ("test.py", "L0") in demotions
     
     def test_multiple_items_entering_same_tier(self, tracker_with_items):
         """Multiple items entering a tier - veterans get N++ once per cycle."""

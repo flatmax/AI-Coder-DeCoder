@@ -271,7 +271,7 @@ class StabilityTracker:
                         broken_tiers.add(old_tier)  # Tier lost an item
                         info.tier = 'active'
                         tier_changes[item] = 'active'
-                        self._last_demotions.append((item, 'active'))
+                        self._last_demotions.append((item, old_tier))
                 else:
                     # Veteran active file, not edited - reward stability with N++
                     info.n_value += 1

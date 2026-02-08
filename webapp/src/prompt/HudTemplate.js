@@ -73,6 +73,11 @@ export function renderPromotions(data) {
   if (promotions.length === 0 && demotions.length === 0) return '';
   
   const formatItem = (item) => {
+    if (!item) return '?';
+    if (item.startsWith('history:')) {
+      const rest = item.slice(8);
+      return rest.length > 20 ? '💬' + rest.substring(0, 20) + '…' : '💬' + rest;
+    }
     const clean = item.replace('symbol:', '📦 ');
     const parts = clean.split('/');
     return parts.length > 2 ? '...' + parts.slice(-2).join('/') : clean;
@@ -84,13 +89,13 @@ export function renderPromotions(data) {
     ${promotions.length > 0 ? html`
       <div class="hud-row promotion">
         <span class="hud-label">📈</span>
-        <span class="hud-value hud-changes">${promotions.slice(0, 3).map(p => formatItem(p[0])).join(', ')}${promotions.length > 3 ? ` +${promotions.length - 3}` : ''}</span>
+        <span class="hud-value hud-changes">${promotions.slice(0, 3).map(p => html`<span>${formatItem(p[0])}</span><span style="color:${getTierColor(p[1])}">→${p[1]} </span>`)}${promotions.length > 3 ? html` +${promotions.length - 3}` : ''}</span>
       </div>
     ` : ''}
     ${demotions.length > 0 ? html`
       <div class="hud-row demotion">
         <span class="hud-label">📉</span>
-        <span class="hud-value hud-changes">${demotions.slice(0, 3).map(d => formatItem(d[0])).join(', ')}${demotions.length > 3 ? ` +${demotions.length - 3}` : ''}</span>
+        <span class="hud-value hud-changes">${demotions.slice(0, 3).map(d => html`<span>${formatItem(d[0])}</span><span style="color:${getTierColor('active')}">${d[1]}→active </span>`)}${demotions.length > 3 ? html` +${demotions.length - 3}` : ''}</span>
       </div>
     ` : ''}
   `;
