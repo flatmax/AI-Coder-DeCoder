@@ -568,11 +568,28 @@ The `broken_tiers` set from 5a feeds into Phase 1's `_process_tier_entries` call
 
 `_get_all_trackable_files()` is already called in `_get_symbol_map_data` which runs every request. The stale check is a set difference operation — O(N) where N is tracked items. This is negligible.
 
-#### 5d. Tests
+#### 5d. Tests — DONE
 
-1. `test_deleted_file_removed_from_tier`: File in L2, delete it from repo, next update removes it from L2 and marks L2 as broken.
-2. `test_deleted_file_symbol_entry_also_removed`: Both `file.py` and `symbol:file.py` entries are cleaned up when the file is deleted.
-3. `test_deletion_triggers_cascade`: File deleted from L2 → L2 is broken → veterans from L3 can promote into L2.
+**Implementation notes:**
+
+- Phase 0 (stale detection) runs before the existing graduation/cascade logic in `_update_cache_stability`
+- Stale items are removed directly from `stability._stability` and `stability._last_active_items`
+- Broken tiers from stale removal are passed via the new `broken_tiers` parameter on `update_after_response`
+- History items (`history:*`) are excluded from stale detection — their lifecycle is managed by compaction
+- Error handling wraps the entire stale detection block to prevent failures from blocking the rest of stability tracking
+- Added `broken_tiers` parameter to `update_after_response` for external tier invalidation
+
+**StabilityTracker tests (`test_stability_tracker.py`):**
+1. `test_broken_tiers_from_stale_removal` ✅ — pre-broken tier triggers cascade
+2. `test_broken_tiers_cascade_from_stale` ✅ — multi-pass cascade from pre-broken L1
+3. `test_broken_tiers_combined_with_demotion` ✅ — stale + demotion broken sets merge
+4. `test_broken_tiers_no_effect_when_no_eligible_veterans` ✅ — broken tier alone insufficient
+5. `test_empty_broken_tiers_no_effect` ✅ — baseline sanity check
+
+**Integration tests (`test_history_graduation.py`):**
+1. `test_deleted_file_removed_from_tier` ✅ — file + symbol entry cleanup
+2. `test_deletion_triggers_cascade` ✅ — end-to-end stale→cascade flow
+3. `test_stale_active_items_cleaned` ✅ — _last_active_items cleanup
 
 ## Phases Summary and Implementation Order
 
@@ -581,7 +598,7 @@ Phases are ordered to minimize risk: stability_tracker.py changes first (pure lo
 | Order | Phase | Gaps | Risk | Effort | Description |
 |-------|-------|------|------|--------|-------------|
 | 1st | 1 | 4, 5 | Low | Small | ✅ DONE — Broken tier guard + N cap in stability_tracker.py |
-| 2nd | 5 | 9 | Low | Small | Item removal from cached tiers |
+| 2nd | 5 | 9 | Low | Small | ✅ DONE — Item removal from cached tiers |
 | 3rd | 3 | 1, 7 | Medium | Medium | Reference graph clustering for initialization |
 | 4th | 4 | 6 | Low | Small | Session-scoped persistence (depends on Phase 3) |
 | 5th | 2 | 2, 8 | Medium | Medium | Native history pairs in cached tiers |

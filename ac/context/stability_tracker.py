@@ -149,6 +149,7 @@ class StabilityTracker:
         get_content: Callable[[str], str],
         modified: list[str] = None,
         get_tokens: Callable[[str], int] = None,
+        broken_tiers: set[str] = None,
     ) -> dict[str, str]:
         """
         Update stability tracking after an assistant response.
@@ -168,6 +169,9 @@ class StabilityTracker:
             modified: Items known to be modified this round
             get_tokens: Optional function to get token count for an item.
                        Required if cache_target_tokens > 0 for threshold-aware promotion.
+            broken_tiers: Optional set of tiers pre-invalidated by external events
+                         (e.g., stale item removal). These tiers are treated as
+                         broken for cascade purposes.
         
         Returns:
             Dict mapping items to their new tiers (only changed items)
@@ -182,7 +186,8 @@ class StabilityTracker:
         self._last_demotions = []
         
         # Phase 1: Update hashes for all items and handle modifications
-        broken_tiers = set()
+        # Start with any pre-invalidated tiers (e.g., from stale item removal)
+        broken_tiers = set(broken_tiers) if broken_tiers else set()
         
         for item in items:
             try:
