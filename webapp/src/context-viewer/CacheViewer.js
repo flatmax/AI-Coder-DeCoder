@@ -71,12 +71,8 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
       ...demotions.map(d => ({ item: d[0], fromTier: d[1], type: 'demotion', time: now })),
     ];
     
-    // Keep last 10 changes, remove ones older than 30 seconds
-    const cutoff = now - 30000;
-    this.recentChanges = [
-      ...newChanges,
-      ...this.recentChanges.filter(c => c.time > cutoff)
-    ].slice(0, 10);
+    // Replace with current response's changes only (matches terminal behavior)
+    this.recentChanges = newChanges;
   }
 
   willUpdate(changedProperties) {
