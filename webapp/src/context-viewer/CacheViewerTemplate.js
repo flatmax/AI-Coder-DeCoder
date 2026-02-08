@@ -304,18 +304,48 @@ function renderTierBlock(component, block) {
 
 // ========== Recent Changes ==========
 
+function formatChangeItem(item) {
+  if (!item) return '?';
+  // History items: show preview
+  if (item.startsWith('history:')) {
+    const rest = item.slice(8);
+    return rest.length > 30 ? '💬 ' + rest.substring(0, 30) + '…' : '💬 ' + rest;
+  }
+  // Symbol items
+  if (item.startsWith('symbol:')) {
+    return '📦 ' + formatPath(item.slice(7));
+  }
+  // File items
+  return '📄 ' + formatPath(item);
+}
+
 function renderRecentChanges(component) {
   if (!component.recentChanges?.length) return '';
   
   return html`
     <div class="recent-changes">
       <div class="recent-changes-title">Recent Changes</div>
-      ${component.recentChanges.map(change => html`
-        <div class="change-row">
-          <span class="change-icon">${change.type === 'promotion' ? '📈' : '📉'}</span>
-          <span class="change-item">${formatPath(change.item)}</span>
-        </div>
-      `)}
+      ${component.recentChanges.map(change => {
+        if (change.type === 'promotion') {
+          return html`
+            <div class="change-row">
+              <span class="change-icon">📈</span>
+              <span class="change-item" title="${change.item}">${formatChangeItem(change.item)}</span>
+              <span class="change-tier" style="color: ${component.getTierColor(change.toTier)}">→ ${change.toTier}</span>
+            </div>
+          `;
+        } else {
+          return html`
+            <div class="change-row">
+              <span class="change-icon">📉</span>
+              <span class="change-item" title="${change.item}">${formatChangeItem(change.item)}</span>
+              <span class="change-tier" style="color: ${component.getTierColor(change.fromTier)}">
+                ${change.fromTier} → active
+              </span>
+            </div>
+          `;
+        }
+      })}
     </div>
   `;
 }

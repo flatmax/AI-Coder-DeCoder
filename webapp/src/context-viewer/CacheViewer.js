@@ -55,15 +55,20 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
 
   _onBreakdownResult(result) {
     if (result.promotions?.length || result.demotions?.length) {
-      this._addRecentChanges(result.promotions, result.demotions);
+      // Build a fingerprint to avoid re-adding the same changes on every refresh
+      const fingerprint = JSON.stringify([result.promotions, result.demotions]);
+      if (fingerprint !== this._lastChangeFingerprint) {
+        this._lastChangeFingerprint = fingerprint;
+        this._addRecentChanges(result.promotions, result.demotions);
+      }
     }
   }
 
   _addRecentChanges(promotions = [], demotions = []) {
     const now = Date.now();
     const newChanges = [
-      ...promotions.map(item => ({ item, type: 'promotion', time: now })),
-      ...demotions.map(item => ({ item, type: 'demotion', time: now })),
+      ...promotions.map(p => ({ item: p[0], toTier: p[1], type: 'promotion', time: now })),
+      ...demotions.map(d => ({ item: d[0], fromTier: d[1], type: 'demotion', time: now })),
     ];
     
     // Keep last 10 changes, remove ones older than 30 seconds

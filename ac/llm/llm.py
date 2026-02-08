@@ -1143,9 +1143,10 @@ class LiteLLM(ConfigMixin, ContextBuilderMixin, ChatMixin, StreamingMixin, Histo
         })
         total_tokens += active_tokens
         
-        # Get promotion/demotion info
-        promotions = [item for item, _ in stability.get_last_promotions()] if stability else []
-        demotions = [item for item, _ in stability.get_last_demotions()] if stability else []
+        # Get promotion/demotion info as [item, tier] tuples
+        # Promotions: [item, to_tier], Demotions: [item, from_tier]
+        promotions = [list(t) for t in stability.get_last_promotions()] if stability else []
+        demotions = [list(t) for t in stability.get_last_demotions()] if stability else []
         
         # Calculate cache hit rate
         cache_hit_rate = 0.0
