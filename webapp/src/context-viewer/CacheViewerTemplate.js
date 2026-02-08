@@ -203,13 +203,44 @@ const GROUP_CONFIG = {
   history: { type: 'history', icon: '💬', label: 'History', renderItem: renderHistoryItem },
 };
 
-function renderHistoryGroup(component, tier, content) {
+/**
+ * Render a compact history summary for a cached tier.
+ * Shows a single line with message count and token total instead of
+ * individual rows per message, saving vertical space.
+ */
+function renderCompactHistoryGroup(component, tier, content) {
+  const items = content.items || [];
+  const count = items.length || content.count || 0;
+  const userCount = items.filter(i => i.role === 'user').length;
+  const assistantCount = items.filter(i => i.role === 'assistant').length;
+  
+  const roleSummary = userCount && assistantCount
+    ? `${userCount}U + ${assistantCount}A`
+    : userCount ? `${userCount} user` : `${assistantCount} assistant`;
+  
   return html`
     <div class="content-group">
       <div class="content-row">
         <span class="content-expand"></span>
         <span class="content-icon">💬</span>
-        <span class="content-label">History (${content.count} messages)</span>
+        <span class="content-label">History (${count} msgs: ${roleSummary})</span>
+        <span class="content-tokens">${formatTokens(content.tokens)}</span>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Render history group for active tier — shows message count, budget warning,
+ * and expandable individual messages.
+ */
+function renderActiveHistoryGroup(component, tier, content) {
+  return html`
+    <div class="content-group">
+      <div class="content-row">
+        <span class="content-expand"></span>
+        <span class="content-icon">💬</span>
+        <span class="content-label">History (${content.count || content.items?.length || 0} messages)</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${content.needs_summary ? html`
@@ -290,8 +321,8 @@ function renderTierBlock(component, block) {
                 return renderContentGroup(component, block.tier, content, GROUP_CONFIG[content.type]);
               case 'history':
                 return block.tier === 'active'
-                  ? renderHistoryGroup(component, block.tier, content)
-                  : renderContentGroup(component, block.tier, content, GROUP_CONFIG['history']);
+                  ? renderActiveHistoryGroup(component, block.tier, content)
+                  : renderCompactHistoryGroup(component, block.tier, content);
               default:
                 return '';
             }
@@ -322,30 +353,51 @@ function formatChangeItem(item) {
 function renderRecentChanges(component) {
   if (!component.recentChanges?.length) return '';
   
+  // Group changes by type+tier for compact display
+  const promotions = component.recentChanges.filter(c => c.type === 'promotion');
+  const demotions = component.recentChanges.filter(c => c.type === 'demotion');
+  
+  // Group promotions by target tier
+  const promoByTier = {};
+  for (const p of promotions) {
+    const tier = p.toTier;
+    if (!promoByTier[tier]) promoByTier[tier] = [];
+    promoByTier[tier].push(p);
+  }
+  
+  // Group demotions by source tier
+  const demoByTier = {};
+  for (const d of demotions) {
+    const tier = d.fromTier;
+    if (!demoByTier[tier]) demoByTier[tier] = [];
+    demoByTier[tier].push(d);
+  }
+  
   return html`
     <div class="recent-changes">
       <div class="recent-changes-title">Recent Changes</div>
-      ${component.recentChanges.map(change => {
-        if (change.type === 'promotion') {
-          return html`
-            <div class="change-row">
-              <span class="change-icon">📈</span>
-              <span class="change-item" title="${change.item}">${formatChangeItem(change.item)}</span>
-              <span class="change-tier" style="color: ${component.getTierColor(change.toTier)}">→ ${change.toTier}</span>
-            </div>
-          `;
-        } else {
-          return html`
-            <div class="change-row">
-              <span class="change-icon">📉</span>
-              <span class="change-item" title="${change.item}">${formatChangeItem(change.item)}</span>
-              <span class="change-tier" style="color: ${component.getTierColor(change.fromTier)}">
-                ${change.fromTier} → active
-              </span>
-            </div>
-          `;
-        }
-      })}
+      ${Object.entries(promoByTier).map(([tier, items]) => html`
+        <div class="change-row">
+          <span class="change-icon">📈</span>
+          <span class="change-summary" style="color: ${component.getTierColor(tier)}">
+            → ${tier}: ${items.length} item${items.length > 1 ? 's' : ''}
+          </span>
+          <span class="change-items" title="${items.map(i => i.item).join(', ')}">
+            ${items.map(i => formatChangeItem(i.item)).join(', ')}
+          </span>
+        </div>
+      `)}
+      ${Object.entries(demoByTier).map(([tier, items]) => html`
+        <div class="change-row">
+          <span class="change-icon">📉</span>
+          <span class="change-summary" style="color: ${component.getTierColor(tier)}">
+            ${tier} → active: ${items.length} item${items.length > 1 ? 's' : ''}
+          </span>
+          <span class="change-items" title="${items.map(i => i.item).join(', ')}">
+            ${items.map(i => formatChangeItem(i.item)).join(', ')}
+          </span>
+        </div>
+      `)}
     </div>
   `;
 }

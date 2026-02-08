@@ -257,8 +257,9 @@ export class PromptView extends MixedBase {
       requestAnimationFrame(() => this.scrollToBottomNow());
     });
     
-    // Refresh history bar to reflect loaded session
+    // Refresh history bar and cache viewer to reflect loaded session
     await this._refreshHistoryBar();
+    this._refreshCacheViewer();
   }
 
   connectedCallback() {
@@ -623,8 +624,9 @@ export class PromptView extends MixedBase {
         }
       }
       
-      // Refresh history bar to reflect loaded session
+      // Refresh history bar and cache viewer to reflect loaded session
       await this._refreshHistoryBar();
+      this._refreshCacheViewer();
     } catch (e) {
       console.warn('Could not load last session:', e);
       console.error(e);

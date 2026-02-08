@@ -1055,28 +1055,38 @@ class StreamingMixin:
         demotions = stability.get_last_demotions()
         
         if promotions:
-            promoted_display = []
+            # Group by destination tier
+            promo_by_tier = {}
             for item, tier in promotions:
-                if item.startswith("symbol:"):
-                    display_name = f"📦 {item[7:]}"
-                elif item.startswith("history:"):
-                    display_name = f"💬 msg {item[8:]}"
-                else:
-                    display_name = item
-                promoted_display.append(f"{display_name}→{tier}")
-            print(f"📈 Promoted: {', '.join(promoted_display)}")
+                promo_by_tier.setdefault(tier, []).append(item)
+            for tier, items in promo_by_tier.items():
+                names = []
+                for item in items:
+                    if item.startswith("symbol:"):
+                        names.append(f"📦 {item[7:]}")
+                    elif item.startswith("history:"):
+                        names.append(f"💬 msg {item[8:]}")
+                    else:
+                        names.append(f"📄 {item}")
+                count = len(items)
+                print(f"📈 → {tier}: {count} item{'s' if count != 1 else ''} — {', '.join(names)}")
         
         if demotions:
-            demoted_display = []
+            # Group by source tier
+            demo_by_tier = {}
             for item, tier in demotions:
-                if item.startswith("symbol:"):
-                    display_name = f"📦 {item[7:]}"
-                elif item.startswith("history:"):
-                    display_name = f"💬 msg {item[8:]}"
-                else:
-                    display_name = item
-                demoted_display.append(f"{display_name}→{tier}")
-            print(f"📉 Demoted: {', '.join(demoted_display)}")
+                demo_by_tier.setdefault(tier, []).append(item)
+            for tier, items in demo_by_tier.items():
+                names = []
+                for item in items:
+                    if item.startswith("symbol:"):
+                        names.append(f"📦 {item[7:]}")
+                    elif item.startswith("history:"):
+                        names.append(f"💬 msg {item[8:]}")
+                    else:
+                        names.append(f"📄 {item}")
+                count = len(items)
+                print(f"📉 {tier} → active: {count} item{'s' if count != 1 else ''} — {', '.join(names)}")
     
     def _select_history_to_graduate(self, eligible, get_tokens, keep_tokens):
         """Select which eligible history messages to graduate from active.
