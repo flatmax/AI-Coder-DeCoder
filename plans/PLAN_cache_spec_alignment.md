@@ -240,7 +240,7 @@ Key design decisions made during implementation:
 7. `test_cascade_propagates_downward_through_breaks` ✅
 8. `test_cascade_with_threshold_respects_guard` ✅ (threshold-aware + guard interaction)
 
-### Phase 2: Native History Pairs in Cached Tiers (Gaps 2, 8)
+### Phase 2: Native History Pairs in Cached Tiers (Gaps 2, 8) — ✅ DONE
 
 **Files**: `ac/llm/streaming.py`, `ac/llm/context_builder.py`
 
@@ -329,13 +329,27 @@ The `tier_info` dict needs to count history tokens correctly. Each native messag
 
 Verify: max 4 cache breakpoints. Each non-empty tier uses exactly 1 breakpoint (on its last message). Empty tiers use 0. With L0 always present, that's 1-4 breakpoints total. This is unchanged from the current implementation — the only difference is WHERE the breakpoint sits (last message instead of always on "Ok.").
 
-#### 2g. Update tests
+#### 2g. Tests — DONE
 
-Add to `tests/test_history_graduation.py` or a new test file:
-1. Test that cached tier history uses native pairs (not markdown)
-2. Test cache_control placement on last message in tier
-3. Test L0 with and without history
-4. Test that cache breakpoint count ≤ 4
+**Implementation notes:**
+
+- Replaced `_format_history_for_cache` (markdown strings) with `_build_history_messages_for_tier` (native pairs)
+- Added `_apply_cache_control` static helper for placing cache_control on any message
+- `_build_tier_cache_block` now returns `{'messages': [...], 'history_messages': [...], 'symbol_tokens': N}` — caller combines and places cache_control on last message
+- L0 block: two paths — with history (system msg plain + native pairs + cache_control on last) and without (system msg with cache_control, original behavior)
+- Each non-empty tier uses exactly 1 cache breakpoint on its last message
+
+**TestNativeHistoryPairs (all ✅):**
+1. `test_native_pairs_from_history` — full history as native user/assistant pairs
+2. `test_native_pairs_subset` — only requested indices included
+3. `test_empty_indices_returns_empty` — empty list → empty result
+4. `test_no_history_returns_empty` — no conversation history → empty result
+5. `test_out_of_bounds_indices_skipped` — invalid indices silently skipped
+6. `test_apply_cache_control_plain_string` — wraps string in structured format
+7. `test_apply_cache_control_structured_content` — adds to last text block
+8. `test_apply_cache_control_user_message` — works on user messages too
+9. `test_cache_control_on_last_message_in_tier` — symbols + history, cache_control on last history msg
+10. `test_tier_with_only_history` — history-only tier gets cache_control correctly
 
 ### Phase 3: Reference Graph Clustering (Gaps 1, 7) — ✅ DONE
 
@@ -617,7 +631,7 @@ Phases are ordered to minimize risk: stability_tracker.py changes first (pure lo
 | 2nd | 5 | 9 | Low | Small | ✅ DONE — Item removal from cached tiers |
 | 3rd | 3 | 1, 7 | Medium | Medium | ✅ DONE — Reference graph clustering for initialization |
 | 4th | 4 | 6 | Low | Small | Session-scoped persistence (depends on Phase 3) |
-| 5th | 2 | 2, 8 | Medium | Medium | Native history pairs in cached tiers |
+| 5th | 2 | 2, 8 | Medium | Medium | ✅ DONE — Native history pairs in cached tiers |
 
 **Why this order:**
 

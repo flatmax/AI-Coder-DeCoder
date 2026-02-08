@@ -543,26 +543,40 @@ class StreamingMixin:
         # Get history message tier assignments
         history_tiers = self._get_history_tiers()
         
-        # Add L0 history to the L0 block
+        # Build L0 history as native message pairs
+        l0_history_messages = []
         if history_tiers.get('L0'):
-            l0_history_content = self._format_history_for_cache(history_tiers['L0'], 'L0')
-            if l0_history_content:
-                l0_content += "\n\n" + l0_history_content
+            l0_history_messages = self._build_history_messages_for_tier(history_tiers['L0'])
+            if l0_history_messages:
                 tier_info['L0']['history'] = len(history_tiers['L0'])
-                tier_info['L0']['tokens'] += self._safe_count_tokens(l0_history_content)
+                for msg in l0_history_messages:
+                    tier_info['L0']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
         
-        messages.append({
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": l0_content,
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ]
-        })
+        if l0_history_messages:
+            # L0 has history: system message WITHOUT cache_control,
+            # then native history pairs, cache_control on last history message
+            messages.append({
+                "role": "system",
+                "content": l0_content,
+            })
+            messages.extend(l0_history_messages)
+            self._apply_cache_control(messages[-1])
+        else:
+            # L0 without history: system message WITH cache_control (original behavior)
+            messages.append({
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": l0_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
         
         # Blocks 2-4 (L1, L2, L3): symbols + files per tier (cached)
+        # Each tier emits: symbols/files pair + native history pairs
+        # cache_control goes on the LAST message in the tier's sequence
         tier_file_headers = {
             'L1': FILES_L1_HEADER,
             'L2': FILES_L2_HEADER,
@@ -575,7 +589,11 @@ class StreamingMixin:
                 history_tiers=history_tiers
             )
             if result:
-                messages.extend(result['messages'])
+                tier_messages = result['messages'] + result['history_messages']
+                if tier_messages:
+                    # Place cache_control on the last message in this tier
+                    self._apply_cache_control(tier_messages[-1])
+                    messages.extend(tier_messages)
                 context_map_tokens += result['symbol_tokens']
             else:
                 tier_info['empty_tiers'] += 1
@@ -667,36 +685,61 @@ class StreamingMixin:
             return ""
         return "\n\n".join(parts)
     
-    def _format_history_for_cache(self, message_indices: list[int], tier: str) -> str:
-        """Format history messages for inclusion in a cached tier block.
+    def _build_history_messages_for_tier(self, message_indices: list[int]) -> list[dict]:
+        """Build native user/assistant message pairs for a cached tier.
         
-        History messages in cached tiers are formatted as quoted content
-        (not as separate user/assistant message pairs, since they must be
-        inside a single cached user message block).
+        History messages are always sent as native pairs — the LLM sees real
+        conversation turns, maintaining its assistant persona. This is better
+        than formatting as markdown strings inside a wrapper message.
         
         Args:
             message_indices: Indices into self.conversation_history
-            tier: Tier name for the header
             
         Returns:
-            Formatted history string, or empty string if no messages
+            List of message dicts (native user/assistant pairs)
         """
         history = self.conversation_history
         if not message_indices or not history:
-            return ""
+            return []
         
-        parts = [f"\n## Conversation History ({tier})\n"]
+        messages = []
         for idx in message_indices:
             if idx >= len(history):
                 continue
             msg = history[idx]
-            role = msg.get('role', 'user').title()
-            content = msg.get('content', '')
-            parts.append(f"### {role}\n{content}")
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", ""),
+            })
         
-        if len(parts) == 1:
-            return ""
-        return "\n\n".join(parts)
+        return messages
+    
+    @staticmethod
+    def _apply_cache_control(message: dict) -> None:
+        """Apply cache_control to the last message in a tier sequence.
+        
+        Wraps the message content in structured format with cache_control
+        if not already structured. Works for both user and assistant messages.
+        
+        Args:
+            message: Message dict to modify in-place
+        """
+        content = message.get("content", "")
+        if isinstance(content, list):
+            # Already structured — add cache_control to last text block
+            for item in reversed(content):
+                if isinstance(item, dict) and item.get("type") == "text":
+                    item["cache_control"] = {"type": "ephemeral"}
+                    break
+        else:
+            # Plain string — wrap in structured format
+            message["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
     
     def _get_history_tiers(self) -> dict[str, list[int]]:
         """Get history message indices organized by stability tier.
@@ -743,6 +786,10 @@ class StreamingMixin:
                                 history_tiers=None):
         """Build a cache block for a single tier (L1/L2/L3).
         
+        Returns symbols/files as a user+assistant pair, plus native history
+        message pairs. The caller places cache_control on the last message
+        in the combined sequence.
+        
         Args:
             tier: Tier name ('L1', 'L2', 'L3')
             symbol_map_content: Dict of tier -> formatted symbol content
@@ -753,7 +800,8 @@ class StreamingMixin:
             history_tiers: Optional dict of tier -> message index lists
             
         Returns:
-            Dict with 'messages' and 'symbol_tokens', or None if tier is empty
+            Dict with 'messages', 'history_messages', and 'symbol_tokens',
+            or None if tier is empty
         """
         parts = []
         symbol_tokens = 0
@@ -773,32 +821,31 @@ class StreamingMixin:
                 tier_info[tier]['files'] = len(file_tiers[tier])
                 tier_info[tier]['tokens'] += self._safe_count_tokens(files_content)
         
-        # Add cached history messages for this tier
+        # Build native history message pairs for this tier
+        history_messages = []
         if history_tiers and history_tiers.get(tier):
-            history_content = self._format_history_for_cache(history_tiers[tier], tier)
-            if history_content:
-                parts.append(history_content)
+            history_messages = self._build_history_messages_for_tier(history_tiers[tier])
+            if history_messages:
                 tier_info[tier]['history'] = len(history_tiers[tier])
-                tier_info[tier]['tokens'] += self._safe_count_tokens(history_content)
+                for msg in history_messages:
+                    tier_info[tier]['tokens'] += self._safe_count_tokens(msg.get('content', ''))
         
-        if not parts:
+        if not parts and not history_messages:
             return None
         
-        combined = "\n\n".join(parts)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": combined,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            },
-            {"role": "assistant", "content": "Ok."},
-        ]
-        return {'messages': messages, 'symbol_tokens': symbol_tokens}
+        messages = []
+        if parts:
+            combined = "\n\n".join(parts)
+            messages = [
+                {"role": "user", "content": combined},
+                {"role": "assistant", "content": "Ok."},
+            ]
+        
+        return {
+            'messages': messages,
+            'history_messages': history_messages,
+            'symbol_tokens': symbol_tokens,
+        }
     
     def _update_cache_stability(self, file_paths, files_modified):
         """Update cache stability tracking after a response.

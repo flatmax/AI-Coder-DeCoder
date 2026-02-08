@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
 
 from ac.context.stability_tracker import StabilityTracker, StabilityInfo
+from ac.llm.streaming import StreamingMixin
 
 
 class FakeStreaming:
@@ -130,6 +131,177 @@ class TestSelectHistoryToGraduate:
         )
         
         assert graduated == {"history:0", "history:1"}
+
+
+class TestNativeHistoryPairs:
+    """Tests for native history message pairs in cached tiers.
+    
+    Verifies that cached tier history uses native user/assistant message
+    pairs (not formatted markdown strings), and that cache_control is
+    placed on the last message in each tier's sequence.
+    """
+    
+    def _make_streaming_mixin(self):
+        """Create a minimal fake with the methods under test."""
+        
+        class FakeMixin:
+            def __init__(self):
+                self.conversation_history = []
+                self._context_manager = None
+            
+            def _safe_count_tokens(self, content):
+                return len(content) // 4 if content else 0
+        
+        # Attach the real methods
+        from ac.llm.streaming import StreamingMixin
+        mixin = FakeMixin()
+        mixin._build_history_messages_for_tier = StreamingMixin._build_history_messages_for_tier.__get__(mixin)
+        mixin._apply_cache_control = StreamingMixin._apply_cache_control
+        return mixin
+    
+    def test_native_pairs_from_history(self):
+        """History messages are returned as native user/assistant pairs."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+            {"role": "user", "content": "Help me"},
+            {"role": "assistant", "content": "Sure"},
+        ]
+        
+        messages = mixin._build_history_messages_for_tier([0, 1, 2, 3])
+        
+        assert len(messages) == 4
+        assert messages[0] == {"role": "user", "content": "Hello"}
+        assert messages[1] == {"role": "assistant", "content": "Hi there"}
+        assert messages[2] == {"role": "user", "content": "Help me"}
+        assert messages[3] == {"role": "assistant", "content": "Sure"}
+    
+    def test_native_pairs_subset(self):
+        """Only requested indices are included."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "msg0"},
+            {"role": "assistant", "content": "msg1"},
+            {"role": "user", "content": "msg2"},
+            {"role": "assistant", "content": "msg3"},
+        ]
+        
+        messages = mixin._build_history_messages_for_tier([0, 1])
+        
+        assert len(messages) == 2
+        assert messages[0]["content"] == "msg0"
+        assert messages[1]["content"] == "msg1"
+    
+    def test_empty_indices_returns_empty(self):
+        """Empty index list returns empty message list."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "Hello"},
+        ]
+        
+        assert mixin._build_history_messages_for_tier([]) == []
+    
+    def test_no_history_returns_empty(self):
+        """No conversation history returns empty message list."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = []
+        
+        assert mixin._build_history_messages_for_tier([0, 1]) == []
+    
+    def test_out_of_bounds_indices_skipped(self):
+        """Indices beyond history length are silently skipped."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "Hello"},
+        ]
+        
+        messages = mixin._build_history_messages_for_tier([0, 5, 10])
+        assert len(messages) == 1
+        assert messages[0]["content"] == "Hello"
+    
+    def test_apply_cache_control_plain_string(self):
+        """cache_control wraps plain string content."""
+        msg = {"role": "assistant", "content": "Sure, I can help."}
+        StreamingMixin._apply_cache_control(msg)
+        
+        assert isinstance(msg["content"], list)
+        assert len(msg["content"]) == 1
+        assert msg["content"][0]["type"] == "text"
+        assert msg["content"][0]["text"] == "Sure, I can help."
+        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+    
+    def test_apply_cache_control_structured_content(self):
+        """cache_control added to last text block in structured content."""
+        msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "First part"},
+                {"type": "text", "text": "Second part"},
+            ]
+        }
+        StreamingMixin._apply_cache_control(msg)
+        
+        # First block unchanged
+        assert "cache_control" not in msg["content"][0]
+        # Last text block gets cache_control
+        assert msg["content"][1]["cache_control"] == {"type": "ephemeral"}
+    
+    def test_apply_cache_control_user_message(self):
+        """cache_control works on user messages too."""
+        msg = {"role": "user", "content": "Question?"}
+        StreamingMixin._apply_cache_control(msg)
+        
+        assert isinstance(msg["content"], list)
+        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+    
+    def test_cache_control_on_last_message_in_tier(self):
+        """When tier has symbols + history, cache_control goes on last history msg."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+        ]
+        
+        # Simulate what _build_streaming_messages does for a tier
+        symbol_messages = [
+            {"role": "user", "content": "# Repository Structure\n..."},
+            {"role": "assistant", "content": "Ok."},
+        ]
+        history_messages = mixin._build_history_messages_for_tier([0, 1])
+        
+        tier_messages = symbol_messages + history_messages
+        StreamingMixin._apply_cache_control(tier_messages[-1])
+        
+        # Symbol messages: no cache_control
+        assert isinstance(tier_messages[0]["content"], str)
+        assert isinstance(tier_messages[1]["content"], str)
+        
+        # History messages: last one has cache_control
+        assert isinstance(tier_messages[2]["content"], str)  # user msg, no cache_control
+        assert isinstance(tier_messages[3]["content"], list)  # last msg, has cache_control
+        assert tier_messages[3]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    
+    def test_tier_with_only_history(self):
+        """Tier with only history (no symbols/files) still gets cache_control."""
+        mixin = self._make_streaming_mixin()
+        mixin.conversation_history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        
+        history_messages = mixin._build_history_messages_for_tier([0, 1])
+        
+        # No symbol messages, just history
+        tier_messages = history_messages
+        StreamingMixin._apply_cache_control(tier_messages[-1])
+        
+        assert len(tier_messages) == 2
+        # Last message has cache_control
+        assert isinstance(tier_messages[-1]["content"], list)
+        assert tier_messages[-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # First message is plain
+        assert isinstance(tier_messages[0]["content"], str)
 
 
 class TestStaleItemRemovalIntegration:
