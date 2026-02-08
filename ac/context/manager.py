@@ -65,14 +65,11 @@ class ContextManager:
         # No cross-session persistence: prevents stale L0 assignments from prior sessions.
         self.cache_stability: Optional[StabilityTracker] = None
         if repo_root:
-            stability_path = Path(repo_root) / '.aicoder' / 'cache_stability.json'
             self.cache_stability = StabilityTracker(
-                persistence_path=stability_path,
                 thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
                 initial_tier='L3',
                 cache_target_tokens=cache_target_tokens,
             )
-            self.cache_stability.clear()
         
         # History compaction
         self._compaction_enabled = False
