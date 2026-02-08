@@ -178,15 +178,31 @@ export function renderPromptView(component) {
               ` : ''}
               ${renderUrlChips(component)}
               <div class="input-area">
-                ${component._showHistorySearch && component._historySearchResults.length > 0 ? html`
+                ${component._showHistorySearch ? html`
                   <div class="history-search-dropdown">
-                    ${component._historySearchResults.map((result, i) => html`
-                      <div class="history-search-item ${i === component._historySearchIndex ? 'selected' : ''}"
-                           @click=${() => component._selectHistorySearchResult(i)}
-                           @mouseenter=${() => { component._historySearchIndex = i; component.requestUpdate(); }}>
-                        <span class="history-search-preview">${result.preview}</span>
+                    ${component._historySearchResults.length > 0 ? html`
+                      <div class="history-search-results">
+                        ${[...component._historySearchResults].reverse().map((result, i) => {
+                          const realIndex = component._historySearchResults.length - 1 - i;
+                          return html`
+                            <div class="history-search-item ${realIndex === component._historySearchIndex ? 'selected' : ''}"
+                                 @click=${() => component._selectHistorySearchResult(realIndex)}
+                                 @mouseenter=${() => { component._historySearchIndex = realIndex; component.requestUpdate(); }}>
+                              <span class="history-search-preview">${result.preview}</span>
+                            </div>
+                          `;
+                        })}
                       </div>
-                    `)}
+                    ` : html`
+                      <div class="history-search-empty">No matches</div>
+                    `}
+                    <input class="history-overlay-input"
+                           type="text"
+                           placeholder="Type to search history..."
+                           .value=${component._historySearchQuery || ''}
+                           @input=${(e) => component._handleHistoryOverlayInput(e)}
+                           @keydown=${(e) => component._handleHistoryOverlayKeydown(e)}
+                    />
                   </div>
                 ` : ''}
                 <div class="input-buttons-stack">

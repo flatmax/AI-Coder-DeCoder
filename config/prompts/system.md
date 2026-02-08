@@ -133,7 +133,14 @@ def process():
 Query → Search Map → Trace i→/inheritance → Request files → Read content → Edit
 ```
 
-### ⛔ MANDATORY PRE-EDIT CHECKLIST
+### ⛔ NEVER EDIT FILES YOU CANNOT SEE
+The Symbol Map shows structure, **not actual content**. You MUST request a file and have it visible in the conversation before emitting any edit block for it. Editing from memory or from the map alone **will fail**.
+
+- If a file is not in the conversation: **ask for it first**
+- If a file was provided earlier but may have changed: **ask for it again**
+- Never assume you know the current content of a file
+
+### Pre-Edit Checklist
 Before ANY edit block, verify and state:
 ```
 ✓ File in context: [filename — YES visible / NO need to request]

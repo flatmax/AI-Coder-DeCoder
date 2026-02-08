@@ -417,14 +417,49 @@ export const promptViewStyles = css`
     bottom: 100%;
     left: 12px;
     right: 12px;
-    max-height: 240px;
-    overflow-y: auto;
+    max-height: 280px;
+    display: flex;
+    flex-direction: column;
     background: #1a1a2e;
     border: 1px solid #0f3460;
     border-radius: 8px 8px 0 0;
     box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
     z-index: 20;
     margin-bottom: -1px;
+  }
+
+  .history-overlay-input {
+    width: 100%;
+    padding: 8px 12px;
+    background: #1a1a2e;
+    border: none;
+    border-top: 1px solid #0f3460;
+    border-radius: 0;
+    color: #eee;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .history-overlay-input:focus {
+    border-top-color: #e94560;
+  }
+
+  .history-overlay-input::placeholder {
+    color: #666;
+  }
+
+  .history-search-results {
+    overflow-y: auto;
+    max-height: 220px;
+  }
+
+  .history-search-empty {
+    padding: 12px;
+    text-align: center;
+    color: #666;
+    font-size: 13px;
   }
 
   .history-search-item {
