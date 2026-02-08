@@ -34,6 +34,7 @@ export class MessageHandler extends JRPCClient {
   scrollToBottomNow() {
     this._userHasScrolledUp = false;
     this._showScrollButton = false;
+    this._scrollPending = false;
     const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
     if (sentinel) {
       sentinel.scrollIntoView({ block: 'end' });
@@ -53,7 +54,22 @@ export class MessageHandler extends JRPCClient {
   }
 
   streamWrite(chunk, final = false, role = 'assistant', editResults = null) {
-    setTimeout(() => this._processStreamChunk(chunk, final, role, editResults), 0);
+    // Store latest chunk data — only the most recent matters since
+    // each chunk carries full accumulated content
+    this._pendingChunk = { chunk, final, role, editResults };
+    
+    // Coalesce: only schedule one rAF per frame
+    if (!this._chunkRafPending) {
+      this._chunkRafPending = true;
+      requestAnimationFrame(() => {
+        this._chunkRafPending = false;
+        const pending = this._pendingChunk;
+        if (pending) {
+          this._pendingChunk = null;
+          this._processStreamChunk(pending.chunk, pending.final, pending.role, pending.editResults);
+        }
+      });
+    }
   }
 
   _processStreamChunk(chunk, final, role, editResults = null) {
@@ -67,7 +83,11 @@ export class MessageHandler extends JRPCClient {
       if (editResults && editResults.length > 0) {
         lastMessage.editResults = editResults;
       }
-      this.messageHistory = [...this.messageHistory];
+      // Mutate in place and only request update for the streaming message.
+      // Lit's repeat/map will still diff the array, but since only the last
+      // element's content changed (same object reference for all others),
+      // the template diff is O(1) for prior messages.
+      this.requestUpdate('messageHistory');
     } else {
       const newMessage = { id: this._messageId++, role, content: chunk, final };
       if (editResults && editResults.length > 0) {
@@ -80,9 +100,16 @@ export class MessageHandler extends JRPCClient {
 
   _scrollToBottom() {
     if (this._userHasScrolledUp) return;
+    // Coalesce: only one pending scroll at a time
+    if (this._scrollPending) return;
+    this._scrollPending = true;
     
+    // Wait for Lit to commit DOM changes, then scroll.
+    // This ensures new messages are in the DOM before we scroll to them.
     this.updateComplete.then(() => {
       requestAnimationFrame(() => {
+        this._scrollPending = false;
+        if (this._userHasScrolledUp) return;
         const sentinel = this.shadowRoot?.querySelector('#scroll-sentinel');
         if (sentinel) {
           sentinel.scrollIntoView({ block: 'end' });

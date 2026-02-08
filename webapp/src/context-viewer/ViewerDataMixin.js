@@ -9,35 +9,34 @@
  * @provides getIncludedUrls, refreshBreakdown, viewUrl, closeUrlModal,
  *   toggleUrlIncluded, isUrlIncluded, removeUrl, viewSymbolMap, closeSymbolMapModal
  */
+export const ViewerDataProperties = {
+  breakdown: { type: Object },
+  isLoading: { type: Boolean },
+  error: { type: String },
+
+  // URL modal
+  selectedUrl: { type: String },
+  showUrlModal: { type: Boolean },
+  urlContent: { type: Object },
+
+  // Symbol map modal
+  showSymbolMapModal: { type: Boolean },
+  symbolMapContent: { type: String },
+  isLoadingSymbolMap: { type: Boolean },
+
+  // From parent
+  selectedFiles: { type: Array },
+  fetchedUrls: { type: Array },
+  excludedUrls: { type: Object },
+};
+
 export const ViewerDataMixin = (superClass) => class extends superClass {
-
-  static get mixinProperties() {
-    return {
-      breakdown: { type: Object },
-      isLoading: { type: Boolean },
-      error: { type: String },
-
-      // URL modal
-      selectedUrl: { type: String },
-      showUrlModal: { type: Boolean },
-      urlContent: { type: Object },
-
-      // Symbol map modal
-      showSymbolMapModal: { type: Boolean },
-      symbolMapContent: { type: String },
-      isLoadingSymbolMap: { type: Boolean },
-
-      // From parent
-      selectedFiles: { type: Array },
-      fetchedUrls: { type: Array },
-      excludedUrls: { type: Object },
-    };
-  }
 
   initViewerData() {
     this.breakdown = null;
     this.isLoading = false;
     this.error = null;
+    this._breakdownStale = true;
 
     this.selectedUrl = null;
     this.showUrlModal = false;
@@ -62,17 +61,28 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
   async refreshBreakdown() {
     if (!this.rpcCall) return;
 
-    const result = await this._rpcWithState(
-      'LiteLLM.get_context_breakdown',
-      {},
-      this.selectedFiles || [],
-      this.getIncludedUrls()
-    );
+    // Deduplicate: if a refresh is already in flight, return that promise
+    if (this._refreshPromise) return this._refreshPromise;
 
-    if (result) {
-      this._onBreakdownResult(result);
-      this.breakdown = result;
-    }
+    this._refreshPromise = (async () => {
+      try {
+        const result = await this._rpcWithState(
+          'LiteLLM.get_context_breakdown',
+          {},
+          this.selectedFiles || [],
+          this.getIncludedUrls()
+        );
+
+        if (result) {
+          this._onBreakdownResult(result);
+          this.breakdown = result;
+        }
+      } finally {
+        this._refreshPromise = null;
+      }
+    })();
+
+    return this._refreshPromise;
   }
 
   /**
@@ -85,16 +95,46 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
 
   /**
    * Auto-refresh when relevant properties change.
-   * Subclasses should call super.willUpdate(changedProperties).
+   * Only fetches when visible. Marks data stale when properties change
+   * while hidden, so the next tab-switch triggers a refresh.
    */
   _viewerDataWillUpdate(changedProperties) {
-    if (changedProperties.has('selectedFiles') ||
+    const dataChanged = changedProperties.has('selectedFiles') ||
         changedProperties.has('fetchedUrls') ||
-        changedProperties.has('excludedUrls')) {
-      if (this.rpcCall) {
-        this.refreshBreakdown();
-      }
+        changedProperties.has('excludedUrls');
+
+    if (dataChanged) {
+      this._breakdownStale = true;
     }
+
+    // Fetch on becoming visible with stale data
+    if (changedProperties.has('visible') && this.visible && this._breakdownStale) {
+      this._breakdownStale = false;
+      if (this._refreshTimer) clearTimeout(this._refreshTimer);
+      this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
+      return;
+    }
+
+    // Fetch when data changes while visible
+    if (dataChanged && this.visible && this.rpcCall && !this._refreshPromise) {
+      this._breakdownStale = false;
+      if (this._refreshTimer) clearTimeout(this._refreshTimer);
+      this._refreshTimer = setTimeout(() => this.refreshBreakdown(), 100);
+    }
+  }
+
+  /**
+   * Clean up pending timers when disconnected from the DOM.
+   */
+  disconnectedCallback() {
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+    if (this._refreshPromise) {
+      this._refreshPromise = null;
+    }
+    super.disconnectedCallback();
   }
 
   // ========== URL Modal ==========

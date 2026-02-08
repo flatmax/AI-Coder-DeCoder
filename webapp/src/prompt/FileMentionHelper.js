@@ -12,26 +12,73 @@ export function highlightFileMentions(htmlContent, mentionedFiles, selectedFiles
     return { html: htmlContent, foundFiles: [] };
   }
 
-  let result = htmlContent;
-  const foundFiles = [];
+  const selectedSet = selectedFiles ? new Set(selectedFiles) : new Set();
+  const lowercaseContent = htmlContent.toLowerCase();
 
-  // Sort by length descending to match longer paths first
-  const sortedFiles = [...mentionedFiles].sort((a, b) => b.length - a.length);
+  // Pre-filter: only files whose path appears as substring
+  const candidates = mentionedFiles.filter(f => lowercaseContent.includes(f.toLowerCase()));
 
-  for (const filePath of sortedFiles) {
-    const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`(?<!<[^>]*)(?<!class=")\\b(${escaped})\\b(?![^<]*>)`, 'g');
-
-    if (regex.test(htmlContent)) {
-      foundFiles.push(filePath);
-      const isInContext = selectedFiles && selectedFiles.includes(filePath);
-      const contextClass = isInContext ? ' in-context' : '';
-      regex.lastIndex = 0;
-      result = result.replace(regex, `<span class="file-mention${contextClass}" data-file="${filePath}">$1</span>`);
-    }
+  if (candidates.length === 0) {
+    return { html: htmlContent, foundFiles: [] };
   }
 
-  return { html: result, foundFiles };
+  // Sort by length descending so longer paths match first in alternation
+  candidates.sort((a, b) => b.length - a.length);
+
+  // Build single combined regex — one pass instead of N
+  const escapedPaths = candidates.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const combined = new RegExp(
+    `(${escapedPaths.join('|')})`,
+    'g'
+  );
+
+  const foundSet = new Set();
+
+  // Build a set of ranges inside <pre>...</pre> blocks (fenced code blocks)
+  // File paths inside these should not be highlighted — they're code examples
+  // Inline <code> is fine to highlight (that's how users reference files)
+  const preRanges = [];
+  const preTagRegex = /<pre\b[^>]*>[\s\S]*?<\/pre>/gi;
+  let tagMatch;
+  while ((tagMatch = preTagRegex.exec(htmlContent)) !== null) {
+    preRanges.push([tagMatch.index, tagMatch.index + tagMatch[0].length]);
+  }
+
+  const isInsidePreBlock = (offset) => {
+    for (const [start, end] of preRanges) {
+      if (offset >= start && offset < end) return true;
+      if (start > offset) break; // ranges are in order
+    }
+    return false;
+  };
+
+  // Replace file paths, but skip matches inside HTML tags and pre blocks
+  const result = htmlContent.replace(combined, (match, filePath, offset) => {
+    // Skip if inside a <pre> code block
+    if (isInsidePreBlock(offset)) {
+      return match;
+    }
+
+    // Skip if inside an HTML tag: find last < and > before this offset
+    const before = htmlContent.substring(Math.max(0, offset - 500), offset);
+    const lastOpen = before.lastIndexOf('<');
+    const lastClose = before.lastIndexOf('>');
+    if (lastOpen > lastClose) {
+      return match;
+    }
+
+    // Skip if already wrapped in a file-mention span
+    const precedingChunk = htmlContent.substring(Math.max(0, offset - 50), offset);
+    if (precedingChunk.includes('class="file-mention')) {
+      return match;
+    }
+
+    foundSet.add(filePath);
+    const contextClass = selectedSet.has(filePath) ? ' in-context' : '';
+    return `<span class="file-mention${contextClass}" data-file="${filePath}">${filePath}</span>`;
+  });
+
+  return { html: result, foundFiles: [...foundSet] };
 }
 
 /**

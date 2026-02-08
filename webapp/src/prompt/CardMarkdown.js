@@ -4,7 +4,7 @@ import { marked } from 'marked';
 import './PrismSetup.js';
 import { escapeHtml } from '../utils/formatters.js';
 import { parseEditBlocks } from './EditBlockParser.js';
-import { renderEditBlock, renderEditsSummary } from './EditBlockRenderer.js';
+import { renderEditBlock, renderEditsSummary, renderInProgressEditBlock } from './EditBlockRenderer.js';
 import { highlightFileMentions, renderFilesSummary } from './FileMentionHelper.js';
 import { dispatchClick } from './CardClickHandler.js';
 
@@ -14,7 +14,9 @@ export class CardMarkdown extends LitElement {
     role: { type: String },
     mentionedFiles: { type: Array },
     selectedFiles: { type: Array },  // Files currently in context
-    editResults: { type: Array }  // Array of {file_path, status, reason, estimated_line}
+    editResults: { type: Array },  // Array of {file_path, status, reason, estimated_line}
+    final: { type: Boolean },  // Whether the message is complete (not still streaming)
+    streaming: { type: Boolean, reflect: true }
   };
 
   static styles = css`
@@ -374,6 +376,32 @@ export class CardMarkdown extends LitElement {
     .token.function { color: #f08d49; }
     .token.regex,
     .token.important { color: #e90; }
+
+    /* Streaming cursor */
+    :host([streaming]) .content::after {
+      content: '▌';
+      display: inline;
+      animation: blink 0.8s step-end infinite;
+      color: #e94560;
+      font-weight: bold;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    /* In-progress edit block pulse */
+    .streaming-edit-pulse {
+      height: 24px;
+      background: linear-gradient(90deg, transparent, rgba(233,69,96,0.1), transparent);
+      background-size: 200% 100%;
+      animation: pulse-sweep 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse-sweep {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
   `;
 
   constructor() {
@@ -383,8 +411,16 @@ export class CardMarkdown extends LitElement {
     this.mentionedFiles = [];
     this.selectedFiles = [];
     this.editResults = [];
+    this.final = true;
+    this.streaming = false;
     this._foundFiles = [];  // Files actually found in content
     this._codeScrollPositions = new Map();
+    this._cachedContent = null;
+    this._cachedResult = null;
+    this._cachedFinal = null;
+    this._incrementalHtml = '';
+    this._incrementalParsedTo = 0;
+    this._incrementalFenceOpen = false;
     
     marked.setOptions({
       highlight: (code, lang) => {
@@ -405,29 +441,65 @@ export class CardMarkdown extends LitElement {
       return escapeHtml(this.content).replace(/\n/g, '<br>');
     }
     
-    // Check if content contains edit blocks
-    const hasEditBlocks = this.content.includes('««« EDIT');
-    
-    if (hasEditBlocks) {
-      // Parse edit blocks and process markdown separately
-      let processed = this.processContentWithEditBlocks(this.content);
-      processed = this.wrapCodeBlocksWithCopyButton(processed);
-      processed = this.highlightFileMentions(processed);
-      return processed;
+    // Fast cache hit — content hasn't changed at all
+    // Also check that final status hasn't changed (streaming → complete needs re-processing)
+    if (this._cachedContent === this.content && this._cachedResult && this._cachedFinal === this.final) {
+      return this._cachedResult;
     }
     
-    // Pre-process to protect search/replace markers from markdown parsing
-    let content = this.protectSearchReplaceBlocks(this.content);
+    const isStreaming = !this.final;
     
-    let processed = marked.parse(content);
+    // During streaming: skip expensive post-processing (file mentions,
+    // copy buttons) which are only useful once complete.
+    // Edit blocks ARE rendered progressively for visual continuity.
+    if (isStreaming) {
+      const hasEditMarker = this.content.includes('««« EDIT');
+      if (hasEditMarker) {
+        const result = this._processStreamingWithEditBlocks(this.content);
+        this._streamCacheSource = this.content;
+        this._streamCache = result;
+        this._cachedContent = null;
+        this._cachedResult = null;
+        return result;
+      }
+
+      // Incremental markdown parsing: only parse new complete segments
+      const result = this._incrementalParse(this.content);
+      this._streamCacheSource = this.content;
+      this._streamCache = result;
+      this._cachedContent = null;
+      this._cachedResult = null;
+      return result;
+    }
+    
+    // Final render — reuse streaming parse if content unchanged
+    this._cachedContent = this.content;
+    
+    const hasEditBlocks = this.content.includes('««« EDIT');
+    let processed;
+    
+    if (hasEditBlocks) {
+      // Edit blocks need structural extraction; must reparse
+      processed = this.processContentWithEditBlocks(this.content);
+    } else if (this._streamCache && this._streamCacheSource === this.content) {
+      // Content unchanged since last streaming chunk — reuse parsed HTML
+      processed = this._streamCache;
+    } else {
+      processed = marked.parse(this.content);
+    }
+    
+    this._streamCache = null;
+    this._streamCacheSource = null;
+    this._incrementalHtml = '';
+    this._incrementalParsedTo = 0;
+    this._incrementalFenceOpen = false;
+    
     processed = this.wrapCodeBlocksWithCopyButton(processed);
     processed = this.highlightFileMentions(processed);
+    this._cachedResult = processed;
+    this._cachedFinal = this.final;
+    
     return processed;
-  }
-
-  protectSearchReplaceBlocks(content) {
-    // Pass through content unchanged - let markdown handle it naturally
-    return content;
   }
 
 
@@ -435,6 +507,8 @@ export class CardMarkdown extends LitElement {
   /**
    * Process content with edit blocks by extracting them, processing markdown
    * on the remaining text, then reinserting rendered edit blocks.
+   * Uses a single marked.parse() call for all text segments to avoid
+   * per-segment parsing overhead.
    */
   processContentWithEditBlocks(content) {
     const blocks = parseEditBlocks(content);
@@ -462,19 +536,205 @@ export class CardMarkdown extends LitElement {
       segments.push({ type: 'text', content: textLines.join('\n') });
     }
     
-    let result = '';
+    // Batch all text segments into a single marked.parse() call
+    // using unique placeholders, then split and interleave
+    const PLACEHOLDER_PREFIX = '\n\n<!--EDIT_BLOCK_';
+    const PLACEHOLDER_SUFFIX = '-->\n\n';
+    let combinedText = '';
+    let editBlockIndex = 0;
+    
     for (const segment of segments) {
       if (segment.type === 'text') {
-        result += marked.parse(segment.content);
+        combinedText += segment.content;
       } else {
-        result += renderEditBlock(segment.block, this.editResults);
+        combinedText += `${PLACEHOLDER_PREFIX}${editBlockIndex}${PLACEHOLDER_SUFFIX}`;
+        editBlockIndex++;
       }
     }
+    
+    // Single parse call for all markdown
+    const parsedHtml = marked.parse(combinedText);
+    
+    // Split on placeholders and interleave edit blocks
+    const editBlocks = segments.filter(s => s.type === 'edit');
+    const placeholderRegex = /<!--EDIT_BLOCK_(\d+)-->/g;
+    let result = '';
+    let lastIndex = 0;
+    let match;
+    
+    while ((match = placeholderRegex.exec(parsedHtml)) !== null) {
+      result += parsedHtml.slice(lastIndex, match.index);
+      const blockIdx = parseInt(match[1], 10);
+      if (blockIdx < editBlocks.length) {
+        result += renderEditBlock(editBlocks[blockIdx].block, this.editResults);
+      }
+      lastIndex = match.index + match[0].length;
+    }
+    result += parsedHtml.slice(lastIndex);
     
     return result;
   }
 
 
+
+  /**
+   * Incremental markdown parsing for streaming.
+   * Only parses new complete segments (at safe paragraph/block boundaries)
+   * and appends to cached HTML. Trailing incomplete content is rendered
+   * as escaped text. The final render always does a full re-parse.
+   */
+  _incrementalParse(content) {
+    // If content was replaced (not appended), reset
+    if (this._incrementalParsedTo > 0 && !content.startsWith(content.slice(0, this._incrementalParsedTo))) {
+      this._incrementalHtml = '';
+      this._incrementalParsedTo = 0;
+      this._incrementalFenceOpen = false;
+    }
+
+    const unparsed = content.slice(this._incrementalParsedTo);
+    const safeSplit = this._findSafeSplit(unparsed);
+
+    if (safeSplit > 0) {
+      const segment = unparsed.slice(0, safeSplit);
+      this._incrementalHtml += marked.parse(segment);
+      this._incrementalParsedTo += safeSplit;
+    }
+
+    // Render: cached HTML + raw-escaped tail for unparsed remainder
+    const tail = content.slice(this._incrementalParsedTo);
+    if (!tail) return this._incrementalHtml;
+
+    const tailHtml = escapeHtml(tail).replace(/\n/g, '<br>');
+    return this._incrementalHtml + tailHtml;
+  }
+
+  /**
+   * Find the last safe split point in text for incremental parsing.
+   * A split is safe at a blank-line boundary (paragraph break) where
+   * no code fence is open. Returns the index to split at, or 0 if
+   * no safe split exists.
+   */
+  _findSafeSplit(text) {
+    let lastSafe = 0;
+    let fenceOpen = this._incrementalFenceOpen;
+    const lines = text.split('\n');
+    let pos = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trimStart();
+
+      // Track code fence state
+      if (trimmed.startsWith('```')) {
+        fenceOpen = !fenceOpen;
+      }
+
+      pos += line.length + 1; // +1 for \n
+
+      // A blank line outside a code fence is a safe paragraph boundary
+      if (!fenceOpen && trimmed === '' && i > 0) {
+        lastSafe = pos;
+      }
+    }
+
+    // Update fence tracking state only for the portion we'll actually parse
+    if (lastSafe > 0) {
+      // Recount fences up to lastSafe to get accurate state
+      let fenceState = this._incrementalFenceOpen;
+      const safePortion = text.slice(0, lastSafe);
+      const safeLines = safePortion.split('\n');
+      for (const l of safeLines) {
+        if (l.trimStart().startsWith('```')) {
+          fenceState = !fenceState;
+        }
+      }
+      this._incrementalFenceOpen = fenceState;
+    }
+
+    return lastSafe;
+  }
+
+  /**
+   * Process content during streaming when edit block markers are present.
+   * Renders completed edit blocks as diffs (pending status) and shows
+   * an in-progress placeholder for any unclosed edit block.
+   */
+  _processStreamingWithEditBlocks(content) {
+    const blocks = parseEditBlocks(content);
+    const lines = content.split('\n');
+
+    // Detect if there's an unclosed edit block at the end
+    let unclosedFilePath = null;
+    const lastEditStart = content.lastIndexOf('««« EDIT');
+    const lastEditEnd = content.lastIndexOf('»»» EDIT END');
+    if (lastEditStart > lastEditEnd) {
+      // There's an unclosed edit block — find the file path
+      // (it's on the line before ««« EDIT)
+      const beforeMarker = content.slice(0, lastEditStart);
+      const beforeLines = beforeMarker.trimEnd().split('\n');
+      const pathLine = beforeLines[beforeLines.length - 1]?.trim();
+      if (pathLine && !pathLine.startsWith('```') && !pathLine.startsWith('#')) {
+        unclosedFilePath = pathLine;
+      }
+    }
+
+    // Build segments: text, completed edit blocks, and trailing unclosed block
+    const segments = [];
+    let lastEnd = 0;
+
+    for (const block of blocks) {
+      if (block.startIndex > lastEnd) {
+        const textLines = lines.slice(lastEnd, block.startIndex);
+        segments.push({ type: 'text', content: textLines.join('\n') });
+      }
+      segments.push({ type: 'edit', block });
+      lastEnd = block.endIndex + 1;
+    }
+
+    // Handle remaining content after last completed block
+    if (lastEnd < lines.length) {
+      if (unclosedFilePath !== null) {
+        // Find where the unclosed block's file path line starts
+        const unclosedStartLine = lines.indexOf(unclosedFilePath, lastEnd);
+        if (unclosedStartLine > lastEnd) {
+          const textLines = lines.slice(lastEnd, unclosedStartLine);
+          segments.push({ type: 'text', content: textLines.join('\n') });
+        } else if (unclosedStartLine === -1 && lastEnd < lines.length) {
+          // File path wasn't found by simple indexOf — text before unclosed marker
+          const markerLine = lines.findIndex((l, i) => i >= lastEnd && l.trim() === '««« EDIT');
+          if (markerLine > lastEnd + 1) {
+            const textLines = lines.slice(lastEnd, markerLine - 1);
+            segments.push({ type: 'text', content: textLines.join('\n') });
+          }
+        }
+        // Extract partial lines inside the unclosed edit block
+        const editMarkerLineIdx = lines.findIndex((l, i) => i >= lastEnd && l.trim() === '««« EDIT');
+        const partialLines = editMarkerLineIdx !== -1
+          ? lines.slice(editMarkerLineIdx + 1)
+          : [];
+        segments.push({ type: 'in-progress', filePath: unclosedFilePath, partialLines });
+      } else {
+        const textLines = lines.slice(lastEnd);
+        segments.push({ type: 'text', content: textLines.join('\n') });
+      }
+    }
+
+    // Render segments
+    let result = '';
+    for (const segment of segments) {
+      if (segment.type === 'text') {
+        if (segment.content.trim()) {
+          result += marked.parse(segment.content);
+        }
+      } else if (segment.type === 'edit') {
+        result += renderEditBlock(segment.block, []);
+      } else if (segment.type === 'in-progress') {
+        result += renderInProgressEditBlock(segment.filePath, segment.partialLines);
+      }
+    }
+
+    return result;
+  }
 
   wrapCodeBlocksWithCopyButton(htmlContent) {
     const preCodeRegex = /(<pre[^>]*>)(\s*<code[^>]*>)([\s\S]*?)(<\/code>\s*<\/pre>)/gi;
@@ -502,15 +762,18 @@ export class CardMarkdown extends LitElement {
   }
 
   willUpdate() {
-    // Save horizontal scroll positions of all code blocks before re-render
+    // Save horizontal scroll positions of all code blocks before re-render.
+    // Skip during streaming — no user interaction with code blocks yet.
     this._codeScrollPositions.clear();
-    const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
-    if (codeBlocks) {
-      codeBlocks.forEach((pre, index) => {
-        if (pre.scrollLeft > 0) {
-          this._codeScrollPositions.set(index, pre.scrollLeft);
-        }
-      });
+    if (this.final && this.content?.includes('```')) {
+      const codeBlocks = this.shadowRoot?.querySelectorAll('pre');
+      if (codeBlocks) {
+        codeBlocks.forEach((pre, index) => {
+          if (pre.scrollLeft > 0) {
+            this._codeScrollPositions.set(index, pre.scrollLeft);
+          }
+        });
+      }
     }
   }
 
@@ -530,11 +793,12 @@ export class CardMarkdown extends LitElement {
 
   render() {
     const processedContent = this.processContent();
+    const isFinal = this.final;
     return html`
       <div class="content" @click=${this.handleClick}>
         ${unsafeHTML(processedContent)}
-        ${this.role === 'assistant' ? unsafeHTML(this.renderEditsSummary()) : ''}
-        ${this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
+        ${isFinal && this.role === 'assistant' ? unsafeHTML(this.renderEditsSummary()) : ''}
+        ${isFinal && this.role === 'assistant' ? unsafeHTML(this.renderFilesSummary()) : ''}
       </div>
     `;
   }

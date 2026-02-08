@@ -1,17 +1,65 @@
+// Simple LRU cache for diff results to avoid recomputing during streaming re-renders
+const _diffCache = new Map();
+const _DIFF_CACHE_MAX = 12;
+
+function _hashLines(lines) {
+  let hash = 5381;
+  let totalLen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    totalLen += line.length;
+    for (let j = 0; j < line.length; j++) {
+      hash = ((hash << 5) + hash + line.charCodeAt(j)) | 0;
+    }
+    // Hash a newline separator between lines
+    hash = ((hash << 5) + hash + 10) | 0;
+  }
+  return { hash, totalLen };
+}
+
+function _getDiffCacheKey(oldLines, newLines) {
+  const o = _hashLines(oldLines);
+  const n = _hashLines(newLines);
+  return `${oldLines.length}:${newLines.length}:${o.totalLen}:${n.totalLen}:${o.hash}:${n.hash}`;
+}
+
+/**
+ * Fast non-cryptographic string hash (djb2 variant).
+ * Used only for cache key collision resistance.
+ */
+function simpleHash(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
 /**
  * Compute unified diff between two arrays of lines using LCS algorithm.
- * Returns array of diff entries in display order.
+ * Results are memoized to avoid redundant computation during streaming re-renders.
  * 
  * @param {string[]} oldLines - Original lines
  * @param {string[]} newLines - New lines  
  * @returns {Array<{type: 'context'|'add'|'remove', line: string, pair?: object}>}
  */
 export function computeLineDiff(oldLines, newLines) {
+  // Check memo cache — key includes lengths + hashes so a match is sufficient
+  const cacheKey = _getDiffCacheKey(oldLines, newLines);
+  const cached = _diffCache.get(cacheKey);
+  if (cached) {
+    return cached.result;
+  }
+
   const n = oldLines.length;
   const m = newLines.length;
   
-  // Build DP table for LCS
-  const dp = Array(n + 1).fill(null).map(() => Array(m + 1).fill(0));
+  // Build DP table for LCS using full matrix (needed for backtracking)
+  // Use typed arrays for better memory layout and performance
+  const dp = new Array(n + 1);
+  for (let i = 0; i <= n; i++) {
+    dp[i] = new Int32Array(m + 1);
+  }
   
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
@@ -44,7 +92,16 @@ export function computeLineDiff(oldLines, newLines) {
   const reversed = result.reverse();
   
   // Post-process to pair adjacent remove/add lines for inline highlighting
-  return pairModifiedLines(reversed);
+  const finalResult = pairModifiedLines(reversed);
+  
+  // Store in memo cache (evict oldest if full)
+  if (_diffCache.size >= _DIFF_CACHE_MAX) {
+    const firstKey = _diffCache.keys().next().value;
+    _diffCache.delete(firstKey);
+  }
+  _diffCache.set(cacheKey, { result: finalResult });
+  
+  return finalResult;
 }
 
 /**
@@ -91,6 +148,15 @@ function pairModifiedLines(diff) {
  * @returns {{oldSegments: Array, newSegments: Array, similarity: number}}
  */
 export function computeCharDiff(oldStr, newStr) {
+  // Fast-path: identical strings need no diff computation
+  if (oldStr === newStr) {
+    return {
+      oldSegments: [{ type: 'same', text: oldStr }],
+      newSegments: [{ type: 'same', text: newStr }],
+      similarity: 1
+    };
+  }
+
   // Tokenize into words and whitespace
   const oldTokens = tokenize(oldStr);
   const newTokens = tokenize(newStr);

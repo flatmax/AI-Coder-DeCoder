@@ -179,20 +179,68 @@ function renderUrlItem(component, item, tier) {
   `;
 }
 
+function renderHistoryItem(component, item, tier) {
+  const roleBadge = item.role === 'user' ? 'U' : 'A';
+  const roleClass = item.role === 'user' ? 'role-user' : 'role-assistant';
+  const preview = item.preview
+    ? (item.preview.length > 60 ? item.preview.substring(0, 60) + '…' : item.preview)
+    : '(empty)';
+  return html`
+    <div class="item-row history-item">
+      <span class="history-role ${roleClass}">${roleBadge}</span>
+      <span class="item-path" title="${item.preview || ''}">${preview}</span>
+      <span class="item-tokens">${formatTokens(item.tokens)}</span>
+      ${renderStabilityBar(item, tier)}
+    </div>
+  `;
+}
+
 // Group configuration registry
 const GROUP_CONFIG = {
   symbols: { type: 'symbols', icon: '📦', label: 'Symbols', renderItem: null },
   files: { type: 'files', icon: '📄', label: 'Files', renderItem: renderFileItem },
   urls: { type: 'urls', icon: '🔗', label: 'URLs', renderItem: renderUrlItem },
+  history: { type: 'history', icon: '💬', label: 'History', renderItem: renderHistoryItem },
 };
 
-function renderHistoryGroup(component, tier, content) {
+/**
+ * Render a compact history summary for a cached tier.
+ * Shows a single line with message count and token total instead of
+ * individual rows per message, saving vertical space.
+ */
+function renderCompactHistoryGroup(component, tier, content) {
+  const items = content.items || [];
+  const count = items.length || content.count || 0;
+  const userCount = items.filter(i => i.role === 'user').length;
+  const assistantCount = items.filter(i => i.role === 'assistant').length;
+  
+  const roleSummary = userCount && assistantCount
+    ? `${userCount}U + ${assistantCount}A`
+    : userCount ? `${userCount} user` : `${assistantCount} assistant`;
+  
   return html`
     <div class="content-group">
       <div class="content-row">
         <span class="content-expand"></span>
         <span class="content-icon">💬</span>
-        <span class="content-label">History (${content.count} messages)</span>
+        <span class="content-label">History (${count} msgs: ${roleSummary})</span>
+        <span class="content-tokens">${formatTokens(content.tokens)}</span>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Render history group for active tier — shows message count, budget warning,
+ * and expandable individual messages.
+ */
+function renderActiveHistoryGroup(component, tier, content) {
+  return html`
+    <div class="content-group">
+      <div class="content-row">
+        <span class="content-expand"></span>
+        <span class="content-icon">💬</span>
+        <span class="content-label">History (${content.count || content.items?.length || 0} messages)</span>
         <span class="content-tokens">${formatTokens(content.tokens)}</span>
       </div>
       ${content.needs_summary ? html`
@@ -272,7 +320,9 @@ function renderTierBlock(component, block) {
               case 'urls':
                 return renderContentGroup(component, block.tier, content, GROUP_CONFIG[content.type]);
               case 'history':
-                return renderHistoryGroup(component, block.tier, content);
+                return block.tier === 'active'
+                  ? renderActiveHistoryGroup(component, block.tier, content)
+                  : renderCompactHistoryGroup(component, block.tier, content);
               default:
                 return '';
             }
@@ -285,16 +335,67 @@ function renderTierBlock(component, block) {
 
 // ========== Recent Changes ==========
 
+function formatChangeItem(item) {
+  if (!item) return '?';
+  // History items: show preview
+  if (item.startsWith('history:')) {
+    const rest = item.slice(8);
+    return rest.length > 30 ? '💬 ' + rest.substring(0, 30) + '…' : '💬 ' + rest;
+  }
+  // Symbol items
+  if (item.startsWith('symbol:')) {
+    return '📦 ' + formatPath(item.slice(7));
+  }
+  // File items
+  return '📄 ' + formatPath(item);
+}
+
 function renderRecentChanges(component) {
   if (!component.recentChanges?.length) return '';
+  
+  // Group changes by type+tier for compact display
+  const promotions = component.recentChanges.filter(c => c.type === 'promotion');
+  const demotions = component.recentChanges.filter(c => c.type === 'demotion');
+  
+  // Group promotions by target tier
+  const promoByTier = {};
+  for (const p of promotions) {
+    const tier = p.toTier;
+    if (!promoByTier[tier]) promoByTier[tier] = [];
+    promoByTier[tier].push(p);
+  }
+  
+  // Group demotions by source tier
+  const demoByTier = {};
+  for (const d of demotions) {
+    const tier = d.fromTier;
+    if (!demoByTier[tier]) demoByTier[tier] = [];
+    demoByTier[tier].push(d);
+  }
   
   return html`
     <div class="recent-changes">
       <div class="recent-changes-title">Recent Changes</div>
-      ${component.recentChanges.map(change => html`
+      ${Object.entries(promoByTier).map(([tier, items]) => html`
         <div class="change-row">
-          <span class="change-icon">${change.type === 'promotion' ? '📈' : '📉'}</span>
-          <span class="change-item">${formatPath(change.item)}</span>
+          <span class="change-icon">📈</span>
+          <span class="change-summary" style="color: ${component.getTierColor(tier)}">
+            → ${tier}: ${items.length} item${items.length > 1 ? 's' : ''}
+          </span>
+          <span class="change-items" title="${items.map(i => i.item).join(', ')}">
+            ${items.map(i => formatChangeItem(i.item)).join(', ')}
+          </span>
+        </div>
+      `)}
+      ${Object.entries(demoByTier).map(([tier, items]) => html`
+        <div class="change-row">
+          <span class="change-icon">📉</span>
+          <span class="change-summary" style="color: ${component.getTierColor(tier)}">
+            ${tier} → active: ${items.length} item${items.length > 1 ? 's' : ''}
+          </span>
+          <span class="change-items" title="${items.map(i => i.item).join(', ')}">
+            ${items.map(i => formatChangeItem(i.item)).join(', ')}
+          </span>
         </div>
       `)}
     </div>

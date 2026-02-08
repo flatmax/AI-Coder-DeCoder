@@ -70,7 +70,7 @@ The parser handles embedded backticks correctly. Never add outer fencing "for sa
 | 1 | **No markdown fences** around edit blocks—emit raw |
 | 2 | **Copy-paste from file**—never type from memory |
 | 3 | **Context in BOTH sections** identically |
-| 4 | **Enough context** for unique match |
+| 4 | **Enough context** for unique match (anchor must match exactly ONE location in file) |
 | 5 | **Exact match**—whitespace, blanks, comments matter |
 | 6 | **No placeholders** (`...`, `// rest of code`) |
 | 7 | **Verify anchor exists** by searching file first |
@@ -83,6 +83,8 @@ The parser handles embedded backticks correctly. Never add outer fencing "for sa
   - **Sequential dependencies**: Edit B's anchor would be affected by Edit A
 
 **Why**: Edits apply sequentially to the file. Edit B's anchor text may not exist after Edit A modifies the region.
+
+**Also beware**: Files may contain duplicate or near-identical sections. An edit will fail as ambiguous if its anchor matches more than one location. Use enough surrounding context to ensure uniqueness, or merge into one block. Earlier edits can also *create* duplicates—check that your edit doesn't make two sections identical.
 
 **Example — WRONG** (second edit fails):
 ```
@@ -131,7 +133,14 @@ def process():
 Query → Search Map → Trace i→/inheritance → Request files → Read content → Edit
 ```
 
-### ⛔ MANDATORY PRE-EDIT CHECKLIST
+### ⛔ NEVER EDIT FILES YOU CANNOT SEE
+The Symbol Map shows structure, **not actual content**. You MUST request a file and have it visible in the conversation before emitting any edit block for it. Editing from memory or from the map alone **will fail**.
+
+- If a file is not in the conversation: **ask for it first**
+- If a file was provided earlier but may have changed: **ask for it again**
+- Never assume you know the current content of a file
+
+### Pre-Edit Checklist
 Before ANY edit block, verify and state:
 ```
 ✓ File in context: [filename — YES visible / NO need to request]

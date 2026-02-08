@@ -3,7 +3,7 @@ import { cacheViewerStyles } from './CacheViewerStyles.js';
 import { renderCacheViewer } from './CacheViewerTemplate.js';
 import { RpcMixin } from '../utils/rpc.js';
 import { getTierColor } from '../utils/tierConfig.js';
-import { ViewerDataMixin } from './ViewerDataMixin.js';
+import { ViewerDataMixin, ViewerDataProperties } from './ViewerDataMixin.js';
 import './UrlContentModal.js';
 import './SymbolMapModal.js';
 
@@ -27,7 +27,7 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
     // Search/filter
     searchQuery: { type: String },
     
-    ...ViewerDataMixin.mixinProperties,
+    ...ViewerDataProperties,
   };
 
   static styles = cacheViewerStyles;
@@ -54,7 +54,9 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
   // ========== Promotion/Demotion Tracking ==========
 
   _onBreakdownResult(result) {
-    if (result.promotions?.length || result.demotions?.length) {
+    const hasChanges = result.promotions?.length || result.demotions?.length;
+    if (hasChanges) {
+      // Backend returns changes once then clears, so always apply when present
       this._addRecentChanges(result.promotions, result.demotions);
     }
   }
@@ -62,16 +64,12 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
   _addRecentChanges(promotions = [], demotions = []) {
     const now = Date.now();
     const newChanges = [
-      ...promotions.map(item => ({ item, type: 'promotion', time: now })),
-      ...demotions.map(item => ({ item, type: 'demotion', time: now })),
+      ...promotions.map(p => ({ item: p[0], toTier: p[1], type: 'promotion', time: now })),
+      ...demotions.map(d => ({ item: d[0], fromTier: d[1], type: 'demotion', time: now })),
     ];
     
-    // Keep last 10 changes, remove ones older than 30 seconds
-    const cutoff = now - 30000;
-    this.recentChanges = [
-      ...newChanges,
-      ...this.recentChanges.filter(c => c.time > cutoff)
-    ].slice(0, 10);
+    // Replace with current response's changes only (matches terminal behavior)
+    this.recentChanges = newChanges;
   }
 
   willUpdate(changedProperties) {
@@ -175,9 +173,14 @@ export class CacheViewer extends ViewerDataMixin(RpcMixin(LitElement)) {
     if (!this.searchQuery || !items) return items;
     
     return items.filter(item => {
-      const searchStr = type === 'urls' 
-        ? (item.title || item.url || '')
-        : (item.path || '');
+      let searchStr;
+      if (type === 'urls') {
+        searchStr = item.title || item.url || '';
+      } else if (type === 'history') {
+        searchStr = `${item.role || ''} ${item.preview || ''}`;
+      } else {
+        searchStr = item.path || '';
+      }
       return this.fuzzyMatch(this.searchQuery, searchStr);
     });
   }

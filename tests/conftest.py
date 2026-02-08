@@ -67,25 +67,17 @@ def sample_web_content():
 # ========== Stability Tracker Fixtures ==========
 
 @pytest.fixture
-def stability_path(tmp_path):
-    """Create path for stability tracker persistence."""
-    return tmp_path / "stability.json"
-
-
-@pytest.fixture
-def stability_tracker(stability_path):
+def stability_tracker():
     """Create StabilityTracker with 4-tier Bedrock config."""
     return StabilityTracker(
-        persistence_path=stability_path,
         thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
     )
 
 
 @pytest.fixture
-def stability_tracker_with_threshold(stability_path):
+def stability_tracker_with_threshold():
     """Create StabilityTracker with threshold-aware promotion enabled."""
     return StabilityTracker(
-        persistence_path=stability_path,
         thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
         cache_target_tokens=1000,  # 1000 tokens target for testing
     )
@@ -112,6 +104,8 @@ def tracker_with_items(stability_tracker, make_stability_info):
             "a.py": (5, 'L3'),  # n_value=5, tier='L3'
             "b.py": (8, 'L2'),
         })
+    
+    Note: Uses the shared stability_tracker fixture (no persistence).
     """
     def _create(items_config, last_active=None):
         for path, (n_value, tier) in items_config.items():

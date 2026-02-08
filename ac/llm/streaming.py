@@ -225,6 +225,9 @@ class StreamingMixin:
                 loop  # Pass the loop to the thread
             )
             
+            # Flush any pending chunk coroutines scheduled from the thread
+            await asyncio.sleep(0)
+            
             # If cancelled, send completion with cancelled flag and return early
             if was_cancelled:
                 # Still store the partial assistant message
@@ -537,18 +540,43 @@ class StreamingMixin:
                 tier_info['L0']['files'] = len(file_tiers['L0'])
                 tier_info['L0']['tokens'] += self._safe_count_tokens(l0_files_content)
         
-        messages.append({
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": l0_content,
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ]
-        })
+        # Get history message tier assignments
+        history_tiers = self._get_history_tiers()
+        
+        # Build L0 history as native message pairs
+        l0_history_messages = []
+        if history_tiers.get('L0'):
+            l0_history_messages = self._build_history_messages_for_tier(history_tiers['L0'])
+            if l0_history_messages:
+                tier_info['L0']['history'] = len(history_tiers['L0'])
+                for msg in l0_history_messages:
+                    tier_info['L0']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+        
+        if l0_history_messages:
+            # L0 has history: system message WITHOUT cache_control,
+            # then native history pairs, cache_control on last history message
+            messages.append({
+                "role": "system",
+                "content": l0_content,
+            })
+            messages.extend(l0_history_messages)
+            self._apply_cache_control(messages[-1])
+        else:
+            # L0 without history: system message WITH cache_control (original behavior)
+            messages.append({
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": l0_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
         
         # Blocks 2-4 (L1, L2, L3): symbols + files per tier (cached)
+        # Each tier emits: symbols/files pair + native history pairs
+        # cache_control goes on the LAST message in the tier's sequence
         tier_file_headers = {
             'L1': FILES_L1_HEADER,
             'L2': FILES_L2_HEADER,
@@ -557,10 +585,15 @@ class StreamingMixin:
         for tier in ['L1', 'L2', 'L3']:
             result = self._build_tier_cache_block(
                 tier, symbol_map_content, symbol_files_by_tier,
-                file_tiers, tier_info, tier_file_headers[tier]
+                file_tiers, tier_info, tier_file_headers[tier],
+                history_tiers=history_tiers
             )
             if result:
-                messages.extend(result['messages'])
+                tier_messages = result['messages'] + result['history_messages']
+                if tier_messages:
+                    # Place cache_control on the last message in this tier
+                    self._apply_cache_control(tier_messages[-1])
+                    messages.extend(tier_messages)
                 context_map_tokens += result['symbol_tokens']
             else:
                 tier_info['empty_tiers'] += 1
@@ -599,14 +632,24 @@ class StreamingMixin:
                 tier_info['active']['files'] = len(file_tiers['active'])
                 tier_info['active']['tokens'] += self._safe_count_tokens(active_content)
         
-        # Add conversation history
-        if self.conversation_history:
-            tier_info['active']['has_history'] = True
-            for msg in self.conversation_history:
-                tier_info['active']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+        # Add conversation history - only active (uncached) messages as raw pairs
+        active_history_indices = set(history_tiers.get('active', []))
+        cached_history_count = sum(
+            len(indices) for tier, indices in history_tiers.items() if tier != 'active'
+        )
         
-        for msg in self.conversation_history:
-            messages.append(msg)
+        if self.conversation_history:
+            for i, msg in enumerate(self.conversation_history):
+                if i in active_history_indices:
+                    messages.append(msg)
+                    tier_info['active']['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+            
+            if active_history_indices:
+                tier_info['active']['has_history'] = True
+                tier_info['active']['history'] = len(active_history_indices)
+            
+            if cached_history_count > 0:
+                print(f"💬 History: {cached_history_count} cached, {len(active_history_indices)} active")
         
         # Build user message with images if provided
         if images:
@@ -642,9 +685,110 @@ class StreamingMixin:
             return ""
         return "\n\n".join(parts)
     
+    def _build_history_messages_for_tier(self, message_indices: list[int]) -> list[dict]:
+        """Build native user/assistant message pairs for a cached tier.
+        
+        History messages are always sent as native pairs — the LLM sees real
+        conversation turns, maintaining its assistant persona. This is better
+        than formatting as markdown strings inside a wrapper message.
+        
+        Args:
+            message_indices: Indices into self.conversation_history
+            
+        Returns:
+            List of message dicts (native user/assistant pairs)
+        """
+        history = self.conversation_history
+        if not message_indices or not history:
+            return []
+        
+        messages = []
+        for idx in message_indices:
+            if idx >= len(history):
+                continue
+            msg = history[idx]
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", ""),
+            })
+        
+        return messages
+    
+    @staticmethod
+    def _apply_cache_control(message: dict) -> None:
+        """Apply cache_control to the last message in a tier sequence.
+        
+        Wraps the message content in structured format with cache_control
+        if not already structured. Works for both user and assistant messages.
+        
+        Args:
+            message: Message dict to modify in-place
+        """
+        content = message.get("content", "")
+        if isinstance(content, list):
+            # Already structured — add cache_control to last text block
+            for item in reversed(content):
+                if isinstance(item, dict) and item.get("type") == "text":
+                    item["cache_control"] = {"type": "ephemeral"}
+                    break
+        else:
+            # Plain string — wrap in structured format
+            message["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+    
+    def _get_history_tiers(self) -> dict[str, list[int]]:
+        """Get history message indices organized by stability tier.
+        
+        Returns:
+            Dict mapping tier names to lists of message indices
+        """
+        from ..context.stability_tracker import TIER_ORDER
+        
+        history = self.conversation_history
+        tiers = {tier: [] for tier in TIER_ORDER}
+        
+        if not history or not self._context_manager or not self._context_manager.cache_stability:
+            tiers['active'] = list(range(len(history))) if history else []
+            return tiers
+        
+        stability = self._context_manager.cache_stability
+        history_items = [f"history:{i}" for i in range(len(history))]
+        tracked = stability.get_items_by_tier(history_items)
+        
+        for tier in TIER_ORDER:
+            tier_items = tracked.get(tier, [])
+            for item in tier_items:
+                if item.startswith("history:"):
+                    idx = int(item.split(":")[1])
+                    if idx < len(history):
+                        tiers[tier].append(idx)
+            # Sort indices to maintain message order
+            tiers[tier].sort()
+        
+        # Any untracked messages go to active
+        tracked_indices = set()
+        for indices in tiers.values():
+            tracked_indices.update(indices)
+        for i in range(len(history)):
+            if i not in tracked_indices:
+                tiers['active'].append(i)
+        tiers['active'].sort()
+        
+        return tiers
+    
     def _build_tier_cache_block(self, tier, symbol_map_content, symbol_files_by_tier,
-                                file_tiers, tier_info, file_header):
+                                file_tiers, tier_info, file_header,
+                                history_tiers=None):
         """Build a cache block for a single tier (L1/L2/L3).
+        
+        Returns symbols/files as a user+assistant pair, plus native history
+        message pairs. The caller places cache_control on the last message
+        in the combined sequence.
         
         Args:
             tier: Tier name ('L1', 'L2', 'L3')
@@ -653,9 +797,11 @@ class StreamingMixin:
             file_tiers: Dict of tier -> file path lists (full content files)
             tier_info: Mutable dict tracking per-tier token counts
             file_header: Header string for the file section
+            history_tiers: Optional dict of tier -> message index lists
             
         Returns:
-            Dict with 'messages' and 'symbol_tokens', or None if tier is empty
+            Dict with 'messages', 'history_messages', and 'symbol_tokens',
+            or None if tier is empty
         """
         parts = []
         symbol_tokens = 0
@@ -675,31 +821,44 @@ class StreamingMixin:
                 tier_info[tier]['files'] = len(file_tiers[tier])
                 tier_info[tier]['tokens'] += self._safe_count_tokens(files_content)
         
-        if not parts:
+        # Build native history message pairs for this tier
+        history_messages = []
+        if history_tiers and history_tiers.get(tier):
+            history_messages = self._build_history_messages_for_tier(history_tiers[tier])
+            if history_messages:
+                tier_info[tier]['history'] = len(history_tiers[tier])
+                for msg in history_messages:
+                    tier_info[tier]['tokens'] += self._safe_count_tokens(msg.get('content', ''))
+        
+        if not parts and not history_messages:
             return None
         
-        combined = "\n\n".join(parts)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": combined,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            },
-            {"role": "assistant", "content": "Ok."},
-        ]
-        return {'messages': messages, 'symbol_tokens': symbol_tokens}
+        messages = []
+        if parts:
+            combined = "\n\n".join(parts)
+            messages = [
+                {"role": "user", "content": combined},
+                {"role": "assistant", "content": "Ok."},
+            ]
+        
+        return {
+            'messages': messages,
+            'history_messages': history_messages,
+            'symbol_tokens': symbol_tokens,
+        }
     
     def _update_cache_stability(self, file_paths, files_modified):
         """Update cache stability tracking after a response.
         
-        Collects active items (files + symbol entries), computes content
-        hashes and token counts, calls the stability tracker, and logs
-        any promotions/demotions.
+        Implements controlled graduation for history messages:
+        - Files and symbol entries leave/enter active normally
+        - History messages accumulate N while active but only graduate to L3 when:
+          a) Piggybacking on a file/symbol ripple (zero additional cost), or
+          b) Eligible history tokens exceed cache_target_tokens (standalone graduation)
+        - This prevents per-request ripple churn from history in long conversations
+        
+        Also detects stale items (deleted files) and removes them from cached
+        tiers, marking those tiers as broken for the cascade.
         
         Args:
             file_paths: Files in active context this request
@@ -707,26 +866,52 @@ class StreamingMixin:
         """
         stability = self._context_manager.cache_stability
         tc = self._context_manager.token_counter
+        history = self._context_manager.get_history()
         
-        # Collect items currently in Active context:
-        # - Files explicitly in file_paths
-        # - Symbol entries ONLY for files in file_paths (not all indexed files)
-        # 
-        # Symbol entries for files NOT in active context should NOT be in items list.
-        # They were registered during _build_streaming_messages and will "leave" Active
-        # when not included here, triggering ripple promotion.
-        active_items = []
+        # --- Phase 0: Remove stale items (deleted/missing files) ---
+        # Files that are tracked but no longer exist in the repo should be
+        # removed. Their tiers are marked as broken for the cascade.
+        stale_broken_tiers = set()
+        try:
+            all_repo_files = set(self._get_all_trackable_files())
+            stale_items = []
+            for item_key in list(stability._stability.keys()):
+                if item_key.startswith("history:"):
+                    continue  # History cleanup handled by compaction
+                
+                file_path = item_key.replace("symbol:", "") if item_key.startswith("symbol:") else item_key
+                
+                if file_path not in all_repo_files:
+                    stale_items.append(item_key)
+            
+            if stale_items:
+                for item_key in stale_items:
+                    tier = stability.get_tier(item_key)
+                    if tier != 'active':
+                        stale_broken_tiers.add(tier)
+                    del stability._stability[item_key]
+                
+                # Also clean from last_active_items
+                stale_set = set(stale_items)
+                stability._last_active_items -= stale_set
+                
+                if stale_broken_tiers:
+                    print(f"🗑️ Removed {len(stale_items)} stale items from tiers: {', '.join(sorted(stale_broken_tiers))}")
+        except Exception as e:
+            # Don't let stale detection failure block the rest of stability tracking
+            print(f"⚠️ Stale item detection error: {e}")
         
-        # Add file paths that are in active context
-        if file_paths:
-            active_items.extend(file_paths)
-            # Add symbol entries only for files in active context
-            active_items.extend([f"symbol:{f}" for f in file_paths])
+        # --- Build content/token callbacks (shared by both phases) ---
         
         def get_item_content(item):
-            """Get content for stability hashing - files or symbol blocks."""
-            if item.startswith("symbol:"):
-                # Symbol entry - compute hash from symbols
+            """Get content for stability hashing - files, symbol blocks, or history."""
+            if item.startswith("history:"):
+                idx = int(item.split(":")[1])
+                if idx < len(history):
+                    msg = history[idx]
+                    return f"{msg.get('role', '')}:{msg.get('content', '')}"
+                return None
+            elif item.startswith("symbol:"):
                 file_path = item.replace("symbol:", "")
                 try:
                     si = self._get_symbol_index()
@@ -737,20 +922,26 @@ class StreamingMixin:
                     pass
                 return None
             else:
-                # Regular file
                 return self._get_file_content_safe(item)
         
         def get_item_tokens(item):
-            """Get token count for an item - files or symbol blocks."""
-            if item.startswith("symbol:"):
-                # Symbol entry - count tokens in formatted block
+            """Get token count for an item - files, symbol blocks, or history."""
+            if item.startswith("history:"):
+                idx = int(item.split(":")[1])
+                if idx < len(history):
+                    msg = history[idx]
+                    content = msg.get('content', '')
+                    role = msg.get('role', '')
+                    formatted = f"### {role.title()}\n{content}\n\n"
+                    return tc.count(formatted) if formatted else 0
+                return 0
+            elif item.startswith("symbol:"):
                 file_path = item.replace("symbol:", "")
                 try:
                     si = self._get_symbol_index()
                     symbols = si.get_symbols(file_path)
                     if symbols:
                         from ..symbol_index.compact_format import format_file_symbol_block
-                        # Get reference data for formatting
                         ref_index = getattr(si, '_reference_index', None)
                         file_refs_data = {}
                         file_imports_data = {}
@@ -772,50 +963,175 @@ class StreamingMixin:
                     pass
                 return 0
             else:
-                # Regular file - count tokens in formatted content
                 content = self._get_file_content_safe(item)
                 if content:
                     return tc.count(f"{item}\n```\n{content}\n```\n")
                 return 0
         
-        # Determine modified items (files that were edited)
+        # --- Phase 1: Detect file/symbol churn ---
+        
+        file_symbol_items = set(file_paths or []) | {f"symbol:{f}" for f in (file_paths or [])}
+        self._last_active_file_symbol_items = file_symbol_items.copy()
+        
+        # --- Phase 2: Controlled graduation (files, symbols, history) ---
+        # For files/symbols: always graduate eligible items (stable files should cache).
+        # For history: graduate when L3 will be invalidated anyway (free piggyback),
+        #   or when eligible history tokens exceed cache_target (standalone graduation).
+        # Active context has no minimum token requirement — it's uncached.
+        
+        all_history = [f"history:{i}" for i in range(len(history))]
+        cache_target = stability.get_cache_target_tokens()
+        
+        # Graduate eligible files and symbols (always - no reason to hold them back)
+        active_file_symbols = set()
+        graduating_file_symbols = set()
+        for item in file_symbol_items:
+            n_val = stability.get_n_value(item)
+            tier = stability.get_tier(item)
+            if n_val >= 3 and tier == 'active':
+                # Eligible: exclude from active so it leaves and enters L3
+                graduating_file_symbols.add(item)
+            else:
+                active_file_symbols.add(item)
+        
+        # Determine modified items (files that were edited) — needed for L3 invalidation check
         modified_items = list(files_modified) if files_modified else []
-        # Symbol entries for modified files are also considered modified
         modified_items.extend([f"symbol:{f}" for f in (files_modified or [])])
         
-        # Pass only active context items - the tracker will:
-        # 1. Keep these items as 'active' with N=0
-        # 2. Move previously-active items that aren't in this list to L3
-        # 3. Trigger ripple promotions for existing L3/L2/L1 items
-        # 4. With cache_target_tokens > 0: use threshold-aware promotion
+        if not cache_target:
+            # Graduation disabled — all history stays active (original behavior)
+            active_history = all_history
+        else:
+            # Find eligible history: any history still in active tier.
+            # History messages are immutable (content never changes), so unlike
+            # files/symbols there's no need to wait for N >= 3 to confirm stability.
+            # They can graduate any time L3 is invalidated.
+            eligible = [
+                h for h in all_history
+                if stability.get_tier(h) == 'active'
+            ]
+            
+            # Detect whether L3 will be invalidated this cycle.
+            # L3 invalidation sources:
+            # 1. Files/symbols graduating from active → L3
+            # 2. Items demoted FROM L3 (content changed while in L3)
+            # 3. Stale items removed from L3
+            l3_demotions = any(
+                stability.get_tier(item) == 'L3'
+                for item in modified_items
+            )
+            l3_stale = 'L3' in stale_broken_tiers
+            l3_will_invalidate = (
+                bool(graduating_file_symbols) or l3_demotions or l3_stale
+            )
+            
+            if l3_will_invalidate and eligible:
+                # Piggyback: L3 is already being invalidated by file/symbol
+                # changes, so graduating history adds zero additional cache cost
+                graduated = set(eligible)
+                active_history = [h for h in all_history if h not in graduated]
+            elif eligible:
+                # Check token threshold for standalone graduation
+                eligible_tokens = sum(get_item_tokens(item) for item in eligible)
+                if eligible_tokens >= cache_target:
+                    # Graduate oldest, keeping recent cache_target worth active
+                    graduated = self._select_history_to_graduate(
+                        eligible, get_item_tokens, cache_target
+                    )
+                    active_history = [h for h in all_history if h not in graduated]
+                else:
+                    # Not enough tokens to justify a cache block
+                    active_history = all_history
+            else:
+                # Nothing eligible yet
+                active_history = all_history
+        
+        # --- Phase 3: Build active items list and update tracker ---
+        
+        active_items = list(active_file_symbols) + active_history
+        
         stability.update_after_response(
             items=active_items,
             get_content=get_item_content,
             modified=modified_items,
             get_tokens=get_item_tokens,
+            broken_tiers=stale_broken_tiers,
         )
         
-        # Log promotions and demotions
+        # --- Phase 4: Log promotions and demotions ---
+        
         promotions = stability.get_last_promotions()
         demotions = stability.get_last_demotions()
         
         if promotions:
-            # Format nicely, stripping symbol: prefix for display
-            promoted_display = []
+            # Group by destination tier
+            promo_by_tier = {}
             for item, tier in promotions:
-                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
-                promoted_display.append(f"{display_name}→{tier}")
-            print(f"📈 Promoted: {', '.join(promoted_display)}")
+                promo_by_tier.setdefault(tier, []).append(item)
+            for tier, items in promo_by_tier.items():
+                names = []
+                for item in items:
+                    if item.startswith("symbol:"):
+                        names.append(f"📦 {item[7:]}")
+                    elif item.startswith("history:"):
+                        names.append(f"💬 msg {item[8:]}")
+                    else:
+                        names.append(f"📄 {item}")
+                count = len(items)
+                print(f"📈 → {tier}: {count} item{'s' if count != 1 else ''} — {', '.join(names)}")
         
         if demotions:
-            demoted_display = []
+            # Group by source tier
+            demo_by_tier = {}
             for item, tier in demotions:
-                display_name = item.replace("symbol:", "📦 ") if item.startswith("symbol:") else item
-                demoted_display.append(f"{display_name}→{tier}")
-            print(f"📉 Demoted: {', '.join(demoted_display)}")
+                demo_by_tier.setdefault(tier, []).append(item)
+            for tier, items in demo_by_tier.items():
+                names = []
+                for item in items:
+                    if item.startswith("symbol:"):
+                        names.append(f"📦 {item[7:]}")
+                    elif item.startswith("history:"):
+                        names.append(f"💬 msg {item[8:]}")
+                    else:
+                        names.append(f"📄 {item}")
+                count = len(items)
+                print(f"📉 {tier} → active: {count} item{'s' if count != 1 else ''} — {', '.join(names)}")
+    
+    def _select_history_to_graduate(self, eligible, get_tokens, keep_tokens):
+        """Select which eligible history messages to graduate from active.
+        
+        Keeps the most recent `keep_tokens` worth of eligible messages in
+        active (they're most likely to be referenced by the LLM). Graduates
+        the rest (older messages) so they enter L3 via ripple promotion.
+        
+        Args:
+            eligible: History item keys sorted by index ascending (oldest first)
+            get_tokens: Callable to get token count for an item
+            keep_tokens: Token budget to keep in active
+            
+        Returns:
+            Set of items to graduate (exclude from active_items)
+        """
+        kept_tokens = 0
+        keep_set = set()
+        
+        # Walk from newest to oldest, accumulating a "keep" budget
+        for item in reversed(eligible):
+            item_tokens = get_tokens(item)
+            if kept_tokens + item_tokens <= keep_tokens:
+                kept_tokens += item_tokens
+                keep_set.add(item)
+            else:
+                break  # Budget exhausted, graduate the rest
+        
+        return set(eligible) - keep_set
     
     def _fire_stream_chunk(self, request_id, content, loop):
-        """Fire stream chunk send (non-blocking).
+        """Fire stream chunk send (non-blocking, fire-and-forget).
+        
+        Each chunk carries the full accumulated content, so dropped or
+        reordered chunks are harmless — the next chunk supersedes it.
+        Only streamComplete needs reliable delivery.
         
         Args:
             request_id: The request ID
@@ -984,6 +1300,8 @@ class StreamingMixin:
                 contents.append(f"{info['symbols']} symbols")
             if info['files'] > 0:
                 contents.append(f"{info['files']} file{'s' if info['files'] != 1 else ''}")
+            if info.get('history', 0) > 0:
+                contents.append(f"{info['history']} history msg{'s' if info['history'] != 1 else ''}")
             if info.get('has_tree'):
                 contents.append('tree')
             if info.get('has_urls'):
@@ -1036,26 +1354,27 @@ class StreamingMixin:
             if hasattr(self, 'get_call'):
                 call = self.get_call()
                 if call and 'PromptView.compactionEvent' in call:
-                    # Fire-and-forget: don't await since frontend doesn't return a value
-                    asyncio.create_task(call['PromptView.compactionEvent'](request_id, event))
-                    # Give it a moment to send
-                    await asyncio.sleep(0.05)
+                    await asyncio.wait_for(
+                        call['PromptView.compactionEvent'](request_id, event),
+                        timeout=5.0
+                    )
+        except asyncio.TimeoutError:
+            print(f"⚠️ compactionEvent timed out for {request_id}")
         except Exception as e:
             print(f"Error sending compaction event: {e}")
 
     async def _send_stream_complete(self, request_id, result):
         """Send stream completion to the client."""
         try:
-            # Small delay to ensure final streamChunk is delivered first
-            await asyncio.sleep(0.05)
             if hasattr(self, 'get_call'):
                 call = self.get_call()
                 if call and 'PromptView.streamComplete' in call:
-                    # Fire-and-forget: don't await since frontend doesn't return a value
-                    # and awaiting can hang if the connection is in a bad state
-                    asyncio.create_task(call['PromptView.streamComplete'](request_id, result))
-                    # Give it a moment to send
-                    await asyncio.sleep(0.1)
+                    await asyncio.wait_for(
+                        call['PromptView.streamComplete'](request_id, result),
+                        timeout=5.0
+                    )
+        except asyncio.TimeoutError:
+            print(f"⚠️ streamComplete timed out for {request_id}")
         except Exception as e:
             print(f"Error sending stream complete: {e}")
             import traceback
@@ -1076,6 +1395,9 @@ class StreamingMixin:
             return
         
         try:
+            # Give frontend time to process streamComplete before starting compaction
+            await asyncio.sleep(0.5)
+            
             # Notify frontend that compaction is starting
             await self._send_compaction_event(request_id, {
                 'type': 'compaction_start',
@@ -1092,6 +1414,11 @@ class StreamingMixin:
             if compaction_result and compaction_result.case != "none":
                 print(f"📝 History compacted: {compaction_result.case} "
                       f"({compaction_result.tokens_before}→{compaction_result.tokens_after} tokens)")
+                
+                # Re-register history items after compaction
+                # Old history:* entries are purged, new ones will register on next request
+                if self._context_manager:
+                    self._context_manager.reregister_history_items()
                 
                 # Build the compacted messages for the frontend
                 # Format: list of {role, content} dicts

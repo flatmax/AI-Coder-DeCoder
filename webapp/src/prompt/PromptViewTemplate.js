@@ -3,14 +3,13 @@ import { repeat } from 'lit/directives/repeat.js';
 import './UserCard.js';
 import './AssistantCard.js';
 import './SpeechToText.js';
-import '../find-in-files/FindInFiles.js';
-import '../context-viewer/ContextViewer.js';
-import '../context-viewer/CacheViewer.js';
 import { TABS } from '../utils/constants.js';
 import { renderHud } from './HudTemplate.js';
 import { renderUrlChips } from './UrlChipsTemplate.js';
 import { renderHistoryBar } from './HistoryBarTemplate.js';
 import { renderSnippetButtons } from './SnippetTemplate.js';
+
+const EMPTY_ARRAY = [];
 
 function renderResizeHandles(component) {
   if (component.minimized) return '';
@@ -120,7 +119,7 @@ export function renderPromptView(component) {
       </div>
       ${component.minimized ? '' : html`
         <div class="main-content">
-          ${component.activeLeftTab === TABS.FILES ? html`
+          <div class="files-tab-panel ${component.activeLeftTab !== TABS.FILES ? 'tab-hidden' : ''}">
             ${component.showFilePicker && !component.leftPanelCollapsed ? html`
               <div class="picker-panel" style="width: ${component.leftPanelWidth}px">
                 <file-picker
@@ -142,17 +141,19 @@ export function renderPromptView(component) {
             ` : component.showFilePicker && component.leftPanelCollapsed ? html`
               ${renderPanelResizer(component)}
             ` : ''}
-            <div class="chat-panel">
+            <div class="chat-panel"
+                 @dragover=${(e) => component._handleDragOver(e)}
+                 @drop=${(e) => component._handleDrop(e)}>
               <div class="messages-wrapper">
                 <div class="messages" id="messages-container" @copy-to-prompt=${(e) => component.handleCopyToPrompt(e)} @file-mention-click=${(e) => component.handleFileMentionClick(e)} @wheel=${(e) => component.handleWheel(e)}>
                   ${repeat(
                     component.messageHistory,
                     (message) => message.id,
-                    message => {
+                    (message) => {
                       if (message.role === 'user') {
-                        return html`<user-card .content=${message.content} .images=${message.images || []}></user-card>`;
+                        return html`<user-card .content=${message.content} .images=${message.images || EMPTY_ARRAY}></user-card>`;
                       } else if (message.role === 'assistant') {
-                        return html`<assistant-card .content=${message.content} .mentionedFiles=${component._addableFiles} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || []}></assistant-card>`;
+                        return html`<assistant-card .content=${message.content} .final=${message.final !== false} .mentionedFiles=${component._addableFiles} .selectedFiles=${component.selectedFiles} .editResults=${message.editResults || EMPTY_ARRAY}></assistant-card>`;
                       }
                     }
                   )}
@@ -177,6 +178,34 @@ export function renderPromptView(component) {
               ` : ''}
               ${renderUrlChips(component)}
               <div class="input-area">
+                ${component._showHistorySearch ? html`
+                  <div class="history-search-dropdown">
+                    ${component._historySearchResults.length > 0 ? html`
+                      <div class="history-search-results">
+                        ${[...component._historySearchResults].reverse().map((result, i) => {
+                          const realIndex = component._historySearchResults.length - 1 - i;
+                          return html`
+                            <div class="history-search-item ${realIndex === component._historySearchIndex ? 'selected' : ''}"
+                                 @click=${() => component._selectHistorySearchResult(realIndex)}
+                                 @mouseenter=${() => { component._historySearchIndex = realIndex; component.requestUpdate(); }}>
+                              <span class="history-search-preview">${result.preview}</span>
+                            </div>
+                          `;
+                        })}
+                      </div>
+                    ` : html`
+                      <div class="history-search-empty">No matches</div>
+                    `}
+                    <input class="history-overlay-input"
+                           type="text"
+                           placeholder="Type to search history..."
+                           .value=${component._historySearchQuery || ''}
+                           @input=${(e) => component._handleHistoryOverlayInput(e)}
+                           @keydown=${(e) => component._handleHistoryOverlayKeydown(e)}
+                           @blur=${() => setTimeout(() => component._closeHistorySearch(), 150)}
+                    />
+                  </div>
+                ` : ''}
                 <div class="input-buttons-stack">
                   <speech-to-text @transcript=${(e) => component.handleSpeechTranscript(e)}></speech-to-text>
                   ${renderSnippetButtons(component)}
@@ -186,26 +215,26 @@ export function renderPromptView(component) {
                   .value=${component.inputValue}
                   @input=${component.handleInput}
                   @keydown=${component.handleKeyDown}
-                  ?disabled=${component.isStreaming}
+                  ?disabled=${component.isStreaming || component.isCompacting}
                 ></textarea>
-                ${component.isStreaming 
+                ${component.isStreaming || component.isCompacting
                   ? html`<button class="send-btn stop-btn" @click=${() => component.stopStreaming()}>Stop</button>`
                   : html`<button class="send-btn" @click=${component.sendMessage}>Send</button>`
                 }
               </div>
             </div>
-          ` : component.activeLeftTab === TABS.SEARCH ? html`
-            <div class="embedded-panel">
+          </div>
+          ${component._visitedTabs.has(TABS.SEARCH) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.SEARCH ? 'tab-hidden' : ''}">
               <find-in-files
-                .rpcCall=${component.call}
                 @result-selected=${(e) => component.handleSearchResultSelected(e)}
                 @file-selected=${(e) => component.handleSearchFileSelected(e)}
               ></find-in-files>
             </div>
-          ` : component.activeLeftTab === TABS.CONTEXT ? html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.CONTEXT) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.CONTEXT ? 'tab-hidden' : ''}">
               <context-viewer
-                .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
                 .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
                 .excludedUrls=${component.excludedUrls}
@@ -213,10 +242,10 @@ export function renderPromptView(component) {
                 @url-inclusion-changed=${(e) => component.handleContextUrlInclusionChanged(e)}
               ></context-viewer>
             </div>
-          ` : component.activeLeftTab === TABS.CACHE ? html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.CACHE) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.CACHE ? 'tab-hidden' : ''}">
               <cache-viewer
-                .rpcCall=${component.call}
                 .selectedFiles=${component.selectedFiles || []}
                 .fetchedUrls=${Object.keys(component.fetchedUrls || {})}
                 .excludedUrls=${component.excludedUrls}
@@ -225,14 +254,14 @@ export function renderPromptView(component) {
                 @file-selected=${(e) => component.handleFileMentionClick(e)}
               ></cache-viewer>
             </div>
-          ` : html`
-            <div class="embedded-panel">
+          ` : ''}
+          ${component._visitedTabs.has(TABS.SETTINGS) ? html`
+            <div class="embedded-panel ${component.activeLeftTab !== TABS.SETTINGS ? 'tab-hidden' : ''}">
               <settings-panel
-                .rpcCall=${component.call}
                 @config-edit-request=${(e) => component.handleConfigEditRequest(e)}
               ></settings-panel>
             </div>
-          `}
+          ` : ''}
         </div>
       `}
       ${renderHistoryBar(component)}

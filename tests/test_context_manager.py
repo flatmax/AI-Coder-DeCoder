@@ -394,8 +394,8 @@ class TestContextManagerCacheStability:
         assert mgr.cache_stability.get_tier("test.py") == 'active'
         assert mgr.cache_stability.get_n_value("test.py") == 0
     
-    def test_cache_stability_persists_to_file(self, tmp_path):
-        """Stability data is persisted to .aicoder/cache_stability.json."""
+    def test_cache_stability_is_ephemeral(self, tmp_path):
+        """Stability data is not persisted to disk (ephemeral per session)."""
         mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
         
         mgr.cache_stability.update_after_response(
@@ -404,7 +404,7 @@ class TestContextManagerCacheStability:
         )
         
         stability_file = tmp_path / ".aicoder" / "cache_stability.json"
-        assert stability_file.exists()
+        assert not stability_file.exists()
     
     def test_cache_stability_tracks_symbol_entries(self, tmp_path):
         """Symbol entries use 'symbol:' prefix to distinguish from files."""
@@ -457,6 +457,73 @@ class TestContextManagerCacheStability:
         
         tiers = mgr.cache_stability.get_items_by_tier(["a.py", "b.py"])
         assert set(tiers['L3']) == {"a.py", "b.py"}
+    
+    def test_cache_stability_tracks_history_entries(self, tmp_path):
+        """History entries use 'history:' prefix and track independently."""
+        mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
+        
+        # Track history items alongside files
+        mgr.cache_stability.update_after_response(
+            items=["test.py", "history:0", "history:1"],
+            get_content=lambda x: {
+                "test.py": "content",
+                "history:0": "user:Hello",
+                "history:1": "assistant:Hi",
+            }[x]
+        )
+        
+        assert mgr.cache_stability.get_tier("history:0") == 'active'
+        assert mgr.cache_stability.get_tier("history:1") == 'active'
+        assert mgr.cache_stability.get_tier("test.py") == 'active'
+    
+    def test_clear_history_purges_stability_entries(self, tmp_path):
+        """clear_history removes history:* entries from stability tracker."""
+        mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
+        
+        # Add history and track in stability
+        mgr.add_message("user", "Hello")
+        mgr.add_message("assistant", "Hi")
+        
+        mgr.cache_stability.update_after_response(
+            items=["history:0", "history:1", "file.py"],
+            get_content=lambda x: f"content_{x}"
+        )
+        
+        assert mgr.cache_stability.get_tier("history:0") == 'active'
+        assert mgr.cache_stability.get_tier("file.py") == 'active'
+        
+        # Clear history
+        mgr.clear_history()
+        
+        # History entries purged, file entry remains
+        assert mgr.cache_stability.get_tier("history:0") == 'active'  # Default (gone)
+        assert "history:0" not in mgr.cache_stability._stability
+        assert "file.py" in mgr.cache_stability._stability
+    
+    def test_reregister_history_items(self, tmp_path):
+        """reregister_history_items purges old entries for fresh start."""
+        mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
+        
+        # Build up some history stability
+        mgr.cache_stability.update_after_response(
+            items=["history:0", "history:1"],
+            get_content=lambda x: f"content_{x}"
+        )
+        # Simulate promotion by multiple rounds
+        for _ in range(3):
+            mgr.cache_stability.update_after_response(
+                items=["history:0", "history:1"],
+                get_content=lambda x: f"content_{x}"
+            )
+        
+        assert mgr.cache_stability.get_n_value("history:0") == 3
+        
+        # Re-register (simulates post-compaction)
+        mgr.reregister_history_items()
+        
+        # Old entries are gone
+        assert "history:0" not in mgr.cache_stability._stability
+        assert "history:1" not in mgr.cache_stability._stability
 
 
 class TestContextManagerHUD:

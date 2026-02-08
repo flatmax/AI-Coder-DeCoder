@@ -143,6 +143,7 @@ export const promptViewStyles = css`
     display: flex;
     flex: 1;
     overflow: hidden;
+    position: relative;
   }
 
   .picker-panel {
@@ -165,6 +166,23 @@ export const promptViewStyles = css`
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  .files-tab-panel {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .tab-hidden {
+    visibility: hidden !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    pointer-events: none !important;
+    z-index: -1 !important;
   }
 
   .embedded-panel find-in-files,
@@ -314,6 +332,7 @@ export const promptViewStyles = css`
     padding: 12px;
     gap: 8px;
     border-top: 1px solid #0f3460;
+    position: relative;
   }
 
   textarea {
@@ -390,6 +409,88 @@ export const promptViewStyles = css`
   .input-buttons-stack .file-btn {
     padding: 6px 10px;
     font-size: 12px;
+  }
+
+  /* History search dropdown */
+  .history-search-dropdown {
+    position: absolute;
+    bottom: 100%;
+    left: 12px;
+    right: 12px;
+    max-height: 280px;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    border-radius: 8px 8px 0 0;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
+    z-index: 20;
+    margin-bottom: -1px;
+  }
+
+  .history-overlay-input {
+    width: 100%;
+    padding: 8px 12px;
+    background: #1a1a2e;
+    border: none;
+    border-top: 1px solid #0f3460;
+    border-radius: 0;
+    color: #eee;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .history-overlay-input:focus {
+    border-top-color: #e94560;
+  }
+
+  .history-overlay-input::placeholder {
+    color: #666;
+  }
+
+  .history-search-results {
+    overflow-y: auto;
+    max-height: 220px;
+  }
+
+  .history-search-empty {
+    padding: 12px;
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+  }
+
+  .history-search-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(15, 52, 96, 0.3);
+    transition: background 0.1s;
+  }
+
+  .history-search-item:last-child {
+    border-bottom: none;
+  }
+
+  .history-search-item:hover,
+  .history-search-item.selected {
+    background: rgba(233, 69, 96, 0.15);
+  }
+
+  .history-search-preview {
+    color: #ccc;
+    font-size: 13px;
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+  }
+
+  .history-search-item.selected .history-search-preview {
+    color: #eee;
   }
 
   /* Snippet drawer - collapsible horizontal expand */

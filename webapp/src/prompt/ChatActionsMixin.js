@@ -191,6 +191,10 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
   async sendMessage() {
     if (!this.inputValue.trim() && this.pastedImages.length === 0) return;
 
+    // Reset scroll state so auto-scroll works for the new exchange
+    this._userHasScrolledUp = false;
+    this._showScrollButton = false;
+
     const userContent = this.inputValue;
     const imagesToSend = this.getImagesForSend();
     const imagesToStore = this.pastedImages.length > 0 ? [...this.pastedImages] : null;
@@ -234,6 +238,7 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
       const requestId = this._generateRequestId();
       this._streamingRequests.set(requestId, { message: messageToSend });
       this.isStreaming = true;
+      this._startStreamingWatchdog();
       
       // Start streaming request - streamChunk will create the assistant message
       const response = await this.call['LiteLLM.chat_streaming'](
@@ -264,10 +269,9 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
   }
 
   async _buildDiffFiles(result) {
-    const diffFiles = [];
     const newContents = result.content || {};
     
-    for (const edit of result.passed) {
+    const diffFilePromises = result.passed.map(async (edit) => {
       const [filePath, original, updated] = edit;
       
       let originalContent = '';
@@ -294,15 +298,15 @@ export const ChatActionsMixin = (superClass) => class extends superClass {
         }
       }
       
-      diffFiles.push({
+      return {
         path: filePath,
         original: originalContent,
         modified: modifiedContent,
         isNew: original === ''
-      });
-    }
+      };
+    });
     
-    return diffFiles;
+    return Promise.all(diffFilePromises);
   }
 
   async _getOriginalFileContent(filePath, newContent, searchBlock, replaceBlock) {

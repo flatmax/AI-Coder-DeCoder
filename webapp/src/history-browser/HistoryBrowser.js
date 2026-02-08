@@ -30,6 +30,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._debouncedSearch = debounce(() => this.performSearch(), 300);
     this._messagesScrollTop = 0;
     this._sessionsScrollTop = 0;
+    this._sessionsLoadedAt = 0;  // Timestamp of last session list fetch
+    this._sessionsCacheTTL = 10000;  // 10 seconds before refetching
   }
 
   onRpcReady() {
@@ -41,14 +43,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
   async show() {
     this.visible = true;
-    await this.loadSessions();
+    this.loadSessions(); // non-blocking; TTL cache prevents redundant fetches
     
     // Restore scroll positions after render
-    await this.updateComplete;
-    const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
-    const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
-    if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
-    if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
+    this.updateComplete.then(() => {
+      const messagesPanel = this.shadowRoot?.querySelector('.messages-panel');
+      const sessionsPanel = this.shadowRoot?.querySelector('.sessions-panel');
+      if (messagesPanel) messagesPanel.scrollTop = this._messagesScrollTop;
+      if (sessionsPanel) sessionsPanel.scrollTop = this._sessionsScrollTop;
+    });
   }
 
   hide() {
@@ -63,9 +66,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // so reopening preserves state
   }
 
-  async loadSessions() {
+  async loadSessions(force = false) {
+    // Skip refetch if sessions were loaded recently (within TTL)
+    const now = Date.now();
+    if (!force && this.sessions.length > 0 && (now - this._sessionsLoadedAt) < this._sessionsCacheTTL) {
+      return;
+    }
     const result = await this._rpcWithState('LiteLLM.history_list_sessions', {}, 50);
     this.sessions = result || [];
+    this._sessionsLoadedAt = Date.now();
   }
 
   async selectSession(sessionId, messageId = null) {
@@ -114,7 +123,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     
     this.isSearching = true;
+    this._searchGen = (this._searchGen || 0) + 1;
+    const gen = this._searchGen;
     const result = await this._rpcWithState('LiteLLM.history_search', {}, this.searchQuery, null, 100);
+    if (gen !== this._searchGen) return; // stale result — discard
     this.searchResults = result || [];
   }
 
@@ -134,6 +146,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     if (!this.selectedSession || this.selectedSession.length === 0) {
       return;
     }
+    // Invalidate session cache since loading a session means context changed
+    this._sessionsLoadedAt = 0;
     this.dispatchEvent(new CustomEvent('load-session', {
       detail: { messages: this.selectedSession, sessionId: this.selectedSessionId },
       bubbles: true,

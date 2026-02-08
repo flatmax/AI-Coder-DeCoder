@@ -61,11 +61,11 @@ class ContextManager:
         
         # Unified cache stability tracker for files AND symbol map entries
         # (4-tier for Bedrock compatibility: L0-L3 cached, active uncached)
+        # Fresh start each session — tiers rebuild from reference graph on first request.
+        # No cross-session persistence: prevents stale L0 assignments from prior sessions.
         self.cache_stability: Optional[StabilityTracker] = None
         if repo_root:
-            stability_path = Path(repo_root) / '.aicoder' / 'cache_stability.json'
             self.cache_stability = StabilityTracker(
-                persistence_path=stability_path,
                 thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
                 initial_tier='L3',
                 cache_target_tokens=cache_target_tokens,
@@ -137,6 +137,20 @@ class ContextManager:
     def clear_history(self) -> None:
         """Clear conversation history."""
         self._history = []
+        # Purge history entries from stability tracker
+        if self.cache_stability:
+            self.cache_stability.remove_by_prefix('history:')
+    
+    def reregister_history_items(self) -> None:
+        """Re-register history items in the stability tracker after compaction.
+        
+        Removes all existing history:* entries and registers current history
+        messages as new active items (N=0). They will promote normally from there.
+        """
+        if not self.cache_stability:
+            return
+        self.cache_stability.remove_by_prefix('history:')
+        # New entries will be registered on next _update_cache_stability call
     
     def history_token_count(self) -> int:
         """Get token count of current history."""

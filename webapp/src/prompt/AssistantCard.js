@@ -6,8 +6,28 @@ export class AssistantCard extends LitElement {
     content: { type: String },
     mentionedFiles: { type: Array },
     selectedFiles: { type: Array },  // Files currently in context
-    editResults: { type: Array }  // Results from edit operations (passed from message or loaded from history)
+    editResults: { type: Array },  // Results from edit operations (passed from message or loaded from history)
+    final: { type: Boolean }  // Whether the message is complete (not still streaming)
   };
+
+  shouldUpdate(changedProperties) {
+    // Skip re-render when all "changed" properties have identical references.
+    // Combined with stable empty-array fallbacks (EMPTY_ARRAY in PromptViewTemplate),
+    // this prevents re-rendering all cards when file selection changes or during streaming.
+    for (const [key, oldVal] of changedProperties) {
+      const newVal = this[key];
+      if (newVal !== oldVal) {
+        // For arrays, compare by length + elements to avoid spurious re-renders
+        // from new array references with identical content
+        if (Array.isArray(newVal) && Array.isArray(oldVal)) {
+          if (newVal.length !== oldVal.length || newVal.some((v, i) => v !== oldVal[i])) return true;
+        } else {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   static styles = css`
     :host {
@@ -95,7 +115,7 @@ export class AssistantCard extends LitElement {
             <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>
           </div>
         </div>
-        <card-markdown .content=${this.content} role="assistant" .mentionedFiles=${this.mentionedFiles || []} .selectedFiles=${this.selectedFiles || []} .editResults=${this.editResults || []}></card-markdown>
+        <card-markdown .content=${this.content} role="assistant" .final=${this.final !== false} ?streaming=${this.final === false} .mentionedFiles=${this.mentionedFiles || []} .selectedFiles=${this.selectedFiles || []} .editResults=${this.editResults || []}></card-markdown>
         <div class="footer-actions">
           <button class="action-btn" @click=${this.copyToClipboard} title="Copy to clipboard">📋</button>
           <button class="action-btn" @click=${this.copyToPrompt} title="Copy to prompt">↩️</button>

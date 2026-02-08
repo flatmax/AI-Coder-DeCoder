@@ -9,12 +9,9 @@ import { WindowControlsMixin } from './prompt/WindowControlsMixin.js';
 import { StreamingMixin } from './prompt/StreamingMixin.js';
 import { UrlService } from './services/UrlService.js';
 import { extractResponse as _extractResponse } from './utils/rpc.js';
+import { setSharedRpcCall } from './utils/RpcContext.js';
 import { TABS } from './utils/constants.js';
 import './file-picker/FilePicker.js';
-import './history-browser/HistoryBrowser.js';
-import './find-in-files/FindInFiles.js';
-import './context-viewer/ContextViewer.js';
-import './settings/SettingsPanel.js';
 
 const MixedBase = StreamingMixin(
   WindowControlsMixin(
@@ -82,13 +79,11 @@ export class PromptView extends MixedBase {
     this.promptSnippets = [];
     this.snippetDrawerOpen = false;
     this.filePickerExpanded = {};
+    this._visitedTabs = new Set([TABS.FILES]);
     this._selectedObject = {};
     this._addableFiles = [];
     this.leftPanelWidth = parseInt(localStorage.getItem('promptview-left-panel-width')) || 280;
     this.leftPanelCollapsed = localStorage.getItem('promptview-left-panel-collapsed') === 'true';
-    this._filePickerScrollTop = 0;
-    this._messagesScrollTop = 0;
-    this._wasScrolledUp = false;
     this._isPanelResizing = false;
     
     const urlParams = new URLSearchParams(window.location.search);
@@ -182,21 +177,37 @@ export class PromptView extends MixedBase {
         selected[path] = true;
       }
       this._selectedObject = selected;
+
+      // Stabilize array reference — only replace if contents actually changed
+      const prev = this._stableSelectedFiles;
+      const curr = this.selectedFiles || [];
+      if (!prev || prev.length !== curr.length || curr.some((f, i) => f !== prev[i])) {
+        this._stableSelectedFiles = curr;
+      } else {
+        this.selectedFiles = prev;
+      }
     }
     if (changedProperties.has('fileTree')) {
-      this._addableFiles = this.getAddableFiles();
+      // Memoize: only rebuild if tree actually changed
+      const newFiles = this.getAddableFiles();
+      const prev = this._addableFiles;
+      if (!prev || prev.length !== newFiles.length || newFiles.some((f, i) => f !== prev[i])) {
+        this._addableFiles = newFiles;
+      }
     }
   }
 
   // ============ History Browser ============
 
-  toggleHistoryBrowser() {
+  async toggleHistoryBrowser() {
+    if (!this.showHistoryBrowser) {
+      await import('./history-browser/HistoryBrowser.js');
+    }
     this.showHistoryBrowser = !this.showHistoryBrowser;
     if (this.showHistoryBrowser) {
       this.updateComplete.then(() => {
         const historyBrowser = this.shadowRoot?.querySelector('history-browser');
         if (historyBrowser) {
-          historyBrowser.rpcCall = this.call;
           historyBrowser.show();
         }
       });
@@ -219,8 +230,10 @@ export class PromptView extends MixedBase {
   async handleLoadSession(e) {
     const { messages, sessionId } = e.detail;
     
-    // Clear current history
+    // Clear current history (also resets scroll state)
     this.clearHistory();
+    this._userHasScrolledUp = false;
+    this._showScrollButton = false;
     
     // If we have a sessionId, use load_session_into_context to populate context manager
     if (sessionId) {
@@ -238,19 +251,15 @@ export class PromptView extends MixedBase {
     
     this.showHistoryBrowser = false;
     
-    // Reset saved scroll positions to avoid stale values after session load
-    this._filePickerScrollTop = 0;
-    this._messagesScrollTop = 0;
-    this._wasScrolledUp = false;
-    
     // Scroll to bottom after loading session (double rAF for content-visibility)
     await this.updateComplete;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => this.scrollToBottomNow());
     });
     
-    // Refresh history bar to reflect loaded session
+    // Refresh history bar and cache viewer to reflect loaded session
     await this._refreshHistoryBar();
+    this._refreshCacheViewer();
   }
 
   connectedCallback() {
@@ -260,7 +269,8 @@ export class PromptView extends MixedBase {
     this.initWindowControls();
     this.initStreaming();
     this._initUrlService();
-    this.setupScrollObserver();
+    // Defer scroll observer setup until DOM is rendered
+    this.updateComplete.then(() => this.setupScrollObserver());
     
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
@@ -287,54 +297,34 @@ export class PromptView extends MixedBase {
   /**
    * Switch between tabs (files/search/context)
    */
-  switchTab(tab) {
-    // Save scroll positions before switching away from files tab
-    if (this.activeLeftTab === TABS.FILES) {
-      const filePicker = this.shadowRoot?.querySelector('file-picker');
-      if (filePicker) {
-        this._filePickerScrollTop = filePicker.getScrollTop();
-      }
-      const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-      if (messagesContainer) {
-        this._messagesScrollTop = messagesContainer.scrollTop;
-        this._messagesScrollHeight = messagesContainer.scrollHeight;
-        // Save whether user had scrolled up
-        this._wasScrolledUp = this._userHasScrolledUp;
+  async switchTab(tab) {
+    // Lazy-load tab components on first visit
+    if (!this._visitedTabs.has(tab)) {
+      switch (tab) {
+        case TABS.SEARCH:
+          await import('./find-in-files/FindInFiles.js');
+          break;
+        case TABS.CONTEXT:
+          await import('./context-viewer/ContextViewer.js');
+          break;
+        case TABS.CACHE:
+          await import('./context-viewer/CacheViewer.js');
+          break;
+        case TABS.SETTINGS:
+          await import('./settings/SettingsPanel.js');
+          break;
       }
     }
 
-    // Disconnect observer before tab switch to prevent interference
-    this.disconnectScrollObserver();
-
+    this._visitedTabs.add(tab);
     this.activeLeftTab = tab;
 
-    // Restore scroll positions when switching back to files tab
+    // Re-establish scroll observer when switching back to chat tab
     if (tab === TABS.FILES) {
-      // Use double rAF to ensure DOM is fully rendered after tab switch
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const filePicker = this.shadowRoot?.querySelector('file-picker');
-          if (filePicker && this._filePickerScrollTop > 0) {
-            filePicker.setScrollTop(this._filePickerScrollTop);
-          }
-          if (this._wasScrolledUp) {
-            // User was scrolled up - restore their position
-            const messagesContainer = this.shadowRoot?.querySelector('#messages-container');
-            if (messagesContainer) {
-              messagesContainer.scrollTop = this._messagesScrollTop;
-            }
-            this._userHasScrolledUp = true;
-            this._showScrollButton = true;
-          } else {
-            // User was at bottom - scroll to sentinel
-            this.scrollToBottomNow();
-          }
-          // Re-setup observer after scroll is restored
-          this.setupScrollObserver();
-          this.requestUpdate();
-        });
-      });
-    } else if (tab === TABS.SEARCH) {
+      this.updateComplete.then(() => this.setupScrollObserver());
+    }
+
+    if (tab === TABS.SEARCH) {
       this.updateComplete.then(() => {
         const findInFiles = this.shadowRoot?.querySelector('find-in-files');
         if (findInFiles) {
@@ -357,15 +347,12 @@ export class PromptView extends MixedBase {
   }
 
   /**
-   * Refresh a viewer component (context-viewer or cache-viewer) with current state
+   * Refresh a viewer component (context-viewer or cache-viewer) with current state.
+   * Properties flow via template bindings; we just trigger the refresh and sync history bar.
    */
   async _refreshViewer(selector) {
     const viewer = this.shadowRoot?.querySelector(selector);
     if (viewer && this.call) {
-      viewer.rpcCall = this.call;
-      viewer.selectedFiles = this.selectedFiles || [];
-      viewer.fetchedUrls = Object.keys(this.fetchedUrls || {});
-      viewer.excludedUrls = this.excludedUrls;
       await viewer.refreshBreakdown();
       
       // Sync history bar with viewer's breakdown data
@@ -380,8 +367,7 @@ export class PromptView extends MixedBase {
    */
   async _refreshSettingsPanel() {
     const settingsPanel = this.shadowRoot?.querySelector('settings-panel');
-    if (settingsPanel && this.call) {
-      settingsPanel.rpcCall = this.call;
+    if (settingsPanel) {
       await settingsPanel.loadConfigInfo();
     }
   }
@@ -414,17 +400,23 @@ export class PromptView extends MixedBase {
    */
   async _refreshHistoryBar() {
     if (!this.call) return;
+    if (this._refreshHistoryBarPromise) return this._refreshHistoryBarPromise;
     
-    try {
-      const response = await this.call['LiteLLM.get_context_breakdown'](
-        this.selectedFiles || [],
-        Object.keys(this.fetchedUrls || {})
-      );
-      const breakdown = this.extractResponse(response);
-      this._syncHistoryBarFromBreakdown(breakdown);
-    } catch (e) {
-      console.warn('Could not refresh history bar:', e);
-    }
+    this._refreshHistoryBarPromise = (async () => {
+      try {
+        const response = await this.call['LiteLLM.get_context_breakdown'](
+          this.selectedFiles || [],
+          Object.keys(this.fetchedUrls || {})
+        );
+        const breakdown = this.extractResponse(response);
+        this._syncHistoryBarFromBreakdown(breakdown);
+      } catch (e) {
+        console.warn('Could not refresh history bar:', e);
+      }
+    })();
+    
+    try { await this._refreshHistoryBarPromise; }
+    finally { this._refreshHistoryBarPromise = null; }
   }
 
   /**
@@ -501,6 +493,7 @@ export class PromptView extends MixedBase {
     this.destroyWindowControls();
     this.disconnectScrollObserver();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
+    this._urlService?.destroy();
     // Clean up any panel resize listeners
     window.removeEventListener('mousemove', this._boundPanelResizeMove);
     window.removeEventListener('mouseup', this._boundPanelResizeEnd);
@@ -520,6 +513,9 @@ export class PromptView extends MixedBase {
       console.warn('setupDone called but this.call is not available yet');
       return;
     }
+    
+    // Publish RPC call object for all RpcMixin components
+    setSharedRpcCall(this.call);
     
     await this.loadFileTree();
     await this.loadLastSession();
@@ -556,11 +552,13 @@ export class PromptView extends MixedBase {
       this.inputValue += message;
     }
     
-    // Focus textarea after appending
+    // Focus textarea and resize after Lit has updated the DOM
     this.updateComplete.then(() => {
       const textarea = this.shadowRoot?.querySelector('textarea');
       if (textarea) {
         textarea.focus();
+        // Ensure textarea.value is in sync before measuring
+        textarea.value = this.inputValue;
         // Move cursor to end
         textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
         // Trigger resize
@@ -626,8 +624,9 @@ export class PromptView extends MixedBase {
         }
       }
       
-      // Refresh history bar to reflect loaded session
+      // Refresh history bar and cache viewer to reflect loaded session
       await this._refreshHistoryBar();
+      this._refreshCacheViewer();
     } catch (e) {
       console.warn('Could not load last session:', e);
       console.error(e);
