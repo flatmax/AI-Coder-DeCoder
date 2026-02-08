@@ -148,6 +148,8 @@ This is the critical rule that prevents unnecessary cache invalidation:
 
 The result: in steady state, all tiers are cached. Only an actual content change triggers movement, and the cascade ensures each tier ends up with progressively more stable content.
 
+**Empty active set**: If no files are selected, the active set is empty and nothing graduates into L3. However, the cascade still operates on cached tiers — if a tier is invalidated (e.g., a file was unchecked, removing its entry from a cached tier), veterans in lower tiers can still promote upward through the normal cascade rules, provided each tier meets its minimum token requirement.
+
 ### Ripple Detection and Cascade Trigger
 
 A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
@@ -297,7 +299,7 @@ When a file is in active context (selected by the user), its **full content** is
 active_context_files = set(file_paths)
 ```
 
-Symbol tiers only include entries for files **not** in this set. When a file is added to context, its symbol entry disappears from its cached tier — changing that tier's block content and causing a cache miss (which is also a ripple for piggybacking purposes).
+Symbol tiers only include entries for files **not** in this set. When a file is added to context, its symbol entry disappears from its cached tier — changing that tier's block content and causing a cache miss (which constitutes a tier invalidation for cascade purposes).
 
 ## Demotion
 
