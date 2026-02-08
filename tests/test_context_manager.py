@@ -394,8 +394,8 @@ class TestContextManagerCacheStability:
         assert mgr.cache_stability.get_tier("test.py") == 'active'
         assert mgr.cache_stability.get_n_value("test.py") == 0
     
-    def test_cache_stability_persists_to_file(self, tmp_path):
-        """Stability data is persisted to .aicoder/cache_stability.json."""
+    def test_cache_stability_is_ephemeral(self, tmp_path):
+        """Stability data is not persisted to disk (ephemeral per session)."""
         mgr = ContextManager("gpt-4", repo_root=str(tmp_path))
         
         mgr.cache_stability.update_after_response(
@@ -404,7 +404,7 @@ class TestContextManagerCacheStability:
         )
         
         stability_file = tmp_path / ".aicoder" / "cache_stability.json"
-        assert stability_file.exists()
+        assert not stability_file.exists()
     
     def test_cache_stability_tracks_symbol_entries(self, tmp_path):
         """Symbol entries use 'symbol:' prefix to distinguish from files."""

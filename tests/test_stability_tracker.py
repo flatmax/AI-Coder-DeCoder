@@ -17,9 +17,9 @@ from ac.context.stability_tracker import (
 class TestStabilityTrackerInit:
     """Tests for StabilityTracker initialization."""
     
-    def test_init_with_default_thresholds(self, stability_path):
+    def test_init_with_default_thresholds(self):
         """Default thresholds use 4-tier config."""
-        tracker = StabilityTracker(persistence_path=stability_path)
+        tracker = StabilityTracker()
         assert tracker.get_thresholds() == {'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
         assert tracker.get_tier_order() == ['L3', 'L2', 'L1', 'L0']
     
@@ -33,13 +33,6 @@ class TestStabilityTrackerInit:
         """4-tier Bedrock-optimized configuration."""
         assert len(stability_tracker.get_thresholds()) == 4
         assert stability_tracker._initial_tier == 'L3'
-    
-    def test_init_creates_parent_directory(self, tmp_path):
-        """Persistence path parent directory is created on save."""
-        nested_path = tmp_path / "subdir" / "stability.json"
-        tracker = StabilityTracker(persistence_path=nested_path)
-        tracker.save()
-        assert nested_path.parent.exists()
 
 
 class TestTierConstants:
@@ -712,87 +705,23 @@ class TestStabilityTrackerGetItemsByTier:
         assert result['L3'] == ["a.py", "b.py"]
 
 
-class TestStabilityTrackerPersistence:
-    """Tests for save/load functionality."""
+class TestStabilityTrackerClear:
+    """Tests for clear functionality."""
     
-    def test_save_and_load(self, stability_path):
-        """Data persists across tracker instances."""
-        # Create and populate tracker
-        tracker1 = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        
-        tracker1._stability = {
-            "test.py": StabilityInfo(content_hash="abc", n_value=5, tier='L3')
-        }
-        tracker1._last_active_items = {"other.py"}
-        tracker1._response_count = 10
-        tracker1.save()
-        
-        # Create new tracker from same path
-        tracker2 = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        
-        assert tracker2.get_tier("test.py") == 'L3'
-        assert tracker2.get_n_value("test.py") == 5
-        assert tracker2._response_count == 10
-        assert "other.py" in tracker2._last_active_items
-    
-    def test_clear_removes_file(self, stability_tracker, stability_path):
-        """Clear removes persistence file."""
+    def test_clear_resets_all_state(self, stability_tracker):
+        """Clear removes all stability data."""
         stability_tracker._stability = {
             "test.py": StabilityInfo(content_hash="abc", n_value=3, tier='L3')
         }
-        stability_tracker.save()
-        
-        assert stability_path.exists()
+        stability_tracker._response_count = 10
+        stability_tracker._last_active_items = {"other.py"}
         
         stability_tracker.clear()
         
-        assert not stability_path.exists()
         assert stability_tracker.get_tier("test.py") == 'active'
-    
-    def test_load_handles_corrupted_file(self, stability_path):
-        """Corrupted persistence file is handled gracefully."""
-        stability_path.write_text("not valid json {{{")
-        
-        # Should not raise, just start fresh
-        tracker = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        
-        assert tracker._response_count == 0
-        assert len(tracker._stability) == 0
-    
-    def test_load_migrates_old_format(self, stability_path):
-        """Old format with stable_count/current_tier is migrated."""
-        # Write old format
-        old_data = {
-            "response_count": 5,
-            "last_reorg_response": 0,
-            "items": {
-                "test.py": {
-                    "content_hash": "abc123",
-                    "stable_count": 7,
-                    "current_tier": "L2",
-                    "tier_entry_response": 3
-                }
-            }
-        }
-        stability_path.write_text(json.dumps(old_data))
-        
-        tracker = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        
-        # Should have migrated
-        assert tracker.get_tier("test.py") == 'L2'
-        assert tracker.get_n_value("test.py") == 7
+        assert stability_tracker._response_count == 0
+        assert len(stability_tracker._stability) == 0
+        assert len(stability_tracker._last_active_items) == 0
 
 
 class TestStabilityTrackerHeuristicInit:
@@ -863,13 +792,8 @@ class TestStabilityTrackerHeuristicInit:
         assert "b.py" in assignments
         assert "c.py" in assignments
     
-    def test_initialize_from_refs_persists(self, stability_path):
-        """Heuristic initialization is persisted to disk."""
-        tracker1 = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        
+    def test_initialize_from_refs_sets_tiers(self, stability_tracker):
+        """Heuristic initialization sets tier data in memory."""
         # Need enough files for meaningful percentile distribution
         files_with_refs = [
             ("core.py", 100),
@@ -878,18 +802,12 @@ class TestStabilityTrackerHeuristicInit:
             ("leaf1.py", 5),
             ("leaf2.py", 0),
         ]
-        tracker1.initialize_from_refs(files_with_refs)
-        
-        # Create new tracker from same path
-        tracker2 = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
+        stability_tracker.initialize_from_refs(files_with_refs)
         
         # Top 20% (1 file) -> L1
-        assert tracker2.get_tier("core.py") == 'L1'
+        assert stability_tracker.get_tier("core.py") == 'L1'
         # Bottom 50% -> L3
-        assert tracker2.get_tier("leaf2.py") == 'L3'
+        assert stability_tracker.get_tier("leaf2.py") == 'L3'
     
     def test_initialize_from_refs_empty_list(self, stability_tracker):
         """Empty file list returns empty assignments."""
@@ -1332,27 +1250,17 @@ class TestStabilityTrackerRemoveByPrefix:
         assert removed == []
         assert "file.py" in stability_tracker._stability
     
-    def test_remove_by_prefix_persists(self, stability_path):
-        """Removal is persisted to disk."""
-        tracker = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        tracker._stability = {
+    def test_remove_by_prefix_leaves_others(self, stability_tracker):
+        """Removal only affects matching items."""
+        stability_tracker._stability = {
             "history:0": StabilityInfo(content_hash="a", n_value=5, tier='L3'),
             "file.py": StabilityInfo(content_hash="b", n_value=6, tier='L2'),
         }
-        tracker.save()
         
-        tracker.remove_by_prefix("history:")
+        stability_tracker.remove_by_prefix("history:")
         
-        # Reload from disk
-        tracker2 = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12}
-        )
-        assert "history:0" not in tracker2._stability
-        assert "file.py" in tracker2._stability
+        assert "history:0" not in stability_tracker._stability
+        assert "file.py" in stability_tracker._stability
     
     def test_remove_by_prefix_empty_tracker(self, stability_tracker):
         """Works on empty tracker without error."""
@@ -2046,63 +1954,34 @@ class TestConnectedComponents:
         assert pair_found
 
 
-class TestSessionScopedPersistence:
-    """Tests for session-scoped persistence (fresh start each session)."""
+class TestSessionScopedBehavior:
+    """Tests for session-scoped behavior (fresh start each session)."""
     
     def test_fresh_start_on_context_manager_init(self, tmp_path):
-        """ContextManager clears stability data on init (no cross-session persistence)."""
-        from ac.context.manager import ContextManager
-        
-        repo_root = tmp_path / "repo"
-        repo_root.mkdir()
-        aicoder_dir = repo_root / ".aicoder"
-        aicoder_dir.mkdir()
-        
-        # Pre-populate stability data (simulating a previous session)
-        stability_path = aicoder_dir / "cache_stability.json"
-        tracker = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
-        )
-        tracker._stability["old_file.py"] = StabilityInfo(
-            content_hash="old", n_value=12, tier='L0'
-        )
-        tracker.save()
-        assert stability_path.exists()
-        
-        # Create ContextManager — should clear the old data
-        cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
-        
-        assert cm.cache_stability is not None
-        assert cm.cache_stability.is_initialized() is False
-        assert cm.cache_stability.get_tier("old_file.py") == 'active'  # Gone
-    
-    def test_first_request_after_fresh_start(self, tmp_path):
-        """After fresh start, tracker is empty and ready for initialization."""
+        """ContextManager creates empty stability tracker on init."""
         from ac.context.manager import ContextManager
         
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / ".aicoder").mkdir()
         
-        # Pre-populate with stale data
-        stability_path = repo_root / ".aicoder" / "cache_stability.json"
-        old_tracker = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
-        )
-        old_tracker._stability["stale.py"] = StabilityInfo(
-            content_hash="stale", n_value=9, tier='L1'
-        )
-        old_tracker.save()
-        
-        # New session
         cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
         
-        # Tracker should be empty — is_initialized() returns False
+        assert cm.cache_stability is not None
+        assert cm.cache_stability.is_initialized() is False
+    
+    def test_first_request_creates_entries(self, tmp_path):
+        """First update creates fresh entries from scratch."""
+        from ac.context.manager import ContextManager
+        
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".aicoder").mkdir()
+        
+        cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
+        
         assert not cm.cache_stability.is_initialized()
         
-        # First update creates fresh entries
         cm.cache_stability.update_after_response(
             items=["new_file.py"],
             get_content=lambda x: "new content",
@@ -2110,10 +1989,9 @@ class TestSessionScopedPersistence:
         
         assert cm.cache_stability.is_initialized() is True
         assert cm.cache_stability.get_tier("new_file.py") == 'active'
-        assert cm.cache_stability.get_tier("stale.py") == 'active'  # Gone
     
-    def test_within_session_save_still_works(self, tmp_path):
-        """Within a session, save() still writes state for crash resilience."""
+    def test_no_persistence_file_created(self, tmp_path):
+        """No stability JSON file is created on disk."""
         from ac.context.manager import ContextManager
         
         repo_root = tmp_path / "repo"
@@ -2122,23 +2000,13 @@ class TestSessionScopedPersistence:
         
         cm = ContextManager(model_name="gpt-4o", repo_root=str(repo_root))
         
-        # Do some work
         cm.cache_stability.update_after_response(
             items=["file.py"],
             get_content=lambda x: "content",
         )
         
-        # Data should be saved to disk
         stability_path = repo_root / ".aicoder" / "cache_stability.json"
-        assert stability_path.exists()
-        
-        # Reload from disk — data should be there
-        reloaded = StabilityTracker(
-            persistence_path=stability_path,
-            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
-        )
-        assert reloaded.get_tier("file.py") == 'active'
-        assert reloaded.is_initialized() is True
+        assert not stability_path.exists()
 
 
 class TestStabilityTrackerScenarios:

@@ -23,10 +23,8 @@ With threshold-aware promotion:
 """
 
 import hashlib
-import json
 from collections import defaultdict
-from dataclasses import dataclass, asdict
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 
 
@@ -146,7 +144,6 @@ class StabilityTracker:
     
     def __init__(
         self,
-        persistence_path: Path,
         thresholds: dict[str, int] = None,
         initial_tier: str = 'L3',
         cache_target_tokens: int = 0,
@@ -154,8 +151,10 @@ class StabilityTracker:
         """
         Initialize stability tracker.
         
+        Stability data is ephemeral — not persisted across sessions.
+        On each startup, tiers rebuild from the reference graph.
+        
         Args:
-            persistence_path: Path to JSON file for persistence
             thresholds: Dict mapping tier names to entry thresholds.
                        Defines entry_n values for each tier.
                        Defaults to 4-tier config: L3=3, L2=6, L1=9, L0=12.
@@ -163,8 +162,6 @@ class StabilityTracker:
             cache_target_tokens: Target tokens per cache block (0 = disabled).
                                 Veterans below this threshold anchor the tier.
         """
-        self._persistence_path = Path(persistence_path)
-        
         if thresholds:
             self._thresholds = thresholds
         else:
@@ -188,8 +185,6 @@ class StabilityTracker:
         
         # Track items that were in Active last response (to detect exits)
         self._last_active_items: set[str] = set()
-        
-        self.load()
     
     def compute_hash(self, content: str) -> str:
         """Compute SHA256 hash of content."""
@@ -306,7 +301,6 @@ class StabilityTracker:
         # Update tracking for next round
         self._last_active_items = current_active.copy()
         
-        self.save()
         return tier_changes
     
     def _process_tier_entries(
@@ -575,47 +569,7 @@ class StabilityTracker:
         
         return result
     
-    def save(self) -> None:
-        """Persist stability data to disk."""
-        self._persistence_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        data = {
-            'response_count': self._response_count,
-            'last_active_items': list(self._last_active_items),
-            'items': {k: asdict(v) for k, v in self._stability.items()}
-        }
-        
-        self._persistence_path.write_text(json.dumps(data, indent=2))
-    
-    def load(self) -> None:
-        """Load stability data from disk."""
-        if not self._persistence_path.exists():
-            return
-        
-        try:
-            data = json.loads(self._persistence_path.read_text())
-            self._response_count = data.get('response_count', 0)
-            self._last_active_items = set(data.get('last_active_items', []))
-            
-            # Load items, handling both old and new format
-            items_data = data.get('items', {})
-            self._stability = {}
-            for k, v in items_data.items():
-                # Handle migration from old format
-                if 'stable_count' in v and 'n_value' not in v:
-                    v['n_value'] = v.pop('stable_count')
-                if 'current_tier' in v and 'tier' not in v:
-                    v['tier'] = v.pop('current_tier')
-                # Remove fields that no longer exist
-                v.pop('tier_entry_response', None)
-                
-                self._stability[k] = StabilityInfo(**v)
-                
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
-            # Corrupted file - start fresh
-            self._stability = {}
-            self._response_count = 0
-            self._last_active_items = set()
+
     
     def initialize_from_refs(
         self,
@@ -732,7 +686,6 @@ class StabilityTracker:
                 )
                 tier_assignments[file_path] = tier
         
-        self.save()
         return tier_assignments
     
     def initialize_from_clusters(
@@ -835,9 +788,6 @@ class StabilityTracker:
                 )
                 tier_assignments[item] = tier
         
-        if tier_assignments:
-            self.save()
-        
         return tier_assignments
     
     def is_initialized(self) -> bool:
@@ -851,8 +801,6 @@ class StabilityTracker:
         self._last_active_items = set()
         self._last_promotions = []
         self._last_demotions = []
-        if self._persistence_path.exists():
-            self._persistence_path.unlink()
     
     def remove_by_prefix(self, prefix: str) -> list[str]:
         """Remove all tracked items whose key starts with prefix.
@@ -874,8 +822,6 @@ class StabilityTracker:
             item for item in self._last_active_items
             if not item.startswith(prefix)
         }
-        if to_remove:
-            self.save()
         return to_remove
     
     def get_last_promotions(self) -> list[tuple[str, str]]:

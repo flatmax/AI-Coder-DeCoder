@@ -314,9 +314,8 @@ class TestStaleItemRemovalIntegration:
     """
     
     @pytest.fixture
-    def tracker(self, tmp_path):
+    def tracker(self):
         return StabilityTracker(
-            persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
             cache_target_tokens=500,
         )
@@ -415,9 +414,8 @@ class TestGraduationIntegration:
     """
     
     @pytest.fixture
-    def tracker(self, tmp_path):
+    def tracker(self):
         return StabilityTracker(
-            persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
             cache_target_tokens=500,
         )
@@ -584,10 +582,9 @@ class TestGraduationIntegration:
         assert "history:0" in active_items
         assert "history:1" in active_items
     
-    def test_graduation_disabled_zero_target(self, tmp_path):
+    def test_graduation_disabled_zero_target(self):
         """cache_target_tokens=0 disables graduation entirely."""
         tracker = StabilityTracker(
-            persistence_path=tmp_path / "stability.json",
             thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
             cache_target_tokens=0,  # Disabled
         )
