@@ -154,7 +154,50 @@ for item in items:
 
 Pass `broken_tiers` to `_process_tier_entries`.
 
-#### 1e. Update tests
+#### 1e. Run cascade even when nothing graduates from active
+
+Currently `_process_tier_entries` is only called when `items_entering_l3` is non-empty. But the spec says the cascade should run whenever any tier is broken — e.g., if an item in L2 is demoted (breaking L2), veterans in L3 should be able to promote into L2 even if nothing left active this round.
+
+After collecting `broken_tiers` from demotions, check whether any cached tier below the broken tier has veterans that could promote. The simplest approach: always call `_process_tier_entries` with `items_entering_l3` (which may be empty), and let the cascade logic handle it. The cascade loop already processes each tier bottom-up. With `broken_tiers` available, the loop can check whether veterans in L3 can promote into a broken L2 even if no items entered L3 this cycle.
+
+To support this, the cascade loop needs a restructure. Instead of starting from an initial tier with entering items and following promotions upward, it should iterate through all tiers bottom-up and process each tier that either (a) received entering items, or (b) has veterans eligible to promote into a broken tier above:
+
+```python
+def _process_tier_entries(self, entering_l3_items, tier_changes, 
+                          get_tokens=None, broken_tiers=None):
+    """Process tier entries with cascade, bottom-up."""
+    if broken_tiers is None:
+        broken_tiers = set()
+    
+    # Pre-populate: empty tiers are always available
+    for tier in TIER_PROMOTION_ORDER:
+        if not any(1 for info in self._stability.values() if info.tier == tier):
+            broken_tiers.add(tier)
+    
+    # Process tiers bottom-up: L3 → L2 → L1 → L0
+    entering_items_for_tier = {
+        'L3': list(entering_l3_items) if entering_l3_items else [],
+        'L2': [], 'L1': [], 'L0': [],
+    }
+    
+    for current_tier in TIER_PROMOTION_ORDER:
+        entering_items = entering_items_for_tier[current_tier]
+        
+        # Skip if nothing entering AND tier above isn't broken
+        next_tier = self._get_next_tier(current_tier)
+        if not entering_items and (not next_tier or next_tier not in broken_tiers):
+            continue
+        
+        # ... process entering items and veterans as before ...
+        # ... collect items_to_promote ...
+        
+        if items_to_promote and next_tier:
+            entering_items_for_tier[next_tier] = items_to_promote
+```
+
+This ensures that even when nothing enters L3, if L2 is broken from a demotion, the loop still processes L3's veterans to see if any can promote into L2.
+
+#### 1f. Update tests
 
 **Existing tests that still pass unchanged:**
 - `test_cascade_promotion`: Sets up trigger.py leaving active → enters L3 (breaks L3) → l3_item promotes to L2 (breaks L2) → l2_item promotes to L1 (breaks L1) → l1_item promotes to L0. Each step breaks the destination, so the cascade propagates fully. ✅
@@ -184,6 +227,10 @@ Pass `broken_tiers` to `_process_tier_entries`.
        if not any(1 for info in self._stability.values() if info.tier == tier):
            broken_tiers.add(tier)
    ```
+
+6. `test_demotion_triggers_cascade_without_active_graduation`: Item in L2 is demoted → L2 is broken. Nothing leaves active this round. Veterans in L3 (at promotion threshold) should still promote into L2 because the cascade runs bottom-up and detects the broken L2. This tests the 1e fix — the cascade runs even without items entering L3.
+
+7. `test_cascade_skips_stable_tiers_between_broken`: Item demoted from L1 (breaks L1). L2 has veterans at threshold. L2 should NOT process its veterans because L2 itself is not broken — items entering L2 would break L2, but nothing is entering L2. The cascade only promotes L3→L2 if L2 is broken, and L2→L1 if L1 is broken. If only L1 is broken and L2 is stable, L2's veterans can promote into L1 (since L1 is broken), which then breaks L2, which allows L3 veterans to promote into L2. This validates correct bottom-up cascade order.
 
 ### Phase 2: Native History Pairs in Cached Tiers (Gaps 2, 8)
 
