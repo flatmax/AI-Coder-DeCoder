@@ -21,7 +21,7 @@ Five tiers, from most stable (cached first) to least stable (uncached):
 | L3 | 3 | 6 | Moderately stable. Entry tier for graduated content |
 | active | 0 | 3 | Recently changed or new. Not cached |
 
-Each tier maps to a single cached message block sent to the LLM provider. The L0 block always includes the system prompt.
+Each tier maps to a single cached message block sent to the LLM provider. The L0 block always includes the system prompt and the symbol map legend — these are **fixed L0 content** placed there at initialization, not earned through stability. Veterans that promote into L0 via ripple promotion join this fixed content.
 
 ## N Value and Stability Tracking
 
@@ -30,9 +30,11 @@ Every item tracked by the system has an **N value** — a counter that measures 
 ### N Progression
 
 1. **New item appears in active context**: N = 0
-2. **Item unchanged in active context**: N increments by 1 each request
+2. **Item unchanged across a request**: N increments by 1 each request. This applies in **all tiers** — active, L3, L2, L1, and L0. N continues incrementing in cached tiers, which is how veterans eventually reach the promotion threshold for the next tier.
 3. **Item content changes** (hash mismatch or explicit modification): N resets to 0, demotes to active
 4. **Item reaches N ≥ 3**: Eligible for graduation from active to L3 (files and symbols only — history is eligible immediately since it is immutable)
+
+**Exception**: Veterans held back by the minimum token requirement (see "Threshold-Aware Promotion") do **not** get N incremented — their N stays frozen. Additionally, when the tier above is not invalidated, N++ is capped at the tier's promotion threshold to prevent artificial accumulation. See the per-tier algorithm for full details.
 
 ### Content Hashing
 
@@ -57,17 +59,21 @@ File graduation itself counts as a ripple — when files leave the active set, t
 
 ### History Messages
 
-History messages are **immutable** — once written to the conversation, their content never changes. Unlike files and symbols, there is no need to wait for N ≥ 3 to confirm stability. Any history message still in the active tier is immediately eligible for graduation.
+History messages are **immutable** — once written to the conversation, their content never changes. Unlike files and symbols, there is no need to wait for N ≥ 3 to confirm stability. Any active history message is immediately eligible for graduation.
 
-However, history graduation is **controlled** to avoid unnecessary cache churn. Graduating history changes the content of a cached tier block, which invalidates that block for the current request. History graduates only when:
+The difference between history and files/symbols exists **only in the active tier**. Once history graduates to L3, it follows the exact same veteran rules — N increments, threshold-aware promotion, ripple cascade — as files and symbols. The special handling below applies solely to the active → L3 transition.
 
-1. **Piggybacking on an existing ripple**: If files or symbols are already changing the active set (file selection changed, file/symbol graduation happening), all eligible history graduates for free — the cache blocks are already being invalidated.
+However, the active set changes **every exchange** (new user/assistant messages are added), so graduating history on every request would break the cache every time. To avoid this churn, history graduation from active to L3 is **controlled**:
+
+1. **Piggybacking on an existing ripple**: If files or symbols are already changing the active set (file selection changed, file/symbol graduation happening), all eligible active history graduates for free — the cache blocks are already being invalidated by the file/symbol changes.
 
 2. **Token threshold met**: If total eligible history tokens exceed `cache_target_tokens`, the oldest eligible messages graduate even without a ripple. This ensures the resulting cache block meets provider minimums (e.g., 1024 tokens for Anthropic).
 
 3. **Never** (if `cache_target_tokens = 0`): With the default configuration, history stays in active permanently. Set `cacheMinTokens` and `cacheBufferMultiplier` in `litellm.json` to enable.
 
 The `cache_target_tokens` is computed as `cacheMinTokens × cacheBufferMultiplier` (default: 1024 × 1.5 = 1536).
+
+**Once graduated to L3**, history messages follow the same veteran rules as files and symbols — N increments each request, and they promote through L3 → L2 → L1 → L0 via normal ripple promotion when their N exceeds the tier's promotion threshold.
 
 ## Ripple Promotion
 
@@ -76,10 +82,12 @@ When a tier's cache block is invalidated (an item is demoted or removed), vetera
 ### How It Works
 
 1. A tier breaks (cache miss) because an item was demoted, removed, or had content change
-2. The most stable veterans (highest N) from the tier below promote into the broken tier
-3. This breaks the source tier, allowing its own veterans from below to promote
-4. The cascade continues downward: L1 break → L2 promotes into L1 → L2 breaks → L3 promotes into L2 → L3 breaks → active graduates into L3
-5. If a tier is **not broken**, nothing above or below it moves — the cascade stops
+2. The most stable veterans (highest N) from the next lower tier promote **up** into the broken tier
+3. This breaks the source tier (its content changed), allowing veterans from the tier below *that* to promote up
+4. The cascade propagates **downward through the tier stack**: an L1 break pulls veterans up from L2 → L2 breaks → pulls veterans up from L3 → L3 breaks → pulls eligible items up from active
+5. If a tier is **not broken**, the cascade stops — no items move through that tier, and all tiers below it remain cached
+
+In other words, content flows **upward** (toward L0) while the cascade signal propagates **downward** (toward active). Each break at a higher tier creates an opening that the most stable content from below fills.
 
 ### Why This Works
 
@@ -105,16 +113,29 @@ Veterans promote when their N value reaches the tier's `promotion_threshold`:
 
 When a veteran promotes, it enters the destination tier with that tier's `entry_n` value and begins accumulating stability again.
 
-### Threshold-Aware Promotion
+### Threshold-Aware Promotion (Per-Tier Algorithm)
 
-When `cache_target_tokens > 0`, promotion is threshold-aware:
+N increments are **not** a global end-of-request step. They happen inside the per-tier promotion algorithm, which runs during the cascade for each tier that receives incoming items. This is the single place where N values change.
 
-1. Accumulate tokens from entering items
-2. Sort veterans by N ascending (lowest first)
-3. Veterans below the token threshold **anchor** the tier (no N increment) — they fill the cache block to meet provider minimums
-4. Veterans past the threshold get N++ and can promote
+**Inputs**: Incoming items (newly graduated from active, or promoted from the tier below)
+**Outputs**: Outgoing items (promoted to the tier above, if that tier is invalidated)
 
-This ensures each cache block meets the provider's minimum token requirement while still allowing veteran content to progress toward higher tiers.
+The algorithm for a single tier:
+
+1. **Merge** incoming items into the existing veteran list. Veterans are already ordered by N descending from previous requests. Incoming items enter with the tier's `entry_n` value and are inserted at their correct position (typically the bottom, since `entry_n` is the tier's minimum N). The ordering is **maintained across requests** — no full re-sort is needed.
+2. **Walk the ordered list from the top** (highest N first), accumulating tokens:
+   - **While accumulated tokens < `cache_target_tokens`**: these items are **held back** to meet the minimum. Their N is **frozen** — no increment. They remain in the tier to ensure the cache block meets the provider's minimum (e.g., 1024 tokens for Anthropic).
+   - **Once the minimum is met**: remaining items (those not needed to fill the budget) receive **N++**
+3. **After N++**, check each incremented item against the tier's promotion threshold:
+   - If the **tier above is invalidated** and the item's new N exceeds the promotion threshold → the item **promotes out** (becomes an outgoing item, enters the tier above with that tier's `entry_n`)
+   - If the **tier above is NOT invalidated** → N++ still applies but is **capped at the promotion threshold**. The item cannot leave, so its N does not accumulate past the maximum valid value for this tier. This prevents artificial N inflation when an item is stuck.
+4. **Outgoing items** become the incoming items for the next tier up in the cascade
+
+**Key properties:**
+
+- The minimum token constraint is the primary throttle on promotion velocity — in a tier with many veterans above the promotion threshold, only as many can leave as the token budget allows
+- Items held back to meet the minimum retain their current N, preserving their relative ordering. As new content enters the tier on subsequent requests and fills the token budget, previously held-back veterans become eligible for N++ and eventual promotion
+- The N cap when the tier above is stable prevents veterans from accumulating arbitrarily high N values while stuck — when the tier above finally breaks, they promote immediately rather than overshooting
 
 ### The Guard: Only Promote Into Broken Tiers
 
@@ -127,7 +148,7 @@ This is the critical rule that prevents unnecessary cache invalidation:
 
 The result: in steady state, all tiers are cached. Only an actual content change triggers movement, and the cascade ensures each tier ends up with progressively more stable content.
 
-### Ripple Detection
+### Ripple Detection and Cascade Trigger
 
 A ripple is detected when the set of active file/symbol items changes between requests. There are two sources of ripple:
 
@@ -148,7 +169,25 @@ Either source of ripple allows history to piggyback. The combined check is:
 has_any_ripple = has_file_symbol_ripple or has_graduation_ripple
 ```
 
-Note: Ripple detection determines whether **active items graduate into L3** and whether **history piggybacks**. The tier-to-tier promotion cascade is triggered separately — it fires whenever a tier's content changes (demotion, graduation into the tier, or content hash mismatch), regardless of whether the active set rippled.
+### How the Cascade Executes
+
+The cascade is evaluated **every request**, bottom-up from active through the tier stack:
+
+1. **First, handle invalidations at the top**: Items that were demoted (content changed, file modified) or removed (file unchecked/deleted) are removed from their current tier. This marks those tiers as invalidated (cache miss).
+
+2. **Then, cascade bottom-up**: Starting from active, evaluate each tier in order: active → L3 → L2 → L1. At each tier, if the tier above is invalidated, promote eligible veterans upward (see "Threshold-Aware Promotion"). Promoting items out of a tier changes its content, invalidating it and allowing the cascade to continue.
+
+3. **Stop at stable tiers**: If a tier above is **not** invalidated, no veterans promote through it. The cascade stops, and all higher tiers remain cached.
+
+Example: User checks file F in the picker (adding it to active context):
+- F's symbol entry is removed from L1 (invalidating L1), F's full content enters active
+- Cascade starts: active → L3 (L3 is not invalidated, but L2 and L1 are)
+- Veterans from L2 promote into L1 (L1 was invalidated) → L2 is now invalidated
+- Veterans from L3 promote into L2 (L2 was invalidated) → L3 is now invalidated
+- Eligible items from active graduate into L3 (L3 was invalidated)
+- L0 was never invalidated → nothing moves into L0, L0 stays cached
+
+Note: Ripple detection (active set changed?) governs **history graduation** — whether active history piggybacks into L3. The tier-to-tier veteran cascade is driven by **tier invalidation** and runs regardless of whether the active set rippled.
 
 ## Cache Block Structure
 
@@ -266,9 +305,19 @@ Items demote to active (N = 0) when:
 
 1. **Content changes**: The hash of the item's content differs from the stored hash
 2. **Explicit modification**: The item appears in the `files_modified` list (files edited by the assistant)
-3. **Symbol invalidation**: When a file is modified, both the file and its `symbol:` entry are marked as modified
+3. **Symbol invalidation**: When a file is modified, both the file and its `symbol:` entry are marked as modified. The symbol index must be rebuilt for modified files so the symbol block reflects current content.
 
 Demotion removes the item from its cached tier — that tier's block changes on the next request (cache miss), which constitutes a ripple.
+
+## Item Removal
+
+When a file is removed from active context (unchecked in the file picker) or deleted from the project:
+
+- **File entry**: Removed from whatever tier it occupied (active or cached). This changes that tier's content, causing a cache miss (ripple).
+- **Symbol entry on file uncheck**: The file's full content is no longer in active context, so its symbol entry is **returned to active** (N = 0) to be included in the symbol map again. It re-enters the normal graduation flow.
+- **Symbol entry on file deletion**: Both the file entry and symbol entry are removed entirely. The symbol index no longer contains the file.
+
+Note that unchecking a file is not the same as deleting it — unchecking removes the full file content from context but the file's compact symbol representation returns to the symbol map tiers.
 
 ## History Compaction Interaction
 
@@ -278,7 +327,9 @@ When history compaction runs (post-response, via `TopicDetector` + `HistoryCompa
 2. **Re-index**: On the next request, the compacted history (summary + retained messages) appears as new active items with N = 0
 3. **Graduation restarts**: The compacted messages re-enter the normal active → L3 → L2 → L1 flow from scratch
 
-This means compaction causes a one-time cache miss for all tiers that contained history. This is unavoidable — the old messages no longer exist, so their cached content is invalid. The cost is temporary; the new (smaller) history re-stabilizes within a few requests.
+Only `history:*` entries are purged. The system prompt and legend in L0 are not history items — they remain in L0 undisturbed. However, any tier that contained graduated history entries will have its content change (the history is gone), causing a cache miss for that tier.
+
+This means compaction causes a one-time cache miss for tiers that contained history. This is unavoidable — the old messages no longer exist, so their cached content is invalid. The cost is temporary; the new (smaller) history re-stabilizes within a few requests.
 
 Compaction runs **after** the response is delivered to the user, so the cache miss doesn't affect the current request — only subsequent ones.
 
@@ -350,7 +401,7 @@ Each tier must meet `cache_target_tokens` from config (default: `cacheMinTokens 
 
 ### Constraints
 
-- **L0 is never assigned on initialization** — it must be earned through stability (ripple promotion during the session).
+- **L0 is never assigned by clustering** — the clustering algorithm distributes content across L1, L2, and L3 only. L0 contains fixed content (system prompt, legend) from the start, and additional content must be earned through ripple promotion during the session.
 - **Files in active context are excluded** — they have full content included separately.
 - **Symbol entries only** — initialization assigns `symbol:` prefixed entries. File entries start in active and graduate through the normal stability flow.
 
@@ -366,6 +417,28 @@ In `litellm.json`:
 The effective `cache_target_tokens = cacheMinTokens × cacheBufferMultiplier`.
 
 Setting `cacheMinTokens` to 0 disables threshold-aware behavior — all promotions happen without token gating, and history never graduates (stays active).
+
+## Order of Operations
+
+Each request processes stability updates in this sequence:
+
+1. **Detect demotions**: Check content hashes for all tracked items. Items with hash mismatches or in the `files_modified` list reset to N = 0 and return to active. Their former tiers are marked as invalidated.
+
+2. **Handle removals**: Files unchecked from the picker or deleted have their entries removed from their current tier (invalidating it). For unchecked files, the symbol entry returns to active (N = 0). For deleted files, both file and symbol entries are removed entirely.
+
+3. **Rebuild symbol index**: Modified files have their symbol blocks rebuilt so the symbol map reflects current content.
+
+4. **Compute current active set**: Determine which files, symbols, and history messages are in active context.
+
+5. **Graduate eligible files/symbols**: Files and symbols with N ≥ 3 are removed from active and placed into L3.
+
+6. **Detect ripple**: Compare current active file/symbol set against last request's set. If different, a ripple exists.
+
+7. **Graduate eligible history**: If a ripple exists or the token threshold is met, eligible active history messages graduate to L3.
+
+8. **Run cascade bottom-up**: Starting from active, evaluate each tier using the per-tier promotion algorithm (see "Threshold-Aware Promotion"). The algorithm merges incoming items with veterans, applies N++ to eligible items (those past the token minimum), and promotes items whose N exceeds the promotion threshold into the tier above (if invalidated). N increments happen **inside** this algorithm — there is no separate global N++ step.
+
+9. **Store current active set**: Save for ripple detection on the next request.
 
 ## No Persistence
 
