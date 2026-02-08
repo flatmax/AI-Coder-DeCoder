@@ -95,6 +95,17 @@ The caller (`update_after_response`) passes `broken_tiers` pre-populated with ti
 
 Note: an empty tier that receives its first items IS marked broken (its content changed from nothing to something). This is harmless — the tier had no cached block to invalidate, and marking it broken allows the cascade to continue upward if needed.
 
+Additionally, empty tiers (no items at all) are pre-populated in `broken_tiers` before the cascade starts. An empty tier has no cached content to protect, so promoting into it is always free:
+
+```python
+# Empty tiers are always available for promotion
+for tier in TIER_PROMOTION_ORDER:
+    if not any(1 for info in self._stability.values() if info.tier == tier):
+        broken_tiers.add(tier)
+```
+
+The `broken_tiers` set grows during the cascade — each time items enter or leave a tier, that tier is added. This means the guard check for each tier uses the most up-to-date information about which tiers have been touched this cycle.
+
 #### 1b. Guard promotions against stable destination tiers
 
 In the cascade loop, after veterans get N++ (or are held back by threshold-aware logic), check whether the next tier is broken before allowing promotion:
@@ -508,23 +519,33 @@ The `broken_tiers` set from 5a feeds into Phase 1's `_process_tier_entries` call
 2. `test_deleted_file_symbol_entry_also_removed`: Both `file.py` and `symbol:file.py` entries are cleaned up when the file is deleted.
 3. `test_deletion_triggers_cascade`: File deleted from L2 → L2 is broken → veterans from L3 can promote into L2.
 
-## Phases Summary
+## Phases Summary and Implementation Order
 
-| Phase | Gaps | Risk | Effort | Description |
-|-------|------|------|--------|-------------|
-| 1 | 4, 5 | Low | Small | Broken tier guard + N cap in stability_tracker.py |
-| 2 | 2, 8 | Medium | Medium | Native history pairs in cached tiers |
-| 3 | 1, 7 | Medium | Medium | Reference graph clustering for initialization |
-| 4 | 6 | Low | Small | Session-scoped persistence |
-| 5 | 9 | Low | Small | Item removal from cached tiers |
+Phases are ordered to minimize risk: stability_tracker.py changes first (pure logic, no message pipeline), then streaming.py changes last (most invasive).
+
+| Order | Phase | Gaps | Risk | Effort | Description |
+|-------|-------|------|------|--------|-------------|
+| 1st | 1 | 4, 5 | Low | Small | Broken tier guard + N cap in stability_tracker.py |
+| 2nd | 5 | 9 | Low | Small | Item removal from cached tiers |
+| 3rd | 3 | 1, 7 | Medium | Medium | Reference graph clustering for initialization |
+| 4th | 4 | 6 | Low | Small | Session-scoped persistence (depends on Phase 3) |
+| 5th | 2 | 2, 8 | Medium | Medium | Native history pairs in cached tiers |
+
+**Why this order:**
+
+- **Phase 1 first**: Pure stability_tracker.py change, no risk to message pipeline. All other phases benefit from the broken tier guard being in place.
+- **Phase 5 second**: Small addition to `_update_cache_stability` that feeds into Phase 1's broken_tiers set. Stale item removal marks tiers as broken, which the guard (Phase 1) then respects.
+- **Phase 3 third**: References.py + stability_tracker.py only. No message pipeline changes. Provides proper re-initialization infrastructure needed by Phase 4.
+- **Phase 4 fourth**: Clearing persistence on startup is only safe once Phase 3's clustering provides proper re-initialization. Without Phase 3, clearing on startup leaves an empty tracker with only the old percentile-based init — worse than loading persisted data.
+- **Phase 2 last**: Most invasive change — restructures the entire message assembly pipeline in streaming.py. Interacts with cache_control placement, token counting, HUD display, and context breakdown API. Benefits from all other phases being stable and tested first.
 
 ## Testing Strategy
 
 - **Phase 1**: Unit tests in `test_stability_tracker.py` — deterministic, no mocking needed
-- **Phase 2**: Unit tests verifying message structure, integration test with mock LLM
+- **Phase 5**: Unit tests for stale item detection and cascade triggering
 - **Phase 3**: Unit tests for graph algorithms, integration test with real symbol index
 - **Phase 4**: Unit test verifying fresh start on init
-- **Phase 5**: Unit tests for stale item detection and cascade triggering
+- **Phase 2**: Unit tests verifying message structure, integration test with mock LLM
 
 ## Files Changed
 
@@ -556,12 +577,12 @@ The current code sorts veterans by N **ascending** (lowest first), so low-N vete
 
 1. **Phase 1 (broken tier guard)**: The cascade test `test_cascade_promotion` still passes because each tier breaks from items entering it (trigger→L3→L2→L1→L0 cascade). The threshold-aware cascade tests similarly work because each promotion breaks the destination tier. The only behavior change: if a tier above is stable, veterans are blocked from promoting into it with N capped. New tests validate this explicitly. **Risk: Low** — the guard is additive (new constraint on existing logic), not a rewrite.
 
-2. **Phase 2 (native history pairs)**: Changes the message structure sent to the LLM. The key risk is cache_control placement — if a breakpoint ends up on a user message instead of assistant message, some providers may behave differently. Mitigation: always place cache_control on the last assistant message in a tier. If a tier's last history message is a user message, wrap a synthetic "Ok." assistant response with the cache_control. **Risk: Medium** — needs careful testing with actual LLM providers.
+2. **Phase 5 (item removal)**: Calling `_get_all_trackable_files()` adds a set comparison each request. This is already called elsewhere in the request path, so the cost is a set difference — negligible. **Risk: Low**.
 
 3. **Phase 3 (clustering)**: The union-find algorithm is well-understood. The main risk is that `ReferenceIndex.build_references()` must complete before clustering can run. Currently `_initialize_stability_from_refs` is called after `si.build_references(all_files)` in `_get_symbol_map_data`, so timing is correct. **Risk: Low** — clustering is a pure function of the reference graph.
 
-4. **Phase 4 (session-scoped persistence)**: Clearing on init means a crash-restart loses stability data. The reference graph re-initialization takes <100ms and produces a reasonable starting point, so the practical impact is minimal. **Risk: Low** — conservative approach, easily reversible if needed.
+4. **Phase 4 (session-scoped persistence)**: Clearing on init means a crash-restart loses stability data. With Phase 3's clustering in place, the reference graph re-initialization takes <100ms and produces a reasonable starting point, so the practical impact is minimal. **Risk: Low** — conservative approach, easily reversible if needed. Phase 3 must be implemented first.
 
-5. **Cross-phase interaction**: Phases 1 and 3 both modify `stability_tracker.py`. Phase 2 modifies the message assembly in `streaming.py` which interacts with `_get_history_tiers()` used by Phase 1's broken tier tracking. **Mitigation**: Implement in order (1→2→3→4→5), run full test suite between phases.
+5. **Phase 2 (native history pairs)**: Changes the message structure sent to the LLM. The key risk is cache_control placement — if a breakpoint ends up on a user message instead of assistant message, some providers may behave differently. Mitigation: always place cache_control on the last assistant message in a tier. If a tier's last history message is a user message, wrap a synthetic "Ok." assistant response with the cache_control. **Risk: Medium** — needs careful testing with actual LLM providers. Implemented last so all stability logic is settled.
 
-6. **Phase 5 (item removal)**: Calling `_get_all_trackable_files()` adds a set comparison each request. This is already called elsewhere in the request path, so the cost is a set difference — negligible. **Risk: Low**.
+6. **Cross-phase interaction**: Phases 1, 3, and 4 all modify `stability_tracker.py`. Phase 5 modifies `_update_cache_stability` in `streaming.py`. Phase 2 modifies the message assembly in `streaming.py`. **Mitigation**: Implement in order (1→5→3→4→2), run full test suite between phases. Phase 2 is last because it's the most invasive and touches the message pipeline that all other phases feed into.
