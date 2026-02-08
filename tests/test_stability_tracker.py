@@ -1636,6 +1636,113 @@ class TestStabilityTrackerHistoryGraduation:
         assert tracker.get_tier("history:1") == 'L3'
 
 
+class TestStabilityTrackerStaleItemRemoval:
+    """Tests for stale item removal via broken_tiers parameter."""
+    
+    def test_broken_tiers_from_stale_removal(self, tracker_with_items):
+        """Pre-broken tiers from stale removal trigger cascade."""
+        # Simulate: file deleted from L2 (removed externally, tier pre-broken)
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),    # Ready to promote
+            "l2_other.py": (7, 'L2'),  # Remains in L2
+        })
+        tracker._last_active_items = set()
+        
+        content = {"l3_vet.py": "a", "l2_other.py": "b"}
+        
+        # Pass L2 as pre-broken (simulating stale item removal from L2)
+        tracker.update_after_response(
+            items=[],
+            get_content=lambda x: content[x],
+            broken_tiers={"L2"},
+        )
+        
+        # L3 veteran should get N++ and promote into broken L2
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_broken_tiers_cascade_from_stale(self, tracker_with_items):
+        """Stale removal from L1 cascades through L2 and L3."""
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "l2_vet.py": (8, 'L2'),
+        })
+        tracker._last_active_items = set()
+        
+        content = {"l3_vet.py": "a", "l2_vet.py": "b"}
+        
+        # L1 pre-broken from stale removal
+        tracker.update_after_response(
+            items=[],
+            get_content=lambda x: content[x],
+            broken_tiers={"L1"},
+        )
+        
+        # L2 vet promotes into L1 (broken), breaking L2
+        assert tracker.get_tier("l2_vet.py") == 'L1'
+        assert tracker.get_n_value("l2_vet.py") == 9
+        
+        # L3 vet promotes into L2 (broken by l2_vet leaving)
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_broken_tiers_combined_with_demotion(self, tracker_with_items):
+        """Stale broken tiers combine with demotion-broken tiers."""
+        tracker = tracker_with_items({
+            "l3_vet.py": (5, 'L3'),
+            "l2_demoted.py": (7, 'L2'),  # Will be demoted
+        })
+        tracker._last_active_items = set()
+        
+        content = {"l3_vet.py": "a", "l2_demoted.py": "CHANGED"}
+        
+        # L1 pre-broken from stale AND l2_demoted modified (breaks L2)
+        tracker.update_after_response(
+            items=["l2_demoted.py"],
+            get_content=lambda x: content[x],
+            modified=["l2_demoted.py"],
+            broken_tiers={"L1"},
+        )
+        
+        # L2 broken from demotion, L3 vet promotes
+        assert tracker.get_tier("l2_demoted.py") == 'active'
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_broken_tiers_no_effect_when_no_eligible_veterans(self, tracker_with_items):
+        """Pre-broken tier has no effect if no veterans can promote."""
+        tracker = tracker_with_items({
+            "l3_item.py": (3, 'L3'),  # N=3, needs N=6 to promote
+        })
+        tracker._last_active_items = set()
+        
+        content = {"l3_item.py": "a"}
+        
+        # L2 pre-broken, but l3_item is too low N to promote
+        tracker.update_after_response(
+            items=[],
+            get_content=lambda x: content[x],
+            broken_tiers={"L2"},
+        )
+        
+        # l3_item gets N++ → 4, but still below promotion threshold (6)
+        assert tracker.get_tier("l3_item.py") == 'L3'
+        assert tracker.get_n_value("l3_item.py") == 4
+    
+    def test_empty_broken_tiers_no_effect(self, stability_tracker):
+        """Passing empty broken_tiers has no side effects."""
+        content = {"file.py": "content"}
+        
+        stability_tracker.update_after_response(
+            items=["file.py"],
+            get_content=lambda x: content[x],
+            broken_tiers=set(),
+        )
+        
+        assert stability_tracker.get_tier("file.py") == 'active'
+        assert stability_tracker.get_n_value("file.py") == 0
+
+
 class TestStabilityTrackerScenarios:
     """Integration tests for realistic scenarios."""
     

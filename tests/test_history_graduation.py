@@ -132,6 +132,108 @@ class TestSelectHistoryToGraduate:
         assert graduated == {"history:0", "history:1"}
 
 
+class TestStaleItemRemovalIntegration:
+    """Integration tests for stale item removal at the streaming level.
+    
+    These simulate the pattern used in _update_cache_stability:
+    1. Detect stale items (tracked but no longer in repo)
+    2. Remove them from the tracker
+    3. Pass their tiers as broken_tiers to update_after_response
+    """
+    
+    @pytest.fixture
+    def tracker(self, tmp_path):
+        return StabilityTracker(
+            persistence_path=tmp_path / "stability.json",
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+            cache_target_tokens=500,
+        )
+    
+    def _simulate_stale_removal(self, tracker, all_repo_files):
+        """Simulate the stale detection logic from _update_cache_stability.
+        
+        Returns set of broken tiers from removal.
+        """
+        stale_broken = set()
+        stale_items = []
+        
+        for item_key in list(tracker._stability.keys()):
+            if item_key.startswith("history:"):
+                continue
+            file_path = item_key.replace("symbol:", "") if item_key.startswith("symbol:") else item_key
+            if file_path not in all_repo_files:
+                stale_items.append(item_key)
+        
+        for item_key in stale_items:
+            tier = tracker.get_tier(item_key)
+            if tier != 'active':
+                stale_broken.add(tier)
+            del tracker._stability[item_key]
+        
+        stale_set = set(stale_items)
+        tracker._last_active_items -= stale_set
+        
+        return stale_broken
+    
+    def test_deleted_file_removed_from_tier(self, tracker):
+        """File in L2, deleted from repo, removed and tier marked broken."""
+        # Set up: file.py in L2, symbol:file.py in L3
+        tracker._stability = {
+            "file.py": StabilityInfo(content_hash="f", n_value=7, tier='L2'),
+            "symbol:file.py": StabilityInfo(content_hash="s", n_value=4, tier='L3'),
+            "other.py": StabilityInfo(content_hash="o", n_value=5, tier='L3'),
+        }
+        
+        # file.py deleted from repo
+        all_repo_files = {"other.py"}  # file.py gone
+        broken = self._simulate_stale_removal(tracker, all_repo_files)
+        
+        assert "file.py" not in tracker._stability
+        assert "symbol:file.py" not in tracker._stability
+        assert "other.py" in tracker._stability
+        assert "L2" in broken  # file.py was in L2
+        assert "L3" in broken  # symbol:file.py was in L3
+    
+    def test_deletion_triggers_cascade(self, tracker):
+        """File deleted from L2 allows L3 veterans to promote."""
+        tracker._stability = {
+            "deleted.py": StabilityInfo(content_hash="d", n_value=7, tier='L2'),
+            "l3_vet.py": StabilityInfo(content_hash="v", n_value=5, tier='L3'),
+        }
+        tracker._last_active_items = set()
+        
+        # deleted.py removed from repo
+        all_repo_files = {"l3_vet.py"}
+        broken = self._simulate_stale_removal(tracker, all_repo_files)
+        
+        assert "L2" in broken
+        
+        # Now run update with the broken tiers
+        content = {"l3_vet.py": "v"}
+        tracker.update_after_response(
+            items=[],
+            get_content=lambda x: content[x],
+            broken_tiers=broken,
+        )
+        
+        # l3_vet should promote into L2 (broken from deletion)
+        assert tracker.get_tier("l3_vet.py") == 'L2'
+        assert tracker.get_n_value("l3_vet.py") == 6
+    
+    def test_stale_active_items_cleaned(self, tracker):
+        """Stale items in _last_active_items are also cleaned."""
+        tracker._stability = {
+            "deleted.py": StabilityInfo(content_hash="d", n_value=0, tier='active'),
+        }
+        tracker._last_active_items = {"deleted.py", "other.py"}
+        
+        all_repo_files = {"other.py"}
+        self._simulate_stale_removal(tracker, all_repo_files)
+        
+        assert "deleted.py" not in tracker._last_active_items
+        assert "other.py" in tracker._last_active_items
+
+
 class TestGraduationIntegration:
     """Integration tests simulating the full graduation flow.
     

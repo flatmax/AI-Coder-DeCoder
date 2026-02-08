@@ -810,6 +810,9 @@ class StreamingMixin:
           b) Eligible history tokens exceed cache_target_tokens (standalone graduation)
         - This prevents per-request ripple churn from history in long conversations
         
+        Also detects stale items (deleted files) and removes them from cached
+        tiers, marking those tiers as broken for the cascade.
+        
         Args:
             file_paths: Files in active context this request
             files_modified: Files that were edited by the assistant
@@ -817,6 +820,39 @@ class StreamingMixin:
         stability = self._context_manager.cache_stability
         tc = self._context_manager.token_counter
         history = self._context_manager.get_history()
+        
+        # --- Phase 0: Remove stale items (deleted/missing files) ---
+        # Files that are tracked but no longer exist in the repo should be
+        # removed. Their tiers are marked as broken for the cascade.
+        stale_broken_tiers = set()
+        try:
+            all_repo_files = set(self._get_all_trackable_files())
+            stale_items = []
+            for item_key in list(stability._stability.keys()):
+                if item_key.startswith("history:"):
+                    continue  # History cleanup handled by compaction
+                
+                file_path = item_key.replace("symbol:", "") if item_key.startswith("symbol:") else item_key
+                
+                if file_path not in all_repo_files:
+                    stale_items.append(item_key)
+            
+            if stale_items:
+                for item_key in stale_items:
+                    tier = stability.get_tier(item_key)
+                    if tier != 'active':
+                        stale_broken_tiers.add(tier)
+                    del stability._stability[item_key]
+                
+                # Also clean from last_active_items
+                stale_set = set(stale_items)
+                stability._last_active_items -= stale_set
+                
+                if stale_broken_tiers:
+                    print(f"🗑️ Removed {len(stale_items)} stale items from tiers: {', '.join(sorted(stale_broken_tiers))}")
+        except Exception as e:
+            # Don't let stale detection failure block the rest of stability tracking
+            print(f"⚠️ Stale item detection error: {e}")
         
         # --- Build content/token callbacks (shared by both phases) ---
         
@@ -963,6 +999,7 @@ class StreamingMixin:
             get_content=get_item_content,
             modified=modified_items,
             get_tokens=get_item_tokens,
+            broken_tiers=stale_broken_tiers,
         )
         
         # --- Phase 4: Log promotions and demotions ---
