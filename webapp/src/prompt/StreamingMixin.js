@@ -439,9 +439,9 @@ export const StreamingMixin = (superClass) => class extends superClass {
     const cacheViewer = this.shadowRoot?.querySelector('cache-viewer');
     if (cacheViewer) {
       cacheViewer._breakdownStale = true;
-      if (cacheViewer.visible) {
-        cacheViewer.refreshBreakdown();
-      }
+      // Always refresh eagerly — promotions/demotions are only returned once
+      // by the backend, so we must fetch them now or lose them
+      cacheViewer.refreshBreakdown(true);
     }
     const contextViewer = this.shadowRoot?.querySelector('context-viewer');
     if (contextViewer) {
