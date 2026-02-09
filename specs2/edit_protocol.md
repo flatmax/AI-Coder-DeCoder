@@ -277,6 +277,9 @@ When multiple edits are applied to a file and one fails:
 - **No rollback** — partially applied state is preserved
 - **Failure reporting** — `streamComplete` includes per-edit status with diagnostics (which edits succeeded, which failed with reasons)
 - **Retry via AI** — the failed edit details (file path, error reason, diagnostic info) are visible to the AI in subsequent exchanges, allowing it to retry with corrected anchors against the now-modified file content
+[context lines — identical anchor]
+[new lines]
+═══════ REPL
 - **No merge editor** — the retry-via-AI approach is sufficient; the AI typically succeeds on the second attempt given the updated file state and failure diagnostics
 ═══════ REPL
 [context lines — identical anchor]

@@ -47,11 +47,14 @@ Web component UIs change too fast for automated tests to be cost-effective. Manu
 
 Recommended implementation sequence, with dependencies noted:
 
-### Phase 1: Foundation
-- [ ] **RPC server** — jrpc-oo WebSocket server with class registration
-- [ ] **Repository layer** — Git operations, file tree, search (wrapping git)
-- [ ] **Configuration** — Config loading, directory resolution, settings service
-- [ ] **Startup** — CLI parsing, port scanning, browser launch
+### Phase 1: Foundation ✅
+- [x] **RPC server** — jrpc-oo WebSocket server with class registration (`main.py`)
+- [x] **Repository layer** — Git operations, file tree, search wrapping git (`repo.py`, `tests/test_repo.py`)
+- [x] **Configuration** — Config loading, directory resolution, settings service (`config.py`, `settings.py`, `tests/test_config.py`)
+- [x] **Startup** — CLI parsing, port scanning, browser launch (`main.py`)
+- [x] **Edit parser** — State machine extraction, anchor matching, application (`edit_parser.py`, `tests/test_edit_parser.py`)
+- [x] **Token counter** — Model-aware counting with fallback (`token_counter.py`)
+- [x] **LLM service stub** — Session state, selected files, RPC interface (`llm_service.py`)
 
 ### Phase 2: Code Analysis
 - [ ] **Tree-sitter parser** — Multi-language parsing singleton

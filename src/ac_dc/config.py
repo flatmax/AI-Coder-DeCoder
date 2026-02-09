@@ -39,7 +39,7 @@ DEFAULT_SNIPPETS = {
     "snippets": [
         {"icon": "✂️", "tooltip": "Continue truncated edit", "message": "Your last edit was truncated, please continue from where you left off."},
         {"icon": "🔍", "tooltip": "Check context", "message": "Please re-read the files in context before making changes."},
-        {"icon": "✏️", "tooltip": "Fix edit blocks", "message": "Your last edit block was malformed. Please retry with the correct EDIT/REPL format."},
+        {"icon": "✏️", "tooltip": "Fix edit blocks", "message": "Your last edit block was malformed. Please retry with the correct EDIT/REPLACE format."},
         {"icon": "⏸️", "tooltip": "Pause before implementing", "message": "Before implementing, explain your plan and wait for confirmation."},
         {"icon": "✅", "tooltip": "Verify tests", "message": "Please verify that existing tests still pass with these changes."},
         {"icon": "📦", "tooltip": "Pre-commit checklist", "message": "Review all changes, ensure nothing is broken, and prepare a commit."},
