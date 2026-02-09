@@ -73,14 +73,15 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Streaming handler** — Background task, chunk delivery, completion (`llm_service.py`, `tests/test_llm_service.py`)
 - [x] **Commit message generation** — Non-streaming LLM call (`llm_service.py`)
 
-### Phase 4: Cache System *(next)*
-- [ ] **Stability tracker** — N-value tracking, tier assignment, content hashing per item
-- [ ] **Tier promotion algorithm** — Ripple cascade, threshold-aware anchoring, N-cap when tier above stable
-- [ ] **Reference graph clustering** — Bidirectional edge analysis, greedy bin-packing into L1/L2/L3
-- [ ] **Context builder** — Tiered message assembly with `cache_control` markers, L0 system message construction
-- [ ] **Stability update** — Post-response: stale removal, active item processing, graduation, cascade, change logging
+### Phase 4: Cache System ✅
+- [x] **Stability tracker** — N-value tracking, tier assignment, content hashing per item (`stability_tracker.py`, `tests/test_stability_tracker.py`)
+- [x] **Tier promotion algorithm** — Ripple cascade, threshold-aware anchoring, N-cap when tier above stable
+- [x] **Reference graph clustering** — Bidirectional edge analysis, greedy bin-packing into L1/L2/L3
+- [x] **Context builder** — Tiered message assembly with `cache_control` markers, L0 system message construction (`context_builder.py`, `tests/test_context_builder.py`)
+- [x] **Stability update** — Post-response: stale removal, active item processing, graduation, cascade, change logging
+- [x] **Context integration** — Tiered message assembly in ContextManager, active items building, stability initialization
 
-### Phase 5: History Management
+### Phase 5: History Management *(next)*
 - [ ] **History store** — JSONL persistence, session management, search
 - [ ] **Topic detector** — LLM-based boundary detection
 - [ ] **History compactor** — Truncation/summarization strategies

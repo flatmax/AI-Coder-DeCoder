@@ -15,6 +15,7 @@ from .config import ConfigManager
 from .context import ContextManager, COMMIT_MSG_SYSTEM
 from .edit_parser import parse_edit_blocks, apply_edits_to_repo, EditStatus
 from .repo import Repo
+from .stability_tracker import Tier, ItemType, _hash_content
 from .token_counter import TokenCounter
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ class LLM:
         self._symbol_index = _init_symbol_index(repo.root)
         if self._symbol_index:
             self._build_symbol_index()
+            self._init_stability()
 
         # Session state
         self._session_id = self._new_session_id()
@@ -195,14 +197,14 @@ class LLM:
 
             # -- Assemble prompt --
             system_prompt = self._config.get_system_prompt()
+            file_tree = self._repo.get_flat_file_list()
+
+            # Pre-request shedding (Layer 3 defense)
             symbol_map = ""
             if self._symbol_index:
                 symbol_map = self._symbol_index.get_symbol_map(
                     exclude_files=set(valid_files),
                 )
-            file_tree = self._repo.get_flat_file_list()
-
-            # Pre-request shedding (Layer 3 defense)
             shed = self._context.shed_files_if_needed(
                 message, system_prompt, symbol_map, file_tree,
             )
@@ -213,13 +215,27 @@ class LLM:
             # Emergency truncation (Layer 2 defense)
             self._context.emergency_truncate()
 
-            messages = self._context.assemble_messages(
-                user_prompt=message,
-                system_prompt=system_prompt,
-                symbol_map=symbol_map,
-                file_tree=file_tree,
-                images=images or None,
-            )
+            # Build messages — tiered if stability tracker has content
+            if self._context.has_tiered_content and self._symbol_index:
+                symbol_blocks, file_contents = self._gather_tiered_content(valid_files)
+                legend = self._symbol_index.get_legend()
+                messages = self._context.assemble_tiered_messages(
+                    user_prompt=message,
+                    system_prompt=system_prompt,
+                    symbol_map_legend=legend,
+                    symbol_blocks=symbol_blocks,
+                    file_contents=file_contents,
+                    file_tree=file_tree,
+                    images=images or None,
+                )
+            else:
+                messages = self._context.assemble_messages(
+                    user_prompt=message,
+                    system_prompt=system_prompt,
+                    symbol_map=symbol_map,
+                    file_tree=file_tree,
+                    images=images or None,
+                )
 
             # -- Stream LLM completion --
             full_content, was_cancelled, usage = await self._run_llm_stream(
@@ -278,6 +294,9 @@ class LLM:
                     # Invalidate symbol cache for modified files
                     if files_modified and self._symbol_index:
                         self._symbol_index.invalidate_files(files_modified)
+
+            # -- Update stability tracker --
+            self._update_stability(valid_files, result.get("files_modified", []))
 
             # -- Save symbol map --
             self._save_symbol_map()
@@ -460,8 +479,29 @@ class LLM:
 
         total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
 
+        # Build cache tier blocks for the cache viewer
+        blocks = self._build_tier_blocks()
+
+        # Compute cache stats
+        cached_tokens = 0
+        for block in blocks:
+            if block.get("cached"):
+                cached_tokens += block.get("tokens", 0)
+        cache_hit_rate = int(cached_tokens / max(1, total) * 100) if total > 0 else 0
+
+        # Get tier changes
+        changes = self._context.stability.get_changes()
+        promotions = [
+            {"key": c.key, "from": c.old_tier.name, "to": c.new_tier.name}
+            for c in changes if c.is_promotion
+        ]
+        demotions = [
+            {"key": c.key, "from": c.old_tier.name, "to": c.new_tier.name}
+            for c in changes if c.is_demotion
+        ]
+
         return {
-            "blocks": [],
+            "blocks": blocks,
             "breakdown": {
                 "system": {"tokens": system_tokens},
                 "symbol_map": {"tokens": symbol_map_tokens, "files": symbol_files, "chunks": []},
@@ -474,18 +514,85 @@ class LLM:
                 },
             },
             "total_tokens": total,
-            "cached_tokens": 0,
-            "cache_hit_rate": 0,
+            "cached_tokens": cached_tokens,
+            "cache_hit_rate": cache_hit_rate,
             "max_input_tokens": self._counter.max_input_tokens,
             "model": self._model,
-            "promotions": [],
-            "demotions": [],
+            "promotions": promotions,
+            "demotions": demotions,
             "session_totals": dict(self._session_totals),
         }
 
     # ------------------------------------------------------------------
     # Terminal reports
     # ------------------------------------------------------------------
+
+    def _build_tier_blocks(self) -> list[dict]:
+        """Build tier block info for the cache viewer."""
+        blocks = []
+        from .stability_tracker import Tier, TIER_CONFIG
+
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]:
+            items = self._context.stability.get_tier_items(tier)
+            if not items and tier != Tier.L0:
+                continue
+
+            tokens = self._context.stability.get_tier_tokens(tier)
+            config = TIER_CONFIG[tier]
+
+            # Group by type
+            contents = []
+            symbol_items = [it for it in items if it.item_type == "symbol"]
+            file_items = [it for it in items if it.item_type == "file"]
+            history_items = [it for it in items if it.item_type == "history"]
+
+            if symbol_items:
+                contents.append({
+                    "type": "symbols",
+                    "count": len(symbol_items),
+                    "tokens": sum(it.token_estimate for it in symbol_items),
+                    "items": [
+                        {
+                            "key": it.key,
+                            "tokens": it.token_estimate,
+                            "n": it.n,
+                            "threshold": config.get("promotion_n", config["entry_n"]),
+                        }
+                        for it in symbol_items
+                    ],
+                })
+            if file_items:
+                contents.append({
+                    "type": "files",
+                    "count": len(file_items),
+                    "tokens": sum(it.token_estimate for it in file_items),
+                    "items": [
+                        {
+                            "key": it.key,
+                            "tokens": it.token_estimate,
+                            "n": it.n,
+                            "threshold": config.get("promotion_n", config["entry_n"]),
+                        }
+                        for it in file_items
+                    ],
+                })
+            if history_items:
+                contents.append({
+                    "type": "history",
+                    "count": len(history_items),
+                    "tokens": sum(it.token_estimate for it in history_items),
+                })
+
+            blocks.append({
+                "tier": config["name"],
+                "name": config["name"],
+                "tokens": tokens,
+                "cached": tier != Tier.ACTIVE and tokens > 0,
+                "threshold": self._context.cache_target_tokens,
+                "contents": contents,
+            })
+
+        return blocks
 
     def _print_usage_report(self, result: dict):
         """Print token usage and edit results to terminal."""
@@ -519,6 +626,113 @@ class LLM:
     # ------------------------------------------------------------------
     # Symbol index
     # ------------------------------------------------------------------
+
+    def _init_stability(self):
+        """Initialize stability tracker from the reference graph."""
+        if self._symbol_index is None:
+            return
+        try:
+            self._context.initialize_stability(
+                self._symbol_index,
+                self._symbol_index.reference_index,
+            )
+        except Exception as e:
+            log.warning("Stability initialization failed: %s", e)
+
+    def _update_stability(self, selected_files: list[str], modified_files: list[str]):
+        """Update stability tracker after a response."""
+        if self._symbol_index is None:
+            return
+        try:
+            # Build symbol blocks for selected files
+            symbol_blocks = {}
+            for fpath in self._symbol_index.all_symbols:
+                key = f"symbol:{fpath}"
+                block = self._symbol_index.get_file_block(fpath)
+                if block:
+                    symbol_blocks[key] = block
+
+            # Build active items
+            active_items = self._context.build_active_items(
+                selected_files, symbol_blocks,
+            )
+
+            # Register unselected symbol entries that aren't already tracked
+            for fpath in self._symbol_index.all_symbols:
+                key = f"symbol:{fpath}"
+                if key not in active_items:
+                    item = self._context.stability.get_item(key)
+                    if item is None:
+                        block = self._symbol_index.get_file_block(fpath)
+                        if block:
+                            self._context.stability.register_item(
+                                key, ItemType.SYMBOL,
+                                _hash_content(block),
+                                max(1, len(block) // 4),
+                            )
+
+            # Get all repo files
+            r = self._repo.get_file_tree()
+            all_files = set()
+            if "tree" in r:
+                self._collect_file_paths(r["tree"], all_files)
+
+            # Run the update
+            changes = self._context.stability.update_after_response(
+                active_items, modified_files, all_files,
+            )
+
+            # Log tier changes
+            for change in changes:
+                if change.is_promotion:
+                    log.info("📈 %s → %s: %s",
+                             change.old_tier.name, change.new_tier.name, change.key)
+                else:
+                    log.info("📉 %s → %s: %s",
+                             change.old_tier.name, change.new_tier.name, change.key)
+
+        except Exception as e:
+            log.warning("Stability update failed: %s", e)
+
+    def _gather_tiered_content(self, selected_files: list[str]) -> tuple[dict, dict]:
+        """Gather symbol blocks and file contents for tiered assembly.
+
+        Returns (symbol_blocks, file_contents) keyed by tracker keys.
+        """
+        symbol_blocks: dict[str, str] = {}
+        file_contents: dict[str, str] = {}
+
+        if self._symbol_index is None:
+            return symbol_blocks, file_contents
+
+        # Symbol blocks for all files NOT in selected (those are in active context)
+        excluded = set(selected_files)
+        for fpath, fsyms in self._symbol_index.all_symbols.items():
+            if fpath not in excluded:
+                key = f"symbol:{fpath}"
+                block = self._symbol_index.get_file_block(fpath)
+                if block:
+                    symbol_blocks[key] = block
+
+        # File contents for files in cached tiers
+        from .stability_tracker import Tier
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+            for item in self._context.stability.get_tier_items(tier):
+                if item.item_type == ItemType.FILE:
+                    path = item.key.split(":", 1)[1] if ":" in item.key else item.key
+                    r = self._repo.get_file_content(path)
+                    if "content" in r:
+                        file_contents[item.key] = r["content"]
+
+        return symbol_blocks, file_contents
+
+    @staticmethod
+    def _collect_file_paths(tree_node: dict, paths: set[str]):
+        """Recursively collect file paths from a tree node."""
+        if tree_node.get("type") == "file" and tree_node.get("path"):
+            paths.add(tree_node["path"])
+        for child in tree_node.get("children", []):
+            LLM._collect_file_paths(child, paths)
 
     def _build_symbol_index(self):
         """Build the symbol index from repo files."""

@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Optional, Union
 
 from .token_counter import TokenCounter
+from .stability_tracker import (
+    StabilityTracker, Tier, ItemType, TierChange,
+    TIER_CONFIG, _hash_content, cluster_for_tiers,
+)
+from .context_builder import TieredContextBuilder
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +186,12 @@ class ContextManager:
         self.counter = TokenCounter(model_name)
         self.file_context = FileContext(repo_root)
 
+        # Stability tracker (cache tiering)
+        self.stability = StabilityTracker(cache_target_tokens)
+
+        # Tiered context builder
+        self._builder = TieredContextBuilder(self.stability)
+
         # Conversation history — working copy for LLM requests
         self._messages: list[dict] = []
 
@@ -271,8 +282,7 @@ class ContextManager:
     ) -> list[dict]:
         """Assemble the full message array for an LLM request.
 
-        This is the non-tiered (no cache) assembly used before
-        Phase 4 implements stability-based cache tiering.
+        Non-tiered assembly — used when stability tracker has no items.
         """
         messages: list[dict] = []
 
@@ -321,6 +331,140 @@ class ContextManager:
             messages.append({"role": "user", "content": user_prompt})
 
         return messages
+
+    def assemble_tiered_messages(
+        self,
+        user_prompt: str,
+        system_prompt: str,
+        symbol_map_legend: str = "",
+        symbol_blocks: Optional[dict[str, str]] = None,
+        file_contents: Optional[dict[str, str]] = None,
+        file_tree: str = "",
+        url_context: str = "",
+        images: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Assemble messages with cache tiering.
+
+        Uses the stability tracker to organize content into cached tiers
+        with cache_control breakpoints.
+        """
+        # Build history tier map
+        history_tier_map = self._build_history_tier_map()
+
+        # Active file contents
+        active_files = {}
+        for path in self.file_context.get_files():
+            content = self.file_context.get_content(path)
+            if content is not None:
+                active_files[path] = content
+
+        return self._builder.build_messages(
+            system_prompt=system_prompt,
+            symbol_map_legend=symbol_map_legend,
+            symbol_blocks=symbol_blocks or {},
+            file_contents=file_contents or {},
+            history=self._messages,
+            history_tier_map=history_tier_map,
+            file_tree=file_tree,
+            url_context=url_context,
+            active_file_contents=active_files,
+            user_prompt=user_prompt,
+            images=images,
+        )
+
+    def _build_history_tier_map(self) -> dict[int, Tier]:
+        """Map each message index to its assigned tier."""
+        tier_map: dict[int, Tier] = {}
+        for idx in range(len(self._messages)):
+            key = f"history:{idx}"
+            item = self.stability.get_item(key)
+            if item is not None:
+                tier_map[idx] = item.tier
+            else:
+                tier_map[idx] = Tier.ACTIVE
+        return tier_map
+
+    # ------------------------------------------------------------------
+    # Stability integration
+    # ------------------------------------------------------------------
+
+    def build_active_items(
+        self,
+        selected_files: list[str],
+        symbol_blocks: Optional[dict[str, str]] = None,
+    ) -> dict[str, dict]:
+        """Build the active items dict for stability tracking.
+
+        Active items are those explicitly in the active (uncached) context:
+        - Selected file paths
+        - Symbol entries for selected files
+        - History messages not yet graduated
+        """
+        active: dict[str, dict] = {}
+
+        # Selected files
+        for fpath in selected_files:
+            content = self.file_context.get_content(fpath)
+            if content is not None:
+                file_key = f"file:{fpath}"
+                active[file_key] = {
+                    "hash": _hash_content(content),
+                    "tokens": max(1, len(content) // 4),
+                    "type": ItemType.FILE,
+                }
+                # Symbol entry for selected file (excluded from symbol map)
+                sym_key = f"symbol:{fpath}"
+                sym_block = (symbol_blocks or {}).get(sym_key, "")
+                if sym_block:
+                    active[sym_key] = {
+                        "hash": _hash_content(sym_block),
+                        "tokens": max(1, len(sym_block) // 4),
+                        "type": ItemType.SYMBOL,
+                    }
+
+        # History messages — register all that aren't already graduated
+        for idx, msg in enumerate(self._messages):
+            key = f"history:{idx}"
+            item = self.stability.get_item(key)
+            if item is None or item.tier == Tier.ACTIVE:
+                content_str = f"{msg.get('role', '')}:{msg.get('content', '')}"
+                active[key] = {
+                    "hash": _hash_content(content_str),
+                    "tokens": self.counter.count(msg),
+                    "type": ItemType.HISTORY,
+                }
+
+        return active
+
+    def initialize_stability(self, symbol_index, ref_index):
+        """Initialize stability tracker from reference graph.
+
+        Called once on startup when the symbol index is first built.
+        """
+        clusters = cluster_for_tiers(
+            ref_index, symbol_index, self.cache_target_tokens,
+        )
+        token_estimates = {}
+        for tier, keys in clusters:
+            for key in keys:
+                path = key.split(":", 1)[1] if ":" in key else key
+                block = symbol_index.get_file_block(path)
+                token_estimates[key] = max(1, len(block) // 4) if block else 0
+
+        self.stability.initialize_from_reference_graph(clusters, token_estimates)
+        log.info(
+            "Stability initialized: %d items across %d clusters",
+            self.stability.item_count, len(clusters),
+        )
+
+    def reregister_history_items(self):
+        """Purge history entries from stability tracker without clearing history."""
+        self.stability.purge_history_items()
+
+    @property
+    def has_tiered_content(self) -> bool:
+        """True if the stability tracker has items in cached tiers."""
+        return self.stability.item_count > 0
 
     def estimate_prompt_tokens(
         self,
