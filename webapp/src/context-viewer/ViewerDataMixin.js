@@ -58,11 +58,12 @@ export const ViewerDataMixin = (superClass) => class extends superClass {
     return this.fetchedUrls.filter(url => !this.excludedUrls.has(url));
   }
 
-  async refreshBreakdown() {
+  async refreshBreakdown(force = false) {
     if (!this.rpcCall) return;
 
     // Deduplicate: if a refresh is already in flight, return that promise
-    if (this._refreshPromise) return this._refreshPromise;
+    // unless force=true (used after streaming to capture one-shot promotions)
+    if (this._refreshPromise && !force) return this._refreshPromise;
 
     this._refreshPromise = (async () => {
       try {

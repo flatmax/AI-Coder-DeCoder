@@ -9,7 +9,7 @@ export const promptViewStyles = css`
 
   .dialog {
     position: relative;
-    width: 400px;
+    width: 50vw;
     height: 100%;
     background: #16213e;
     border-radius: 12px;
@@ -26,12 +26,13 @@ export const promptViewStyles = css`
   }
 
   .dialog.minimized {
-    width: 200px;
+    width: 250px;
+    min-width: 250px;
     max-height: 48px;
   }
 
   .dialog.with-picker {
-    width: 700px;
+    width: 50vw;
   }
 
   .header {
