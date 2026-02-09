@@ -40,6 +40,12 @@ export const FileHandlerMixin = (superClass) => class extends superClass {
         case 'create-dir':
           await this.call['Repo.create_directory'](paths[0]);
           break;
+        case 'rename':
+          await this.call['Repo.rename_file'](paths[0], paths[1]);
+          break;
+        case 'rename-dir':
+          await this.call['Repo.rename_directory'](paths[0], paths[1]);
+          break;
         default:
           console.warn('Unknown git operation:', operation);
           return;
