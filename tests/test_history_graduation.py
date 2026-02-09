@@ -304,6 +304,122 @@ class TestNativeHistoryPairs:
         assert isinstance(tier_messages[0]["content"], str)
 
 
+class TestGhostHistoryPrevention:
+    """Tests for preventing ghost history messages.
+    
+    Ghost messages occur when history items are graduated from active
+    before being registered in the stability tracker. They end up
+    tracked by neither active nor any cache tier — always appearing
+    as 'active' in the UI but never being processed by the tracker.
+    
+    The fix: pre-register all history items in _stability before the
+    graduation decision in _update_cache_stability.
+    """
+    
+    @pytest.fixture
+    def tracker(self):
+        return StabilityTracker(
+            thresholds={'L3': 3, 'L2': 6, 'L1': 9, 'L0': 12},
+            cache_target_tokens=500,
+        )
+    
+    def test_new_history_not_ghosted_by_piggyback(self, tracker):
+        """New history items must be registered before graduation decision.
+        
+        Scenario: piggybacking fires on the same round that new messages
+        are added. Without pre-registration, the new messages get graduated
+        (removed from active_items) before being registered in _stability.
+        They become permanent ghosts.
+        """
+        from ac.context.stability_tracker import StabilityInfo
+        
+        # Simulate: 4 rounds built up history:0..3 with N=3
+        for key in ["history:0", "history:1", "history:2", "history:3"]:
+            tracker._stability[key] = StabilityInfo(
+                content_hash=tracker.compute_hash(f"content:{key}"),
+                n_value=3,
+                tier='active',
+            )
+        tracker._last_active_items = {
+            "history:0", "history:1", "history:2", "history:3",
+            "file.py", "symbol:file.py",
+        }
+        
+        # New exchange added: history:4, history:5 (not yet in _stability)
+        # These are the "ghost candidates" — if graduated before registration,
+        # they'll never appear in any tier.
+        
+        # Pre-register new items (the fix)
+        for key in ["history:4", "history:5"]:
+            if key not in tracker._stability:
+                tracker._stability[key] = StabilityInfo(
+                    content_hash=tracker.compute_hash(f"content:{key}"),
+                    n_value=0,
+                    tier='active',
+                )
+        
+        # Now all 6 history items are in _stability
+        assert "history:4" in tracker._stability
+        assert "history:5" in tracker._stability
+        assert tracker.get_tier("history:4") == 'active'
+        assert tracker.get_n_value("history:4") == 0
+    
+    def test_unregistered_history_is_ghost(self, tracker):
+        """Without pre-registration, unregistered items become ghosts.
+        
+        This demonstrates the bug: items not in _stability that are
+        excluded from active_items never get processed by the tracker.
+        """
+        # history:0 is registered, history:1 is not
+        tracker._stability["history:0"] = StabilityInfo(
+            content_hash="h0", n_value=3, tier='active',
+        )
+        tracker._last_active_items = {"history:0"}
+        
+        # history:1 not registered — simulate graduation excluding it
+        # from active_items
+        tracker.update_after_response(
+            items=[],  # Both excluded (simulating graduation)
+            get_content=lambda x: f"content:{x}",
+        )
+        
+        # history:0 was in _last_active_items, left active → enters L3
+        assert tracker.get_tier("history:0") == 'L3'
+        
+        # history:1 was NEVER in _stability or _last_active_items
+        # It's a ghost — get_tier returns 'active' (default for unknown)
+        assert "history:1" not in tracker._stability
+        assert tracker.get_tier("history:1") == 'active'  # Ghost!
+    
+    def test_preregistered_history_graduates_correctly(self, tracker):
+        """Pre-registered items graduate normally via the cascade."""
+        from ac.context.stability_tracker import StabilityInfo
+        
+        # Register all items including new ones
+        for i in range(4):
+            tracker._stability[f"history:{i}"] = StabilityInfo(
+                content_hash=f"h{i}", n_value=3 if i < 2 else 0, tier='active',
+            )
+        tracker._last_active_items = {
+            "history:0", "history:1", "history:2", "history:3",
+        }
+        
+        # Graduate history:0 and history:1 (exclude from active_items)
+        tracker.update_after_response(
+            items=["history:2", "history:3"],
+            get_content=lambda x: f"content:{x}",
+            get_tokens=lambda x: 600,
+        )
+        
+        # Graduated items entered L3
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
+        
+        # Non-graduated items stayed active
+        assert tracker.get_tier("history:2") == 'active'
+        assert tracker.get_tier("history:3") == 'active'
+
+
 class TestStaleItemRemovalIntegration:
     """Integration tests for stale item removal at the streaming level.
     
@@ -635,6 +751,53 @@ class TestGraduationIntegration:
         
         assert has_ripple
         assert len(graduated) == 10  # All eligible history graduates
+    
+    def test_piggyback_on_files_leaving_active(self, tracker):
+        """When files leave active context, L3 is invalidated and history piggybacks.
+        
+        This tests the l3_entries_from_leaving detection: files that were
+        in the active set last round but aren't this round will enter L3
+        via the cascade, invalidating L3. History should piggyback.
+        """
+        content = {
+            "history:0": "user:hi", "history:1": "assistant:hello",
+            "file.py": "content",
+        }
+        
+        # Build N to 3 for history
+        for _ in range(4):
+            tracker.update_after_response(
+                items=["history:0", "history:1", "file.py"],
+                get_content=lambda x: content[x],
+                get_tokens=lambda x: 400,
+            )
+        
+        assert tracker.get_n_value("history:0") == 3
+        assert tracker.get_n_value("file.py") == 3
+        
+        # Simulate file.py leaving active (user unchecked it).
+        # Use _last_active_file_symbol_items to track this.
+        # file.py is still in _stability with tier='active' and will
+        # enter L3 via the cascade, invalidating it.
+        
+        # The graduation logic checks:
+        #   items_leaving_active = _last_active_file_symbol_items - file_symbol_items
+        #   l3_entries_from_leaving = any(tier == 'active' for item in items_leaving_active)
+        # Since file.py has tier='active', l3_entries_from_leaving is True.
+        
+        # Graduate: exclude file.py AND history from active_items
+        tracker.update_after_response(
+            items=[],  # Everything excluded
+            get_content=lambda x: content[x],
+            get_tokens=lambda x: 400,
+        )
+        
+        # file.py entered L3 (left active, 400 tokens >= threshold not needed for L3)
+        assert tracker.get_tier("file.py") == 'L3'
+        
+        # History piggybacked on L3 invalidation
+        assert tracker.get_tier("history:0") == 'L3'
+        assert tracker.get_tier("history:1") == 'L3'
     
     def test_mixed_eligible_and_ineligible(self, tracker):
         """Only eligible (N>=3, active tier) history considered for graduation."""

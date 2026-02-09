@@ -153,7 +153,7 @@ The result: in steady state, all tiers are cached. Only an actual content change
 
 ### L3 Invalidation Detection for History Graduation
 
-History graduation from active to L3 piggybacks on L3 invalidation — when L3 is being rebuilt anyway, adding history has zero additional cache cost. L3 invalidation is detected from three sources:
+History graduation from active to L3 piggybacks on L3 invalidation — when L3 is being rebuilt anyway, adding history has zero additional cache cost. L3 invalidation is detected from four sources:
 
 1. **File/symbol graduation**: Files or symbols with N ≥ 3 are graduating from active into L3. Their entry changes L3's content, causing a cache miss.
 
@@ -161,15 +161,18 @@ History graduation from active to L3 piggybacks on L3 invalidation — when L3 i
 
 3. **Stale removal from L3**: A deleted file's entry was removed from L3 during stale item cleanup.
 
+4. **File/symbol items leaving active context**: Files or symbols that were in the active set on the previous request but are no longer selected (e.g., unchecked from the file picker, or a message sent with no files after previously having files). These items will enter L3 via the cascade in `update_after_response`, invalidating L3's content.
+
 ```python
 l3_will_invalidate = (
     bool(graduating_file_symbols) or l3_demotions or l3_stale
+    or l3_entries_from_leaving
 )
 ```
 
 If any of these conditions are true, all eligible active history graduates for free. If none are true, standalone graduation requires `eligible_tokens >= cache_target_tokens`.
 
-Note: L3 invalidation detection governs **history graduation** — whether active history piggybacks into L3. The tier-to-tier veteran cascade is driven by **tier invalidation** during `update_after_response` and runs regardless of the history graduation decision.
+Note: L3 invalidation detection governs **history graduation** — whether active history piggybacks into L3. The tier-to-tier veteran cascade is driven by **tier invalidation** during `update_after_response` and runs regardless of the history graduation decision. The leaving-active detection uses `_last_active_file_symbol_items` (tracked on the LiteLLM instance) to compare the previous request's file/symbol set with the current one.
 
 ### How the Cascade Executes
 
