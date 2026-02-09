@@ -71,6 +71,9 @@ export const FileContextMenuMixin = (superClass) => class extends superClass {
       items.push({ label: 'Discard changes', action: () => this._discardChanges(filePath), danger: true });
     }
     
+    // Rename / move
+    items.push({ label: 'Rename / Move...', action: () => this._renameFile(filePath) });
+
     // Delete option (always available, but dangerous for tracked files)
     items.push({ label: 'Delete file', action: () => this._deleteFile(filePath), danger: true });
     
@@ -95,6 +98,7 @@ export const FileContextMenuMixin = (superClass) => class extends superClass {
       items.push({ label: 'Unstage all in directory', action: () => this._unstageDirectory(filesInDir) });
     }
     
+    items.push({ label: 'Rename / Move...', action: () => this._renameDirectory(dirPath) });
     items.push({ label: 'New file...', action: () => this._createNewFile(dirPath) });
     items.push({ label: 'New directory...', action: () => this._createNewDirectory(dirPath) });
     
@@ -201,6 +205,44 @@ export const FileContextMenuMixin = (superClass) => class extends superClass {
     const newDirPath = relativePath ? `${relativePath}/${dirName}` : dirName;
     this.dispatchEvent(new CustomEvent('git-operation', {
       detail: { operation: 'create-dir', paths: [newDirPath] },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  async _renameFile(filePath) {
+    this._closeContextMenu();
+    const newPath = prompt(`Rename / move file:\n\nCurrent: ${filePath}\n\nEnter new path:`, filePath);
+    if (!newPath || newPath === filePath) return;
+    
+    this.dispatchEvent(new CustomEvent('git-operation', {
+      detail: { operation: 'rename', paths: [filePath, newPath] },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  async _renameDirectory(dirPath) {
+    this._closeContextMenu();
+    
+    // Strip root prefix for display and the prompt default
+    const rootName = this.tree?.name || '';
+    let relativePath = dirPath;
+    if (rootName && dirPath.startsWith(rootName + '/')) {
+      relativePath = dirPath.substring(rootName.length + 1);
+    } else if (dirPath === rootName) {
+      // Don't allow renaming the repo root
+      return;
+    }
+    
+    const newRelPath = prompt(
+      `Rename / move directory:\n\nCurrent: ${relativePath}\n\nEnter new path:`,
+      relativePath
+    );
+    if (!newRelPath || newRelPath === relativePath) return;
+    
+    this.dispatchEvent(new CustomEvent('git-operation', {
+      detail: { operation: 'rename-dir', paths: [relativePath, newRelPath] },
       bubbles: true,
       composed: true
     }));

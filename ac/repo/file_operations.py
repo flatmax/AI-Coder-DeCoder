@@ -208,3 +208,77 @@ class FileOperationsMixin:
             return {"success": True, "path": file_path}
         except Exception as e:
             return self._create_error_response(str(e))
+
+    def rename_file(self, old_path, new_path):
+        """Rename or move a file, using git mv if tracked.
+
+        Args:
+            old_path: Current relative path of the file
+            new_path: Desired relative path of the file
+
+        Returns:
+            dict with success/error status
+        """
+        try:
+            repo_root = self.get_repo_root()
+            abs_old = os.path.join(repo_root, old_path)
+            abs_new = os.path.join(repo_root, new_path)
+
+            if not os.path.exists(abs_old):
+                return self._create_error_response(f"File not found: {old_path}")
+
+            if os.path.exists(abs_new):
+                return self._create_error_response(f"Destination already exists: {new_path}")
+
+            # Ensure destination directory exists
+            dest_dir = os.path.dirname(abs_new)
+            if dest_dir:
+                os.makedirs(dest_dir, exist_ok=True)
+
+            # Check if file is tracked by git
+            try:
+                self._repo.git.ls_files('--error-unmatch', old_path)
+                # File is tracked — use git mv
+                self._repo.git.mv(old_path, new_path)
+            except Exception:
+                # File is untracked — plain filesystem rename
+                os.rename(abs_old, abs_new)
+
+            return {"success": True, "old_path": old_path, "new_path": new_path}
+        except Exception as e:
+            return self._create_error_response(str(e))
+
+    def rename_directory(self, old_path, new_path):
+        """Rename or move a directory, using git mv for tracked files.
+
+        Args:
+            old_path: Current relative directory path
+            new_path: Desired relative directory path
+
+        Returns:
+            dict with success/error status
+        """
+        try:
+            repo_root = self.get_repo_root()
+            abs_old = os.path.join(repo_root, old_path)
+            abs_new = os.path.join(repo_root, new_path)
+
+            if not os.path.isdir(abs_old):
+                return self._create_error_response(f"Directory not found: {old_path}")
+
+            if os.path.exists(abs_new):
+                return self._create_error_response(f"Destination already exists: {new_path}")
+
+            # Use git mv which handles the entire directory
+            try:
+                self._repo.git.mv(old_path, new_path)
+            except Exception:
+                # Fallback: plain filesystem rename (e.g. untracked directory)
+                dest_parent = os.path.dirname(abs_new)
+                if dest_parent:
+                    os.makedirs(dest_parent, exist_ok=True)
+                os.rename(abs_old, abs_new)
+
+            return {"success": True, "old_path": old_path, "new_path": new_path}
+        except Exception as e:
+            return self._create_error_response(str(e))
