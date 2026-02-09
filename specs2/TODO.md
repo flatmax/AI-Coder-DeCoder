@@ -65,20 +65,20 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Compact formatter** — LLM-optimized text output with aliases, annotations, test collapsing, chunks (`symbol_index/compact_format.py`)
 - [x] **LSP queries** — Hover, definition, references, completions via symbol index (`symbol_index/index.py`, `llm_service.py`)
 
-### Phase 3: LLM Integration
-- [ ] **Token counter** — Model-aware counting with fallback
-- [ ] **Context manager** — History, file context, token budgets
-- [ ] **Prompt loader** — System prompt assembly from files
-- [ ] **Edit parser** — State machine for edit block extraction and application
-- [ ] **Streaming handler** — Background task, chunk delivery, completion
-- [ ] **Commit message generation** — Non-streaming LLM call
+### Phase 3: LLM Integration ✅
+- [x] **Token counter** — Model-aware counting with fallback (done in Phase 1)
+- [x] **Context manager** — History, file context, token budgets (`context.py`, `tests/test_context.py`)
+- [x] **Prompt loader** — System prompt assembly from files (done in Phase 1 via `config.py`)
+- [x] **Edit parser** — State machine for edit block extraction and application (done in Phase 1)
+- [x] **Streaming handler** — Background task, chunk delivery, completion (`llm_service.py`, `tests/test_llm_service.py`)
+- [x] **Commit message generation** — Non-streaming LLM call (`llm_service.py`)
 
-### Phase 4: Cache System
-- [ ] **Stability tracker** — N-value tracking, tier assignment
-- [ ] **Tier promotion algorithm** — Ripple cascade, threshold-aware promotion
-- [ ] **Reference graph clustering** — Bidirectional edge analysis, bin-packing
-- [ ] **Context builder** — Tiered message assembly with cache control markers
-- [ ] **Stability update** — Post-response item tracking, graduation, demotion
+### Phase 4: Cache System *(next)*
+- [ ] **Stability tracker** — N-value tracking, tier assignment, content hashing per item
+- [ ] **Tier promotion algorithm** — Ripple cascade, threshold-aware anchoring, N-cap when tier above stable
+- [ ] **Reference graph clustering** — Bidirectional edge analysis, greedy bin-packing into L1/L2/L3
+- [ ] **Context builder** — Tiered message assembly with `cache_control` markers, L0 system message construction
+- [ ] **Stability update** — Post-response: stale removal, active item processing, graduation, cascade, change logging
 
 ### Phase 5: History Management
 - [ ] **History store** — JSONL persistence, session management, search

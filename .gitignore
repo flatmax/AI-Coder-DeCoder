@@ -11,3 +11,4 @@ node_modules/
 .venv/
 venv/
 .aicoder
+uv.lock
