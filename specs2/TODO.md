@@ -14,8 +14,8 @@ The following are explicitly deferred to implementation time:
 - **Accessibility** — ARIA roles, focus management (can be added incrementally)
 - **Keyboard shortcuts** — Ctrl+S for save; others added as needed
 
-### Tree-Sitter Queries
-Bundle community `tags.scm` files from tree-sitter grammar repos (Python, JS/TS, C). These are well-tested and cover 80%+ of needs. Implementation effort is in per-language post-processing, not the queries.
+### Tree-Sitter Integration
+Individual `tree-sitter-{language}` packages provide grammars. Per-language extractor classes walk the AST using tree-sitter's node API. The parser supports multiple API versions and falls back to `tree-sitter-languages` if individual packages are unavailable.
 
 ## Testing Approach
 
@@ -56,14 +56,14 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Token counter** — Model-aware counting with fallback (`token_counter.py`)
 - [x] **LLM service stub** — Session state, selected files, RPC interface (`llm_service.py`)
 
-### Phase 2: Code Analysis
-- [ ] **Tree-sitter parser** — Multi-language parsing singleton
-- [ ] **Language extractors** — Python, JavaScript/TypeScript, C/C++
-- [ ] **Symbol cache** — mtime-based per-file caching
-- [ ] **Import resolver** — Python and JS import → file path mapping
-- [ ] **Reference index** — Cross-file reference tracking
-- [ ] **Compact formatter** — LLM-optimized text output with aliases and annotations
-- [ ] **LSP formatter** — Editor-compatible JSON output
+### Phase 2: Code Analysis ✅
+- [x] **Tree-sitter parser** — Multi-language parsing singleton (`symbol_index/parser.py`)
+- [x] **Language extractors** — Python, JavaScript/TypeScript, C/C++ (`symbol_index/extractors/`)
+- [x] **Symbol cache** — mtime-based per-file caching (`symbol_index/cache.py`)
+- [x] **Import resolver** — Python, JS/TS, and C import → file path mapping (`symbol_index/import_resolver.py`)
+- [x] **Reference index** — Cross-file reference tracking, bidirectional edges, connected components (`symbol_index/reference_index.py`)
+- [x] **Compact formatter** — LLM-optimized text output with aliases, annotations, test collapsing, chunks (`symbol_index/compact_format.py`)
+- [x] **LSP queries** — Hover, definition, references, completions via symbol index (`symbol_index/index.py`, `llm_service.py`)
 
 ### Phase 3: LLM Integration
 - [ ] **Token counter** — Model-aware counting with fallback

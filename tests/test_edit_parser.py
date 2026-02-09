@@ -63,9 +63,6 @@ import sys
         assert b.old_only == []
         assert b.new_only == ["import sys"]
 
-new content
-
-═══════ REPL
     def test_multiple_blocks(self):
         text = """
 src/a.py
@@ -384,5 +381,3 @@ LINE3
         content = (tmp_path / "app.py").read_text()
         assert "LINE1" in content
         assert "LINE3" in content
-═══════ REPL
-new content

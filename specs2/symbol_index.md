@@ -86,77 +86,56 @@ Import:
 
 ### Grammar Acquisition
 
-Tree-sitter grammars are obtained via the `tree-sitter-languages` pip package, which provides pre-compiled grammars for ~50 languages in a single install. No WASM, runtime download, or build step required.
+Tree-sitter grammars are obtained via individual `tree-sitter-{language}` pip packages (`tree-sitter-python`, `tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-c`, `tree-sitter-cpp`). Each provides a pre-compiled grammar as a Python extension module with a `language()` function. The parser also supports the legacy `tree-sitter-languages` bundle as a fallback for environments that use it.
+
+The parser initialization tries three strategies in order:
+1. **tree-sitter-languages global** — `get_parser("python")` smoke test
+2. **tree-sitter-languages per-language** — lazy per-language `get_parser()` calls
+3. **Plain tree-sitter + individual packages** — `tree_sitter_python.language()` etc., with parser API auto-detection (constructor vs `set_language`)
 
 ### Symbol Extraction Strategy
 
-Symbol extraction uses **tree-sitter queries** (S-expression patterns) rather than hand-written per-language AST walkers. This keeps the engine generic and makes adding new languages declarative.
+Symbol extraction uses **per-language AST walkers** built on tree-sitter's node API. Each language has a dedicated extractor class that walks the AST, matching node types to extract classes, functions, methods, variables, imports, and call sites.
 
 #### Architecture
 
 ```
-Generic Query Engine
+Base Extractor (generic AST walking)
     │
-    ├── Per-language .scm query files (declarative patterns)
-    │     ├── python.scm
-    │     ├── javascript.scm
-    │     ├── typescript.scm
-    │     └── c.scm
+    ├── Per-language extractors (subclasses)
+    │     ├── PythonExtractor
+    │     ├── JavaScriptExtractor (also used for TypeScript)
+    │     └── CExtractor (also used for C++)
     │
-    ├── Capture name → Symbol kind mapping
-    │     @definition.function → function
-    │     @definition.class → class
-    │     @definition.method → method
-    │     @name → symbol name
-    │     @reference.call → call site
-    │
-    └── Per-language post-processing (minimal)
+    └── Each extractor defines:
+          ├── Node type sets (CLASS_NODE_TYPES, FUNCTION_NODE_TYPES, etc.)
+          ├── Symbol extraction methods (_extract_class, _extract_function, etc.)
           ├── Parameter extraction
           ├── Return type extraction
-          ├── Base class extraction
-          └── Instance variable detection (self.x)
+          ├── Import parsing
+          └── Call site collection
 ```
 
-#### Query Files
+#### Per-Language Extractors
 
-Tree-sitter's query language matches AST patterns and captures nodes:
+Each extractor subclass overrides the base to handle language-specific AST structures:
 
-```scheme
-;; Example: Python functions
-(function_definition
-  name: (identifier) @name
-  parameters: (parameters) @parameters
-  return_type: (type) @return_type) @definition.function
-
-;; Example: Python classes
-(class_definition
-  name: (identifier) @name
-  superclasses: (argument_list) @bases) @definition.class
-```
-
-Many tree-sitter grammar repositories ship community-maintained `tags.scm` files that define standard captures (`@definition.function`, `@definition.class`, `@definition.method`, `@reference.call`, etc.). These community files are **bundled as the starting point** — they are well-tested and cover 80%+ of extraction needs. Extend with custom queries where needed (e.g., for parameters, return types, base classes, async detection). The per-language post-processing code is where implementation effort concentrates, not the queries themselves.
-
-#### Per-Language Post-Processing
-
-Queries handle the bulk of extraction, but some logic requires minimal per-language code:
-
-| Concern | Why Queries Aren't Enough |
-|---------|--------------------------|
-| Method vs function | Requires checking if a function is inside a class body (structural context) |
-| Async detection | Some grammars use a separate `async` modifier node vs a distinct node type |
-| Parameter details | Extracting defaults, `*args`/`**kwargs`, type annotations from parameter children |
-| Instance variables | Matching `self.x = ...` inside `__init__` as class-level state |
-| Import resolution | Mapping import syntax to file paths is inherently language-specific |
-
-This post-processing is small — mapping tables and short functions, not full AST walkers.
+| Concern | Approach |
+|---------|----------|
+| Method vs function | Check if parent context is a class body |
+| Async detection | Check for `async` child node or text prefix |
+| Parameter details | Walk parameter node children for defaults, `*args`/`**kwargs`, type annotations |
+| Instance variables | Match `self.x = ...` inside `__init__` (Python) |
+| Import resolution | Language-specific parsing of import syntax |
+| Properties | Decorator-based (`@property` in Python), getter/setter keywords (JS) |
+| Inheritance | Parse superclass/heritage nodes |
 
 #### Adding a New Language
 
-1. Write a `.scm` query file using standard capture names
-2. Add an entry to the language → extensions mapping
-3. Optionally add post-processing for language-specific features (imports, parameter style)
-
-No changes to the generic engine required.
+1. Install the `tree-sitter-{language}` package
+2. Create an extractor subclass defining node type sets and extraction methods
+3. Add an entry to the language → extensions mapping in `LANGUAGE_MAP`
+4. Register the extractor in `extractors/__init__.py`
 
 ## Indexing Pipeline
 
