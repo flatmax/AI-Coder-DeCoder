@@ -275,6 +275,12 @@ export class PromptView extends MixedBase {
     // Listen for edit block clicks
     this.addEventListener('edit-block-click', this._handleEditBlockClick.bind(this));
     
+    // Close snippet drawer on outside click or Escape key
+    this._boundSnippetClickOutside = this._handleSnippetClickOutside.bind(this);
+    this._boundSnippetKeydown = this._handleSnippetKeydown.bind(this);
+    document.addEventListener('click', this._boundSnippetClickOutside, true);
+    document.addEventListener('keydown', this._boundSnippetKeydown, true);
+    
     // Bind panel resize handlers
     this._boundPanelResizeMove = this._handlePanelResizeMove.bind(this);
     this._boundPanelResizeEnd = this._handlePanelResizeEnd.bind(this);
@@ -493,6 +499,8 @@ export class PromptView extends MixedBase {
     this.destroyWindowControls();
     this.disconnectScrollObserver();
     this.removeEventListener('edit-block-click', this._handleEditBlockClick);
+    document.removeEventListener('click', this._boundSnippetClickOutside, true);
+    document.removeEventListener('keydown', this._boundSnippetKeydown, true);
     this._urlService?.destroy();
     // Clean up any panel resize listeners
     window.removeEventListener('mousemove', this._boundPanelResizeMove);
@@ -539,6 +547,25 @@ export class PromptView extends MixedBase {
 
   toggleSnippetDrawer() {
     this.snippetDrawerOpen = !this.snippetDrawerOpen;
+  }
+
+  _handleSnippetClickOutside(e) {
+    if (!this.snippetDrawerOpen) return;
+    // Check if click is inside the snippet drawer (which lives in our shadow DOM)
+    const path = e.composedPath();
+    const drawer = this.shadowRoot?.querySelector('.snippet-drawer');
+    if (drawer && !path.includes(drawer)) {
+      this.snippetDrawerOpen = false;
+    }
+  }
+
+  _handleSnippetKeydown(e) {
+    if (!this.snippetDrawerOpen) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      this.snippetDrawerOpen = false;
+    }
   }
 
   appendSnippet(message) {
