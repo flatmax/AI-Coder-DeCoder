@@ -14,6 +14,7 @@ from ..symbol_index.compact_format import (
     compute_file_block_hash,
     _compute_path_aliases,
 )
+from ..context.stability_tracker import StabilityInfo
 from .context_builder import TIER_THRESHOLDS, TIER_ORDER, CACHE_TIERS
 
 
@@ -971,9 +972,8 @@ class StreamingMixin:
         # --- Phase 1: Detect file/symbol churn ---
         
         file_symbol_items = set(file_paths or []) | {f"symbol:{f}" for f in (file_paths or [])}
-        self._last_active_file_symbol_items = file_symbol_items.copy()
         
-        # --- Phase 2: Controlled graduation (files, symbols, history) ---
+        # --- Phase 2: Controlled history graduation (files, symbols, history) ---
         # For files/symbols: always graduate eligible items (stable files should cache).
         # For history: graduate when L3 will be invalidated anyway (free piggyback),
         #   or when eligible history tokens exceed cache_target (standalone graduation).
@@ -981,6 +981,22 @@ class StreamingMixin:
         
         all_history = [f"history:{i}" for i in range(len(history))]
         cache_target = stability.get_cache_target_tokens()
+        
+        # Ensure all history items are registered in the stability tracker.
+        # Items from the current exchange (added via add_exchange before this
+        # method) need initial registration so the graduation logic below can
+        # distinguish tracked items from untracked ghosts.  Without this,
+        # new messages get graduated before registration and become permanent
+        # ghosts — never in _stability, always appearing as 'active' in the UI.
+        for h in all_history:
+            if h not in stability._stability:
+                content = get_item_content(h)
+                if content is not None:
+                    stability._stability[h] = StabilityInfo(
+                        content_hash=stability.compute_hash(content),
+                        n_value=0,
+                        tier='active'
+                    )
         
         # Graduate eligible files and symbols (always - no reason to hold them back)
         active_file_symbols = set()
@@ -1016,13 +1032,25 @@ class StreamingMixin:
             # 1. Files/symbols graduating from active → L3
             # 2. Items demoted FROM L3 (content changed while in L3)
             # 3. Stale items removed from L3
+            # 4. File/symbol items leaving active context (unchecked from picker
+            #    or no longer selected) — they will enter L3 via the cascade
             l3_demotions = any(
                 stability.get_tier(item) == 'L3'
                 for item in modified_items
             )
             l3_stale = 'L3' in stale_broken_tiers
+            
+            # Check if file/symbol items from last round are leaving active
+            items_leaving_active = self._last_active_file_symbol_items - file_symbol_items
+            l3_entries_from_leaving = any(
+                stability.get_tier(item) == 'active'
+                for item in items_leaving_active
+                if item in stability._stability
+            )
+            
             l3_will_invalidate = (
                 bool(graduating_file_symbols) or l3_demotions or l3_stale
+                or l3_entries_from_leaving
             )
             
             if l3_will_invalidate and eligible:
@@ -1045,6 +1073,9 @@ class StreamingMixin:
             else:
                 # Nothing eligible yet
                 active_history = all_history
+        
+        # Update file/symbol tracking for next round's leaving-active detection
+        self._last_active_file_symbol_items = file_symbol_items.copy()
         
         # --- Phase 3: Build active items list and update tracker ---
         
