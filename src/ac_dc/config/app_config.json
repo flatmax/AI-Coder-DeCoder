@@ -1,0 +1,13 @@
+{
+    "url_cache": {
+        "path": "",
+        "ttl_hours": 24
+    },
+    "history_compaction": {
+        "enabled": true,
+        "compaction_trigger_tokens": 24000,
+        "verbatim_window_tokens": 4000,
+        "summary_budget_tokens": 500,
+        "min_verbatim_exchanges": 2
+    }
+}

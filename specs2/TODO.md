@@ -1,5 +1,7 @@
 # Implementation TODO
 
+> **Implementation Status**: Phase 1 in progress — Foundation layer
+
 ## Implementation Notes
 
 ### jrpc-oo Integration

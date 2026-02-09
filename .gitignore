@@ -1,2 +1,13 @@
-.aicoder/*
-
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.ac-dc/
+node_modules/
+.env
+*.log
+.venv/
+venv/
+.aicoder

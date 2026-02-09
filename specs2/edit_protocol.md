@@ -1,10 +1,3 @@
-[context lines — identical anchor]
-[new lines]
-═══════ REPL
-[context lines — identical anchor]
-[new lines]
-```
-═══════ REPL
 # Edit Protocol
 
 ## Overview

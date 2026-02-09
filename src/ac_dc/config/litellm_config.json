@@ -1,0 +1,7 @@
+{
+    "env": {},
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "smaller_model": "anthropic/claude-haiku-3",
+    "cache_min_tokens": 1024,
+    "cache_buffer_multiplier": 1.5
+}
