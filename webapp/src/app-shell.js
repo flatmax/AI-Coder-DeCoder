@@ -35,13 +35,7 @@ class AcApp extends JRPCClient {
       }
 
       ac-dialog {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 50vw;
-        min-width: 400px;
-        height: 100vh;
-        z-index: 10;
+        /* Positioning managed by ac-dialog itself via :host styles */
       }
 
       .reconnect-banner {

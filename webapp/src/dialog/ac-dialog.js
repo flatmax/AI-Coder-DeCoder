@@ -29,8 +29,13 @@ class AcDialog extends RpcMixin(LitElement) {
   static styles = css`
     :host {
       display: block;
-      width: 100%;
-      height: 100%;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 50vw;
+      min-width: 400px;
+      height: 100vh;
+      z-index: 10;
     }
 
     .dialog {
@@ -43,21 +48,20 @@ class AcDialog extends RpcMixin(LitElement) {
       border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
       box-shadow: var(--shadow-lg);
       overflow: hidden;
-      transition: height var(--transition-normal);
     }
 
-    .dialog.positioned {
+    :host(.positioned) {
       min-width: 300px;
       min-height: 200px;
     }
 
-    .dialog.minimized {
-      height: 48px;
+    :host(.minimized) {
+      height: 48px !important;
       min-height: 48px;
     }
 
-    .dialog.minimized .content,
-    .dialog.minimized .history-bar {
+    :host(.minimized) .content,
+    :host(.minimized) .history-bar {
       display: none;
     }
 
@@ -212,14 +216,17 @@ class AcDialog extends RpcMixin(LitElement) {
     .history-fill.warning { background: var(--accent-warning); }
     .history-fill.critical { background: var(--accent-error); }
 
-    /* Resize handles */
+    /* Resize handles — always rendered, positioned within the dialog */
     .resize-handle {
       position: absolute;
       z-index: 10;
     }
+    /* Right edge always available (primary handle for left-docked state) */
+    .resize-e { top: 8px; right: 0; bottom: 8px; width: 4px; cursor: e-resize; }
+
+    /* Other edges only available after undocking */
     .resize-n { top: 0; left: 8px; right: 8px; height: 4px; cursor: n-resize; }
     .resize-s { bottom: 0; left: 8px; right: 8px; height: 4px; cursor: s-resize; }
-    .resize-e { top: 8px; right: 0; bottom: 8px; width: 4px; cursor: e-resize; }
     .resize-w { top: 8px; left: 0; bottom: 8px; width: 4px; cursor: w-resize; }
     .resize-ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
     .resize-nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
@@ -276,6 +283,11 @@ class AcDialog extends RpcMixin(LitElement) {
 
   _toggleMinimize() {
     this.minimized = !this.minimized;
+    if (this.minimized) {
+      this.classList.add('minimized');
+    } else {
+      this.classList.remove('minimized');
+    }
   }
 
   // ── Dragging ──
@@ -300,24 +312,25 @@ class AcDialog extends RpcMixin(LitElement) {
     if (!this._dragStart.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
     this._dragStart.moved = true;
 
-    const dialog = this.shadowRoot.querySelector('.dialog');
+    const host = this;
     if (!this._positioned) {
-      // Switch from flow to fixed positioning
-      const rect = dialog.getBoundingClientRect();
-      dialog.style.left = rect.left + 'px';
-      dialog.style.top = rect.top + 'px';
-      dialog.style.width = rect.width + 'px';
-      dialog.style.height = rect.height + 'px';
+      // Switch from default docked to explicit positioning
+      const rect = host.getBoundingClientRect();
+      host.style.left = rect.left + 'px';
+      host.style.top = rect.top + 'px';
+      host.style.width = rect.width + 'px';
+      host.style.height = rect.height + 'px';
       this._positioned = true;
+      this.classList.add('positioned');
       this._dragStart.x = e.clientX;
       this._dragStart.y = e.clientY;
       return;
     }
 
-    const left = parseInt(dialog.style.left) + dx;
-    const top = parseInt(dialog.style.top) + dy;
-    dialog.style.left = left + 'px';
-    dialog.style.top = top + 'px';
+    const left = parseFloat(host.style.left) + dx;
+    const top = parseFloat(host.style.top) + dy;
+    host.style.left = left + 'px';
+    host.style.top = top + 'px';
 
     this._dragStart.x = e.clientX;
     this._dragStart.y = e.clientY;
@@ -344,24 +357,25 @@ class AcDialog extends RpcMixin(LitElement) {
     e.preventDefault();
     e.stopPropagation();
 
-    const dialog = this.shadowRoot.querySelector('.dialog');
+    const host = this;
     if (!this._positioned) {
-      const rect = dialog.getBoundingClientRect();
-      dialog.style.left = rect.left + 'px';
-      dialog.style.top = rect.top + 'px';
-      dialog.style.width = rect.width + 'px';
-      dialog.style.height = rect.height + 'px';
+      const rect = host.getBoundingClientRect();
+      host.style.left = rect.left + 'px';
+      host.style.top = rect.top + 'px';
+      host.style.width = rect.width + 'px';
+      host.style.height = rect.height + 'px';
       this._positioned = true;
+      this.classList.add('positioned');
     }
 
     this._resizeDir = dir;
     this._resizeStart = {
       x: e.clientX,
       y: e.clientY,
-      left: parseInt(dialog.style.left),
-      top: parseInt(dialog.style.top),
-      width: parseInt(dialog.style.width),
-      height: parseInt(dialog.style.height),
+      left: parseFloat(host.style.left),
+      top: parseFloat(host.style.top),
+      width: parseFloat(host.style.width),
+      height: parseFloat(host.style.height),
     };
 
     document.addEventListener('mousemove', this._onMouseMove);
@@ -369,7 +383,7 @@ class AcDialog extends RpcMixin(LitElement) {
   }
 
   _handleResize(e) {
-    const dialog = this.shadowRoot.querySelector('.dialog');
+    const host = this;
     const s = this._resizeStart;
     const dx = e.clientX - s.x;
     const dy = e.clientY - s.y;
@@ -382,10 +396,10 @@ class AcDialog extends RpcMixin(LitElement) {
     if (dir.includes('s')) height = Math.max(200, s.height + dy);
     if (dir.includes('n')) { height = Math.max(200, s.height - dy); top = s.top + s.height - height; }
 
-    dialog.style.left = left + 'px';
-    dialog.style.top = top + 'px';
-    dialog.style.width = width + 'px';
-    dialog.style.height = height + 'px';
+    host.style.left = left + 'px';
+    host.style.top = top + 'px';
+    host.style.width = width + 'px';
+    host.style.height = height + 'px';
   }
 
   // ── History bar ──
@@ -402,12 +416,14 @@ class AcDialog extends RpcMixin(LitElement) {
     const activeLabel = TABS.find(t => t.id === this.activeTab)?.label || '';
 
     return html`
-      <div class="dialog ${this._positioned ? 'positioned' : ''} ${this.minimized ? 'minimized' : ''}">
+      <div class="dialog">
+
+        <!-- Right edge always available (primary handle for left-docked state) -->
+        <div class="resize-handle resize-e" @mousedown=${(e) => this._onResizeStart('e', e)}></div>
 
         ${this._positioned ? html`
           <div class="resize-handle resize-n" @mousedown=${(e) => this._onResizeStart('n', e)}></div>
           <div class="resize-handle resize-s" @mousedown=${(e) => this._onResizeStart('s', e)}></div>
-          <div class="resize-handle resize-e" @mousedown=${(e) => this._onResizeStart('e', e)}></div>
           <div class="resize-handle resize-w" @mousedown=${(e) => this._onResizeStart('w', e)}></div>
           <div class="resize-handle resize-ne" @mousedown=${(e) => this._onResizeStart('ne', e)}></div>
           <div class="resize-handle resize-nw" @mousedown=${(e) => this._onResizeStart('nw', e)}></div>
