@@ -3,9 +3,9 @@ import { defineConfig } from 'vite';
 /**
  * Vite transform plugin to patch @flatmax/jrpc-oo for browser ESM usage.
  *
- * The library was written for script-tag loading with globals (Window.JRPC,
- * Window.JRPCCommon, Window.LitElement). This plugin rewrites those to
- * require() calls which Vite's commonjs transform then converts to ESM.
+ * The library assumes either Node.js require() or browser Window globals.
+ * Vite's bundler polyfills `module`, so the Node.js branch fires in the browser,
+ * causing "require is not defined". This plugin rewrites the problematic patterns.
  */
 function jrpcFixes() {
   return {
@@ -13,31 +13,34 @@ function jrpcFixes() {
     transform(code, id) {
       if (!id.includes('@flatmax/jrpc-oo') && !id.includes('jrpc/jrpc.js')) return null;
 
-      // JRPCCommon.js: Replace browser/node detection with direct requires
+      // JRPCCommon.js: Replace the browser/node detection with direct requires
+      // (Vite's commonjs plugin will resolve these properly)
       if (id.endsWith('JRPCCommon.js')) {
-        // Match the entire if/else block for browser/node detection
-        // Source has: if (...){  // nodejs ... var LitElement=class {}; } else {  // browser ... var LitElement = Window.LitElement; ... }
         code = code.replace(
-          /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\{[\s\S]*?var LitElement=class \{\};\n\} else \{[\s\S]*?var LitElement = Window\.LitElement;[^\n]*\n\}/,
+          /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\{[\s\S]*?\} else \{[\s\S]*?var LitElement = Window\.LitElement;[\s\S]*?\}/,
           `var ExposeClass = require("./ExposeClass.js");
 var JRPC = require('jrpc');
 var { LitElement } = require('lit');
 var crypto = self.crypto;`
         );
         code = code.replace(/new Window\.JRPC\(/g, 'new JRPC(');
-        // Match the export block with its specific indentation
         code = code.replace(
-          /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\n\s+module\.exports = JRPCCommon;\n\s+else\n\s+Window\.JRPCCommon = JRPCCommon;/,
+          /if \(typeof module !== 'undefined' && typeof module\.exports !== 'undefined'\)\s*\n?\s*module\.exports = JRPCCommon;\s*\n?\s*else\s*\n?\s*Window\.JRPCCommon = JRPCCommon;/,
           'module.exports = JRPCCommon;'
         );
       }
 
-      // jrpc-client.js: Import JRPCCommon directly instead of Window global
+      // jrpc-client.js: Replace Window.JRPCCommon with direct require
       if (id.endsWith('jrpc-client.js')) {
         code = code.replace(
           /let JRPCCommon = Window\.JRPCCommon;/,
           `var JRPCCommon = require('./JRPCCommon.js');`
         );
+      }
+
+      // JRPCExport.js: Fix side-effect import to proper default import
+      if (id.endsWith('JRPCExport.js')) {
+        code = code.replace(/import 'jrpc\/jrpc\.min\.js';/, `import JRPC from 'jrpc';`);
       }
 
       // jrpc: Polyfill setImmediate (timers module not available in browser)
@@ -49,7 +52,7 @@ var crypto = self.crypto;`
       }
 
       return code;
-    },
+    }
   };
 }
 
@@ -63,12 +66,13 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    target: 'esnext',
     sourcemap: true,
     commonjsOptions: {
-      transformMixedEsModules: true,
+      transformMixedEsModules: true,  // Needed because require() and import coexist
     },
   },
   optimizeDeps: {
-    exclude: ['@flatmax/jrpc-oo'],
+    exclude: ['@flatmax/jrpc-oo'],  // Must exclude from pre-bundling so transforms run
   },
 });

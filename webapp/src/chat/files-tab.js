@@ -3,10 +3,11 @@ import { RpcMixin } from '../rpc-mixin.js';
 import './chat-panel.js';
 import './chat-input.js';
 import './url-chips.js';
+import './file-picker.js';
 
 /**
- * Files & Chat tab — left panel (file picker placeholder) + right panel (chat).
- * This orchestrates chat state, streaming, URL state, and message flow.
+ * Files & Chat tab — left panel (file picker) + right panel (chat).
+ * This orchestrates chat state, streaming, URL state, file selection, and message flow.
  */
 class FilesTab extends RpcMixin(LitElement) {
   static properties = {
@@ -18,6 +19,8 @@ class FilesTab extends RpcMixin(LitElement) {
     _detectedUrls: { type: Array, state: true },
     _fetchedUrls: { type: Array, state: true },
     _excludedUrls: { type: Object, state: true },
+    _pickerCollapsed: { type: Boolean, state: true },
+    _pickerWidth: { type: Number, state: true },
   };
 
   static styles = css`
@@ -28,24 +31,18 @@ class FilesTab extends RpcMixin(LitElement) {
     }
 
     .file-picker-panel {
-      width: 280px;
-      min-width: 150px;
-      max-width: 500px;
       border-right: 1px solid var(--border-color);
       background: var(--bg-secondary);
-      overflow: auto;
+      overflow: hidden;
       flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
     }
 
-    .file-picker-placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: var(--text-muted);
-      font-size: 13px;
-      padding: 12px;
-      text-align: center;
+    .file-picker-panel.collapsed {
+      width: 0 !important;
+      min-width: 0 !important;
+      border-right: none;
     }
 
     .chat-panel-container {
@@ -68,6 +65,9 @@ class FilesTab extends RpcMixin(LitElement) {
     this._detectedUrls = [];
     this._fetchedUrls = [];
     this._excludedUrls = new Set();
+    // Picker panel state — restore from localStorage
+    this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
+    this._pickerWidth = parseInt(localStorage.getItem('ac-dc-picker-width')) || 280;
   }
 
   connectedCallback() {
@@ -85,6 +85,7 @@ class FilesTab extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._loadSnippets();
+    this._loadFileTree();
   }
 
   async _loadSnippets() {
@@ -96,13 +97,53 @@ class FilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  async _loadFileTree() {
+    try {
+      const result = await this.rpcExtract('Repo.get_file_tree');
+      if (result && !result.error) {
+        const picker = this.shadowRoot.querySelector('file-picker');
+        if (picker) picker.setTree(result);
+      }
+    } catch (e) {
+      console.warn('Failed to load file tree:', e);
+    }
+  }
+
   _onStateLoaded(e) {
     const state = e.detail;
     if (state) {
       this.messages = state.messages || [];
       this.selectedFiles = state.selected_files || [];
       this.streaming = state.streaming_active || false;
+      // Sync selection to picker
+      this.updateComplete.then(() => {
+        const picker = this.shadowRoot.querySelector('file-picker');
+        if (picker && this.selectedFiles.length) picker.setSelectedFiles(this.selectedFiles);
+      });
     }
+  }
+
+  // ── File picker events ──
+
+  _onSelectionChanged(e) {
+    const { selectedFiles } = e.detail;
+    this.selectedFiles = selectedFiles;
+    // Notify server
+    if (this.rpcConnected) {
+      this.rpcCall('LLM.set_selected_files', selectedFiles).catch(() => {});
+    }
+  }
+
+  _onFileClicked(e) {
+    this.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path: e.detail.path },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  async _onGitOperation() {
+    // Refresh tree after any git operation
+    await this._loadFileTree();
   }
 
   // ── URL events ──
@@ -226,6 +267,11 @@ class FilesTab extends RpcMixin(LitElement) {
       }];
     }
 
+    // Refresh file tree if edits were applied
+    if (result.files_modified?.length > 0) {
+      this._loadFileTree();
+    }
+
     // Focus input
     this.shadowRoot.querySelector('chat-input')?.focus();
   }
@@ -251,11 +297,18 @@ class FilesTab extends RpcMixin(LitElement) {
   // ── Render ──
 
   render() {
+    const pickerStyle = this._pickerCollapsed
+      ? ''
+      : `width:${this._pickerWidth}px; min-width:150px; max-width:500px;`;
+
     return html`
-      <div class="file-picker-panel">
-        <div class="file-picker-placeholder">
-          File picker — Phase 8
-        </div>
+      <div class="file-picker-panel ${this._pickerCollapsed ? 'collapsed' : ''}"
+        style=${pickerStyle}>
+        <file-picker
+          @selection-changed=${this._onSelectionChanged}
+          @file-clicked=${this._onFileClicked}
+          @git-operation=${this._onGitOperation}
+        ></file-picker>
       </div>
 
       <div class="chat-panel-container">
