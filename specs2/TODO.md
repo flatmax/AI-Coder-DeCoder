@@ -94,15 +94,15 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
 - [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
-### Phase 7: Webapp Foundation *(next)*
-- [ ] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
-- [ ] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
-- [ ] **Dialog component** — Dragging, resizing, minimizing, tab bar
-- [ ] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
-- [ ] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
-- [ ] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
-- [ ] **Input history** — Up-arrow fuzzy search overlay, history navigation
-- [ ] **URL chips** — Detection display, fetch triggers, inclusion toggles
+### Phase 7: Webapp Foundation *(in progress)*
+- [x] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
+- [x] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
+- [x] **Dialog component** — Dragging, resizing, minimizing, tab bar
+- [x] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
+- [x] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
+- [x] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
+- [x] **Input history** — Up-arrow fuzzy search overlay, history navigation
+- [x] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
 ### Phase 8: Webapp Features
 - [ ] **File picker** — Tree rendering, checkbox selection, git status badges, context menu

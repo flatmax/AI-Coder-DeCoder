@@ -90,16 +90,16 @@ class LLM:
         url_config = config.get_app_config().get("url_cache", {})
         self._url_service = URLService(url_config, self._smaller_model)
 
+        # Session state (must be before symbol index build, which uses _selected_files)
+        self._session_id = self._new_session_id()
+        self._selected_files: list[str] = []
+        self._streaming_active = False
+
         # Symbol index
         self._symbol_index = _init_symbol_index(repo.root)
         if self._symbol_index:
             self._build_symbol_index()
             self._init_stability()
-
-        # Session state
-        self._session_id = self._new_session_id()
-        self._selected_files: list[str] = []
-        self._streaming_active = False
         self._active_request_id: Optional[str] = None
         self._cancelled: set[str] = set()  # Thread-safe via GIL for simple set ops
 

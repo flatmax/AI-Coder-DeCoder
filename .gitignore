@@ -5,10 +5,13 @@ __pycache__/
 dist/
 build/
 .ac-dc/
+webapp/node_modules/
+webapp/dist/
 node_modules/
 .env
 *.log
 .venv/
 venv/
 .aicoder
+**/uv.lock
 uv.lock

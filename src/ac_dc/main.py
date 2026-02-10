@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import socket
 import subprocess
 import sys
 import webbrowser
@@ -14,7 +15,6 @@ log = logging.getLogger("ac_dc")
 
 def find_available_port(start: int, max_tries: int = 50) -> int:
     """Find an available port starting from the given number."""
-    import socket
     for offset in range(max_tries):
         port = start + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -24,6 +24,46 @@ def find_available_port(start: int, max_tries: int = 50) -> int:
             except OSError:
                 continue
     raise RuntimeError(f"No available port found starting from {start}")
+
+
+def _is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _start_vite_dev(webapp_dir: Path, port: int) -> subprocess.Popen | None:
+    """Start the Vite dev server as a subprocess.
+
+    Returns the Popen object, or None if skipped.
+    """
+    if _is_port_in_use(port):
+        log.info("Port %d already in use — assuming Vite is running", port)
+        return None
+
+    node_modules = webapp_dir / "node_modules"
+    if not node_modules.is_dir():
+        print(f"\n❌ node_modules not found in {webapp_dir}")
+        print(f"   Run: cd {webapp_dir} && npm install\n")
+        return None
+
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+
+    try:
+        proc = subprocess.Popen(
+            ["npm", "run", "dev"],
+            cwd=str(webapp_dir),
+            env=env,
+        )
+        log.info("Vite dev server started (pid %d) on port %d", proc.pid, port)
+        return proc
+    except FileNotFoundError:
+        print("\n❌ npm not found. Install Node.js to use --dev mode.\n")
+        return None
+    except Exception as e:
+        log.warning("Failed to start Vite dev server: %s", e)
+        return None
 
 
 def get_version() -> str:
@@ -62,8 +102,9 @@ async def run_server(args: argparse.Namespace):
         print(f"Error: {repo_root} is not a git repository", file=sys.stderr)
         sys.exit(1)
 
-    # Find port
+    # Find ports
     server_port = find_available_port(args.server_port)
+    webapp_port = find_available_port(args.webapp_port) if args.dev else None
 
     # Initialize services
     config = ConfigManager(repo_root, dev_mode=args.dev)
@@ -94,10 +135,19 @@ async def run_server(args: argparse.Namespace):
     print(f"RPC server: ws://localhost:{server_port}")
     print(f"Repository: {repo_root}")
 
+    # Start Vite dev server in dev mode
+    vite_proc = None
+    if args.dev:
+        webapp_dir = Path(__file__).parent.parent.parent / "webapp"
+        loop = asyncio.get_event_loop()
+        vite_proc = await loop.run_in_executor(
+            None, _start_vite_dev, webapp_dir, webapp_port,
+        )
+        print(f"Webapp: http://localhost:{webapp_port}/?port={server_port}")
+
     # Open browser
     if not args.no_browser:
         if args.dev:
-            webapp_port = find_available_port(args.webapp_port)
             url = f"http://localhost:{webapp_port}/?port={server_port}"
         else:
             url = f"http://localhost:{server_port}/?port={server_port}"
@@ -112,6 +162,14 @@ async def run_server(args: argparse.Namespace):
     except asyncio.CancelledError:
         pass
     finally:
+        # Clean up Vite subprocess
+        if vite_proc is not None:
+            log.info("Stopping Vite dev server (pid %d)", vite_proc.pid)
+            vite_proc.terminate()
+            try:
+                vite_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                vite_proc.kill()
         await server.stop()
 
 
