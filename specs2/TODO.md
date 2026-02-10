@@ -108,7 +108,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
 - [x] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
 - [x] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
-- [ ] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
+- [x] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
 - [ ] **Context viewer** — Token budget bar, category breakdown, expandable details
 - [ ] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
 - [ ] **Settings panel** — Config type cards, edit/reload buttons, toast feedback

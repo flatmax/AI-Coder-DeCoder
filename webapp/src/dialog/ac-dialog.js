@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 import '../chat/files-tab.js';
+import '../chat/search-tab.js';
 
 // Tab definitions
 const TABS = [
@@ -241,11 +242,33 @@ class AcDialog extends RpcMixin(LitElement) {
     this._onMouseUp = this._onMouseUp.bind(this);
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    this.addEventListener('search-navigate', this._onSearchNavigate.bind(this));
+  }
+
   // ── Tab switching ──
 
   _switchTab(tabId) {
     this.activeTab = tabId;
     this._visitedTabs = new Set([...this._visitedTabs, tabId]);
+
+    // Focus search input when switching to search tab
+    if (tabId === 'SEARCH') {
+      this.updateComplete.then(() => {
+        this.shadowRoot.querySelector('search-tab')?.focus();
+      });
+    }
+  }
+
+  // ── Search navigation ──
+
+  _onSearchNavigate(e) {
+    // Bubble up as navigate-file for the app shell / files-tab to handle
+    this.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: e.detail,
+      bubbles: true, composed: true,
+    }));
   }
 
   // ── Minimize ──
@@ -423,7 +446,7 @@ class AcDialog extends RpcMixin(LitElement) {
             <files-tab></files-tab>
           `)}
           ${this._renderTabPanel('SEARCH', () => html`
-            <div class="tab-placeholder">Search</div>
+            <search-tab></search-tab>
           `)}
           ${this._renderTabPanel('CONTEXT', () => html`
             <div class="tab-placeholder">Context Budget</div>
