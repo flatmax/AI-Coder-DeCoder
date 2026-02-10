@@ -8,7 +8,7 @@ A tree view of repository files with checkboxes for selection, git status indica
 
 ### Node Types
 
-**Directories**: Expandable toggle (▸/▾). Checkbox selects/deselects all contained files. Shows indeterminate state when partially selected.
+**Directories**: Expandable toggle (▸/▾). Clicking the directory name also toggles expand/collapse. Checkbox selects/deselects all contained files. Shows indeterminate state when partially selected.
 
 **Files**: Checkbox for selection. Name click opens in diff viewer. Shows:
 - Line count with color coding (green < 130, orange 130–170, red > 170)

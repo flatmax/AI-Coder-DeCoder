@@ -761,10 +761,10 @@ class FilePicker extends RpcMixin(LitElement) {
       <div class="node-row ${isFocused ? 'focused' : ''}"
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
-        @click=${() => { this._focused = node.path; }}
+        @click=${() => { this._focused = node.path; this._toggleExpand(node.path); }}
         @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
-        <span class="toggle" @click=${(e) => { e.stopPropagation(); this._toggleExpand(node.path); }}>
+        <span class="toggle" @click=${(e) => e.stopPropagation()}>
           ${expanded ? '▾' : '▸'}
         </span>
         <input type="checkbox"
