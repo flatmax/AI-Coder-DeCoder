@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import monacoEditorPlugin from 'vite-plugin-monaco-editor';
 
 /**
  * Vite transform plugin to patch @flatmax/jrpc-oo for browser ESM usage.
@@ -94,9 +93,6 @@ export default defineConfig({
   root: '.',
   plugins: [
     jrpcFixes(),
-    monacoEditorPlugin({
-      languageWorkers: ['editorWorkerService', 'json', 'css', 'html', 'typescript'],
-    }),
   ],
   server: {
     port: parseInt(process.env.PORT) || 18999,

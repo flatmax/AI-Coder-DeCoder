@@ -5,6 +5,7 @@ import './chat-input.js';
 import './url-chips.js';
 import './file-picker.js';
 import './history-browser.js';
+import './token-hud.js';
 
 /**
  * Files & Chat tab — left panel (file picker) + right panel (chat).
@@ -118,6 +119,7 @@ class FilesTab extends RpcMixin(LitElement) {
       flex-direction: column;
       overflow: hidden;
       min-width: 0;
+      position: relative;
     }
 
     /* ── Git action bar ── */
@@ -242,18 +244,22 @@ class FilesTab extends RpcMixin(LitElement) {
 
   connectedCallback() {
     super.connectedCallback();
-    window.addEventListener('state-loaded', this._onStateLoaded.bind(this));
-    window.addEventListener('stream-complete', this._onStreamComplete.bind(this));
-    window.addEventListener('compaction-event', this._onCompactionEvent.bind(this));
-    window.addEventListener('files-changed', this._onFilesChanged.bind(this));
+    this._boundOnStateLoaded = this._onStateLoaded.bind(this);
+    this._boundOnStreamComplete = this._onStreamComplete.bind(this);
+    this._boundOnCompactionEvent = this._onCompactionEvent.bind(this);
+    this._boundOnFilesChanged = this._onFilesChanged.bind(this);
+    window.addEventListener('state-loaded', this._boundOnStateLoaded);
+    window.addEventListener('stream-complete', this._boundOnStreamComplete);
+    window.addEventListener('compaction-event', this._boundOnCompactionEvent);
+    window.addEventListener('files-changed', this._boundOnFilesChanged);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    window.removeEventListener('state-loaded', this._onStateLoaded);
-    window.removeEventListener('stream-complete', this._onStreamComplete);
-    window.removeEventListener('compaction-event', this._onCompactionEvent);
-    window.removeEventListener('files-changed', this._onFilesChanged);
+    window.removeEventListener('state-loaded', this._boundOnStateLoaded);
+    window.removeEventListener('stream-complete', this._boundOnStreamComplete);
+    window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
+    window.removeEventListener('files-changed', this._boundOnFilesChanged);
     document.removeEventListener('mousemove', this._onDividerMove);
     document.removeEventListener('mouseup', this._onDividerUp);
     this._clearWatchdog();
@@ -453,6 +459,11 @@ class FilesTab extends RpcMixin(LitElement) {
         content: result.response,
         editResults: result.edit_results || [],
       }];
+    }
+
+    // Show token usage HUD
+    if (result.token_usage) {
+      this.shadowRoot.querySelector('token-hud')?.show(result);
     }
 
     // Refresh file tree if edits were applied
@@ -744,6 +755,8 @@ class FilesTab extends RpcMixin(LitElement) {
           @send-message=${this._onSendMessage}
           @urls-detected=${this._onUrlsDetected}
         ></chat-input>
+
+        <token-hud></token-hud>
       </div>
 
       <history-browser

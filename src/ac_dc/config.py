@@ -138,10 +138,24 @@ class ConfigManager:
                 log.warning("Failed to load %s: %s — using defaults", path, e)
         return dict(defaults)
 
+    @staticmethod
+    def _normalize_llm_keys(data: dict) -> dict:
+        """Normalize camelCase keys to snake_case for LLM config compatibility."""
+        key_map = {
+            "smallerModel": "smaller_model",
+            "cacheMinTokens": "cache_min_tokens",
+            "cacheBufferMultiplier": "cache_buffer_multiplier",
+        }
+        result = {}
+        for k, v in data.items():
+            result[key_map.get(k, k)] = v
+        return result
+
     def get_llm_config(self, force_reload: bool = False) -> dict:
         if self._llm_config is None or force_reload:
             path = self._config_path("litellm")
-            self._llm_config = self._load_json(path, DEFAULT_LLM_CONFIG)
+            raw = self._load_json(path, DEFAULT_LLM_CONFIG)
+            self._llm_config = self._normalize_llm_keys(raw)
             # Apply env vars
             for key, val in self._llm_config.get("env", {}).items():
                 os.environ[key] = str(val)

@@ -94,7 +94,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
 - [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
-### Phase 7: Webapp Foundation *(in progress)*
+### Phase 7: Webapp Foundation ✅
 - [x] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
 - [x] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
 - [x] **Dialog component** — Dragging, resizing, minimizing, tab bar
@@ -117,13 +117,15 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Diff viewer layout** — Background placement in app-shell, navigate-file event routing from dialog/files-tab/search, file-save handling, post-edit refresh
 - [x] **Diff viewer Monaco integration** — vite-plugin-monaco-editor for proper workers, Shadow DOM style syncing via MutationObserver, diff highlighting, find widget, scrolling fixes
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco, URI-based model matching, cross-file go-to-definition
-- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
+- [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 
-### Phase 9: Polish
+### Phase 9: Polish *(next)*
+- [ ] **Bedrock token usage** — Streaming usage capture for Bedrock provider (stream_options may not be supported); test with current bedrock/global.anthropic models
+- [ ] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
+- [ ] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
+- [ ] **Error handling** — Graceful degradation, reconnection indicator, toast system for transient errors
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry, root redirect
-- [ ] **Terminal HUD** — Cache blocks report, token usage, tier changes
-- [ ] **Error handling** — Graceful degradation, reconnection indicator, toast system
-- [ ] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options)
+- [ ] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options) — partially done (picker width/collapse already persisted)
 - [ ] **Content-visibility optimization** — CSS containment for off-screen messages
 - [ ] **Accessibility** — ARIA roles, focus management, keyboard shortcuts

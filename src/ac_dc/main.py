@@ -128,9 +128,6 @@ async def run_server(args: argparse.Namespace):
     server.add_class(llm)
     server.add_class(settings)
 
-    # Give LLM service access to server for streaming callbacks
-    llm._server = server
-
     print(f"ac-dc v{version}")
     print(f"RPC server: ws://localhost:{server_port}")
     print(f"Repository: {repo_root}")

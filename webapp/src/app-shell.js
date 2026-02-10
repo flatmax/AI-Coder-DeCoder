@@ -61,6 +61,7 @@ class AcApp extends JRPCClient {
 
   connectedCallback() {
     super.connectedCallback();
+    this.addClass(this, 'AcApp');
     this.addEventListener('navigate-file', this._onNavigateFile);
     this.addEventListener('file-save', this._onFileSave);
     window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
@@ -85,9 +86,6 @@ class AcApp extends JRPCClient {
     // Publish the call proxy to all child components via the singleton
     SharedRpc.set(this.call);
 
-    // Register client-side methods the server can call back
-    this._registerCallbacks();
-
     // Load initial state
     this._loadInitialState();
   }
@@ -102,30 +100,35 @@ class AcApp extends JRPCClient {
   }
 
   /**
-   * Register methods the server can call on the client.
-   * These handle streaming callbacks and events.
+   * Methods the server can call on the client.
+   * These must be class methods (not late-assigned) so jrpc-oo
+   * discovers them during connection setup.
    */
-  _registerCallbacks() {
-    // Streaming callbacks — the server calls these during chat_streaming
-    window.streamChunk = (requestId, content) => {
-      this._dispatch('stream-chunk', { requestId, content });
-      return true; // Acknowledge to server
-    };
+  streamChunk(requestId, content) {
+    this._dispatch('stream-chunk', { requestId, content });
+    return true;
+  }
 
-    window.streamComplete = (requestId, result) => {
-      this._dispatch('stream-complete', { requestId, result });
-      return true;
-    };
+  streamComplete(requestId, result) {
+    console.log('[ac-dc] streamComplete called!', requestId, typeof result, result);
+    this._dispatch('stream-complete', { requestId, result });
+    return true;
+  }
 
-    window.compactionEvent = (requestId, event) => {
-      this._dispatch('compaction-event', { requestId, event });
-      return true;
-    };
+  streamChunk(requestId, content) {
+    console.log('[ac-dc] streamChunk called!', requestId, typeof content, content?.length);
+    this._dispatch('stream-chunk', { requestId, content });
+    return true;
+  }
 
-    window.filesChanged = (selectedFiles) => {
-      this._dispatch('files-changed', { selectedFiles });
-      return true;
-    };
+  compactionEvent(requestId, event) {
+    this._dispatch('compaction-event', { requestId, event });
+    return true;
+  }
+
+  filesChanged(selectedFiles) {
+    this._dispatch('files-changed', { selectedFiles });
+    return true;
   }
 
   async _loadInitialState() {

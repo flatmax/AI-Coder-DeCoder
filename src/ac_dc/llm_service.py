@@ -103,9 +103,6 @@ class LLM:
         self._active_request_id: Optional[str] = None
         self._cancelled: set[str] = set()  # Thread-safe via GIL for simple set ops
 
-        # Server reference — set by main.py after server creation
-        self._server = None
-
         # Session token totals
         self._session_totals = {
             "prompt": 0, "completion": 0, "total": 0,
@@ -135,6 +132,17 @@ class LLM:
 
     def get_selected_files(self) -> list[str]:
         return list(self._selected_files)
+
+    @property
+    def call(self):
+        """Get the jrpc-oo call proxy for calling browser-side methods.
+        Returns None if no client is connected."""
+        try:
+            result = self.get_call()
+            return result
+        except Exception as e:
+            log.debug("get_call() failed: %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # Chat streaming
@@ -397,13 +405,16 @@ class LLM:
                     model=self._model,
                     messages=messages,
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
 
+                last_chunk = None
                 for chunk in response:
                     if request_id in self._cancelled:
                         was_cancelled = True
                         break
 
+                    last_chunk = chunk
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if delta and delta.content:
                         full_content += delta.content
@@ -413,7 +424,7 @@ class LLM:
                             loop,
                         )
 
-                    # Capture usage from final chunk
+                    # Capture usage from any chunk that has it
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage = {
                             "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
@@ -422,6 +433,8 @@ class LLM:
                             "cache_read_tokens": getattr(chunk.usage, "cache_read_input_tokens", 0) or 0,
                             "cache_creation_tokens": getattr(chunk.usage, "cache_creation_input_tokens", 0) or 0,
                         }
+
+
 
             except Exception as e:
                 log.error("LLM call failed: %s", e)
@@ -433,11 +446,11 @@ class LLM:
 
     async def _send_chunk(self, request_id: str, content: str):
         """Send a streaming chunk to the client via RPC callback."""
-        if self._server is None:
+        if not self.call:
             return
         try:
             await asyncio.wait_for(
-                self._server.call["streamChunk"](request_id, content),
+                self.call["AcApp.streamChunk"](request_id, content),
                 timeout=5.0,
             )
         except Exception as e:
@@ -445,11 +458,11 @@ class LLM:
 
     async def _send_stream_complete(self, request_id: str, result: dict):
         """Send stream completion to the client."""
-        if self._server is None:
+        if not self.call:
             return
         try:
             await asyncio.wait_for(
-                self._server.call["streamComplete"](request_id, result),
+                self.call["AcApp.streamComplete"](request_id, result),
                 timeout=5.0,
             )
         except Exception as e:
@@ -604,11 +617,11 @@ class LLM:
 
     async def _send_compaction_event(self, request_id: str, event: dict):
         """Send a compaction event to the client."""
-        if self._server is None:
+        if not self.call:
             return
         try:
             await asyncio.wait_for(
-                self._server.call["compactionEvent"](request_id, event),
+                self.call["AcApp.compactionEvent"](request_id, event),
                 timeout=5.0,
             )
         except Exception as e:
