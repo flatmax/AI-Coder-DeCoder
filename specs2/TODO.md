@@ -87,32 +87,41 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **History compactor** — Truncation/summarization strategies with verbatim window (`history_compactor.py`)
 - [x] **Compaction integration** — Post-response trigger in LLM service, stability re-registration, message persistence (`context.py`, `llm_service.py`)
 
-### Phase 6: URL Handling *(next)*
-- [ ] **URL detector** — Pattern matching and type classification
-- [ ] **GitHub handler** — Shallow clone, README, symbol map generation
-- [ ] **Web handler** — Content extraction with fallback
-- [ ] **URL cache** — Filesystem TTL cache
-- [ ] **Summarizer** — Type-aware LLM summarization
+### Phase 6: URL Handling ✅
+- [x] **URL detector** — Pattern matching and type classification (`url_handler.py`)
+- [x] **GitHub handler** — Shallow clone, README, symbol map generation (`url_handler.py`)
+- [x] **Web handler** — Content extraction with fallback (`url_handler.py`)
+- [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
+- [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
-### Phase 7: Webapp Foundation
-- [ ] **App shell** — Root component, dialog, tabs, lazy loading
-- [ ] **RPC mixin** — Shared singleton, convenience methods
-- [ ] **Chat panel** — Message cards, streaming display, scroll management
-- [ ] **Input handling** — Textarea, history navigation, fuzzy search, snippets
+### Phase 7: Webapp Foundation *(next)*
+- [ ] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
+- [ ] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
+- [ ] **Dialog component** — Dragging, resizing, minimizing, tab bar
+- [ ] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
+- [ ] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
+- [ ] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
+- [ ] **Input history** — Up-arrow fuzzy search overlay, history navigation
 - [ ] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
 ### Phase 8: Webapp Features
-- [ ] **File picker** — Tree rendering, selection, git status, context menu
-- [ ] **Diff viewer** — Side-by-side editor, language detection, save flow
-- [ ] **LSP integration** — Hover, definition, references, completions
-- [ ] **Search tab** — Full-text search with results navigation
-- [ ] **Context viewer** — Token budget breakdown
-- [ ] **Cache viewer** — Tier visualization, stability bars, recent changes
-- [ ] **Settings panel** — Config editing, reload
-- [ ] **History browser** — Session list, search, load
+- [ ] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
+- [ ] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
+- [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
+- [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
+- [ ] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
+- [ ] **Context viewer** — Token budget bar, category breakdown, expandable details
+- [ ] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
+- [ ] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
+- [ ] **History browser** — Modal overlay, session list, search, message preview, load into context
+- [ ] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
+- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 
 ### Phase 9: Polish
-- [ ] **Build pipeline** — Bundling, versioned deployment, CI
+- [ ] **Build pipeline** — Production bundling, versioned deployment, CI
+- [ ] **Hosted deployment** — GitHub Pages with version registry, root redirect
 - [ ] **Terminal HUD** — Cache blocks report, token usage, tier changes
-- [ ] **Error handling** — Graceful degradation throughout
-- [ ] **State persistence** — Local storage for UI preferences
+- [ ] **Error handling** — Graceful degradation, reconnection indicator, toast system
+- [ ] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options)
+- [ ] **Content-visibility optimization** — CSS containment for off-screen messages
+- [ ] **Accessibility** — ARIA roles, focus management, keyboard shortcuts

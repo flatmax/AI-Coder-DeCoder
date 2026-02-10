@@ -11,6 +11,8 @@ setup(
         "litellm>=1.81.4",
         "GitPython",
         "boto3",
+        "tiktoken>=0.7",
+        "trafilatura>=1.6",
         "tree-sitter>=0.25.2",
         "tree-sitter-python>=0.25.0",
         "tree-sitter-javascript>=0.25.0",

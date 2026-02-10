@@ -9,3 +9,7 @@ from . import context_builder
 from . import history_store
 from . import topic_detector
 from . import history_compactor
+
+# Phase 6 modules
+from . import url_cache
+from . import url_handler

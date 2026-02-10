@@ -18,6 +18,7 @@ from .history_store import HistoryStore
 from .repo import Repo
 from .stability_tracker import Tier, ItemType, _hash_content
 from .token_counter import TokenCounter
+from .url_handler import URLService
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,10 @@ class LLM:
 
         # History store (persistent JSONL)
         self._history_store = HistoryStore(config.ac_dc_dir)
+
+        # URL service
+        url_config = config.get_app_config().get("url_cache", {})
+        self._url_service = URLService(url_config, self._smaller_model)
 
         # Symbol index
         self._symbol_index = _init_symbol_index(repo.root)
@@ -210,6 +215,15 @@ class LLM:
             system_prompt = self._config.get_system_prompt()
             file_tree = self._repo.get_flat_file_list()
 
+            # -- Build URL context --
+            url_context = ""
+            fetched_urls = self._url_service.get_fetched_urls()
+            if fetched_urls:
+                active_urls = [
+                    u["url"] for u in fetched_urls if not u.get("error")
+                ]
+                url_context = self._url_service.format_url_context(active_urls)
+
             # Pre-request shedding (Layer 3 defense)
             symbol_map = ""
             if self._symbol_index:
@@ -217,7 +231,7 @@ class LLM:
                     exclude_files=set(valid_files),
                 )
             shed = self._context.shed_files_if_needed(
-                message, system_prompt, symbol_map, file_tree,
+                message, system_prompt, symbol_map, file_tree, url_context,
             )
             if shed:
                 result["shed_files"] = shed
@@ -237,6 +251,7 @@ class LLM:
                     symbol_blocks=symbol_blocks,
                     file_contents=file_contents,
                     file_tree=file_tree,
+                    url_context=url_context,
                     images=images or None,
                 )
             else:
@@ -245,6 +260,7 @@ class LLM:
                     system_prompt=system_prompt,
                     symbol_map=symbol_map,
                     file_tree=file_tree,
+                    url_context=url_context,
                     images=images or None,
                 )
 
@@ -502,6 +518,31 @@ class LLM:
         return {"ok": True, "message_count": len(messages), "session_id": session_id}
 
     # ------------------------------------------------------------------
+    # URL handling
+    # ------------------------------------------------------------------
+
+    def detect_urls(self, text: str) -> list[dict]:
+        """Find and classify URLs in text."""
+        return self._url_service.detect_urls(text)
+
+    def fetch_url(self, url: str, use_cache: bool = True,
+                  summarize: bool = True, user_hint: str = "") -> dict:
+        """Fetch URL content with caching and optional summarization."""
+        return self._url_service.fetch_url(url, use_cache, summarize, user_hint)
+
+    def get_url_content(self, url: str) -> dict:
+        """Get previously fetched content for display."""
+        return self._url_service.get_url_content(url)
+
+    def invalidate_url_cache(self, url: str) -> dict:
+        """Remove a URL from the cache."""
+        return self._url_service.invalidate_url_cache(url)
+
+    def clear_url_cache(self) -> dict:
+        """Clear all cached URLs."""
+        return self._url_service.clear_url_cache()
+
+    # ------------------------------------------------------------------
     # Post-response compaction
     # ------------------------------------------------------------------
 
@@ -597,9 +638,27 @@ class LLM:
         for path, tokens in self._context.file_context.get_tokens_by_file(self._counter).items():
             file_items.append({"path": path, "tokens": tokens})
 
+        # URL context tokens
+        url_tokens = 0
+        url_items = []
+        fetched = self._url_service.get_fetched_urls()
+        for u in fetched:
+            if not u.get("error"):
+                content_obj = self._url_service._fetched.get(u["url"])
+                if content_obj:
+                    prompt_text = content_obj.format_for_prompt()
+                    t = self._counter.count(prompt_text)
+                    url_tokens += t
+                    url_items.append({
+                        "url": u["url"],
+                        "title": u.get("title", ""),
+                        "tokens": t,
+                        "display_name": u.get("display_name", u["url"]),
+                    })
+
         history_tokens = self._context.history_token_count()
 
-        total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
+        total = system_tokens + symbol_map_tokens + file_tokens + url_tokens + history_tokens
 
         # Build cache tier blocks for the cache viewer
         blocks = self._build_tier_blocks()
@@ -628,7 +687,7 @@ class LLM:
                 "system": {"tokens": system_tokens},
                 "symbol_map": {"tokens": symbol_map_tokens, "files": symbol_files, "chunks": []},
                 "files": {"tokens": file_tokens, "items": file_items},
-                "urls": {"tokens": 0, "items": []},
+                "urls": {"tokens": url_tokens, "items": url_items},
                 "history": {
                     "tokens": history_tokens,
                     "needs_summary": self._context.should_compact(),
