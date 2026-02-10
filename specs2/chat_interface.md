@@ -265,6 +265,10 @@ After all edits, a banner shows:
 3. **Coalesce**: at most one pending scroll chain at a time
 4. Wait for DOM update → request animation frame → scroll sentinel into view
 
+### Auto-Scroll for Non-Streaming Messages
+
+Messages added outside of streaming (e.g., commit messages, compaction summaries) follow the same scroll-respect rule: if the user is already at the bottom, scroll down to show the new message; if the user has scrolled up, leave the scroll position unchanged.
+
 ### User Scroll Detection
 
 **Wheel up**: immediately pauses auto-scroll, shows scroll-to-bottom button
@@ -345,7 +349,7 @@ Three buttons in the header (Files tab only):
 | Button | Action |
 |--------|--------|
 | 📋 Copy diff | Fetch staged + unstaged diffs, copy combined to clipboard |
-| 💾 Commit | Stage all → generate message via LLM → commit → show commit message in chat → refresh tree |
+| 💾 Commit | Stage all → generate message via LLM → commit → show commit message in chat (auto-scroll only if already at bottom) → refresh tree |
 | ⚠️ Reset | Confirm dialog → hard reset to HEAD → refresh tree |
 
 ## Token HUD Overlay

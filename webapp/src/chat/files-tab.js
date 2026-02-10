@@ -607,6 +607,10 @@ class FilesTab extends RpcMixin(LitElement) {
       // Rebuild messages from compacted history
       if (event.messages) {
         this.messages = [...event.messages];
+        // Auto-scroll only if user is already at bottom
+        this.updateComplete.then(() => {
+          this.shadowRoot.querySelector('chat-panel')?.scrollToBottomIfAtBottom();
+        });
       }
       // Show summary as system-like message
       const info = event.case === 'truncate'
@@ -723,6 +727,10 @@ class FilesTab extends RpcMixin(LitElement) {
           role: 'assistant',
           content: `**Committed:**\n\n${commitMsg}`,
         }];
+        // Auto-scroll only if user is already at bottom
+        this.updateComplete.then(() => {
+          this.shadowRoot.querySelector('chat-panel')?.scrollToBottomIfAtBottom();
+        });
       }
       // Refresh tree
       await this._loadFileTree();

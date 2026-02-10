@@ -800,6 +800,11 @@ class ChatPanel extends RpcMixin(LitElement) {
     this._userScrolledUp = false;
     this._scrollToBottom();
   }
+
+  /** Scroll to bottom only if the user hasn't scrolled up. */
+  scrollToBottomIfAtBottom() {
+    this._scrollToBottom();
+  }
 }
 
 customElements.define('chat-panel', ChatPanel);
