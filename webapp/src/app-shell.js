@@ -3,6 +3,7 @@ import { JRPCClient } from '@flatmax/jrpc-oo';
 import { SharedRpc } from './rpc-mixin.js';
 import './dialog/ac-dialog.js';
 import './chat/diff-viewer.js';
+import './chat/toast-container.js';
 
 /**
  * Root application shell.
@@ -14,6 +15,8 @@ class AcApp extends JRPCClient {
   static properties = {
     connected: { type: Boolean, state: true },
     error: { type: String, state: true },
+    _reconnecting: { type: Boolean, state: true },
+    _reconnectAttempt: { type: Number, state: true },
   };
 
   static get styles() {
@@ -40,6 +43,35 @@ class AcApp extends JRPCClient {
         height: 100vh;
         z-index: 10;
       }
+
+      .reconnect-banner {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+        background: var(--accent-warning, #ff9800);
+        color: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+        z-index: 9999;
+        gap: 8px;
+      }
+
+      .reconnect-spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(0,0,0,0.3);
+        border-top-color: #000;
+        border-radius: 50%;
+        animation: rspin 0.8s linear infinite;
+      }
+
+      @keyframes rspin { to { transform: rotate(360deg); } }
     `;
   }
 
@@ -47,6 +79,9 @@ class AcApp extends JRPCClient {
     super();
     this.connected = false;
     this.error = '';
+    this._reconnecting = false;
+    this._reconnectAttempt = 0;
+    this._reconnectTimer = null;
     this.remoteTimeout = 60;
 
     // Extract WebSocket port from URL ?port=N
@@ -82,12 +117,24 @@ class AcApp extends JRPCClient {
     console.log(`[ac-dc] Connected to ${this.serverURI}`);
     this.connected = true;
     this.error = '';
+    this._reconnecting = false;
+    this._reconnectAttempt = 0;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
 
     // Publish the call proxy to all child components via the singleton
     SharedRpc.set(this.call);
 
     // Load initial state
     this._loadInitialState();
+
+    // Show reconnection success toast if we were reconnecting
+    if (this._wasDisconnected) {
+      this._wasDisconnected = false;
+      this._dispatchToast('Reconnected to server', 'success');
+    }
   }
 
   /**
@@ -95,8 +142,59 @@ class AcApp extends JRPCClient {
    */
   setupSkip() {
     console.warn('[ac-dc] Connection failed or skipped');
+    const wasConnected = this.connected;
     this.connected = false;
     this.error = 'Connection failed';
+
+    if (wasConnected) {
+      this._wasDisconnected = true;
+      SharedRpc.reset();
+      this._dispatchToast('Disconnected from server — reconnecting...', 'error');
+    }
+
+    this._scheduleReconnect();
+  }
+
+  /**
+   * Called by jrpc-oo when remote disconnects.
+   */
+  remoteDisconnected() {
+    console.warn('[ac-dc] Remote disconnected');
+    const wasConnected = this.connected;
+    this.connected = false;
+
+    if (wasConnected) {
+      this._wasDisconnected = true;
+      SharedRpc.reset();
+      this._dispatchToast('Server disconnected — reconnecting...', 'error');
+    }
+
+    this._scheduleReconnect();
+  }
+
+  _scheduleReconnect() {
+    if (this._reconnectTimer) return;
+    this._reconnecting = true;
+    this._reconnectAttempt++;
+    // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
+    const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempt - 1), 15000);
+    console.log(`[ac-dc] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempt})`);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      try {
+        this.open();
+      } catch (e) {
+        console.warn('[ac-dc] Reconnect attempt failed:', e);
+        this._scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  _dispatchToast(message, type = 'info') {
+    window.dispatchEvent(new CustomEvent('ac-toast', {
+      detail: { message, type },
+      bubbles: true,
+    }));
   }
 
   /**
@@ -199,6 +297,13 @@ class AcApp extends JRPCClient {
         <diff-viewer></diff-viewer>
       </div>
       <ac-dialog .connected=${this.connected} .error=${this.error}></ac-dialog>
+      ${this._reconnecting ? html`
+        <div class="reconnect-banner">
+          <span class="reconnect-spinner"></span>
+          Reconnecting${this._reconnectAttempt > 1 ? ` (attempt ${this._reconnectAttempt})` : ''}...
+        </div>
+      ` : ''}
+      <toast-container></toast-container>
     `;
   }
 }

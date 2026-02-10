@@ -158,7 +158,11 @@ class LLM:
         self._active_request_id = request_id
 
         # Launch background task
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         loop.create_task(self._stream_chat(request_id, message, files or [], images or []))
 
         return {"status": "started"}
@@ -397,24 +401,61 @@ class LLM:
         was_cancelled = False
         usage = {}
 
+        def _extract_usage(chunk) -> dict:
+            """Extract token usage from a streaming chunk.
+
+            Handles multiple provider formats:
+            - OpenAI: chunk.usage with prompt_tokens/completion_tokens
+            - Anthropic/Bedrock: chunk.usage with cache_read_input_tokens/cache_creation_input_tokens
+            - litellm unified: maps provider-specific fields to common names
+            """
+            u = getattr(chunk, "usage", None)
+            if not u:
+                return {}
+            extracted = {
+                "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(u, "total_tokens", 0) or 0,
+                "cache_read_tokens": (
+                    getattr(u, "cache_read_input_tokens", 0)
+                    or getattr(u, "prompt_tokens_details", None)
+                    and getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0)
+                    or 0
+                ),
+                "cache_creation_tokens": (
+                    getattr(u, "cache_creation_input_tokens", 0) or 0
+                ),
+            }
+            # Compute total if provider didn't supply it
+            if not extracted["total_tokens"] and (extracted["prompt_tokens"] or extracted["completion_tokens"]):
+                extracted["total_tokens"] = extracted["prompt_tokens"] + extracted["completion_tokens"]
+            return extracted
+
         def _blocking_stream():
             nonlocal full_content, was_cancelled, usage
             try:
                 import litellm
-                response = litellm.completion(
-                    model=self._model,
-                    messages=messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
 
-                last_chunk = None
+                # Build stream kwargs — some providers don't support stream_options
+                stream_kwargs = {
+                    "model": self._model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                # Only add stream_options for providers known to support it
+                model_lower = (self._model or "").lower()
+                is_bedrock = "bedrock" in model_lower
+                is_anthropic_direct = model_lower.startswith("anthropic/") or model_lower.startswith("claude")
+                if not is_bedrock:
+                    stream_kwargs["stream_options"] = {"include_usage": True}
+
+                response = litellm.completion(**stream_kwargs)
+
                 for chunk in response:
                     if request_id in self._cancelled:
                         was_cancelled = True
                         break
 
-                    last_chunk = chunk
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if delta and delta.content:
                         full_content += delta.content
@@ -424,17 +465,24 @@ class LLM:
                             loop,
                         )
 
-                    # Capture usage from any chunk that has it
-                    if hasattr(chunk, "usage") and chunk.usage:
-                        usage = {
-                            "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
-                            "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
-                            "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
-                            "cache_read_tokens": getattr(chunk.usage, "cache_read_input_tokens", 0) or 0,
-                            "cache_creation_tokens": getattr(chunk.usage, "cache_creation_input_tokens", 0) or 0,
-                        }
+                    # Capture usage from any chunk that has it (last chunk typically)
+                    chunk_usage = _extract_usage(chunk)
+                    if chunk_usage:
+                        usage = chunk_usage
 
+                # For Bedrock/Anthropic: also check response-level attributes
+                if not usage and hasattr(response, "usage"):
+                    resp_usage = _extract_usage(response)
+                    if resp_usage:
+                        usage = resp_usage
 
+                # Estimate completion tokens from content if provider didn't report
+                if full_content and not usage.get("completion_tokens"):
+                    estimated = max(1, len(full_content) // 4)
+                    if usage:
+                        usage["completion_tokens"] = estimated
+                        usage["total_tokens"] = usage.get("prompt_tokens", 0) + estimated
+                    # If no usage at all, leave empty — don't fabricate prompt tokens
 
             except Exception as e:
                 log.error("LLM call failed: %s", e)

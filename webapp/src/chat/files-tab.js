@@ -443,6 +443,7 @@ class FilesTab extends RpcMixin(LitElement) {
       console.error('chat_streaming failed:', e);
       this.streaming = false;
       this._clearWatchdog();
+      this._toast('Failed to send message: ' + (e.message || e), 'error');
     }
   }
 
@@ -451,6 +452,11 @@ class FilesTab extends RpcMixin(LitElement) {
     this._clearWatchdog();
     this.streaming = false;
     this._activeRequestId = null;
+
+    // Show error toast if present
+    if (result.error) {
+      this._toast(result.error, 'error');
+    }
 
     // Add assistant message to our list
     if (result.response) {
@@ -544,6 +550,14 @@ class FilesTab extends RpcMixin(LitElement) {
 
   // ── Git actions ──
 
+  /** Dispatch a toast notification. */
+  _toast(message, type = 'info') {
+    window.dispatchEvent(new CustomEvent('ac-toast', {
+      detail: { message, type },
+      bubbles: true,
+    }));
+  }
+
   async _copyDiff() {
     try {
       const staged = await this.rpcExtract('Repo.get_staged_diff');
@@ -553,8 +567,10 @@ class FilesTab extends RpcMixin(LitElement) {
       if (unstaged?.diff) parts.push('=== Unstaged ===\n' + unstaged.diff);
       const text = parts.join('\n\n') || '(no changes)';
       await navigator.clipboard.writeText(text);
+      this._toast('Diff copied to clipboard', 'success');
     } catch (e) {
       console.error('Copy diff failed:', e);
+      this._toast('Failed to copy diff: ' + (e.message || e), 'error');
     }
   }
 
@@ -566,39 +582,27 @@ class FilesTab extends RpcMixin(LitElement) {
       // Get staged diff
       const diffResult = await this.rpcExtract('Repo.get_staged_diff');
       if (!diffResult?.diff?.trim()) {
-        // Nothing to commit — show as a user message
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: 'Nothing to commit — working tree clean.',
-        }];
+        this._toast('Nothing to commit — working tree clean', 'info');
         return;
       }
       // Generate commit message
       const msgResult = await this.rpcExtract('LLM.generate_commit_message', diffResult.diff);
       if (msgResult?.error) {
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: `Commit message generation failed: ${msgResult.error}`,
-        }];
+        this._toast(`Commit message generation failed: ${msgResult.error}`, 'error');
         return;
       }
       // Commit
       const commitResult = await this.rpcExtract('Repo.commit', msgResult.message || msgResult);
       if (commitResult?.error) {
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: `Commit failed: ${commitResult.error}`,
-        }];
+        this._toast(`Commit failed: ${commitResult.error}`, 'error');
       } else {
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: `Committed: ${msgResult.message || msgResult}\n\n${commitResult?.output || ''}`,
-        }];
+        this._toast('Committed: ' + (msgResult.message || msgResult).split('\n')[0], 'success');
       }
       // Refresh tree
       await this._loadFileTree();
     } catch (e) {
       console.error('Commit failed:', e);
+      this._toast('Commit failed: ' + (e.message || e), 'error');
     }
   }
 
@@ -614,19 +618,14 @@ class FilesTab extends RpcMixin(LitElement) {
     try {
       const result = await this.rpcExtract('Repo.reset_hard');
       if (result?.error) {
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: `Reset failed: ${result.error}`,
-        }];
+        this._toast(`Reset failed: ${result.error}`, 'error');
       } else {
-        this.messages = [...this.messages, {
-          role: 'assistant',
-          content: 'Repository reset to HEAD.',
-        }];
+        this._toast('Repository reset to HEAD', 'success');
       }
       await this._loadFileTree();
     } catch (e) {
       console.error('Reset failed:', e);
+      this._toast('Reset failed: ' + (e.message || e), 'error');
     }
   }
 
@@ -642,8 +641,10 @@ class FilesTab extends RpcMixin(LitElement) {
       this._fetchedUrls = [];
       this._excludedUrls = new Set();
       this.shadowRoot.querySelector('chat-input')?.clear();
+      this._toast('New session started', 'info');
     } catch (e) {
       console.error('New session failed:', e);
+      this._toast('Failed to start new session: ' + (e.message || e), 'error');
     }
   }
 

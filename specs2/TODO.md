@@ -120,12 +120,12 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 
 ### Phase 9: Polish *(next)*
-- [ ] **Bedrock token usage** — Streaming usage capture for Bedrock provider (stream_options may not be supported); test with current bedrock/global.anthropic models
+- [x] **Bedrock token usage** — Streaming usage capture for Bedrock provider (stream_options conditional, multi-format usage extraction, completion token estimation)
 - [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
-- [ ] **Error handling** — Graceful degradation, reconnection indicator, toast system for transient errors
-- [ ] **Build pipeline** — Production bundling, versioned deployment, CI
+- [x] **Error handling** — Reconnection with exponential backoff, toast notification system, error toasts for git ops/streaming/session management
+- [ ] **Build pipeline** — Production bundling, versioned deployment, CI (`vite build`, npm scripts, GitHub Actions)
 - [ ] **Hosted deployment** — GitHub Pages with version registry, root redirect
-- [ ] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options) — partially done (picker width/collapse already persisted)
+- [x] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options, input history)
 - [x] **Content-visibility optimization** — CSS containment for off-screen messages
 - [ ] **Accessibility** — ARIA roles, focus management, keyboard shortcuts

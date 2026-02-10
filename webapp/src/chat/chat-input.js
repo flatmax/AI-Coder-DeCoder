@@ -187,13 +187,31 @@ class ChatInput extends RpcMixin(LitElement) {
     this.snippets = [];
     this._images = [];
     this._showSnippets = false;
-    this._inputHistory = []; // deduplicated user messages, newest first
+    this._inputHistory = this._loadInputHistory();
     this._historyItems = [];
     this._showHistory = false;
     this._historyIndex = -1;
     this._savedInput = '';
     this._urlDetectTimer = null;
     this._lastDetectedText = '';
+  }
+
+  _loadInputHistory() {
+    try {
+      const stored = localStorage.getItem('ac-dc-input-history');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed.slice(0, 100);
+      }
+    } catch { /* ignore corrupt data */ }
+    return [];
+  }
+
+  _saveInputHistory() {
+    try {
+      localStorage.setItem('ac-dc-input-history',
+        JSON.stringify(this._inputHistory.slice(0, 100)));
+    } catch { /* storage full or unavailable */ }
   }
 
   // ── Auto-resize & URL detection ──
@@ -301,6 +319,7 @@ class ChatInput extends RpcMixin(LitElement) {
     // Record in input history
     if (text) {
       this._inputHistory = [text, ...this._inputHistory.filter(h => h !== text)].slice(0, 100);
+      this._saveInputHistory();
     }
 
     this.dispatchEvent(new CustomEvent('send-message', {
