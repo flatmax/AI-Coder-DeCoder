@@ -136,7 +136,7 @@ Three buttons in the header (Files tab only):
 |--------|--------|
 | 📋 Copy diff | Fetch staged + unstaged diffs, copy combined to clipboard |
 | 💾 Commit | Stage all → generate message via LLM → commit → refresh tree |
-| ⚠️ Reset | Confirm dialog → hard reset to HEAD → refresh tree → clear diff viewer |
+| ⚠️ Reset | Confirm dialog → hard reset to HEAD → refresh tree |
 
 ## Token HUD Overlay
 

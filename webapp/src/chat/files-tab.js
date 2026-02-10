@@ -311,6 +311,7 @@ class FilesTab extends RpcMixin(LitElement) {
   }
 
   _onFileClicked(e) {
+    // Bubble up as navigate-file — app-shell routes to diff viewer
     this.dispatchEvent(new CustomEvent('navigate-file', {
       detail: { path: e.detail.path },
       bubbles: true, composed: true,

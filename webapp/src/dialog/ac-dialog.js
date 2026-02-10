@@ -40,16 +40,13 @@ class AcDialog extends RpcMixin(LitElement) {
       height: 100%;
       background: var(--bg-secondary);
       border: 1px solid var(--border-color);
-      border-radius: var(--radius-lg);
+      border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
       box-shadow: var(--shadow-lg);
       overflow: hidden;
       transition: height var(--transition-normal);
     }
 
     .dialog.positioned {
-      position: fixed;
-      width: 900px;
-      height: 700px;
       min-width: 300px;
       min-height: 200px;
     }
@@ -267,7 +264,8 @@ class AcDialog extends RpcMixin(LitElement) {
   // ── Search navigation ──
 
   _onSearchNavigate(e) {
-    // Bubble up as navigate-file for the app shell / files-tab to handle
+    // Re-dispatch as navigate-file so it bubbles up to app-shell which owns the diff viewer
+    e.stopPropagation();
     this.dispatchEvent(new CustomEvent('navigate-file', {
       detail: e.detail,
       bubbles: true, composed: true,

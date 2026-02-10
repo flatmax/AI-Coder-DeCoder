@@ -4,6 +4,46 @@
 
 A side-by-side diff editor for displaying file changes (original vs modified), supporting inline editing with save, and integrating with LSP features for navigation and completions.
 
+## Layout
+
+The diff viewer lives **outside the dialog**, occupying the background space of the full browser window. When files are open, it fills the area not covered by the dialog — typically the right half of the screen.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Browser viewport                                         │
+│                                                          │
+│ ┌── Dialog (left) ──┐ ┌── Diff Viewer (right) ────────┐ │
+│ │ [file picker]      │ │                               │ │
+│ │ [chat / tabs]      │ │  [tab bar with open files]    │ │
+│ │                    │ │  [original]  │  [modified]    │ │
+│ │                    │ │              │                │ │
+│ │                    │ │              │                │ │
+│ │ [input area]       │ │                               │ │
+│ └────────────────────┘ └───────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Placement
+
+- The diff viewer is a **sibling of the dialog** in the app shell, not a child of the dialog or files tab
+- It fills the full viewport behind the dialog (`position: fixed; inset: 0`)
+- The dialog floats on top; users resize/move the dialog to reveal more of the diff viewer
+- When no files are open, the background is empty (dark)
+
+### Interaction with Dialog
+
+- Clicking a file name in the file picker opens it in the diff viewer (background)
+- Clicking an edit result file path in chat opens it in the diff viewer
+- Search result navigation opens files in the diff viewer
+- The dialog stays visible and interactive at all times — no mode switching
+- Users drag the dialog's right edge to give more or less space to the diff viewer
+
+### Visibility
+
+- The diff viewer is always present but shows an empty state when no files are open
+- File tab bar and editor are visible whenever files are loaded
+- No "back to chat" toggle needed — both are always accessible
+
 ## Editor Features
 
 ### Diff Display
@@ -65,6 +105,20 @@ LSP providers registered when both editor and RPC connection are ready.
 2. If file already open: navigate directly
 3. If not: dispatch event to load file from parent
 4. Scroll to target line with temporary highlight
+
+## Event Flow
+
+File navigation events originate from multiple sources and are routed through the app shell to the diff viewer:
+
+| Source | Event | Route |
+|--------|-------|-------|
+| File picker (name click) | `file-clicked` → `navigate-file` | files-tab → app-shell → diff-viewer |
+| Chat edit result (path click) | `navigate-file` | chat-panel → app-shell → diff-viewer |
+| Search result (match click) | `search-navigate` → `navigate-file` | search-tab → ac-dialog → app-shell → diff-viewer |
+| Edit applied (post-stream) | Direct call | files-tab → app-shell → diff-viewer |
+| Config edit | Direct call | settings-tab → app-shell → diff-viewer |
+
+The app shell owns the diff viewer instance and exposes methods for child components to open files in it.
 
 ## File Loading Sources
 

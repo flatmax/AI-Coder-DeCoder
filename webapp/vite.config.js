@@ -107,5 +107,6 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['@flatmax/jrpc-oo', 'jrpc'],  // Must exclude from pre-bundling so transforms run
+    include: ['monaco-editor'],  // Pre-bundle Monaco for faster dev startup
   },
 });
