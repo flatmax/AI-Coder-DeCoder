@@ -24,6 +24,7 @@ class AcDialog extends RpcMixin(LitElement) {
     _dragging: { type: Boolean, state: true },
     _positioned: { type: Boolean, state: true },
     _visitedTabs: { type: Object, state: true },
+    _historyPercent: { type: Number, state: true },
   };
 
   static styles = css`
