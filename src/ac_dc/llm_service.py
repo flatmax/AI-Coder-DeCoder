@@ -603,6 +603,10 @@ class LLM:
         """Clear all cached URLs."""
         return self._url_service.clear_url_cache()
 
+    def get_history_status(self) -> dict:
+        """Return history token usage for the history bar."""
+        return self._context.get_compaction_status()
+
     # ------------------------------------------------------------------
     # Post-response compaction
     # ------------------------------------------------------------------

@@ -247,11 +247,29 @@ class AcDialog extends RpcMixin(LitElement) {
 
     this._onMouseMove = this._onMouseMove.bind(this);
     this._onMouseUp = this._onMouseUp.bind(this);
+
+    this._boundOnStreamComplete = this._onStreamCompleteForBar.bind(this);
+    this._boundOnCompactionEvent = this._onCompactionEventForBar.bind(this);
+    this._boundOnStateLoaded = this._onStateLoadedForBar.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     this.addEventListener('search-navigate', this._onSearchNavigate.bind(this));
+    window.addEventListener('stream-complete', this._boundOnStreamComplete);
+    window.addEventListener('compaction-event', this._boundOnCompactionEvent);
+    window.addEventListener('state-loaded', this._boundOnStateLoaded);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('stream-complete', this._boundOnStreamComplete);
+    window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
+    window.removeEventListener('state-loaded', this._boundOnStateLoaded);
+  }
+
+  onRpcReady() {
+    this._refreshHistoryBar();
   }
 
   // ── Tab switching ──
@@ -403,6 +421,33 @@ class AcDialog extends RpcMixin(LitElement) {
   }
 
   // ── History bar ──
+
+  _onStreamCompleteForBar() {
+    this._refreshHistoryBar();
+  }
+
+  _onCompactionEventForBar(e) {
+    const event = e.detail?.event;
+    if (event?.type === 'compaction_complete' && event.case !== 'none') {
+      this._refreshHistoryBar();
+    }
+  }
+
+  _onStateLoadedForBar() {
+    this._refreshHistoryBar();
+  }
+
+  async _refreshHistoryBar() {
+    if (!this.rpcConnected) return;
+    try {
+      const status = await this.rpcExtract('LLM.get_history_status');
+      if (status && typeof status.percent === 'number') {
+        this._historyPercent = status.percent;
+      }
+    } catch (e) {
+      // History bar is non-critical — silently ignore
+    }
+  }
 
   _historyBarClass() {
     if (this._historyPercent > 90) return 'critical';

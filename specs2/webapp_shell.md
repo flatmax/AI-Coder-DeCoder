@@ -82,12 +82,32 @@ Five tabs in a centered row of icon buttons:
 
 ## History Bar
 
-A thin (3px) bar at the bottom showing history token usage:
-- **Green** — normal usage
-- **Orange** — warning level
-- **Red** — critical level
+A thin (3px) bar at the bottom showing history token usage as a percentage of `compaction_trigger_tokens`:
+- **Green** — ≤ 75% of trigger threshold
+- **Orange** — 75–90% (warning)
+- **Red** — > 90% (critical, compaction imminent)
 
-Width transitions smoothly as a percentage fill.
+Width transitions smoothly as a percentage fill (`width: N%` with CSS transition).
+
+### Data Source
+
+`LLM.get_history_status()` returns:
+```pseudo
+{
+    enabled: boolean,
+    history_tokens: integer,
+    trigger_tokens: integer,
+    percent: integer (0–100)
+}
+```
+
+### Refresh Triggers
+
+The dialog fetches history status on:
+1. **RPC ready** — initial sync (spec: "sync history bar")
+2. **`stream-complete`** — history grew (user + assistant messages added)
+3. **`compaction-event`** (type `compaction_complete`, case ≠ `none`) — history shrank
+4. **`state-loaded`** — session loaded or reconnected
 
 ## Left Panel (File Picker) Resizer
 
@@ -131,6 +151,7 @@ specs2/webapp_shell.md
 ### Reconnection (Browser Refresh)
 - jrpc-oo handles WebSocket reconnection automatically
 - On `setupDone`: fetch current state from server, rebuild chat display and file selection
+- Scroll chat to bottom after state is loaded (so the user sees the most recent messages)
 - If a stream is active (from another tab or pre-refresh), display existing messages but don't receive in-progress chunks
 
 ### Shutdown

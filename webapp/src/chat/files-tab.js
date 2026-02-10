@@ -314,10 +314,13 @@ class FilesTab extends RpcMixin(LitElement) {
       this.messages = state.messages || [];
       this.selectedFiles = state.selected_files || [];
       this.streaming = state.streaming_active || false;
-      // Sync selection to picker
+      // Sync selection to picker and scroll chat to bottom
       this.updateComplete.then(() => {
         const picker = this.shadowRoot.querySelector('file-picker');
         if (picker && this.selectedFiles.length) picker.setSelectedFiles(this.selectedFiles);
+        if (this.messages.length > 0) {
+          this.shadowRoot.querySelector('chat-panel')?.scrollToBottom();
+        }
       });
     }
   }
@@ -778,6 +781,8 @@ class FilesTab extends RpcMixin(LitElement) {
         this._toast('Repository reset to HEAD', 'success');
       }
       await this._loadFileTree();
+      // Scroll chat to bottom so user sees latest context
+      this.shadowRoot.querySelector('chat-panel')?.scrollToBottom();
     } catch (e) {
       console.error('Reset failed:', e);
       this._toast('Reset failed: ' + (e.message || e), 'error');
