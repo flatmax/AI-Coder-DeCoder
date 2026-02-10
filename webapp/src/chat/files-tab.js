@@ -577,6 +577,7 @@ class FilesTab extends RpcMixin(LitElement) {
   async _commitWithMessage() {
     if (this.streaming) return;
     try {
+      this._toast('Staging all changes...', 'info');
       // Stage all
       await this.rpcExtract('Repo.stage_all');
       // Get staged diff
@@ -585,6 +586,7 @@ class FilesTab extends RpcMixin(LitElement) {
         this._toast('Nothing to commit — working tree clean', 'info');
         return;
       }
+      this._toast('Generating commit message...', 'info');
       // Generate commit message
       const msgResult = await this.rpcExtract('LLM.generate_commit_message', diffResult.diff);
       if (msgResult?.error) {
@@ -593,6 +595,7 @@ class FilesTab extends RpcMixin(LitElement) {
       }
       // Commit
       const commitMsg = msgResult.message || msgResult;
+      this._toast('Committing...', 'info');
       const commitResult = await this.rpcExtract('Repo.commit', commitMsg);
       if (commitResult?.error) {
         this._toast(`Commit failed: ${commitResult.error}`, 'error');
