@@ -592,11 +592,16 @@ class FilesTab extends RpcMixin(LitElement) {
         return;
       }
       // Commit
-      const commitResult = await this.rpcExtract('Repo.commit', msgResult.message || msgResult);
+      const commitMsg = msgResult.message || msgResult;
+      const commitResult = await this.rpcExtract('Repo.commit', commitMsg);
       if (commitResult?.error) {
         this._toast(`Commit failed: ${commitResult.error}`, 'error');
       } else {
-        this._toast('Committed: ' + (msgResult.message || msgResult).split('\n')[0], 'success');
+        this._toast('Committed successfully', 'success');
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: `**Committed:**\n\n${commitMsg}`,
+        }];
       }
       // Refresh tree
       await this._loadFileTree();

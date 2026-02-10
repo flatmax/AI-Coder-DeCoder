@@ -95,7 +95,8 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 2. Get staged diff
 3. Send diff to LLM to generate commit message
 4. Commit with generated message
-5. Refresh file tree
+5. Display commit message as assistant message in chat
+6. Refresh file tree
 
 ## Search
 
