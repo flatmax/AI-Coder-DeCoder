@@ -173,7 +173,8 @@ After cancellation: partial content is stored with a `[stopped]` marker, `stream
 3. Handle errors — auto-deselect binary/invalid files
 4. Finalize message — mark as final, attach edit results
 5. Refresh file tree if edits were applied
-6. Show token usage HUD
+6. Run file mention detection on the finalized assistant message (see [Chat Interface](chat_interface.md#file-mentions))
+7. Show token usage HUD
 7. Refresh cache/context viewers
 8. Focus input for next message
 

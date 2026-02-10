@@ -13,6 +13,10 @@ class ChatPanel extends RpcMixin(LitElement) {
     streaming: { type: Boolean },
     streamContent: { type: String },
     editResults: { type: Array },
+    /** Known repo file paths (from file tree) for mention detection */
+    repoFiles: { type: Array },
+    /** Currently selected file paths */
+    selectedFiles: { type: Object },
   };
 
   static styles = css`
@@ -221,6 +225,88 @@ class ChatPanel extends RpcMixin(LitElement) {
       border-top: 1px solid var(--border-color);
     }
 
+    /* File mentions */
+    .file-mention {
+      color: var(--accent-primary);
+      cursor: pointer;
+      text-decoration: none;
+      border-radius: 2px;
+      transition: background var(--transition-fast);
+    }
+    .file-mention:hover {
+      text-decoration: underline;
+      background: rgba(100, 180, 255, 0.1);
+    }
+    .file-mention.in-context {
+      color: var(--text-muted);
+    }
+
+    /* File summary section */
+    .file-summary {
+      margin: 8px 0;
+      padding: 8px 12px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+    }
+
+    .file-summary-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .file-summary-header .add-all-btn {
+      margin-left: auto;
+      background: none;
+      border: 1px solid var(--accent-primary);
+      color: var(--accent-primary);
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 11px;
+      transition: background var(--transition-fast);
+    }
+    .file-summary-header .add-all-btn:hover {
+      background: rgba(100, 180, 255, 0.15);
+    }
+
+    .file-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: background var(--transition-fast);
+      border: 1px solid var(--border-color);
+    }
+    .file-chip.in-context {
+      background: var(--bg-surface);
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .file-chip.not-in-context {
+      background: rgba(100, 180, 255, 0.08);
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+    }
+    .file-chip.not-in-context:hover {
+      background: rgba(100, 180, 255, 0.18);
+    }
+
     /* Edit summary banner */
     .edit-summary {
       margin: 8px 0;
@@ -281,6 +367,8 @@ class ChatPanel extends RpcMixin(LitElement) {
     this.streaming = false;
     this.streamContent = '';
     this.editResults = [];
+    this.repoFiles = [];
+    this.selectedFiles = new Set();
     this._userScrolledUp = false;
     this._pendingScroll = false;
     this._observer = null;
@@ -417,7 +505,7 @@ class ChatPanel extends RpcMixin(LitElement) {
         <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser
           ? html`<div class="md-content">${unsafeHTML(this._renderUserContent(msg.content))}</div>`
-          : this._renderAssistantContent(msg.content, isLast)
+          : this._renderAssistantContent(msg.content, isLast, true)
         }
       </div>
     `;
@@ -443,14 +531,23 @@ class ChatPanel extends RpcMixin(LitElement) {
     return String(content);
   }
 
-  _renderAssistantContent(content, showEditResults) {
+  _renderAssistantContent(content, showEditResults, isFinal) {
     const segments = segmentResponse(content);
     const resultMap = showEditResults ? this.editResults : [];
 
+    // Collect all mentioned files across text segments (final render only)
+    let allMentionedFiles = [];
+
     return html`
-      <div class="md-content">
+      <div class="md-content" @click=${this._onMdContentClick}>
         ${segments.map(seg => {
           if (seg.type === 'text') {
+            if (isFinal && this.repoFiles?.length > 0) {
+              const rendered = renderMarkdown(seg.content);
+              const { html: processedHtml, files } = this._detectFileMentions(rendered, seg.content);
+              allMentionedFiles.push(...files);
+              return html`${unsafeHTML(processedHtml)}`;
+            }
             return html`${unsafeHTML(renderMarkdown(seg.content))}`;
           }
           if (seg.type === 'edit') {
@@ -463,6 +560,7 @@ class ChatPanel extends RpcMixin(LitElement) {
           return nothing;
         })}
         ${showEditResults && resultMap.length > 0 ? this._renderEditSummary(resultMap) : nothing}
+        ${isFinal ? this._renderFileSummary([...new Set(allMentionedFiles)]) : nothing}
       </div>
     `;
   }
@@ -511,11 +609,157 @@ class ChatPanel extends RpcMixin(LitElement) {
     return html`
       <div class="message-card assistant streaming">
         <div class="role-label">Assistant</div>
-        <div class="md-content">
-          ${unsafeHTML(renderMarkdown(this.streamContent))}
+        ${this._renderAssistantContent(this.streamContent, false, false)}
+      </div>
+    `;
+  }
+
+  // ── File mention detection ──
+
+  /**
+   * Detect repo file paths in assistant message HTML and return
+   * modified HTML with clickable spans + list of found files.
+   * Skips matches inside <pre> blocks and HTML tags.
+   */
+  _detectFileMentions(htmlContent, rawContent) {
+    if (!this.repoFiles || this.repoFiles.length === 0) return { html: htmlContent, files: [] };
+
+    // Pre-filter: only check files whose path appears in raw text
+    const candidates = this.repoFiles.filter(f => rawContent.includes(f));
+    if (candidates.length === 0) return { html: htmlContent, files: [] };
+
+    // Sort by path length descending so longer paths match first
+    candidates.sort((a, b) => b.length - a.length);
+
+    const foundFiles = new Set();
+
+    // Process HTML, skipping <pre>...</pre> blocks and existing file-mention spans
+    // Strategy: split into "safe to replace" and "skip" zones
+    const parts = [];
+    let remaining = htmlContent;
+
+    // Regex to find <pre...>...</pre> blocks (non-greedy)
+    const skipPattern = /<pre[\s>][\s\S]*?<\/pre>/gi;
+    let lastIdx = 0;
+    let match;
+
+    // Reset lastIndex
+    skipPattern.lastIndex = 0;
+    while ((match = skipPattern.exec(htmlContent)) !== null) {
+      // Text before the <pre> block — safe to process
+      if (match.index > lastIdx) {
+        parts.push({ text: htmlContent.slice(lastIdx, match.index), safe: true });
+      }
+      // The <pre> block itself — skip
+      parts.push({ text: match[0], safe: false });
+      lastIdx = match.index + match[0].length;
+    }
+    // Remaining text after last <pre>
+    if (lastIdx < htmlContent.length) {
+      parts.push({ text: htmlContent.slice(lastIdx), safe: true });
+    }
+
+    // Build combined regex from candidates, escaping special chars
+    const escaped = candidates.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const combinedRe = new RegExp(`(?<![\\w/])(?:` + escaped.join('|') + `)(?![\\w/])`, 'g');
+
+    // Process safe parts
+    const selectedSet = this.selectedFiles instanceof Set
+      ? this.selectedFiles
+      : new Set(this.selectedFiles || []);
+
+    const processedParts = parts.map(part => {
+      if (!part.safe) return part.text;
+
+      return part.text.replace(combinedRe, (matched, offset, str) => {
+        // Check we're not inside an HTML tag (< ... >)
+        // Find the last '<' before this match and the last '>' before this match
+        const before = str.slice(0, offset);
+        const lastOpen = before.lastIndexOf('<');
+        const lastClose = before.lastIndexOf('>');
+        if (lastOpen > lastClose) {
+          // We're inside a tag — don't replace
+          return matched;
+        }
+
+        // Check we're not already inside a file-mention span
+        const nearBefore = before.slice(Math.max(0, before.length - 200));
+        if (nearBefore.includes('class="file-mention') && !nearBefore.includes('</span>')) {
+          return matched;
+        }
+
+        foundFiles.add(matched);
+        const inContext = selectedSet.has(matched);
+        return `<span class="file-mention${inContext ? ' in-context' : ''}" data-file="${matched}">${matched}</span>`;
+      });
+    });
+
+    return {
+      html: processedParts.join(''),
+      files: [...foundFiles],
+    };
+  }
+
+  _renderFileSummary(files) {
+    if (!files || files.length === 0) return nothing;
+
+    const selectedSet = this.selectedFiles instanceof Set
+      ? this.selectedFiles
+      : new Set(this.selectedFiles || []);
+
+    const notInContext = files.filter(f => !selectedSet.has(f));
+
+    return html`
+      <div class="file-summary">
+        <div class="file-summary-header">
+          <span>📁 Files Referenced</span>
+          ${notInContext.length >= 2 ? html`
+            <button class="add-all-btn"
+              @click=${() => this._onAddAllFiles(notInContext)}>
+              + Add All (${notInContext.length})
+            </button>
+          ` : nothing}
+        </div>
+        <div class="file-chips">
+          ${files.map(f => {
+            const inCtx = selectedSet.has(f);
+            return html`
+              <span class="file-chip ${inCtx ? 'in-context' : 'not-in-context'}"
+                @click=${() => this._onFileMentionClick(f)}>
+                ${inCtx ? '✓' : '+'} ${f}
+              </span>
+            `;
+          })}
         </div>
       </div>
     `;
+  }
+
+  _onFileMentionClick(filePath) {
+    this.dispatchEvent(new CustomEvent('file-mention-click', {
+      detail: { path: filePath },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  _onAddAllFiles(files) {
+    for (const f of files) {
+      this.dispatchEvent(new CustomEvent('file-mention-click', {
+        detail: { path: f },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
+  _onMdContentClick(e) {
+    // Delegate clicks on file mentions within rendered markdown
+    const mention = e.target.closest('.file-mention');
+    if (mention) {
+      const filePath = mention.dataset.file;
+      if (filePath) {
+        this._onFileMentionClick(filePath);
+      }
+    }
   }
 
   _onEditFileClick(filePath) {

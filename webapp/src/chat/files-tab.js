@@ -26,6 +26,8 @@ class FilesTab extends RpcMixin(LitElement) {
     _dividerDragging: { type: Boolean, state: true },
     _confirmAction: { type: Object, state: true },
     _historyOpen: { type: Boolean, state: true },
+    /** Flat list of repo file paths for file mention detection */
+    _repoFiles: { type: Array, state: true },
   };
 
   static styles = css`
@@ -232,6 +234,7 @@ class FilesTab extends RpcMixin(LitElement) {
     this._dividerDragging = false;
     this._confirmAction = null;
     this._historyOpen = false;
+    this._repoFiles = [];
 
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
@@ -285,10 +288,24 @@ class FilesTab extends RpcMixin(LitElement) {
       if (result && !result.error) {
         const picker = this.shadowRoot.querySelector('file-picker');
         if (picker) picker.setTree(result);
+        // Extract flat file list for file mention detection
+        this._repoFiles = this._collectAllFiles(result.tree);
       }
     } catch (e) {
       console.warn('Failed to load file tree:', e);
     }
+  }
+
+  /** Recursively collect all file paths from tree structure */
+  _collectAllFiles(node) {
+    if (!node) return [];
+    const files = [];
+    const walk = (n) => {
+      if (n.type === 'file') files.push(n.path);
+      if (n.children) n.children.forEach(walk);
+    };
+    walk(node);
+    return files;
   }
 
   _onStateLoaded(e) {
@@ -338,6 +355,107 @@ class FilesTab extends RpcMixin(LitElement) {
         if (picker) picker.setSelectedFiles(selectedFiles);
       });
     }
+  }
+
+  // ── File mention handling ──
+
+  _onFileMentionClick(e) {
+    const { path } = e.detail;
+    if (!path) return;
+
+    const next = new Set(this.selectedFiles);
+    const wasSelected = next.has(path);
+
+    if (wasSelected) {
+      // Remove from selection
+      next.delete(path);
+      this._removeFileFromInput(path);
+    } else {
+      // Add to selection
+      next.add(path);
+      this._addFileToInput(path);
+    }
+
+    this.selectedFiles = [...next];
+
+    // Sync to picker (also auto-expands parent dirs)
+    const picker = this.shadowRoot.querySelector('file-picker');
+    if (picker) {
+      picker.setSelectedFiles(this.selectedFiles);
+      if (!wasSelected) picker._expandParents(path);
+    }
+
+    // Notify server
+    if (this.rpcConnected) {
+      this.rpcCall('LLM.set_selected_files', this.selectedFiles).catch(() => {});
+    }
+  }
+
+  /** Accumulate a file addition into the chat input textarea */
+  _addFileToInput(filePath) {
+    const input = this.shadowRoot.querySelector('chat-input');
+    if (!input) return;
+    const textarea = input.shadowRoot?.querySelector('textarea');
+    if (!textarea) return;
+
+    const fileName = filePath.split('/').pop();
+    const currentText = textarea.value;
+    const suffix = ' added. Do you want to see more files before you continue?';
+
+    // Pattern: "The file(s) X, Y, Z added. Do you want to see more files..."
+    const pattern = /^The files? (.+) added\. Do you want to see more files before you continue\?$/;
+    const match = currentText.match(pattern);
+
+    if (match) {
+      // Append to existing file list
+      const existingFiles = match[1];
+      textarea.value = `The files ${existingFiles}, ${fileName}${suffix}`;
+    } else if (currentText.trim() === '') {
+      // Empty input — start fresh
+      textarea.value = `The file ${fileName}${suffix}`;
+    } else {
+      // Has unrelated text — append parenthetical
+      textarea.value = `${currentText} (added ${fileName})`;
+    }
+
+    textarea.dispatchEvent(new Event('input'));
+    input._autoResize(textarea);
+  }
+
+  /** Remove a file from the accumulated input text */
+  _removeFileFromInput(filePath) {
+    const input = this.shadowRoot.querySelector('chat-input');
+    if (!input) return;
+    const textarea = input.shadowRoot?.querySelector('textarea');
+    if (!textarea) return;
+
+    const fileName = filePath.split('/').pop();
+    const currentText = textarea.value;
+    const suffix = ' added. Do you want to see more files before you continue?';
+
+    // Pattern: "The file(s) X, Y, Z added. Do you want to see more files..."
+    const pattern = /^The files? (.+) added\. Do you want to see more files before you continue\?$/;
+    const match = currentText.match(pattern);
+
+    if (match) {
+      const files = match[1].split(', ').filter(f => f !== fileName);
+      if (files.length === 0) {
+        textarea.value = '';
+      } else if (files.length === 1) {
+        textarea.value = `The file ${files[0]}${suffix}`;
+      } else {
+        textarea.value = `The files ${files.join(', ')}${suffix}`;
+      }
+    } else {
+      // Try removing parenthetical: " (added filename)"
+      const parenthetical = ` (added ${fileName})`;
+      if (currentText.includes(parenthetical)) {
+        textarea.value = currentText.replace(parenthetical, '');
+      }
+    }
+
+    textarea.dispatchEvent(new Event('input'));
+    input._autoResize(textarea);
   }
 
   // ── URL events ──
@@ -744,6 +862,9 @@ class FilesTab extends RpcMixin(LitElement) {
         <chat-panel
           .messages=${this.messages}
           .streaming=${this.streaming}
+          .repoFiles=${this._repoFiles}
+          .selectedFiles=${new Set(this.selectedFiles)}
+          @file-mention-click=${this._onFileMentionClick}
         ></chat-panel>
 
         <url-chips

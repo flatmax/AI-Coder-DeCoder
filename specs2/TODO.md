@@ -113,6 +113,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
 - [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
 - [x] **History browser** — Modal overlay, session list, search, message preview, load into context
+- [x] **File mentions** — Detect repo file paths in assistant responses, render as clickable links, summary section with add-to-context chips, input text accumulation with LLM prompt
 - [x] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
 - [x] **Diff viewer layout** — Background placement in app-shell, navigate-file event routing from dialog/files-tab/search, file-save handling, post-edit refresh
 - [x] **Diff viewer Monaco integration** — vite-plugin-monaco-editor for proper workers, Shadow DOM style syncing via MutationObserver, diff highlighting, find widget, scrolling fixes

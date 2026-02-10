@@ -72,6 +72,14 @@ Right-click opens a context menu with git operations.
 
 On first load, automatically select modified, staged, and untracked files. Auto-expand directories containing changed files.
 
+## File Mention Selection
+
+Files mentioned in assistant responses can be added to the selection via `file-mention-click` events (see [Chat Interface](chat_interface.md#file-mentions)). When a file mention is clicked:
+1. The file is added to the selected files set
+2. The file picker updates its checkbox state
+3. The parent directory is auto-expanded if collapsed
+4. The chat input text is updated with an accumulated file list prompt (see [Chat Interface — Input Text Accumulation](chat_interface.md#input-text-accumulation))
+
 ## State Persistence
 
 - **Expanded directories**: tracked and propagated via events

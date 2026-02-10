@@ -8,9 +8,141 @@ The chat panel renders conversation messages, handles streaming display, and man
 
 Messages render as a scrollable list of card components:
 - **User cards** — user messages with optional image attachments
-- **Assistant cards** — LLM responses with markdown rendering, edit blocks, and file mentions
+- **Assistant cards** — LLM responses with markdown rendering, edit blocks, and file mention detection
 
 Cards use efficient keyed rendering for DOM reuse.
+
+## File Mentions
+
+Assistant messages frequently reference repository file paths in prose (e.g., "You should edit `src/utils/helpers.js` to fix this"). The system detects these paths, highlights them as clickable links, and shows a summary section with buttons to add files to context.
+
+### Detection & Highlighting
+
+On **final render only** (not during streaming), the rendered HTML of each assistant message is scanned against the list of known repo files (from the file tree):
+
+1. **Pre-filter** — only check files whose path appears as a substring in the raw message text (cheap check before regex)
+2. **Sort candidates** by path length descending — so `src/utils/helpers.js` matches before `helpers.js`
+3. **Build a single combined regex** from all candidate paths
+4. **Replace matches** in the HTML with clickable spans
+
+Each match becomes:
+```html
+<span class="file-mention" data-file="src/utils/helpers.js">src/utils/helpers.js</span>
+```
+
+If the file is already in context (selected by the user), it gets an additional class:
+```html
+<span class="file-mention in-context" data-file="src/utils/helpers.js">src/utils/helpers.js</span>
+```
+
+**Smart skipping** — matches are not highlighted if they appear:
+- Inside a `<pre>` block (fenced code — don't highlight paths in code examples)
+- Inside an HTML tag (would break markup)
+- Already wrapped in a `file-mention` span (avoid double-wrapping)
+
+Inline `<code>` elements are fine to highlight — that's how file paths are typically referenced.
+
+### File Summary Section
+
+After detection, a summary box is appended below the assistant message showing all referenced files as chips:
+
+```
+┌─────────────────────────────────────────────┐
+│ 📁 Files Referenced            [+ Add All (2)]│
+│ [✓ src/app.js] [+ src/utils/helpers.js]      │
+│ [+ src/config.py]                             │
+└─────────────────────────────────────────────┘
+```
+
+Each chip shows:
+- **`✓` prefix + muted styling** — file is already in context
+- **`+` prefix + accent styling** — file is NOT in context, clickable to add
+
+The **"+ Add All (N)"** button appears when 2+ files are not yet in context. It adds all unselected files at once.
+
+### Click Handling
+
+All clicks on file mentions are delegated through the assistant card's click handler:
+
+| Element | Action |
+|---------|--------|
+| Inline file mention (`.file-mention`) | Dispatch `file-mention-click` event with `{ path }` |
+| File chip in summary (`.file-chip`) | Dispatch `file-mention-click` event with `{ path }` |
+| "Add All" button (`.add-all-btn`) | Dispatch `file-mention-click` for each unselected file |
+
+The `file-mention-click` event bubbles up to the Files tab, which adds the file to selection and **accumulates a prompt message in the chat input textarea**.
+
+### Input Text Accumulation
+
+When a file is added via mention click, the chat input text is updated to communicate the addition to the LLM:
+
+**First file** (input is empty):
+```
+The file helpers.js added. Do you want to see more files before you continue?
+```
+
+**Second file** (detects existing pattern, appends):
+```
+The files helpers.js, config.py added. Do you want to see more files before you continue?
+```
+
+**Third file** (continues appending):
+```
+The files helpers.js, config.py, app.js added. Do you want to see more files before you continue?
+```
+
+The handler detects whether the input already matches the pattern `The file(s) ... added. Do you want to see more files before you continue?` and appends the new filename to the list. If the input already has unrelated text, it appends a parenthetical instead:
+
+```
+fix the bug (added helpers.js)
+```
+
+The suffix `"Do you want to see more files before you continue?"` prompts the LLM — when sent, the LLM knows files were added to context and can ask for more or proceed.
+
+**Removing** works in reverse — clicking a chip for an already-selected file removes that filename from the accumulated text. If all files are removed, the input clears to empty.
+
+### "Add All" Button
+
+The "Add All" button fires individual `file-mention-click` events in a loop for each unselected file. Each event triggers the same accumulation logic, so the input builds up the full list:
+
+```
+The files helpers.js, config.py, app.js added. Do you want to see more files before you continue?
+```
+
+### Data Flow
+
+```
+LLM response rendered (final, non-streaming)
+    │
+    ▼
+Scan HTML against known repo files
+    │ returns: modified HTML with clickable spans + list of found files
+    ▼
+Append file summary section with chips
+    │
+    ▼
+User clicks a file mention, chip, or "Add All"
+    │
+    ▼
+file-mention-click event(s) dispatched (bubbles, composed)
+    │
+    ▼
+Files tab receives event → adds file to selection → auto-expands parent dir
+    │
+    ▼
+Chat input text accumulated: "The file(s) X, Y added. Do you want to see more files?"
+    │
+    ▼
+File added to context; mention and chip update to show ✓
+```
+
+### Performance
+
+- Detection runs **only on final render**, never during streaming
+- Pre-filtering by substring avoids expensive regex on messages that mention no files
+- The combined regex is built once per render, not per-file
+
+---
 
 ## Streaming Display
 

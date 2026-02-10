@@ -106,6 +106,7 @@ The app shell hosts a `<diff-viewer>` component that fills the viewport behind t
 - The app shell listens for `navigate-file` events and routes them to the diff viewer
 - Post-edit file updates are routed from the `stream-complete` handler to the diff viewer
 - Save events from the diff viewer (`file-save`) are handled by the app shell, which calls the appropriate Repo or Settings RPC
+- File mention clicks (`file-mention-click`) bubble from chat panel through the dialog to the files tab, which updates file selection
 
 ## Lifecycle
 ═══════ REPL
