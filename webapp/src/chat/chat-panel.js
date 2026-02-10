@@ -43,6 +43,12 @@ class ChatPanel extends RpcMixin(LitElement) {
       line-height: 1.5;
       max-width: 100%;
       overflow-wrap: break-word;
+      content-visibility: auto;
+      contain-intrinsic-size: auto 120px;
+    }
+
+    .message-card.force-visible {
+      content-visibility: visible;
     }
 
     .message-card.user {
@@ -387,7 +393,7 @@ class ChatPanel extends RpcMixin(LitElement) {
             <div class="empty-state">Send a message to start</div>
           ` : nothing}
 
-          ${allMessages.map((msg, idx) => this._renderMessage(msg, idx))}
+          ${allMessages.map((msg, idx) => this._renderMessage(msg, idx, allMessages.length))}
 
           ${this.streaming ? this._renderStreamingMessage() : nothing}
 
@@ -401,12 +407,13 @@ class ChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
-  _renderMessage(msg, idx) {
+  _renderMessage(msg, idx, total) {
     const isUser = msg.role === 'user';
     const isLast = idx === (this.messages || []).length - 1;
+    const forceVisible = total - idx <= 15;
 
     return html`
-      <div class="message-card ${msg.role}">
+      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}">
         <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser
           ? html`<div class="md-content">${unsafeHTML(this._renderUserContent(msg.content))}</div>`

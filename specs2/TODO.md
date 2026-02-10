@@ -121,11 +121,11 @@ Recommended implementation sequence, with dependencies noted:
 
 ### Phase 9: Polish *(next)*
 - [ ] **Bedrock token usage** — Streaming usage capture for Bedrock provider (stream_options may not be supported); test with current bedrock/global.anthropic models
-- [ ] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
-- [ ] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
+- [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
+- [x] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
 - [ ] **Error handling** — Graceful degradation, reconnection indicator, toast system for transient errors
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry, root redirect
 - [ ] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options) — partially done (picker width/collapse already persisted)
-- [ ] **Content-visibility optimization** — CSS containment for off-screen messages
+- [x] **Content-visibility optimization** — CSS containment for off-screen messages
 - [ ] **Accessibility** — ARIA roles, focus management, keyboard shortcuts

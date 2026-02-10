@@ -110,14 +110,7 @@ class AcApp extends JRPCClient {
   }
 
   streamComplete(requestId, result) {
-    console.log('[ac-dc] streamComplete called!', requestId, typeof result, result);
     this._dispatch('stream-complete', { requestId, result });
-    return true;
-  }
-
-  streamChunk(requestId, content) {
-    console.log('[ac-dc] streamChunk called!', requestId, typeof content, content?.length);
-    this._dispatch('stream-chunk', { requestId, content });
     return true;
   }
 

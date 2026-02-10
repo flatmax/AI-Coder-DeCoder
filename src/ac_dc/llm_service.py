@@ -789,22 +789,77 @@ class LLM:
         return blocks
 
     def _print_usage_report(self, result: dict):
-        """Print token usage and edit results to terminal."""
+        """Print token usage, cache blocks, and edit results to terminal."""
         usage = result.get("token_usage", {})
-        if not usage:
-            return
 
-        prompt = usage.get("prompt_tokens", 0)
-        completion = usage.get("completion_tokens", 0)
-        cache_read = usage.get("cache_read_tokens", 0)
-        cache_write = usage.get("cache_creation_tokens", 0)
+        # ── Cache Blocks Report ──
+        try:
+            blocks = self._build_tier_blocks()
+            if blocks:
+                lines = ["╭─ Cache Blocks ─────────────────────────╮"]
+                total_tokens = 0
+                cached_tokens = 0
+                for block in blocks:
+                    tokens = block.get("tokens", 0)
+                    total_tokens += tokens
+                    cached = block.get("cached", False)
+                    if cached:
+                        cached_tokens += tokens
+                    tag = " [cached]" if cached else ""
+                    name = block.get("name", "?")
+                    lines.append(f"│ {name:<14} {tokens:>6,} tokens{tag:<10}│")
+                    # Summarize contents
+                    for content in block.get("contents", []):
+                        ctype = content.get("type", "?")
+                        count = content.get("count", 0)
+                        ctokens = content.get("tokens", 0)
+                        if ctype == "system":
+                            lines.append("│   └─ system + legend                   │")
+                        elif ctype == "symbols":
+                            lines.append(f"│   └─ {count} symbols ({ctokens:,} tok)            │"[:43] + "│")
+                        elif ctype == "files":
+                            lines.append(f"│   └─ {count} files ({ctokens:,} tok)              │"[:43] + "│")
+                        elif ctype == "history":
+                            lines.append(f"│   └─ {count} history msgs ({ctokens:,} tok)       │"[:43] + "│")
+                lines.append("├────────────────────────────────────────┤")
+                hit_rate = int(cached_tokens / max(1, total_tokens) * 100)
+                lines.append(f"│ Total: {total_tokens:,} | Cache hit: {hit_rate}%{' ' * max(0, 14 - len(str(total_tokens)) - len(str(hit_rate)))}│")
+                lines.append("╰────────────────────────────────────────╯")
+                for line in lines:
+                    log.info(line)
+        except Exception as e:
+            log.debug("Cache blocks report failed: %s", e)
 
-        log.info(
-            "Model: %s | Prompt: %d | Completion: %d | Cache read: %d | Cache write: %d",
-            self._model, prompt, completion, cache_read, cache_write,
-        )
+        # ── Token Usage Report ──
+        if usage:
+            prompt = usage.get("prompt_tokens", 0)
+            completion = usage.get("completion_tokens", 0)
+            cache_read = usage.get("cache_read_tokens", 0)
+            cache_write = usage.get("cache_creation_tokens", 0)
+            max_input = self._counter.max_input_tokens
 
-        # Edit results
+            log.info("Model: %s", self._model)
+            log.info("Last request: %s in, %s out", f"{prompt:,}", f"{completion:,}")
+            if cache_read:
+                log.info("Cache: read: %s", f"{cache_read:,}")
+            if cache_write:
+                log.info("Cache: write: %s", f"{cache_write:,}")
+            log.info("Session total: %s", f"{self._session_totals['total']:,}")
+
+        # ── Tier Change Notifications ──
+        try:
+            changes = self._context.stability.get_changes()
+            for change in changes:
+                if change.is_promotion:
+                    log.info("📈 %s → %s: %s",
+                             change.old_tier.name, change.new_tier.name, change.key)
+                elif change.is_demotion:
+                    log.info("📉 %s → %s: %s",
+                             change.old_tier.name, change.new_tier.name, change.key)
+        except Exception as e:
+            log.debug("Tier change report failed: %s", e)
+
+        # ── Edit Results ──
         passed = result.get("passed", [])
         failed = result.get("failed", [])
         skipped = result.get("skipped", [])
