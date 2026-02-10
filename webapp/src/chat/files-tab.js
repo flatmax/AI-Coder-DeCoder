@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 import './chat-panel.js';
 import './chat-input.js';
@@ -21,6 +21,8 @@ class FilesTab extends RpcMixin(LitElement) {
     _excludedUrls: { type: Object, state: true },
     _pickerCollapsed: { type: Boolean, state: true },
     _pickerWidth: { type: Number, state: true },
+    _dividerDragging: { type: Boolean, state: true },
+    _confirmAction: { type: Object, state: true },
   };
 
   static styles = css`
@@ -45,12 +47,170 @@ class FilesTab extends RpcMixin(LitElement) {
       border-right: none;
     }
 
+    /* ── Panel divider / resize handle ── */
+    .panel-divider {
+      width: 6px;
+      flex-shrink: 0;
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border-color);
+      cursor: col-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      z-index: 5;
+      transition: background var(--transition-fast);
+    }
+    .panel-divider:hover,
+    .panel-divider.dragging {
+      background: var(--bg-surface);
+    }
+    .panel-divider.collapsed {
+      cursor: default;
+      width: 4px;
+    }
+
+    .divider-grip {
+      width: 2px;
+      height: 24px;
+      border-radius: 1px;
+      background: var(--border-color);
+      pointer-events: none;
+    }
+    .panel-divider:hover .divider-grip,
+    .panel-divider.dragging .divider-grip {
+      background: var(--text-muted);
+    }
+
+    .collapse-btn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 16px;
+      height: 32px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: 3px;
+      color: var(--text-muted);
+      font-size: 9px;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 6;
+      line-height: 1;
+    }
+    .panel-divider:hover .collapse-btn,
+    .panel-divider.collapsed .collapse-btn {
+      display: flex;
+    }
+    .collapse-btn:hover {
+      color: var(--text-primary);
+      background: var(--bg-surface);
+    }
+
     .chat-panel-container {
       flex: 1;
       display: flex;
       flex-direction: column;
       overflow: hidden;
       min-width: 0;
+    }
+
+    /* ── Git action bar ── */
+    .git-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border-color);
+      background: var(--bg-elevated);
+      flex-shrink: 0;
+    }
+
+    .git-btn {
+      background: none;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 3px 8px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: background var(--transition-fast), color var(--transition-fast);
+      white-space: nowrap;
+    }
+    .git-btn:hover {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+    }
+    .git-btn.danger:hover {
+      background: rgba(239,83,80,0.15);
+      color: var(--accent-error);
+    }
+    .git-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .git-spacer { flex: 1; }
+
+    .session-btn {
+      background: none;
+      border: none;
+      padding: 3px 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-radius: var(--radius-sm);
+      transition: color var(--transition-fast);
+    }
+    .session-btn:hover { color: var(--text-primary); }
+
+    /* ── Confirm dialog ── */
+    .confirm-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 300;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .confirm-dialog {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 16px 20px;
+      box-shadow: var(--shadow-lg);
+      max-width: 360px;
+    }
+    .confirm-dialog p {
+      color: var(--text-primary);
+      font-size: 13px;
+      margin: 0 0 12px 0;
+    }
+    .confirm-btns {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .confirm-btns button {
+      padding: 5px 14px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .confirm-btns button.danger {
+      background: var(--accent-error);
+      color: white;
+      border-color: var(--accent-error);
     }
   `;
 
@@ -65,21 +225,34 @@ class FilesTab extends RpcMixin(LitElement) {
     this._detectedUrls = [];
     this._fetchedUrls = [];
     this._excludedUrls = new Set();
+    this._dividerDragging = false;
+    this._confirmAction = null;
+
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
     this._pickerWidth = parseInt(localStorage.getItem('ac-dc-picker-width')) || 280;
+
+    // Bind divider drag handlers
+    this._onDividerMove = this._onDividerMove.bind(this);
+    this._onDividerUp = this._onDividerUp.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('state-loaded', this._onStateLoaded.bind(this));
     window.addEventListener('stream-complete', this._onStreamComplete.bind(this));
+    window.addEventListener('compaction-event', this._onCompactionEvent.bind(this));
+    window.addEventListener('files-changed', this._onFilesChanged.bind(this));
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('state-loaded', this._onStateLoaded);
     window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener('compaction-event', this._onCompactionEvent);
+    window.removeEventListener('files-changed', this._onFilesChanged);
+    document.removeEventListener('mousemove', this._onDividerMove);
+    document.removeEventListener('mouseup', this._onDividerUp);
     this._clearWatchdog();
   }
 
@@ -144,6 +317,17 @@ class FilesTab extends RpcMixin(LitElement) {
   async _onGitOperation() {
     // Refresh tree after any git operation
     await this._loadFileTree();
+  }
+
+  _onFilesChanged(e) {
+    const { selectedFiles } = e.detail;
+    if (selectedFiles) {
+      this.selectedFiles = selectedFiles;
+      this.updateComplete.then(() => {
+        const picker = this.shadowRoot.querySelector('file-picker');
+        if (picker) picker.setSelectedFiles(selectedFiles);
+      });
+    }
   }
 
   // ── URL events ──
@@ -276,6 +460,23 @@ class FilesTab extends RpcMixin(LitElement) {
     this.shadowRoot.querySelector('chat-input')?.focus();
   }
 
+  _onCompactionEvent(e) {
+    const event = e.detail?.event;
+    if (!event) return;
+
+    if (event.type === 'compaction_complete' && event.case !== 'none') {
+      // Rebuild messages from compacted history
+      if (event.messages) {
+        this.messages = [...event.messages];
+      }
+      // Show summary as system-like message
+      const info = event.case === 'truncate'
+        ? `History truncated: ${event.messages_before} → ${event.messages_after} messages`
+        : `History compacted: ${event.messages_before} → ${event.messages_after} messages`;
+      console.log(`[ac-dc] ${info}`);
+    }
+  }
+
   // ── Watchdog ──
 
   _startWatchdog() {
@@ -291,6 +492,143 @@ class FilesTab extends RpcMixin(LitElement) {
     if (this._watchdogTimer) {
       clearTimeout(this._watchdogTimer);
       this._watchdogTimer = null;
+    }
+  }
+
+  // ── Panel divider drag ──
+
+  _onDividerDown(e) {
+    if (this._pickerCollapsed) return;
+    e.preventDefault();
+    this._dividerDragging = true;
+    this._dividerStartX = e.clientX;
+    this._dividerStartWidth = this._pickerWidth;
+    document.addEventListener('mousemove', this._onDividerMove);
+    document.addEventListener('mouseup', this._onDividerUp);
+  }
+
+  _onDividerMove(e) {
+    if (!this._dividerDragging) return;
+    const dx = e.clientX - this._dividerStartX;
+    const newWidth = Math.max(150, Math.min(500, this._dividerStartWidth + dx));
+    this._pickerWidth = newWidth;
+  }
+
+  _onDividerUp() {
+    if (!this._dividerDragging) return;
+    this._dividerDragging = false;
+    document.removeEventListener('mousemove', this._onDividerMove);
+    document.removeEventListener('mouseup', this._onDividerUp);
+    localStorage.setItem('ac-dc-picker-width', String(this._pickerWidth));
+  }
+
+  _togglePickerCollapsed() {
+    this._pickerCollapsed = !this._pickerCollapsed;
+    localStorage.setItem('ac-dc-picker-collapsed', String(this._pickerCollapsed));
+  }
+
+  // ── Git actions ──
+
+  async _copyDiff() {
+    try {
+      const staged = await this.rpcExtract('Repo.get_staged_diff');
+      const unstaged = await this.rpcExtract('Repo.get_unstaged_diff');
+      const parts = [];
+      if (staged?.diff) parts.push('=== Staged ===\n' + staged.diff);
+      if (unstaged?.diff) parts.push('=== Unstaged ===\n' + unstaged.diff);
+      const text = parts.join('\n\n') || '(no changes)';
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      console.error('Copy diff failed:', e);
+    }
+  }
+
+  async _commitWithMessage() {
+    if (this.streaming) return;
+    try {
+      // Stage all
+      await this.rpcExtract('Repo.stage_all');
+      // Get staged diff
+      const diffResult = await this.rpcExtract('Repo.get_staged_diff');
+      if (!diffResult?.diff?.trim()) {
+        // Nothing to commit — show as a user message
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: 'Nothing to commit — working tree clean.',
+        }];
+        return;
+      }
+      // Generate commit message
+      const msgResult = await this.rpcExtract('LLM.generate_commit_message', diffResult.diff);
+      if (msgResult?.error) {
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: `Commit message generation failed: ${msgResult.error}`,
+        }];
+        return;
+      }
+      // Commit
+      const commitResult = await this.rpcExtract('Repo.commit', msgResult.message || msgResult);
+      if (commitResult?.error) {
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: `Commit failed: ${commitResult.error}`,
+        }];
+      } else {
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: `Committed: ${msgResult.message || msgResult}\n\n${commitResult?.output || ''}`,
+        }];
+      }
+      // Refresh tree
+      await this._loadFileTree();
+    } catch (e) {
+      console.error('Commit failed:', e);
+    }
+  }
+
+  _requestReset() {
+    this._confirmAction = {
+      message: 'Reset all changes? This will discard all uncommitted modifications (git reset --hard HEAD).',
+      action: () => this._doReset(),
+    };
+  }
+
+  async _doReset() {
+    this._confirmAction = null;
+    try {
+      const result = await this.rpcExtract('Repo.reset_hard');
+      if (result?.error) {
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: `Reset failed: ${result.error}`,
+        }];
+      } else {
+        this.messages = [...this.messages, {
+          role: 'assistant',
+          content: 'Repository reset to HEAD.',
+        }];
+      }
+      await this._loadFileTree();
+    } catch (e) {
+      console.error('Reset failed:', e);
+    }
+  }
+
+  _cancelConfirm() {
+    this._confirmAction = null;
+  }
+
+  async _newSession() {
+    try {
+      await this.rpcExtract('LLM.history_new_session');
+      this.messages = [];
+      this._detectedUrls = [];
+      this._fetchedUrls = [];
+      this._excludedUrls = new Set();
+      this.shadowRoot.querySelector('chat-input')?.clear();
+    } catch (e) {
+      console.error('New session failed:', e);
     }
   }
 
@@ -311,7 +649,35 @@ class FilesTab extends RpcMixin(LitElement) {
         ></file-picker>
       </div>
 
+      <div class="panel-divider ${this._pickerCollapsed ? 'collapsed' : ''} ${this._dividerDragging ? 'dragging' : ''}"
+        @mousedown=${(e) => this._onDividerDown(e)}>
+        <span class="divider-grip"></span>
+        <button class="collapse-btn"
+          @mousedown=${(e) => e.stopPropagation()}
+          @click=${this._togglePickerCollapsed}
+          title=${this._pickerCollapsed ? 'Show file picker' : 'Hide file picker'}>
+          ${this._pickerCollapsed ? '▶' : '◀'}
+        </button>
+      </div>
+
       <div class="chat-panel-container">
+        <div class="git-actions">
+          <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard">
+            📋 Diff
+          </button>
+          <button class="git-btn" @click=${this._commitWithMessage}
+            ?disabled=${this.streaming} title="Stage all, generate message, commit">
+            💾 Commit
+          </button>
+          <button class="git-btn danger" @click=${this._requestReset}
+            ?disabled=${this.streaming} title="Reset to HEAD">
+            ⚠️ Reset
+          </button>
+          <span class="git-spacer"></span>
+          <button class="session-btn" @click=${this._newSession}
+            title="New session (clear chat)">🗑️</button>
+        </div>
+
         <chat-panel
           .messages=${this.messages}
           .streaming=${this.streaming}
@@ -336,6 +702,18 @@ class FilesTab extends RpcMixin(LitElement) {
           @urls-detected=${this._onUrlsDetected}
         ></chat-input>
       </div>
+
+      ${this._confirmAction ? html`
+        <div class="confirm-backdrop" @click=${this._cancelConfirm}>
+          <div class="confirm-dialog" @click=${(e) => e.stopPropagation()}>
+            <p>${this._confirmAction.message}</p>
+            <div class="confirm-btns">
+              <button @click=${this._cancelConfirm}>Cancel</button>
+              <button class="danger" @click=${() => this._confirmAction.action()}>Reset</button>
+            </div>
+          </div>
+        </div>
+      ` : nothing}
     `;
   }
 }
