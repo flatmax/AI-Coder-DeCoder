@@ -115,7 +115,8 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **History browser** — Modal overlay, session list, search, message preview, load into context
 - [x] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
 - [x] **Diff viewer layout** — Background placement in app-shell, navigate-file event routing from dialog/files-tab/search, file-save handling, post-edit refresh
-- [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
+- [x] **Diff viewer Monaco integration** — vite-plugin-monaco-editor for proper workers, Shadow DOM style syncing via MutationObserver, diff highlighting, find widget, scrolling fixes
+- [x] **LSP integration** — Hover, definition, references, completions providers for Monaco, URI-based model matching, cross-file go-to-definition
 - [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 
 ### Phase 9: Polish

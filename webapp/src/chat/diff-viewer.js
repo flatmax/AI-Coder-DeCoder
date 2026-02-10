@@ -39,6 +39,17 @@ function detectLanguage(filePath) {
   return LANG_MAP[ext] || 'plaintext';
 }
 
+/**
+ * Map Monaco language IDs to languages the backend symbol index supports.
+ * Returns null for unsupported languages (no LSP features).
+ */
+function isLspSupported(langId) {
+  const supported = new Set([
+    'python', 'javascript', 'typescript', 'c', 'cpp',
+  ]);
+  return supported.has(langId);
+}
+
 /** @typedef {{ path: string, original: string, modified: string, is_new: boolean, is_read_only?: boolean, is_config?: boolean, config_type?: string, real_path?: string, savedContent: string }} DiffFile */
 
 class DiffViewer extends RpcMixin(LitElement) {
@@ -186,6 +197,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     .editor-container {
       width: 100%;
       height: 100%;
+      position: relative;
     }
 
     .empty-state {
@@ -229,7 +241,9 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     this._monaco = null;
     this._editor = null;
-    this._resizeObserver = null;
+    this._styleObserver = null;
+    this._lspRegistered = false;
+    this._lspDisposables = [];
 
     this._onKeyDown = this._onKeyDown.bind(this);
   }
@@ -242,11 +256,16 @@ class DiffViewer extends RpcMixin(LitElement) {
   disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this._onKeyDown);
+    this._disposeLspProviders();
     this._disposeEditor();
-    if (this._resizeObserver) {
-      this._resizeObserver.disconnect();
-      this._resizeObserver = null;
+    if (this._styleObserver) {
+      this._styleObserver.disconnect();
+      this._styleObserver = null;
     }
+  }
+
+  onRpcReady() {
+    this._tryRegisterLsp();
   }
 
   // ── Public API ──
@@ -331,7 +350,7 @@ class DiffViewer extends RpcMixin(LitElement) {
       original,
       modified,
       is_new,
-      is_read_only: original === modified && !is_new,
+      is_read_only: false,
       line,
     });
   }
@@ -440,22 +459,12 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     try {
       // Dynamic import — lazy load Monaco
+      // Workers are configured by vite-plugin-monaco-editor automatically
       const monaco = await import('monaco-editor');
       this._monaco = monaco;
 
-      // Configure Monaco environment for workers
-      self.MonacoEnvironment = {
-        getWorker(_, label) {
-          // Use simple inline worker for all languages
-          const blob = new Blob(
-            ['self.onmessage = function() {}'],
-            { type: 'application/javascript' }
-          );
-          return new Worker(URL.createObjectURL(blob));
-        },
-      };
-
       this._monacoReady = true;
+      this._tryRegisterLsp();
     } catch (e) {
       console.error('Failed to load Monaco:', e);
     }
@@ -467,24 +476,22 @@ class DiffViewer extends RpcMixin(LitElement) {
     const container = this.shadowRoot.querySelector('.editor-container');
     if (!container) return;
 
+    // Copy Monaco styles into shadow root BEFORE creating the editor,
+    // so all CSS (including diff decorations) is available from the start.
+    this._injectMonacoStyles();
+
     this._editor = this._monaco.editor.createDiffEditor(container, {
       theme: 'vs-dark',
-      automaticLayout: false,
-      minimap: { enabled: false },
-      renderSideBySide: true,
+      automaticLayout: true,
       readOnly: false,
+      originalEditable: false,
+      renderSideBySide: true,
+      enableSplitViewResizing: true,
+      minimap: { enabled: false },
       scrollBeyondLastLine: false,
       fontSize: 13,
       fontFamily: "var(--font-mono), 'Fira Code', 'Cascadia Code', monospace",
-      lineNumbers: 'on',
-      glyphMargin: false,
-      folding: true,
-      wordWrap: 'off',
-      renderWhitespace: 'selection',
-      scrollbar: {
-        verticalScrollbarSize: 10,
-        horizontalScrollbarSize: 10,
-      },
+      fixedOverflowWidgets: true,
     });
 
     // Watch for content changes on the modified editor
@@ -492,13 +499,85 @@ class DiffViewer extends RpcMixin(LitElement) {
     modifiedEditor.onDidChangeModelContent(() => {
       this._onContentChanged();
     });
+  }
 
-    // Set up resize observer
-    this._resizeObserver = new ResizeObserver(() => {
-      if (this._editor) this._editor.layout();
-    });
-    const wrapper = this.shadowRoot.querySelector('.editor-wrapper');
-    if (wrapper) this._resizeObserver.observe(wrapper);
+  _injectMonacoStyles() {
+    const root = this.shadowRoot;
+    if (!root) return;
+
+    // Initial sync
+    this._syncAllStyles();
+
+    // Monaco dynamically injects <style> tags into document.head (and
+    // possibly document.body) for decorations, diff highlighting,
+    // colorization, etc. These don't penetrate Shadow DOM.
+    // Watch both head and body for changes.
+    if (!this._styleObserver) {
+      this._styleObserver = new MutationObserver(() => this._syncAllStyles());
+      this._styleObserver.observe(document.head, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      this._styleObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+  }
+
+  _syncAllStyles() {
+    const root = this.shadowRoot;
+    if (!root) return;
+
+    // Strategy: clone all <style> and <link> from document.head into shadow root.
+    // Monaco injects its CSS there at runtime. We remove old clones and re-clone
+    // everything to catch both new tags and mutations to existing ones.
+    root.querySelectorAll('[data-monaco-styles]').forEach(el => el.remove());
+
+    for (const node of document.head.querySelectorAll('style, link[rel="stylesheet"]')) {
+      const clone = node.cloneNode(true);
+      clone.setAttribute('data-monaco-styles', 'true');
+      root.appendChild(clone);
+    }
+
+    // Monaco may also inject <style> tags into document.body or other locations
+    for (const node of document.body.querySelectorAll('style')) {
+      const clone = node.cloneNode(true);
+      clone.setAttribute('data-monaco-styles', 'true');
+      root.appendChild(clone);
+    }
+
+    // Adopt any constructed stylesheets (CSSStyleSheet objects)
+    if (document.adoptedStyleSheets?.length > 0) {
+      root.adoptedStyleSheets = [...document.adoptedStyleSheets];
+    }
+
+    // Minimal Shadow DOM fixes for Monaco widgets that may not
+    // receive proper styling from the cloned stylesheets.
+    if (!root.querySelector('#monaco-shadow-fixes')) {
+      const fixes = document.createElement('style');
+      fixes.id = 'monaco-shadow-fixes';
+      fixes.textContent = `
+        /* Find widget z-index within shadow root */
+        .monaco-editor .find-widget {
+          z-index: 100;
+        }
+
+        /* Ensure both editor panes receive pointer events for scrolling */
+        .monaco-diff-editor .editor.original,
+        .monaco-diff-editor .editor.modified {
+          pointer-events: auto;
+        }
+
+        /* Highlight line decoration (used by _revealLine) */
+        .highlight-line {
+          background: rgba(79, 195, 247, 0.15) !important;
+        }
+      `;
+      root.appendChild(fixes);
+    }
   }
 
   _disposeEditor() {
@@ -523,17 +602,20 @@ class DiffViewer extends RpcMixin(LitElement) {
     const originalModel = this._monaco.editor.createModel(file.original, lang);
     const modifiedModel = this._monaco.editor.createModel(file.modified, lang);
 
-    // Dispose old models
+    // Capture old models before replacing
     const oldModel = this._editor.getModel();
-    if (oldModel) {
-      if (oldModel.original) oldModel.original.dispose();
-      if (oldModel.modified) oldModel.modified.dispose();
-    }
 
+    // Set new model FIRST — editor must release old models before we dispose them
     this._editor.setModel({
       original: originalModel,
       modified: modifiedModel,
     });
+
+    // Now safe to dispose old models
+    if (oldModel) {
+      if (oldModel.original) oldModel.original.dispose();
+      if (oldModel.modified) oldModel.modified.dispose();
+    }
 
     // Set read-only state
     this._editor.getModifiedEditor().updateOptions({
@@ -544,6 +626,11 @@ class DiffViewer extends RpcMixin(LitElement) {
     requestAnimationFrame(() => {
       if (this._editor) this._editor.layout();
     });
+
+    // Monaco computes diffs asynchronously — decoration styles may
+    // be injected after the diff worker returns. One delayed re-sync
+    // as a safety net alongside the MutationObserver.
+    setTimeout(() => this._syncAllStyles(), 500);
   }
 
   _revealLine(line) {
@@ -797,6 +884,221 @@ class DiffViewer extends RpcMixin(LitElement) {
         this._createEditor();
         this._showActiveFile();
       });
+    }
+  }
+
+  // ── LSP Integration ──
+
+  /**
+   * Register Monaco language providers once both Monaco and RPC are ready.
+   */
+  _tryRegisterLsp() {
+    if (this._lspRegistered || !this._monacoReady || !this.rpcConnected || !this._monaco) return;
+    this._lspRegistered = true;
+    console.log('[lsp] Registering Monaco language providers');
+
+    const monaco = this._monaco;
+    const viewer = this;
+
+    // Register for all supported languages
+    const languages = ['python', 'javascript', 'typescript', 'c', 'cpp'];
+
+    for (const langId of languages) {
+      // Hover provider
+      this._lspDisposables.push(
+        monaco.languages.registerHoverProvider(langId, {
+          provideHover: (model, position) => viewer._provideHover(model, position),
+        })
+      );
+
+      // Definition provider
+      this._lspDisposables.push(
+        monaco.languages.registerDefinitionProvider(langId, {
+          provideDefinition: (model, position) => viewer._provideDefinition(model, position),
+        })
+      );
+
+      // Reference provider
+      this._lspDisposables.push(
+        monaco.languages.registerReferenceProvider(langId, {
+          provideReferences: (model, position, _ctx) => viewer._provideReferences(model, position),
+        })
+      );
+
+      // Completion provider
+      this._lspDisposables.push(
+        monaco.languages.registerCompletionItemProvider(langId, {
+          triggerCharacters: ['.', '_'],
+          provideCompletionItems: (model, position) => viewer._provideCompletions(model, position),
+        })
+      );
+    }
+  }
+
+  _disposeLspProviders() {
+    for (const d of this._lspDisposables) {
+      try { d.dispose(); } catch {}
+    }
+    this._lspDisposables = [];
+    this._lspRegistered = false;
+  }
+
+  /**
+   * Get the file path for the model being queried.
+   * Compares by URI string since Monaco providers may receive model references
+   * that are not identity-equal to the editor's current models.
+   */
+  _getPathForModel(model) {
+    if (!this._editor || this._activeIndex < 0) return null;
+    const file = this._files[this._activeIndex];
+    if (!file || file.is_config) return null;
+
+    const modelUri = model.uri.toString();
+
+    // Check modified editor's model
+    const modifiedModel = this._editor.getModifiedEditor().getModel();
+    if (modifiedModel && modifiedModel.uri.toString() === modelUri) {
+      return file.real_path || file.path;
+    }
+
+    // Also allow original side (read-only, but hover/refs still useful)
+    const originalModel = this._editor.getOriginalEditor().getModel();
+    if (originalModel && originalModel.uri.toString() === modelUri) {
+      return file.real_path || file.path;
+    }
+
+    return null;
+  }
+
+  async _provideHover(model, position) {
+    const path = this._getPathForModel(model);
+    if (!path) return null;
+
+    try {
+      const result = await this.rpcExtract(
+        'LLM.lsp_get_hover', path, position.lineNumber, position.column
+      );
+      if (!result) return null;
+      return {
+        contents: [{ value: result, isTrusted: true }],
+      };
+    } catch (e) {
+      console.warn('[lsp] hover error:', e);
+      return null;
+    }
+  }
+
+  async _provideDefinition(model, position) {
+    const path = this._getPathForModel(model);
+    if (!path) return null;
+
+    try {
+      const result = await this.rpcExtract(
+        'LLM.lsp_get_definition', path, position.lineNumber, position.column
+      );
+      if (!result || !result.file) return null;
+
+      const targetFile = result.file;
+      const range = result.range || {};
+      const targetLine = range.start_line || 1;
+      const targetCol = Math.max(1, range.start_col || 1);
+
+      // If definition is in a different file, open it in the diff viewer
+      if (targetFile !== path) {
+        setTimeout(() => this.openRepoFile(targetFile, targetLine), 0);
+        return null;
+      }
+
+      // Same file — return location for Monaco to navigate to
+      return [{
+        uri: model.uri,
+        range: new this._monaco.Range(
+          targetLine, targetCol,
+          range.end_line || targetLine, Math.max(1, range.end_col || targetCol)
+        ),
+      }];
+    } catch (e) {
+      console.warn('[lsp] definition error:', e);
+      return null;
+    }
+  }
+
+  async _provideReferences(model, position) {
+    const path = this._getPathForModel(model);
+    if (!path) return null;
+
+    try {
+      const results = await this.rpcExtract(
+        'LLM.lsp_get_references', path, position.lineNumber, position.column
+      );
+      if (!results || !results.length) return null;
+
+      const monaco = this._monaco;
+      // For same-file references, use the model's URI so Monaco can display them.
+      // For cross-file references, use a file URI (Monaco will show them in peek).
+      return results.map(ref => {
+        const range = ref.range || {};
+        const refFile = ref.file || path;
+        const uri = refFile === path ? model.uri : monaco.Uri.parse(`file:///${refFile}`);
+        const startLine = range.start_line || ref.line || 1;
+        const startCol = Math.max(1, range.start_col || 1);
+        return {
+          uri,
+          range: new monaco.Range(
+            startLine,
+            startCol,
+            range.end_line || startLine,
+            Math.max(1, range.end_col || startCol)
+          ),
+        };
+      });
+    } catch (e) {
+      console.warn('[lsp] references error:', e);
+      return null;
+    }
+  }
+
+  async _provideCompletions(model, position) {
+    const path = this._getPathForModel(model);
+    if (!path) return null;
+
+    try {
+      const word = model.getWordUntilPosition(position);
+
+      const results = await this.rpcExtract(
+        'LLM.lsp_get_completions', path, position.lineNumber, position.column
+      );
+      if (!results || !results.length) return { suggestions: [] };
+
+      const monaco = this._monaco;
+      const range = new monaco.Range(
+        position.lineNumber, word.startColumn,
+        position.lineNumber, word.endColumn
+      );
+
+      const KIND_MAP = {
+        class: monaco.languages.CompletionItemKind.Class,
+        function: monaco.languages.CompletionItemKind.Function,
+        method: monaco.languages.CompletionItemKind.Method,
+        variable: monaco.languages.CompletionItemKind.Variable,
+        property: monaco.languages.CompletionItemKind.Property,
+        module: monaco.languages.CompletionItemKind.Module,
+        import: monaco.languages.CompletionItemKind.Reference,
+      };
+
+      const suggestions = results.map((item, i) => ({
+        label: item.label,
+        kind: KIND_MAP[item.kind] || monaco.languages.CompletionItemKind.Text,
+        detail: item.detail || '',
+        insertText: item.label,
+        range,
+        sortText: String(i).padStart(5, '0'),
+      }));
+
+      return { suggestions };
+    } catch (e) {
+      console.warn('[lsp] completions error:', e);
+      return { suggestions: [] };
     }
   }
 }

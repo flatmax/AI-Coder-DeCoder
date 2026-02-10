@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import monacoEditorPlugin from 'vite-plugin-monaco-editor';
 
 /**
  * Vite transform plugin to patch @flatmax/jrpc-oo for browser ESM usage.
@@ -91,7 +92,12 @@ const crypto = self.crypto;`
 
 export default defineConfig({
   root: '.',
-  plugins: [jrpcFixes()],
+  plugins: [
+    jrpcFixes(),
+    monacoEditorPlugin({
+      languageWorkers: ['editorWorkerService', 'json', 'css', 'html', 'typescript'],
+    }),
+  ],
   server: {
     port: parseInt(process.env.PORT) || 18999,
     strictPort: true,
@@ -107,6 +113,5 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['@flatmax/jrpc-oo', 'jrpc'],  // Must exclude from pre-bundling so transforms run
-    include: ['monaco-editor'],  // Pre-bundle Monaco for faster dev startup
   },
 });

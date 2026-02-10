@@ -55,6 +55,18 @@
       height: 100%;
       position: relative;
     }
+
+    /* Monaco overflow widgets (find dialog, autocomplete, parameter hints)
+       are appended to document.body when fixedOverflowWidgets is enabled.
+       Ensure they render above the Shadow DOM UI. */
+    .monaco-editor .overflow-guard,
+    body > .monaco-editor-overlaymessage,
+    body > .editor-widget,
+    body > .monaco-hover,
+    body > .parameter-hints-widget,
+    body > .suggest-widget {
+      z-index: 10000 !important;
+    }
   </style>
 </head>
 <body>

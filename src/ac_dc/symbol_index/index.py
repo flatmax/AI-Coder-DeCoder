@@ -203,21 +203,29 @@ class SymbolIndex:
     def get_definition(
         self, file_path: str, line: int, col: int
     ) -> Optional[dict]:
-        """Get definition location for a symbol at position."""
-        sym = self.symbol_at_position(file_path, line, col)
-        if sym is None:
+        """Get definition location for a symbol at position.
+
+        Handles three cases:
+        1. Cursor on a call site with a resolved target → jump to target
+        2. Cursor on an imported name → resolve import to source file
+        3. Cursor on a word that matches a symbol in an imported file → jump there
+        4. Cursor on a definition → return own location (Monaco shows "already at def")
+        """
+        fsyms = self._all_symbols.get(file_path)
+        if fsyms is None:
             return None
 
-        # Check if on a call site
-        fsyms = self._all_symbols.get(file_path)
+        # Extract the word at the cursor position from source
+        word = self._word_at_position(file_path, line, col)
+
+        # 1. Check if on a call site with resolved target
         if fsyms:
             for s in fsyms.all_symbols_flat:
                 for call in s.call_sites:
                     if call.line == line and call.target_file:
-                        # Find the target symbol
+                        target_name = call.name.split(".")[-1]
                         target_syms = self._all_symbols.get(call.target_file)
                         if target_syms:
-                            target_name = call.name.split(".")[-1]
                             for ts in target_syms.all_symbols_flat:
                                 if ts.name == target_name:
                                     return {
@@ -230,16 +238,69 @@ class SymbolIndex:
                                         },
                                     }
 
-        # Return own definition
-        return {
-            "file": sym.file_path,
-            "range": {
-                "start_line": sym.range.start_line,
-                "start_col": sym.range.start_col,
-                "end_line": sym.range.end_line,
-                "end_col": sym.range.end_col,
-            },
-        }
+        # 2. Check imports — if the word matches an imported name, resolve it
+        if word:
+            for imp in fsyms.imports:
+                if word in imp.names or word == imp.module.split(".")[-1]:
+                    # Resolve import to target file
+                    target_file = self._resolve_import(imp, file_path, fsyms.language)
+                    if target_file:
+                        target_syms = self._all_symbols.get(target_file)
+                        if target_syms:
+                            # Find the specific symbol in the target
+                            for ts in target_syms.all_symbols_flat:
+                                if ts.name == word:
+                                    return {
+                                        "file": target_file,
+                                        "range": {
+                                            "start_line": ts.range.start_line,
+                                            "start_col": ts.range.start_col,
+                                            "end_line": ts.range.end_line,
+                                            "end_col": ts.range.end_col,
+                                        },
+                                    }
+                            # Symbol not found by name — jump to top of file
+                            return {
+                                "file": target_file,
+                                "range": {
+                                    "start_line": 1, "start_col": 0,
+                                    "end_line": 1, "end_col": 0,
+                                },
+                            }
+
+        # 3. Search imported files for a symbol matching the word
+        if word and self._import_resolver:
+            for imp in fsyms.imports:
+                target_file = self._resolve_import(imp, file_path, fsyms.language)
+                if target_file:
+                    target_syms = self._all_symbols.get(target_file)
+                    if target_syms:
+                        for ts in target_syms.all_symbols_flat:
+                            if ts.name == word:
+                                return {
+                                    "file": target_file,
+                                    "range": {
+                                        "start_line": ts.range.start_line,
+                                        "start_col": ts.range.start_col,
+                                        "end_line": ts.range.end_line,
+                                        "end_col": ts.range.end_col,
+                                    },
+                                }
+
+        # 4. Fall back to own definition if cursor is on a local symbol
+        sym = self.symbol_at_position(file_path, line, col)
+        if sym is not None:
+            return {
+                "file": sym.file_path,
+                "range": {
+                    "start_line": sym.range.start_line,
+                    "start_col": sym.range.start_col,
+                    "end_line": sym.range.end_line,
+                    "end_col": sym.range.end_col,
+                },
+            }
+
+        return None
 
     def get_references(
         self, file_path: str, line: int, col: int
@@ -308,6 +369,51 @@ class SymbolIndex:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _word_at_position(self, file_path: str, line: int, col: int) -> Optional[str]:
+        """Extract the identifier word at a given line/col from source."""
+        full_path = self.repo_root / file_path
+        try:
+            source = full_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        lines = source.splitlines()
+        if line < 1 or line > len(lines):
+            return None
+        text = lines[line - 1]
+        if col < 0 or col > len(text):
+            return None
+        # Find word boundaries (col is 1-based from Monaco)
+        idx = min(col - 1, len(text) - 1) if text else 0
+        if not text or not (text[idx].isalnum() or text[idx] == "_"):
+            # Try one position left (cursor might be just past the word)
+            idx = max(0, idx - 1)
+            if not text or not (text[idx].isalnum() or text[idx] == "_"):
+                return None
+        start = idx
+        while start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+            start -= 1
+        end = idx
+        while end < len(text) - 1 and (text[end + 1].isalnum() or text[end + 1] == "_"):
+            end += 1
+        word = text[start:end + 1]
+        return word if word else None
+
+    def _resolve_import(self, imp, from_file: str, language: str) -> Optional[str]:
+        """Resolve an Import object to a target file path."""
+        if self._import_resolver is None:
+            return None
+        if language == "python":
+            return self._import_resolver.resolve_python_import(
+                imp.module, imp.level, from_file,
+            )
+        elif language in ("javascript", "typescript"):
+            return self._import_resolver.resolve_js_import(
+                imp.module, from_file,
+            )
+        elif language in ("c", "cpp"):
+            return self._import_resolver.resolve_c_include(imp.module)
+        return None
 
     def _discover_files(self) -> list[str]:
         """Discover all supported files in the repo."""
