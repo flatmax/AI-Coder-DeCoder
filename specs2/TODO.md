@@ -81,13 +81,13 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Stability update** — Post-response: stale removal, active item processing, graduation, cascade, change logging
 - [x] **Context integration** — Tiered message assembly in ContextManager, active items building, stability initialization
 
-### Phase 5: History Management *(next)*
-- [ ] **History store** — JSONL persistence, session management, search
-- [ ] **Topic detector** — LLM-based boundary detection
-- [ ] **History compactor** — Truncation/summarization strategies
-- [ ] **Compaction integration** — Post-response trigger, stability re-registration
+### Phase 5: History Management ✅
+- [x] **History store** — JSONL persistence, session management, search (`history_store.py`, `tests/test_history.py`)
+- [x] **Topic detector** — LLM-based boundary detection with JSON parsing fallbacks (`topic_detector.py`)
+- [x] **History compactor** — Truncation/summarization strategies with verbatim window (`history_compactor.py`)
+- [x] **Compaction integration** — Post-response trigger in LLM service, stability re-registration, message persistence (`context.py`, `llm_service.py`)
 
-### Phase 6: URL Handling
+### Phase 6: URL Handling *(next)*
 - [ ] **URL detector** — Pattern matching and type classification
 - [ ] **GitHub handler** — Shallow clone, README, symbol map generation
 - [ ] **Web handler** — Content extraction with fallback

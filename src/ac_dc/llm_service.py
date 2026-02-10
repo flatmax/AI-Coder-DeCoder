@@ -14,6 +14,7 @@ from typing import Any, Optional
 from .config import ConfigManager
 from .context import ContextManager, COMMIT_MSG_SYSTEM
 from .edit_parser import parse_edit_blocks, apply_edits_to_repo, EditStatus
+from .history_store import HistoryStore
 from .repo import Repo
 from .stability_tracker import Tier, ItemType, _hash_content
 from .token_counter import TokenCounter
@@ -64,15 +65,25 @@ class LLM:
         self._config = config
         self._repo = repo
         self._model = config.get_llm_config().get("model", "")
+        self._smaller_model = config.get_llm_config().get("smaller_model", "")
         self._counter = TokenCounter(self._model)
 
         # Context manager
+        compaction_config = config.get_app_config().get("history_compaction", {})
         self._context = ContextManager(
             model_name=self._model,
             repo_root=repo.root,
             cache_target_tokens=config.cache_target_tokens,
-            compaction_config=config.get_app_config().get("history_compaction", {}),
+            compaction_config=compaction_config,
         )
+
+        # Initialize compactor with detection model
+        skill_prompt = config.get_compaction_prompt()
+        if self._smaller_model and skill_prompt and compaction_config.get("enabled", True):
+            self._context.init_compactor(self._smaller_model, skill_prompt)
+
+        # History store (persistent JSONL)
+        self._history_store = HistoryStore(config.ac_dc_dir)
 
         # Symbol index
         self._symbol_index = _init_symbol_index(repo.root)
@@ -237,6 +248,15 @@ class LLM:
                     images=images or None,
                 )
 
+            # -- Persist user message --
+            self._history_store.append_message(
+                session_id=self._session_id,
+                role="user",
+                content=message,
+                files=valid_files or None,
+                images=len(images) if images else 0,
+            )
+
             # -- Stream LLM completion --
             full_content, was_cancelled, usage = await self._run_llm_stream(
                 request_id, messages,
@@ -249,6 +269,12 @@ class LLM:
                 result["cancelled"] = True
                 full_content += "\n\n[stopped]"
                 self._context.add_exchange(message, full_content)
+                # Persist cancelled response
+                self._history_store.append_message(
+                    session_id=self._session_id,
+                    role="assistant",
+                    content=full_content,
+                )
             else:
                 # -- Add exchange to context --
                 self._context.add_exchange(message, full_content)
@@ -295,6 +321,15 @@ class LLM:
                     if files_modified and self._symbol_index:
                         self._symbol_index.invalidate_files(files_modified)
 
+                # -- Persist assistant message --
+                self._history_store.append_message(
+                    session_id=self._session_id,
+                    role="assistant",
+                    content=full_content,
+                    files_modified=result.get("files_modified") or None,
+                    edit_results=result.get("edit_results") or None,
+                )
+
             # -- Update stability tracker --
             self._update_stability(valid_files, result.get("files_modified", []))
 
@@ -323,6 +358,10 @@ class LLM:
 
             # Send completion
             await self._send_stream_complete(request_id, result)
+
+            # Post-response compaction (non-blocking)
+            if not result.get("cancelled") and not result.get("error"):
+                await self._post_response_compaction(request_id)
 
     async def _run_llm_stream(
         self, request_id: str, messages: list[dict],
@@ -443,13 +482,96 @@ class LLM:
         return {"session_id": self._session_id}
 
     def history_list_sessions(self, limit: int = 20) -> list[dict]:
-        return []  # Phase 5
+        return self._history_store.list_sessions(limit)
 
     def history_get_session(self, session_id: str) -> list[dict]:
-        return []  # Phase 5
+        return self._history_store.get_session(session_id)
 
     def history_search(self, query: str, role: str = None, limit: int = 50) -> list[dict]:
-        return []  # Phase 5
+        return self._history_store.search(query, role, limit)
+
+    def load_session_into_context(self, session_id: str) -> dict:
+        """Load a previous session into the active context."""
+        messages = self._history_store.get_session_messages_for_context(session_id)
+        if not messages:
+            return {"error": f"Session not found: {session_id}"}
+        self._context.clear_history()
+        self._session_id = session_id
+        for msg in messages:
+            self._context.add_message(msg["role"], msg["content"])
+        return {"ok": True, "message_count": len(messages), "session_id": session_id}
+
+    # ------------------------------------------------------------------
+    # Post-response compaction
+    # ------------------------------------------------------------------
+
+    async def _post_response_compaction(self, request_id: str):
+        """Run compaction after response delivery if needed."""
+        if not self._context.should_compact():
+            return
+
+        try:
+            # Brief pause to let frontend process completion
+            await asyncio.sleep(0.5)
+
+            # Notify start
+            await self._send_compaction_event(request_id, {
+                "type": "compaction_start",
+            })
+
+            # Run compaction (may involve LLM call — run in executor)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                _executor,
+                self._context.compact_history_if_needed,
+            )
+
+            if result is None or result.get("case") == "none":
+                await self._send_compaction_event(request_id, {
+                    "type": "compaction_complete",
+                    "case": "none",
+                })
+                return
+
+            # Track compaction LLM usage in session totals
+            # (topic detection usage is internal to the detector)
+
+            await self._send_compaction_event(request_id, {
+                "type": "compaction_complete",
+                "case": result["case"],
+                "messages_before": result.get("messages_before", 0),
+                "messages_after": result.get("messages_after", 0),
+                "tokens_before": result.get("tokens_before", 0),
+                "tokens_after": result.get("tokens_after", 0),
+                "summary": result.get("summary", ""),
+                "messages": self._context.get_history(),
+            })
+
+            log.info(
+                "Compaction complete: %s, %d → %d messages",
+                result["case"],
+                result.get("messages_before", 0),
+                result.get("messages_after", 0),
+            )
+
+        except Exception as e:
+            log.error("Compaction error: %s", e)
+            await self._send_compaction_event(request_id, {
+                "type": "compaction_error",
+                "error": str(e),
+            })
+
+    async def _send_compaction_event(self, request_id: str, event: dict):
+        """Send a compaction event to the client."""
+        if self._server is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._server.call["compactionEvent"](request_id, event),
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.debug("Compaction event send failed: %s", e)
 
     # ------------------------------------------------------------------
     # Context info

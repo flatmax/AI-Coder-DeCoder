@@ -192,6 +192,9 @@ class ContextManager:
         # Tiered context builder
         self._builder = TieredContextBuilder(self.stability)
 
+        # History compactor (initialized later via init_compactor)
+        self._compactor = None
+
         # Conversation history — working copy for LLM requests
         self._messages: list[dict] = []
 
@@ -246,15 +249,66 @@ class ContextManager:
         }
 
     # ------------------------------------------------------------------
-    # Compaction stubs (Phase 5 will fill these in)
+    # Compaction
     # ------------------------------------------------------------------
+
+    def init_compactor(self, detection_model: str, skill_prompt: str):
+        """Initialize the history compactor with a detection model.
+
+        Called by the LLM service once model info is available.
+        """
+        from .history_compactor import HistoryCompactor
+        self._compactor = HistoryCompactor(
+            counter=self.counter,
+            config=self._compaction_config,
+            detection_model=detection_model,
+            skill_prompt=skill_prompt,
+        )
 
     def should_compact(self) -> bool:
         """True if enabled and history tokens exceed trigger."""
+        if hasattr(self, '_compactor') and self._compactor is not None:
+            return self._compactor.should_compact(self._messages)
         if not self._compaction_config.get("enabled", False):
             return False
         trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
         return self.history_token_count() > trigger
+
+    def compact_history_if_needed(self) -> Optional[dict]:
+        """Run compaction if threshold exceeded. Returns result dict or None."""
+        if not hasattr(self, '_compactor') or self._compactor is None:
+            return None
+        if not self._compactor.should_compact(self._messages):
+            return None
+
+        result = self._compactor.compact(self._messages)
+        if result.case == "none":
+            return {"case": "none"}
+
+        # Apply compaction
+        new_messages = self._compactor.apply_compaction(self._messages, result)
+
+        # Replace history
+        old_count = len(self._messages)
+        self._messages = new_messages
+
+        # Purge history entries from stability tracker
+        self.stability.purge_history_items()
+
+        log.info(
+            "Compaction applied: case=%s, %d → %d messages, %d → %d tokens",
+            result.case, result.messages_before, result.messages_after,
+            result.tokens_before, result.tokens_after,
+        )
+
+        return {
+            "case": result.case,
+            "messages_before": result.messages_before,
+            "messages_after": result.messages_after,
+            "tokens_before": result.tokens_before,
+            "tokens_after": result.tokens_after,
+            "summary": result.summary,
+        }
 
     def get_compaction_status(self) -> dict:
         """Status dict for UI."""
