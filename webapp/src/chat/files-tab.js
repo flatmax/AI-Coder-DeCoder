@@ -766,7 +766,6 @@ class FilesTab extends RpcMixin(LitElement) {
       this._detectedUrls = [];
       this._fetchedUrls = [];
       this._excludedUrls = new Set();
-      this.shadowRoot.querySelector('chat-input')?.clear();
       this._toast('New session started', 'info');
     } catch (e) {
       console.error('New session failed:', e);

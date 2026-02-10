@@ -112,8 +112,14 @@ function _looksLikePath(s) {
 }
 
 /**
- * Compute a simple unified diff for display.
- * Returns array of { type: 'context'|'add'|'remove', text }
+ * Compute a unified diff for display with modify-pair detection.
+ * Returns array of:
+ *   { type: 'context', text }
+ *   { type: 'remove', text, charDiff? }
+ *   { type: 'add', text, charDiff? }
+ *
+ * Adjacent delete+insert pairs that are similar are tagged as modify pairs
+ * with charDiff arrays for character-level highlighting.
  */
 export function computeDiff(oldLines, newLines) {
   const result = [];
@@ -130,14 +136,182 @@ export function computeDiff(oldLines, newLines) {
   for (let i = 0; i < anchor; i++) {
     result.push({ type: 'context', text: oldLines[i] });
   }
-  // Removed lines
+
+  // Collect raw deletes and inserts
+  const deletes = [];
   for (let i = anchor; i < oldLines.length; i++) {
-    result.push({ type: 'remove', text: oldLines[i] });
+    deletes.push(oldLines[i]);
   }
-  // Added lines
+  const inserts = [];
   for (let i = anchor; i < newLines.length; i++) {
-    result.push({ type: 'add', text: newLines[i] });
+    inserts.push(newLines[i]);
+  }
+
+  // Pair adjacent deletes and inserts that are similar → modify pairs
+  const paired = Math.min(deletes.length, inserts.length);
+  for (let i = 0; i < paired; i++) {
+    const sim = _lineSimilarity(deletes[i], inserts[i]);
+    if (sim > 0.3) {
+      // Similar enough — treat as a modify pair with char-level diff
+      const charDiff = computeCharDiff(deletes[i], inserts[i]);
+      result.push({ type: 'remove', text: deletes[i], charDiff: charDiff.old });
+      result.push({ type: 'add', text: inserts[i], charDiff: charDiff.new });
+    } else {
+      result.push({ type: 'remove', text: deletes[i] });
+      result.push({ type: 'add', text: inserts[i] });
+    }
+  }
+  // Remaining unpaired lines
+  for (let i = paired; i < deletes.length; i++) {
+    result.push({ type: 'remove', text: deletes[i] });
+  }
+  for (let i = paired; i < inserts.length; i++) {
+    result.push({ type: 'add', text: inserts[i] });
   }
 
   return result;
+}
+
+/**
+ * Compute similarity ratio between two strings (0–1).
+ * Based on shared token count vs total tokens.
+ */
+function _lineSimilarity(a, b) {
+  const tokA = _tokenize(a);
+  const tokB = _tokenize(b);
+  if (tokA.length === 0 && tokB.length === 0) return 1;
+  if (tokA.length === 0 || tokB.length === 0) return 0;
+  const setB = new Set(tokB);
+  let shared = 0;
+  for (const t of tokA) {
+    if (setB.has(t)) shared++;
+  }
+  return (shared * 2) / (tokA.length + tokB.length);
+}
+
+/**
+ * Tokenize a string on word boundaries for diffing.
+ * "foo.bar()" → ["foo", ".", "bar", "(", ")"]
+ */
+function _tokenize(str) {
+  if (!str) return [];
+  const tokens = [];
+  const re = /\w+|[^\w\s]|\s+/g;
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    tokens.push(m[0]);
+  }
+  return tokens;
+}
+
+/**
+ * Compute character-level diff between two strings using token-level LCS.
+ * Returns { old: segments[], new: segments[] } where each segment is
+ * { type: 'equal'|'delete'|'insert', text }.
+ *
+ * The 'old' array contains 'equal' and 'delete' segments.
+ * The 'new' array contains 'equal' and 'insert' segments.
+ */
+export function computeCharDiff(oldStr, newStr) {
+  const oldToks = _tokenize(oldStr);
+  const newToks = _tokenize(newStr);
+
+  // LCS of token arrays
+  const lcs = _lcs(oldToks, newToks);
+
+  // Build old segments (equal + delete)
+  const oldSegs = [];
+  let li = 0;
+  let oi = 0;
+  for (const [lcsOi, lcsNi] of lcs) {
+    // Tokens in old before this LCS match are deletions
+    if (oi < lcsOi) {
+      oldSegs.push({ type: 'delete', text: oldToks.slice(oi, lcsOi).join('') });
+    }
+    oldSegs.push({ type: 'equal', text: oldToks[lcsOi] });
+    oi = lcsOi + 1;
+  }
+  if (oi < oldToks.length) {
+    oldSegs.push({ type: 'delete', text: oldToks.slice(oi).join('') });
+  }
+
+  // Build new segments (equal + insert)
+  const newSegs = [];
+  let ni = 0;
+  for (const [lcsOi, lcsNi] of lcs) {
+    if (ni < lcsNi) {
+      newSegs.push({ type: 'insert', text: newToks.slice(ni, lcsNi).join('') });
+    }
+    newSegs.push({ type: 'equal', text: newToks[lcsNi] });
+    ni = lcsNi + 1;
+  }
+  if (ni < newToks.length) {
+    newSegs.push({ type: 'insert', text: newToks.slice(ni).join('') });
+  }
+
+  // Merge consecutive segments of same type
+  return {
+    old: _mergeSegments(oldSegs),
+    new: _mergeSegments(newSegs),
+  };
+}
+
+/**
+ * Compute LCS of two token arrays. Returns array of [oldIdx, newIdx] pairs.
+ */
+function _lcs(a, b) {
+  const m = a.length;
+  const n = b.length;
+
+  // Build DP table
+  // For large inputs, use a space-optimized approach
+  if (m > 500 || n > 500) {
+    // Fallback: no LCS, treat everything as changed
+    return [];
+  }
+
+  const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to find pairs
+  const pairs = [];
+  let i = m, j = n;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) {
+      pairs.push([i - 1, j - 1]);
+      i--;
+      j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  pairs.reverse();
+  return pairs;
+}
+
+/**
+ * Merge consecutive segments of the same type.
+ */
+function _mergeSegments(segs) {
+  if (segs.length === 0) return [];
+  const merged = [{ ...segs[0] }];
+  for (let i = 1; i < segs.length; i++) {
+    const last = merged[merged.length - 1];
+    if (segs[i].type === last.type) {
+      last.text += segs[i].text;
+    } else {
+      merged.push({ ...segs[i] });
+    }
+  }
+  return merged;
 }

@@ -213,10 +213,22 @@ class ChatPanel extends RpcMixin(LitElement) {
       overflow-x: auto;
     }
 
-    .diff-line { padding: 0 10px; white-space: pre; }
-    .diff-line.context { color: var(--text-secondary); }
-    .diff-line.remove { background: rgba(239,83,80,0.12); color: #ef9a9a; }
-    .diff-line.add { background: rgba(102,187,106,0.12); color: #a5d6a7; }
+    .diff-line { padding: 0 10px; white-space: pre; display: block; }
+    .diff-line.context { background: #0d1117; color: #8b949e; }
+    .diff-line.remove { background: #3d1f1f; color: #ffa198; }
+    .diff-line.add { background: #1f3d1f; color: #7ee787; }
+
+    .diff-line-prefix {
+      display: inline-block;
+      width: 1.2em;
+      user-select: none;
+      color: inherit;
+      opacity: 0.6;
+    }
+
+    /* Character-level highlight within changed lines */
+    .diff-line.remove .diff-change { background: #8b3d3d; border-radius: 2px; padding: 0 2px; }
+    .diff-line.add .diff-change    { background: #2d6b2d; border-radius: 2px; padding: 0 2px; }
 
     .edit-error {
       padding: 6px 10px;
@@ -579,13 +591,26 @@ class ChatPanel extends RpcMixin(LitElement) {
           ${status ? html`<span class="edit-badge ${status}">${status}</span>` : nothing}
         </div>
         <div class="edit-diff">
-          ${diff.map(line => html`
-            <div class="diff-line ${line.type}">${line.type === 'remove' ? '-' : line.type === 'add' ? '+' : ' '} ${line.text}</div>
-          `)}
+          ${diff.map(line => this._renderDiffLine(line))}
         </div>
         ${result?.error ? html`<div class="edit-error">⚠ ${result.error}</div>` : nothing}
       </div>
     `;
+  }
+
+  _renderDiffLine(line) {
+    const prefix = line.type === 'remove' ? '-' : line.type === 'add' ? '+' : ' ';
+
+    if (line.charDiff && line.charDiff.length > 0) {
+      // Render with character-level highlighting
+      return html`<span class="diff-line ${line.type}"><span class="diff-line-prefix">${prefix}</span>${line.charDiff.map(seg =>
+        (seg.type === 'equal')
+          ? seg.text
+          : html`<span class="diff-change">${seg.text}</span>`
+      )}</span>`;
+    }
+
+    return html`<span class="diff-line ${line.type}"><span class="diff-line-prefix">${prefix}</span>${line.text}</span>`;
   }
 
   _renderEditSummary(results) {

@@ -158,7 +158,85 @@ Rapid chunks are coalesced per animation frame:
 During streaming, partially-received edit blocks render with an in-progress indicator. On completion, blocks show:
 - File path (clickable → navigates to diff viewer)
 - Status badge: applied, failed (with reason), or skipped
-- Unified diff view with red/green + character-level highlighting
+- Unified diff view with two-level highlighting (line-level + character-level)
+
+#### Edit Block Structure
+
+Each edit block renders as a card:
+
+```html
+<div class="edit-block">
+  <div class="edit-block-header">
+    <span class="edit-block-file" data-file="path/to/file.js">path/to/file.js</span>
+    <span class="edit-block-status applied">✓ Applied</span>
+  </div>
+  <div class="edit-block-content">
+    <!-- diff lines here -->
+  </div>
+</div>
+```
+
+File path is clickable (dispatches `navigate-file` event). Status badges: `✓ Applied` (green), `✗ Failed: reason` (red), `⊘ Skipped` (grey).
+
+#### Two-Level Diff Highlighting
+
+The diff renderer uses a two-stage pipeline to produce fine-grained highlighting:
+
+**Stage 1: Line-level diff**
+
+`computeDiff(oldLines, newLines)` produces an array of operations:
+- `equal` — line unchanged (context)
+- `delete` — line removed
+- `insert` — line added
+- `modify` — line changed (detected by pairing adjacent delete/insert that are similar)
+
+Modified-line pairing: adjacent delete+insert pairs where the lines share enough common tokens are reclassified as a single `modify` operation rather than separate delete and insert. This is the key to enabling character-level highlighting.
+
+**Stage 2: Character-level diff within modified pairs**
+
+For each `modify` pair, `computeCharDiff(oldStr, newStr)` tokenizes both strings and diffs at the token level:
+
+Tokenization splits on word boundaries:
+```
+"foo.bar()" → ["foo", ".", "bar", "(", ")"]
+```
+
+Tokens are diffed using an LCS-based algorithm, producing segments:
+```
+[{ type: 'equal', text: '...' }, { type: 'delete', text: '...' }, { type: 'insert', text: '...' }]
+```
+
+**Stage 3: Render with inline highlights**
+
+Each line renders as a `<span>` with class `context`, `remove`, or `add`. For modified lines, changed token segments are wrapped in `<span class="diff-change">`:
+
+```html
+<!-- Context line -->
+<span class="diff-line context"><span class="diff-line-prefix"> </span>unchanged code here</span>
+
+<!-- Removed line with word highlights -->
+<span class="diff-line remove"><span class="diff-line-prefix">-</span>return a <span class="diff-change">+ b  # BUG</span></span>
+
+<!-- Added line with word highlights -->
+<span class="diff-line add"><span class="diff-line-prefix">+</span>return a <span class="diff-change">* b</span></span>
+```
+
+#### Diff CSS: Two-Layer Coloring
+
+Line-level backgrounds provide the base color; character-level highlights use a brighter variant of the same hue:
+
+```css
+/* Line-level background */
+.diff-line.remove  { background: #3d1f1f; color: #ffa198; }
+.diff-line.add     { background: #1f3d1f; color: #7ee787; }
+.diff-line.context { background: #0d1117; color: #8b949e; }
+
+/* Character-level highlight within changed lines */
+.diff-line.remove .diff-change { background: #8b3d3d; border-radius: 2px; padding: 0 2px; }
+.diff-line.add .diff-change    { background: #2d6b2d; border-radius: 2px; padding: 0 2px; }
+```
+
+A removed line gets a dark red background (`#3d1f1f`), and the specific changed words within it get a brighter red (`#8b3d3d`). Added lines: dark green base (`#1f3d1f`), brighter green for changed tokens (`#2d6b2d`).
 
 ### Edit Summary
 
