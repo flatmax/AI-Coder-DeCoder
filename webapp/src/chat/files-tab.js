@@ -4,6 +4,7 @@ import './chat-panel.js';
 import './chat-input.js';
 import './url-chips.js';
 import './file-picker.js';
+import './history-browser.js';
 
 /**
  * Files & Chat tab — left panel (file picker) + right panel (chat).
@@ -23,6 +24,7 @@ class FilesTab extends RpcMixin(LitElement) {
     _pickerWidth: { type: Number, state: true },
     _dividerDragging: { type: Boolean, state: true },
     _confirmAction: { type: Object, state: true },
+    _historyOpen: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -227,6 +229,7 @@ class FilesTab extends RpcMixin(LitElement) {
     this._excludedUrls = new Set();
     this._dividerDragging = false;
     this._confirmAction = null;
+    this._historyOpen = false;
 
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
@@ -632,6 +635,43 @@ class FilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  // ── History browser ──
+
+  _openHistory() {
+    this._historyOpen = true;
+  }
+
+  _onHistoryClosed() {
+    this._historyOpen = false;
+  }
+
+  _onSessionLoaded(e) {
+    const { messages } = e.detail;
+    if (Array.isArray(messages)) {
+      this.messages = [...messages];
+    }
+    this._historyOpen = false;
+    // Scroll chat to bottom
+    this.updateComplete.then(() => {
+      this.shadowRoot.querySelector('chat-panel')?.scrollToBottom();
+    });
+  }
+
+  _onInsertToPrompt(e) {
+    const { text } = e.detail;
+    if (text) {
+      const input = this.shadowRoot.querySelector('chat-input');
+      if (input) {
+        const textarea = input.shadowRoot?.querySelector('textarea');
+        if (textarea) {
+          textarea.value = text;
+          textarea.dispatchEvent(new Event('input'));
+          input.focus();
+        }
+      }
+    }
+  }
+
   // ── Render ──
 
   render() {
@@ -674,6 +714,8 @@ class FilesTab extends RpcMixin(LitElement) {
             ⚠️ Reset
           </button>
           <span class="git-spacer"></span>
+          <button class="session-btn" @click=${this._openHistory}
+            title="Browse history">📜</button>
           <button class="session-btn" @click=${this._newSession}
             title="New session (clear chat)">🗑️</button>
         </div>
@@ -702,6 +744,13 @@ class FilesTab extends RpcMixin(LitElement) {
           @urls-detected=${this._onUrlsDetected}
         ></chat-input>
       </div>
+
+      <history-browser
+        .open=${this._historyOpen}
+        @history-closed=${this._onHistoryClosed}
+        @session-loaded=${this._onSessionLoaded}
+        @insert-to-prompt=${this._onInsertToPrompt}
+      ></history-browser>
 
       ${this._confirmAction ? html`
         <div class="confirm-backdrop" @click=${this._cancelConfirm}>

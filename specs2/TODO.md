@@ -112,7 +112,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Context viewer** — Token budget bar, category breakdown, expandable details
 - [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
 - [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
-- [ ] **History browser** — Modal overlay, session list, search, message preview, load into context *(next)*
+- [x] **History browser** — Modal overlay, session list, search, message preview, load into context
 - [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
 - [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
