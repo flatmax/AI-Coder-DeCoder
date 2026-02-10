@@ -109,10 +109,10 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
 - [x] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
 - [x] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
-- [ ] **Context viewer** — Token budget bar, category breakdown, expandable details
-- [ ] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
-- [ ] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
-- [ ] **History browser** — Modal overlay, session list, search, message preview, load into context
+- [x] **Context viewer** — Token budget bar, category breakdown, expandable details
+- [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
+- [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
+- [ ] **History browser** — Modal overlay, session list, search, message preview, load into context *(next)*
 - [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
 - [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide

@@ -2,6 +2,9 @@ import { LitElement, html, css } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 import '../chat/files-tab.js';
 import '../chat/search-tab.js';
+import '../chat/context-tab.js';
+import '../chat/cache-tab.js';
+import '../chat/settings-tab.js';
 
 // Tab definitions
 const TABS = [
@@ -449,13 +452,13 @@ class AcDialog extends RpcMixin(LitElement) {
             <search-tab></search-tab>
           `)}
           ${this._renderTabPanel('CONTEXT', () => html`
-            <div class="tab-placeholder">Context Budget</div>
+            <context-tab></context-tab>
           `)}
           ${this._renderTabPanel('CACHE', () => html`
-            <div class="tab-placeholder">Cache Tiers</div>
+            <cache-tab></cache-tab>
           `)}
           ${this._renderTabPanel('SETTINGS', () => html`
-            <div class="tab-placeholder">Settings</div>
+            <settings-tab></settings-tab>
           `)}
         </div>
 
