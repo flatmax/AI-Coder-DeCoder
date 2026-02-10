@@ -416,6 +416,39 @@ class FilePicker extends RpcMixin(LitElement) {
     }));
   }
 
+  // ── Middle-click to insert path into chat input ──
+
+  _onMiddleClick(e, path) {
+    // Middle mouse button = button 1
+    if (e.button !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Block all follow-up events that could trigger clipboard paste or autoscroll.
+    // Different browsers use different events for middle-click paste:
+    //   - auxclick (Chrome/Firefox)
+    //   - mouseup with button=1 (some Linux environments)
+    //   - paste event on the focused textarea
+    const blockMid = (ev) => { if (ev.button === 1) { ev.preventDefault(); ev.stopPropagation(); } };
+    const blockPaste = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+
+    window.addEventListener('auxclick', blockMid, { once: true, capture: true });
+    window.addEventListener('mouseup', blockMid, { once: true, capture: true });
+    // Temporarily block paste on the target textarea
+    const input = this.closest('files-tab')?.shadowRoot?.querySelector('chat-input');
+    const textarea = input?.shadowRoot?.querySelector('textarea');
+    if (textarea) {
+      textarea.addEventListener('paste', blockPaste, { once: true, capture: true });
+      // Clean up paste blocker after a short delay in case paste never fires
+      setTimeout(() => textarea.removeEventListener('paste', blockPaste, true), 200);
+    }
+
+    this.dispatchEvent(new CustomEvent('path-to-input', {
+      detail: { path },
+      bubbles: true, composed: true,
+    }));
+  }
+
   // ── Git status helpers ──
 
   _gitStatus(path) {
@@ -729,6 +762,7 @@ class FilePicker extends RpcMixin(LitElement) {
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
         @click=${() => { this._focused = node.path; }}
+        @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
         <span class="toggle" @click=${(e) => { e.stopPropagation(); this._toggleExpand(node.path); }}>
           ${expanded ? '▾' : '▸'}
@@ -758,6 +792,7 @@ class FilePicker extends RpcMixin(LitElement) {
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
         @click=${() => { this._focused = node.path; }}
+        @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
         <span class="toggle"></span>
         <input type="checkbox"

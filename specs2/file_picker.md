@@ -80,6 +80,26 @@ Files mentioned in assistant responses can be added to the selection via `file-m
 3. The parent directory is auto-expanded if collapsed
 4. The chat input text is updated with an accumulated file list prompt (see [Chat Interface — Input Text Accumulation](chat_interface.md#input-text-accumulation))
 
+## Middle-Click Path Insertion
+
+Middle-clicking (mouse button 1) on any file or directory row inserts its repository-relative path into the chat input textarea at the current cursor position. The default middle-click clipboard paste and autoscroll behaviors are suppressed.
+
+- **Files**: inserts the full path including filename (e.g., `src/utils/helpers.js`)
+- **Directories**: inserts the directory path (e.g., `src/utils`)
+- Always prepends and appends a space around the inserted path
+- Cursor is placed after the trailing space
+- Textarea auto-resizes and receives focus
+- Does **not** trigger clipboard paste — only inserts the path
+
+This allows users to quickly reference paths in their messages to the LLM without manually typing them. Multiple middle-clicks accumulate space-separated paths.
+
+### Event Flow
+
+1. User middle-clicks a file or directory row in the tree
+2. File picker suppresses the default auxclick/paste behavior
+3. File picker dispatches `path-to-input` event with `{ path }`
+4. Files tab receives event and inserts ` path ` (space-padded) into chat input textarea at cursor position
+
 ## State Persistence
 
 - **Expanded directories**: tracked and propagated via events

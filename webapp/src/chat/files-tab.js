@@ -341,6 +341,27 @@ class FilesTab extends RpcMixin(LitElement) {
     }));
   }
 
+  _onPathToInput(e) {
+    const { path } = e.detail;
+    if (!path) return;
+    const input = this.shadowRoot.querySelector('chat-input');
+    if (!input) return;
+    const textarea = input.shadowRoot?.querySelector('textarea');
+    if (!textarea) return;
+
+    // Insert path at cursor position with a space before and after
+    const start = textarea.selectionStart;
+    const before = textarea.value.substring(0, start);
+    const after = textarea.value.substring(textarea.selectionEnd);
+    const insert = ' ' + path + ' ';
+    textarea.value = before + insert + after;
+    const newPos = start + insert.length;
+    textarea.selectionStart = textarea.selectionEnd = newPos;
+    textarea.dispatchEvent(new Event('input'));
+    input._autoResize(textarea);
+    textarea.focus();
+  }
+
   async _onGitOperation() {
     // Refresh tree after any git operation
     await this._loadFileTree();
@@ -832,6 +853,7 @@ class FilesTab extends RpcMixin(LitElement) {
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}
           @git-operation=${this._onGitOperation}
+          @path-to-input=${this._onPathToInput}
         ></file-picker>
       </div>
 
