@@ -865,6 +865,7 @@ class FilesTab extends RpcMixin(LitElement) {
       this._fetchedUrls = [];
       this._excludedUrls = new Set();
       this._toast('New session started', 'info');
+      window.dispatchEvent(new CustomEvent('session-reset'));
     } catch (e) {
       console.error('New session failed:', e);
       this._toast('Failed to start new session: ' + (e.message || e), 'error');

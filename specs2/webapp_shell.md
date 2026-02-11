@@ -108,6 +108,7 @@ The dialog fetches history status on:
 2. **`stream-complete`** — history grew (user + assistant messages added)
 3. **`compaction-event`** (type `compaction_complete`, case ≠ `none`) — history shrank
 4. **`state-loaded`** — session loaded or reconnected
+5. **`session-reset`** — new session started (history cleared)
 
 ## Left Panel (File Picker) Resizer
 

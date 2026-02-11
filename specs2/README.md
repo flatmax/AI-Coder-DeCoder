@@ -57,6 +57,7 @@ A complete specification for an **AI-assisted code editing tool** that runs as a
 | [Cache and Context Viewers](cache_context_viewers.md) | Token budget and cache tier visualization |
 | [Search Interface](search_interface.md) | Full-text search UI |
 | [Settings Interface](settings_interface.md) | Config editing UI |
+| [Speech to Text](speech_to_text.md) | Voice dictation via Web Speech API |
 | [Build and Deployment](build_and_deployment.md) | Build pipeline, versioning, startup |
 
 ## Core Concepts

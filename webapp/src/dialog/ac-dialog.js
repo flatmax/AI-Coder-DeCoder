@@ -252,6 +252,7 @@ class AcDialog extends RpcMixin(LitElement) {
     this._boundOnStreamComplete = this._onStreamCompleteForBar.bind(this);
     this._boundOnCompactionEvent = this._onCompactionEventForBar.bind(this);
     this._boundOnStateLoaded = this._onStateLoadedForBar.bind(this);
+    this._boundOnSessionReset = this._onSessionResetForBar.bind(this);
   }
 
   connectedCallback() {
@@ -260,6 +261,7 @@ class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._boundOnStreamComplete);
     window.addEventListener('compaction-event', this._boundOnCompactionEvent);
     window.addEventListener('state-loaded', this._boundOnStateLoaded);
+    window.addEventListener('session-reset', this._boundOnSessionReset);
   }
 
   disconnectedCallback() {
@@ -267,6 +269,7 @@ class AcDialog extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._boundOnStreamComplete);
     window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
     window.removeEventListener('state-loaded', this._boundOnStateLoaded);
+    window.removeEventListener('session-reset', this._boundOnSessionReset);
   }
 
   onRpcReady() {
@@ -435,6 +438,10 @@ class AcDialog extends RpcMixin(LitElement) {
   }
 
   _onStateLoadedForBar() {
+    this._refreshHistoryBar();
+  }
+
+  _onSessionResetForBar() {
     this._refreshHistoryBar();
   }
 

@@ -119,6 +119,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Diff viewer Monaco integration** — vite-plugin-monaco-editor for proper workers, Shadow DOM style syncing via MutationObserver, diff highlighting, find widget, scrolling fixes
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco, URI-based model matching, cross-file go-to-definition
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
+- [x] **Speech to text** — Auto-transcribe toggle button using Web Speech API, LED states, transcript appended to input (`SpeechToText.js`)
 
 ### Phase 9: Polish *(next)*
 - [x] **Bedrock token usage** — Streaming usage capture for all providers including Bedrock (unified stream_options, multi-format usage extraction with dict/object dual-mode getter, cache_read/cache_write field fallback chains, response-level merge, completion token estimation)

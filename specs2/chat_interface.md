@@ -369,6 +369,10 @@ During streaming, the **Send button transforms into a Stop button** (⏹ Stop) w
 
 Toggleable drawer of quick-insert buttons loaded from config. Clicking inserts text at cursor. Closes on outside click or Escape.
 
+### Speech to Text
+
+A microphone button for continuous voice dictation. Toggles auto-transcribe mode — recognized utterances are appended to the textarea. See [Speech to Text](speech_to_text.md) for full details.
+
 ### Image Support
 
 Users can paste images into the input area for multimodal LLM queries.
