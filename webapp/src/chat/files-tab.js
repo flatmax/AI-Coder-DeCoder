@@ -29,6 +29,10 @@ class FilesTab extends RpcMixin(LitElement) {
     _repoFiles: { type: Array, state: true },
     /** Path of file currently active in the diff viewer */
     _viewerActiveFile: { type: String, state: true },
+    /** Chat search query */
+    _chatSearch: { type: String, state: true },
+    _chatSearchIndex: { type: Number, state: true },
+    _chatSearchMatches: { type: Array, state: true },
   };
 
   static styles = css`
@@ -165,6 +169,51 @@ class FilesTab extends RpcMixin(LitElement) {
 
     .git-spacer { flex: 1; }
 
+    .chat-search-group {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      min-width: 60px;
+    }
+
+    .chat-search {
+      flex: 1;
+      min-width: 0;
+      padding: 3px 8px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      outline: none;
+      box-sizing: border-box;
+    }
+    .chat-search:focus { border-color: var(--accent-primary); }
+    .chat-search::placeholder { color: var(--text-muted); }
+
+    .chat-search-nav {
+      background: none;
+      border: none;
+      padding: 2px 4px;
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-radius: var(--radius-sm);
+      line-height: 1;
+    }
+    .chat-search-nav:hover { color: var(--text-primary); }
+    .chat-search-nav:disabled { opacity: 0.3; cursor: default; }
+
+    .chat-search-count {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      min-width: 28px;
+      text-align: center;
+    }
+
     .session-btn {
       background: none;
       border: none;
@@ -237,6 +286,9 @@ class FilesTab extends RpcMixin(LitElement) {
     this._historyOpen = false;
     this._repoFiles = [];
     this._viewerActiveFile = '';
+    this._chatSearch = '';
+    this._chatSearchIndex = -1;
+    this._chatSearchMatches = [];
 
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
@@ -515,6 +567,97 @@ class FilesTab extends RpcMixin(LitElement) {
       }
     }
     return result;
+  }
+
+  // ── Chat search ──
+
+  _onChatSearchInput(e) {
+    this._chatSearch = e.target.value;
+    this._updateChatSearchMatches();
+    if (this._chatSearchMatches.length > 0) {
+      this._chatSearchIndex = 0;
+      this._scrollToChatMatch();
+    } else {
+      this._chatSearchIndex = -1;
+    }
+  }
+
+  _onChatSearchKeydown(e) {
+    if (e.key === 'Escape') {
+      this._chatSearch = '';
+      this._chatSearchMatches = [];
+      this._chatSearchIndex = -1;
+      this._clearChatSearchHighlights();
+      e.target.blur();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        this._chatSearchPrev();
+      } else {
+        this._chatSearchNext();
+      }
+    }
+  }
+
+  _updateChatSearchMatches() {
+    const query = this._chatSearch.trim().toLowerCase();
+    if (!query) {
+      this._chatSearchMatches = [];
+      this._clearChatSearchHighlights();
+      return;
+    }
+    const matches = [];
+    for (let i = 0; i < this.messages.length; i++) {
+      const text = typeof this.messages[i].content === 'string' ? this.messages[i].content : '';
+      if (text.toLowerCase().includes(query)) {
+        matches.push(i);
+      }
+    }
+    this._chatSearchMatches = matches;
+  }
+
+  _chatSearchNext() {
+    if (this._chatSearchMatches.length === 0) return;
+    this._chatSearchIndex = (this._chatSearchIndex + 1) % this._chatSearchMatches.length;
+    this._scrollToChatMatch();
+  }
+
+  _chatSearchPrev() {
+    if (this._chatSearchMatches.length === 0) return;
+    this._chatSearchIndex = (this._chatSearchIndex - 1 + this._chatSearchMatches.length) % this._chatSearchMatches.length;
+    this._scrollToChatMatch();
+  }
+
+  _scrollToChatMatch() {
+    const panel = this.shadowRoot.querySelector('chat-panel');
+    if (!panel) return;
+    const msgIdx = this._chatSearchMatches[this._chatSearchIndex];
+    if (msgIdx == null) return;
+
+    this.updateComplete.then(() => {
+      const root = panel.shadowRoot;
+      if (!root) return;
+      // Clear previous highlights
+      root.querySelectorAll('.message-card.search-highlight').forEach(el => {
+        el.classList.remove('search-highlight');
+      });
+      // Find and highlight the target card by data attribute
+      const card = root.querySelector(`.message-card[data-msg-index="${msgIdx}"]`);
+      if (card) {
+        card.classList.add('search-highlight');
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    });
+  }
+
+  _clearChatSearchHighlights() {
+    const panel = this.shadowRoot.querySelector('chat-panel');
+    if (!panel) return;
+    const root = panel.shadowRoot;
+    if (!root) return;
+    root.querySelectorAll('.message-card.search-highlight').forEach(el => {
+      el.classList.remove('search-highlight');
+    });
   }
 
   // ── URL events ──
@@ -945,7 +1088,21 @@ class FilesTab extends RpcMixin(LitElement) {
             title="New session" aria-label="Start new session">✨</button>
           <button class="session-btn" @click=${this._openHistory}
             title="Browse history" aria-label="Browse conversation history">📜</button>
-          <span class="git-spacer"></span>
+          <div class="chat-search-group">
+            <input type="text" class="chat-search"
+              placeholder="Search chat…"
+              aria-label="Search chat messages"
+              .value=${this._chatSearch}
+              @input=${this._onChatSearchInput}
+              @keydown=${this._onChatSearchKeydown}>
+            ${this._chatSearchMatches.length > 0 ? html`
+              <span class="chat-search-count">${this._chatSearchIndex + 1}/${this._chatSearchMatches.length}</span>
+              <button class="chat-search-nav" @click=${this._chatSearchPrev} title="Previous (Shift+Enter)" aria-label="Previous match">▲</button>
+              <button class="chat-search-nav" @click=${this._chatSearchNext} title="Next (Enter)" aria-label="Next match">▼</button>
+            ` : this._chatSearch.trim() ? html`
+              <span class="chat-search-count">0</span>
+            ` : nothing}
+          </div>
           <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard"
             aria-label="Copy diff to clipboard">📋</button>
           <button class="git-btn" @click=${this._commitWithMessage}

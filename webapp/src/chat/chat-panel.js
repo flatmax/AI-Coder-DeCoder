@@ -56,15 +56,22 @@ class ChatPanel extends RpcMixin(LitElement) {
       margin-bottom: 12px;
       padding: 10px 14px;
       border-radius: var(--radius-md);
+      border: 1px solid transparent;
       line-height: 1.5;
       max-width: 100%;
       overflow-wrap: break-word;
       content-visibility: auto;
       contain-intrinsic-size: auto 120px;
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
     }
 
     .message-card.force-visible {
       content-visibility: visible;
+    }
+
+    .message-card.search-highlight {
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 1px var(--accent-primary), 0 0 12px rgba(79, 195, 247, 0.15);
     }
 
     .message-card.user {
@@ -656,8 +663,8 @@ class ChatPanel extends RpcMixin(LitElement) {
     `;
 
     return html`
-      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}" role="article"
-        aria-label="${isUser ? 'Your message' : 'Assistant response'}">
+      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}" data-msg-index=${idx}
+        role="article" aria-label="${isUser ? 'Your message' : 'Assistant response'}">
         ${actionBar('top')}
         <div class="role-label" aria-hidden="true">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser

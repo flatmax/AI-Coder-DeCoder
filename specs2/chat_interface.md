@@ -392,15 +392,38 @@ Users can paste images into the input area for multimodal LLM queries.
 
 ## Action Bar
 
-The header bar groups session actions on the left and git operations on the right. Git buttons are icon-only (tooltips provide labels).
+The header bar groups session actions on the left, a chat filter in the center, and git operations on the right. Git buttons are icon-only (tooltips provide labels).
 
-| Side | Button | Action |
-|------|--------|--------|
+| Side | Element | Action |
+|------|---------|--------|
 | Left | ✨ | New session — clear chat, start fresh session |
 | Left | 📜 | Browse history — open history browser modal |
+| Center | Search input | Case-insensitive substring search across chat messages — highlights and scrolls to matches, Enter/Shift+Enter for next/prev, Escape clears |
 | Right | 📋 | Copy diff — fetch staged + unstaged diffs, copy combined to clipboard |
 | Right | 💾 | Commit — stage all → generate message via LLM → commit → show commit message in chat (auto-scroll only if already at bottom) → refresh tree |
 | Right | ⚠️ | Reset — confirm dialog → hard reset to HEAD → refresh tree |
+
+### Chat Search
+
+A compact search input between the session and git buttons with prev/next navigation. Performs case-insensitive substring matching against message content. Matching messages are highlighted and scrolled into view — all messages remain visible.
+
+| Key | Action |
+|-----|--------|
+| Enter | Jump to next match |
+| Shift+Enter | Jump to previous match |
+| Escape | Clear search and blur |
+
+The match counter shows `N/M` (current match index / total matches). ▲/▼ buttons provide mouse-driven navigation. The search input fills available space (flex: 1, no max-width) to push the git action buttons to the right edge.
+
+The current match message receives a highlight outline (accent-colored border + glow via `.search-highlight` class) and is scrolled to center. Message cards carry a `data-msg-index` attribute for reliable search targeting across the shadow DOM boundary between files-tab and chat-panel.
+
+#### Highlight Implementation
+
+Message cards have `border: 1px solid transparent` by default with a transition on border-color and box-shadow. The `.search-highlight` class applied by files-tab's search logic sets:
+- `border-color: var(--accent-primary)`
+- `box-shadow: 0 0 0 1px var(--accent-primary), 0 0 12px rgba(79, 195, 247, 0.15)`
+
+Files-tab reaches into chat-panel's shadow DOM to add/remove the class on `.message-card[data-msg-index="N"]` elements. Previous highlights are cleared before each new match navigation.
 
 ## Token HUD Overlay
 
