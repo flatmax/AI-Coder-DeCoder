@@ -214,9 +214,9 @@ class ChatPanel extends RpcMixin(LitElement) {
     }
 
     .diff-line { padding: 0 10px; white-space: pre; display: block; }
-    .diff-line.context { background: #0d1117; color: #8b949e; }
-    .diff-line.remove { background: #3d1f1f; color: #ffa198; }
-    .diff-line.add { background: #1f3d1f; color: #7ee787; }
+    .diff-line.context { background: #0d1117; color: #e6edf3; }
+    .diff-line.remove { background: #2d1215; color: #ffa198; }
+    .diff-line.add { background: #122117; color: #7ee787; }
 
     .diff-line-prefix {
       display: inline-block;
@@ -227,8 +227,8 @@ class ChatPanel extends RpcMixin(LitElement) {
     }
 
     /* Character-level highlight within changed lines */
-    .diff-line.remove .diff-change { background: #8b3d3d; border-radius: 2px; padding: 0 2px; }
-    .diff-line.add .diff-change    { background: #2d6b2d; border-radius: 2px; padding: 0 2px; }
+    .diff-line.remove .diff-change { background: #6d3038; border-radius: 2px; padding: 0 2px; }
+    .diff-line.add .diff-change    { background: #2b6331; border-radius: 2px; padding: 0 2px; }
 
     .edit-error {
       padding: 6px 10px;

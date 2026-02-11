@@ -40,6 +40,7 @@ path/to/file.ext
 4. **Exact match**—whitespace, blanks, comments matter
 5. **No placeholders** (`...`, `// rest of code`)
 6. **Verify anchor exists** by searching file first
+7. **No file moves/renames/deletes**—ask the user to run `git mv` or `git rm` instead
 
 ### Edit Sizing
 - **Default**: Small, targeted edits

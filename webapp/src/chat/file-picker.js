@@ -764,7 +764,7 @@ class FilePicker extends RpcMixin(LitElement) {
         @click=${() => { this._focused = node.path; this._toggleExpand(node.path); }}
         @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
-        <span class="toggle" @click=${(e) => e.stopPropagation()}>
+        <span class="toggle" @click=${(e) => { e.stopPropagation(); this._toggleExpand(node.path); }}>
           ${expanded ? '▾' : '▸'}
         </span>
         <input type="checkbox"
