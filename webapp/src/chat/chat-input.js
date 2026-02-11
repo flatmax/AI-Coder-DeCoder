@@ -1,5 +1,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
+import '../prompt/SpeechToText.js';
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 const MAX_IMAGES = 5;
@@ -80,6 +81,13 @@ class ChatInput extends RpcMixin(LitElement) {
       display: flex;
       gap: 6px;
       align-items: flex-end;
+    }
+
+    .input-tools {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex-shrink: 0;
     }
 
     .snippet-toggle {
@@ -380,6 +388,25 @@ class ChatInput extends RpcMixin(LitElement) {
     this._images = this._images.filter((_, i) => i !== index);
   }
 
+  // ── Speech to text ──
+
+  _onTranscript(e) {
+    const { text } = e.detail;
+    if (!text) return;
+    const textarea = this.shadowRoot.querySelector('textarea');
+    if (!textarea) return;
+
+    // Append transcript to current value, space-separated
+    if (textarea.value && !textarea.value.endsWith(' ')) {
+      textarea.value += ' ' + text;
+    } else {
+      textarea.value += text;
+    }
+
+    this._autoResize(textarea);
+    this._scheduleUrlDetection(textarea.value);
+  }
+
   // ── Snippets ──
 
   _toggleSnippets() {
@@ -627,10 +654,13 @@ class ChatInput extends RpcMixin(LitElement) {
         ` : nothing}
 
         <div class="input-row">
-          ${this.snippets.length > 0 ? html`
-            <button class="snippet-toggle ${this._showSnippets ? 'active' : ''}"
-              @click=${this._toggleSnippets} title="Snippets">💡</button>
-          ` : nothing}
+          <div class="input-tools">
+            <speech-to-text @transcript=${this._onTranscript}></speech-to-text>
+            ${this.snippets.length > 0 ? html`
+              <button class="snippet-toggle ${this._showSnippets ? 'active' : ''}"
+                @click=${this._toggleSnippets} title="Snippets">💡</button>
+            ` : nothing}
+          </div>
 
           <textarea
             placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
