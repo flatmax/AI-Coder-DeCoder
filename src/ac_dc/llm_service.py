@@ -788,6 +788,23 @@ class LLM:
 
             # Group by type
             contents = []
+
+            # L0 always has system prompt + legend as fixed content
+            if tier == Tier.L0:
+                system_prompt = self._config.get_system_prompt()
+                system_tokens = self._counter.count(system_prompt) if system_prompt else 0
+                legend_tokens = 0
+                if self._symbol_index:
+                    legend = self._symbol_index.get_legend()
+                    legend_tokens = self._counter.count(legend) if legend else 0
+                if system_tokens or legend_tokens:
+                    contents.append({
+                        "type": "system",
+                        "count": 1,
+                        "tokens": system_tokens + legend_tokens,
+                    })
+                    tokens += system_tokens + legend_tokens
+
             symbol_items = [it for it in items if it.item_type == "symbol"]
             file_items = [it for it in items if it.item_type == "file"]
             history_items = [it for it in items if it.item_type == "history"]
@@ -829,11 +846,12 @@ class LLM:
                     "tokens": sum(it.token_estimate for it in history_items),
                 })
 
+            cached = tier != Tier.ACTIVE and tokens > 0
             blocks.append({
                 "tier": config["name"],
                 "name": config["name"],
                 "tokens": tokens,
-                "cached": tier != Tier.ACTIVE and tokens > 0,
+                "cached": cached,
                 "threshold": self._context.cache_target_tokens,
                 "contents": contents,
             })
@@ -866,7 +884,7 @@ class LLM:
                         count = content.get("count", 0)
                         ctokens = content.get("tokens", 0)
                         if ctype == "system":
-                            lines.append("│   └─ system + legend                   │")
+                            lines.append(f"│   └─ system + legend ({ctokens:,} tok)        │"[:43] + "│")
                         elif ctype == "symbols":
                             lines.append(f"│   └─ {count} symbols ({ctokens:,} tok)            │"[:43] + "│")
                         elif ctype == "files":

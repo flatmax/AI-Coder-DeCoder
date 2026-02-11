@@ -513,9 +513,11 @@ class StabilityTracker:
                 for it in tier_items:
                     processed.add(it.key)
 
-                # Determine if tier above is stable (not broken)
+                # Determine if tier above is stable (not broken and not empty)
                 tier_above_stable = (
-                    dest_tier is not None and not self._tier_broken[dest_tier]
+                    dest_tier is not None
+                    and not self._tier_broken[dest_tier]
+                    and self.get_tier_tokens(dest_tier) > 0
                 ) if dest_tier is not None else True
 
                 promotion_n = TIER_CONFIG[tier]["promotion_n"]
@@ -538,12 +540,17 @@ class StabilityTracker:
                             else:
                                 it.n += 1
 
-                            # Check promotion
+                            # Check promotion (broken OR empty dest tier)
+                            dest_open = (
+                                dest_tier is not None
+                                and (self._tier_broken[dest_tier]
+                                     or self.get_tier_tokens(dest_tier) == 0)
+                            )
                             if (
                                 promotion_n is not None
                                 and dest_tier is not None
                                 and it.n >= promotion_n
-                                and self._tier_broken[dest_tier]
+                                and dest_open
                             ):
                                 # Promote!
                                 old_tier = it.tier
@@ -563,11 +570,16 @@ class StabilityTracker:
                             else:
                                 it.n += 1
                         # L0 has no promotion
+                        dest_open = (
+                            dest_tier is not None
+                            and (self._tier_broken[dest_tier]
+                                 or self.get_tier_tokens(dest_tier) == 0)
+                        )
                         if (
                             promotion_n is not None
                             and dest_tier is not None
                             and it.n >= promotion_n
-                            and self._tier_broken[dest_tier]
+                            and dest_open
                         ):
                             old_tier = it.tier
                             it.tier = dest_tier

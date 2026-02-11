@@ -182,6 +182,15 @@ class CacheTab extends RpcMixin(LitElement) {
       flex: 1;
     }
 
+    .item-n {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      min-width: 20px;
+      text-align: right;
+    }
+
     .item-tokens {
       font-family: var(--font-mono);
       color: var(--text-muted);
@@ -402,6 +411,7 @@ class CacheTab extends RpcMixin(LitElement) {
         ` : (group.items || []).map(it => html`
           <div class="item-row">
             <span class="item-key" title="${it.key}">${this._stripPrefix(it.key)}</span>
+            <span class="item-n">${it.n}</span>
             <div class="stability-bar" title="N=${it.n}/${it.threshold || '?'}">
               <div class="stability-fill ${this._stabilityClass(it.n, it.threshold)}"
                 style="width:${this._stabilityPct(it.n, it.threshold)}%"></div>
