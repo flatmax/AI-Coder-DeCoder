@@ -59,6 +59,7 @@ A complete specification for an **AI-assisted code editing tool** that runs as a
 | [Settings Interface](settings_interface.md) | Config editing UI |
 | [Speech to Text](speech_to_text.md) | Voice dictation via Web Speech API |
 | [Build and Deployment](build_and_deployment.md) | Build pipeline, versioning, startup, README generation |
+| [jrpc-oo Integration](jrpc_oo_integration.md) | How jrpc-oo is used: addClass, call proxy, RpcMixin patterns |
 
 ## Core Concepts
 
