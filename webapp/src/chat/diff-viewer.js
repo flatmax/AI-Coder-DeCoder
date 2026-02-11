@@ -215,6 +215,22 @@ class DiffViewer extends RpcMixin(LitElement) {
       height: 100%;
       color: var(--text-muted);
       font-size: 13px;
+      position: relative;
+    }
+
+    .brand-watermark {
+      position: absolute;
+      left: 75%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 8rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      opacity: 0.18;
+      user-select: none;
+      pointer-events: none;
+      white-space: nowrap;
     }
 
     .loading-state {
@@ -859,7 +875,9 @@ class DiffViewer extends RpcMixin(LitElement) {
             `}
           </div>
         ` : html`
-          <div class="empty-state">No files open</div>
+          <div class="empty-state">
+            <span class="brand-watermark">AC⚡DC</span>
+          </div>
         `}
       </div>
     `;

@@ -121,7 +121,7 @@ On the Files tab, a vertical resizer separates the file picker from the chat pan
 
 The app shell hosts a `<diff-viewer>` component that fills the viewport behind the dialog:
 - `position: fixed; inset: 0; z-index: 0` — always behind the dialog
-- Shows an empty/dark state when no files are open
+- Shows an empty state with the **AC⚡DC** brand watermark when no files are open (large, semi-transparent text at 75% horizontal, vertically centered)
 - File tab bar appears at the top when files are loaded
 - Monaco diff editor fills the remaining space
 - The app shell listens for `navigate-file` events and routes them to the diff viewer

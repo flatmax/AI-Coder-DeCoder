@@ -6,7 +6,7 @@ A side-by-side diff editor for displaying file changes (original vs modified), s
 
 ## Layout
 
-The diff viewer lives **outside the dialog**, occupying the background space of the full browser window. When files are open, it fills the area not covered by the dialog — typically the right half of the screen.
+The diff viewer lives **outside the dialog**, occupying the background space of the full browser window. When files are open, it fills the area not covered by the dialog — typically the right half of the screen. When no files are open, the empty state displays the **AC⚡DC** brand watermark — a large, semi-transparent text mark positioned at 75% from the left edge and vertically centered.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -41,6 +41,7 @@ The diff viewer lives **outside the dialog**, occupying the background space of 
 ### Visibility
 
 - The diff viewer is always present but shows an empty state when no files are open
+- The empty state displays the "AC⚡DC" brand watermark (8rem, 18% opacity, positioned at 75% horizontal / 50% vertical) as a subtle background identity mark
 - File tab bar and editor are visible whenever files are loaded
 - No "back to chat" toggle needed — both are always accessible
 
