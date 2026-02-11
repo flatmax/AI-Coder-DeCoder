@@ -121,7 +121,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 
 ### Phase 9: Polish *(next)*
-- [x] **Bedrock token usage** — Streaming usage capture for Bedrock provider (stream_options conditional, multi-format usage extraction, completion token estimation)
+- [x] **Bedrock token usage** — Streaming usage capture for all providers including Bedrock (unified stream_options, multi-format usage extraction with dict/object dual-mode getter, cache_read/cache_write field fallback chains, response-level merge, completion token estimation)
 - [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
 - [x] **Error handling** — Reconnection with exponential backoff, toast notification system, error toasts for git ops/streaming/session management

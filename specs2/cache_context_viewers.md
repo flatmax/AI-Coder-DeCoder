@@ -164,6 +164,8 @@ Clicking a symbol or file item dispatches a file-selected event.
 }
 ```
 
+**Cache hit rate and cached_tokens are derived from real provider-reported usage data** (`session_totals.cache_hit` / `session_totals.prompt`), not estimated from tier placement. This ensures the UI reflects actual cache behavior as reported by the LLM provider. Before any requests have been made, the rate is 0%.
+
 ---
 
 ## Terminal HUD
@@ -184,6 +186,8 @@ Two reports printed after each response:
 │ Total: 55,448 | Cache hit: 0%         │
 ╰────────────────────────────────────────╯
 ```
+
+The **Cache hit** percentage uses real provider-reported `cache_read_tokens / prompt_tokens` from the most recent request, not an estimate based on tier placement.
 
 ### Token Usage Report
 

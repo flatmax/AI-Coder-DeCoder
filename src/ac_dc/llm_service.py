@@ -359,7 +359,7 @@ class LLM:
                 )
 
             # -- Update stability tracker --
-            self._update_stability(valid_files, result.get("files_modified", []))
+            tier_changes = self._update_stability(valid_files, result.get("files_modified", []))
 
             # -- Save symbol map --
             self._save_symbol_map()
@@ -373,7 +373,7 @@ class LLM:
                 self._session_totals["cache_write"] += usage.get("cache_creation_tokens", 0)
 
             # -- Print terminal report --
-            self._print_usage_report(result)
+            self._print_usage_report(result, tier_changes=tier_changes)
 
         except Exception as e:
             log.error("Streaming error: %s\n%s", e, traceback.format_exc())
@@ -402,33 +402,57 @@ class LLM:
         usage = {}
 
         def _extract_usage(chunk) -> dict:
-            """Extract token usage from a streaming chunk.
+            """Extract token usage from a streaming chunk or response.
 
             Handles multiple provider formats:
             - OpenAI: chunk.usage with prompt_tokens/completion_tokens
-            - Anthropic/Bedrock: chunk.usage with cache_read_input_tokens/cache_creation_input_tokens
+            - Anthropic direct: cache_read_input_tokens/cache_creation_input_tokens
+            - Bedrock Anthropic: prompt_tokens_details.cached_tokens (dict or object)
             - litellm unified: maps provider-specific fields to common names
+
+            The usage object may be an object with attributes OR a dict,
+            depending on provider and litellm version.
             """
             u = getattr(chunk, "usage", None)
             if not u:
                 return {}
+
+            def _get(obj, key, default=0):
+                """Get a value from an object or dict."""
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            prompt = _get(u, "prompt_tokens", 0) or 0
+            completion = _get(u, "completion_tokens", 0) or 0
+            total = _get(u, "total_tokens", 0) or 0
+
+            # Extract cache read tokens — try multiple field names/locations
+            cache_read = _get(u, "cache_read_input_tokens", 0) or 0
+            if not cache_read:
+                # Bedrock/OpenAI: prompt_tokens_details.cached_tokens
+                details = _get(u, "prompt_tokens_details", None)
+                if details:
+                    cache_read = _get(details, "cached_tokens", 0) or 0
+            if not cache_read:
+                # Some litellm versions use this field name
+                cache_read = _get(u, "cache_read_tokens", 0) or 0
+
+            # Extract cache write tokens
+            cache_write = _get(u, "cache_creation_input_tokens", 0) or 0
+            if not cache_write:
+                cache_write = _get(u, "cache_creation_tokens", 0) or 0
+
             extracted = {
-                "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                "cache_read_tokens": (
-                    getattr(u, "cache_read_input_tokens", 0)
-                    or getattr(u, "prompt_tokens_details", None)
-                    and getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0)
-                    or 0
-                ),
-                "cache_creation_tokens": (
-                    getattr(u, "cache_creation_input_tokens", 0) or 0
-                ),
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_write,
             }
             # Compute total if provider didn't supply it
-            if not extracted["total_tokens"] and (extracted["prompt_tokens"] or extracted["completion_tokens"]):
-                extracted["total_tokens"] = extracted["prompt_tokens"] + extracted["completion_tokens"]
+            if not extracted["total_tokens"] and (prompt or completion):
+                extracted["total_tokens"] = prompt + completion
             return extracted
 
         def _blocking_stream():
@@ -444,9 +468,15 @@ class LLM:
                 }
                 # Only add stream_options for providers known to support it
                 model_lower = (self._model or "").lower()
-                is_bedrock = "bedrock" in model_lower
+                is_bedrock = "bedrock" in model_lower or model_lower.startswith("global.")
                 is_anthropic_direct = model_lower.startswith("anthropic/") or model_lower.startswith("claude")
                 if not is_bedrock:
+                    stream_kwargs["stream_options"] = {"include_usage": True}
+
+                # For Bedrock streaming, request usage in the final message
+                # Bedrock Anthropic models return usage via the stream's
+                # message_stop event when stream_usage is enabled.
+                if is_bedrock:
                     stream_kwargs["stream_options"] = {"include_usage": True}
 
                 response = litellm.completion(**stream_kwargs)
@@ -471,10 +501,13 @@ class LLM:
                         usage = chunk_usage
 
                 # For Bedrock/Anthropic: also check response-level attributes
-                if not usage and hasattr(response, "usage"):
+                if hasattr(response, "usage") and response.usage:
                     resp_usage = _extract_usage(response)
                     if resp_usage:
-                        usage = resp_usage
+                        # Merge: prefer chunk-level but fill in missing fields
+                        for k, v in resp_usage.items():
+                            if v and not usage.get(k):
+                                usage[k] = v
 
                 # Estimate completion tokens from content if provider didn't report
                 if full_content and not usage.get("completion_tokens"):
@@ -728,12 +761,10 @@ class LLM:
         # Build cache tier blocks for the cache viewer
         blocks = self._build_tier_blocks()
 
-        # Compute cache stats
-        cached_tokens = 0
-        for block in blocks:
-            if block.get("cached"):
-                cached_tokens += block.get("tokens", 0)
-        cache_hit_rate = int(cached_tokens / max(1, total) * 100) if total > 0 else 0
+        # Cache stats from real provider-reported session totals
+        cached_tokens = self._session_totals.get("cache_hit", 0)
+        total_prompt = self._session_totals.get("prompt", 0)
+        cache_hit_rate = int(cached_tokens / max(1, total_prompt) * 100) if total_prompt > 0 else 0
 
         # Get tier changes
         changes = self._context.stability.get_changes()
@@ -858,7 +889,7 @@ class LLM:
 
         return blocks
 
-    def _print_usage_report(self, result: dict):
+    def _print_usage_report(self, result: dict, tier_changes: list = None):
         """Print token usage, cache blocks, and edit results to terminal."""
         usage = result.get("token_usage", {})
 
@@ -892,7 +923,10 @@ class LLM:
                         elif ctype == "history":
                             lines.append(f"│   └─ {count} history msgs ({ctokens:,} tok)       │"[:43] + "│")
                 lines.append("├────────────────────────────────────────┤")
-                hit_rate = int(cached_tokens / max(1, total_tokens) * 100)
+                usage = result.get("token_usage", {})
+                real_cache_read = usage.get("cache_read_tokens", 0)
+                real_prompt = usage.get("prompt_tokens", 0)
+                hit_rate = int(real_cache_read / real_prompt * 100) if real_prompt > 0 else 0
                 lines.append(f"│ Total: {total_tokens:,} | Cache hit: {hit_rate}%{' ' * max(0, 14 - len(str(total_tokens)) - len(str(hit_rate)))}│")
                 lines.append("╰────────────────────────────────────────╯")
                 for line in lines:
@@ -918,14 +952,18 @@ class LLM:
 
         # ── Tier Change Notifications ──
         try:
-            changes = self._context.stability.get_changes()
-            for change in changes:
-                if change.is_promotion:
-                    log.info("📈 %s → %s: %s",
-                             change.old_tier.name, change.new_tier.name, change.key)
-                elif change.is_demotion:
-                    log.info("📉 %s → %s: %s",
-                             change.old_tier.name, change.new_tier.name, change.key)
+            changes = tier_changes if tier_changes is not None else []
+            if changes:
+                # Group changes by (direction, old_tier, new_tier)
+                groups: dict[tuple, list] = {}
+                for change in changes:
+                    direction = "📈" if change.is_promotion else "📉"
+                    key = (direction, change.old_tier.name, change.new_tier.name)
+                    groups.setdefault(key, []).append(change.key)
+                for (direction, old_name, new_name), keys in sorted(groups.items()):
+                    items_str = ", ".join(keys)
+                    log.info("%s %s → %s: %d items — %s",
+                             direction, old_name, new_name, len(keys), items_str)
         except Exception as e:
             log.debug("Tier change report failed: %s", e)
 
@@ -958,10 +996,10 @@ class LLM:
         except Exception as e:
             log.warning("Stability initialization failed: %s", e)
 
-    def _update_stability(self, selected_files: list[str], modified_files: list[str]):
-        """Update stability tracker after a response."""
+    def _update_stability(self, selected_files: list[str], modified_files: list[str]) -> list:
+        """Update stability tracker after a response. Returns tier changes."""
         if self._symbol_index is None:
-            return
+            return []
         try:
             # Build symbol blocks for selected files
             symbol_blocks = {}
@@ -1000,18 +1038,11 @@ class LLM:
             changes = self._context.stability.update_after_response(
                 active_items, modified_files, all_files,
             )
-
-            # Log tier changes
-            for change in changes:
-                if change.is_promotion:
-                    log.info("📈 %s → %s: %s",
-                             change.old_tier.name, change.new_tier.name, change.key)
-                else:
-                    log.info("📉 %s → %s: %s",
-                             change.old_tier.name, change.new_tier.name, change.key)
+            return changes
 
         except Exception as e:
             log.warning("Stability update failed: %s", e)
+            return []
 
     def _gather_tiered_content(self, selected_files: list[str]) -> tuple[dict, dict]:
         """Gather symbol blocks and file contents for tiered assembly.
@@ -1024,8 +1055,18 @@ class LLM:
         if self._symbol_index is None:
             return symbol_blocks, file_contents
 
-        # Symbol blocks for all files NOT in selected (those are in active context)
-        excluded = set(selected_files)
+        # Determine which selected files have graduated to cached tiers
+        # (their content goes in the tier block, not in active files)
+        graduated_files = set()
+        for fpath in selected_files:
+            file_key = f"file:{fpath}"
+            item = self._context.stability.get_item(file_key)
+            if item and item.tier != Tier.ACTIVE:
+                graduated_files.add(fpath)
+
+        # Symbol blocks for all files NOT in selected (those are in active context),
+        # UNLESS they've graduated to a cached tier
+        excluded = set(selected_files) - graduated_files
         for fpath, fsyms in self._symbol_index.all_symbols.items():
             if fpath not in excluded:
                 key = f"symbol:{fpath}"
@@ -1033,8 +1074,7 @@ class LLM:
                 if block:
                     symbol_blocks[key] = block
 
-        # File contents for files in cached tiers
-        from .stability_tracker import Tier
+        # File contents for files in cached tiers (including graduated selected files)
         for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
             for item in self._context.stability.get_tier_items(tier):
                 if item.item_type == ItemType.FILE:

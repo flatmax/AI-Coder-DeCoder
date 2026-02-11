@@ -32,9 +32,9 @@ Every tracked item has an **N value** measuring consecutive unchanged appearance
 1. **New item**: N = 0
 2. **Unchanged across a request**: N increments by 1 (with exceptions — see threshold anchoring)
 3. **Content changes** (hash mismatch): N resets to 0, item demotes to active
-4. **N ≥ 3 AND item leaves the active items list**: Eligible for graduation from active to L3
+4. **N ≥ 3**: Eligible for graduation from active to L3 (whether still in active list or not)
 
-**Critical:** N increment happens **before** the graduation check each cycle. But graduation requires the item to **leave the active items list** — an item at N=10 that's still selected by the user stays in active tier. When an item enters a cached tier, its N is **reset to the tier's `entry_n`**, not preserved from active.
+**Critical:** N increment happens **before** the graduation check each cycle. When an item enters a cached tier, its N is **reset to the tier's `entry_n`**, not preserved from active. Files that are edited demote to active with N = 0 and must accumulate stability again.
 
 ### Content Hashing
 
@@ -45,7 +45,7 @@ Each item is hashed (SHA256) to detect changes:
 
 ## Graduation: Active → L3
 
-Graduation happens when items **leave the active items list**, not simply when N reaches a threshold.
+Graduation happens when files/symbols reach N ≥ 3, regardless of whether they are still in the active items list. This ensures frequently-used files benefit from caching rather than being re-ingested every request.
 
 ### The Active Items List
 
@@ -57,13 +57,20 @@ On each request, the system builds an active items list — the set of items exp
 
 Symbol entries for **unselected** files are never in this list — they live in whichever cached tier they've earned through initialization or promotion.
 
+When a selected file graduates to L3, its full content moves from the "Working Files" (uncached active) prompt section to the L3 cached block. The symbol map exclusion for that file is lifted since it's no longer in the active section. L3 is rebuilt (cache miss) each time active content changes, but L0–L2 remain stable.
+
 ### Files and Symbols
 
-When a file is **unchecked by the user**, it leaves the active items list. If it has N ≥ 3 and is currently in the active tier, it enters L3. Its N is reset to `entry_n` (3) on entry.
+Files and symbols with N ≥ 3 graduate from active to L3 **regardless of whether they are still in the active items list**. This means:
 
-Items do **not** auto-graduate while still in the active list, even if N ≥ 3. An item at N=10 that's still selected stays in active tier. This lets the caller control graduation timing.
+- **Still-selected files** with N ≥ 3 graduate to L3. Their full content moves from the uncached "active files" section to the cached L3 block. L3 is rebuilt (cache miss), but L0–L2 remain cached. This ensures frequently-used files benefit from caching.
+- **Unchecked files** that leave the active items list with N ≥ 3 also graduate to L3 (same as before).
 
-When a file graduates, its symbol entry also graduates independently (they're tracked separately since a file in active context has full content, while its symbol entry is excluded from the symbol map).
+In both cases, N is reset to `entry_n` (3) on entry to L3.
+
+If a graduated file is **edited** (content hash changes or it appears in the modified-files list), it demotes back to active with N = 0. On the next request its N begins accumulating again, and after 3+ unchanged appearances it re-graduates to L3.
+
+When a file graduates, its symbol entry also graduates independently (they're tracked separately since a file in active context has full content, while its symbol entry is excluded from the symbol map). Graduated selected files are excluded from the "Working Files" (active) section of the prompt and instead appear in the L3 cached block.
 
 ### History Messages
 
@@ -189,6 +196,14 @@ Providers typically allow 4 breakpoints per request. Each non-empty tier uses on
 
 Blocks under the provider's minimum (e.g., 1024 tokens for Anthropic) won't actually be cached — the breakpoint is silently ignored. This is why the minimum token threshold exists.
 
+### Cache Hit Reporting
+
+Cache hit statistics are **read directly from the LLM provider's usage response**, not estimated locally. When the application places `cache_control: {"type": "ephemeral"}` breakpoints, the provider decides whether to serve those prefix tokens from its server-side cache. The provider then reports:
+- **Cache read tokens** — prompt tokens served from cache (cheap/free)
+- **Cache write tokens** — prompt tokens written to cache this request (slightly more expensive)
+
+The application requests usage reporting via `stream_options: {"include_usage": true}`, which litellm translates to each provider's native mechanism. Different providers report cache tokens under different field names; the extraction handles all known formats with fallback chains.
+
 ## Symbol Map Exclusion
 
 When a file is in active context (selected by the user), its full content is included. Its symbol map entry is **excluded** from all tiers to avoid redundancy. When a file is added to context, its symbol entry disappears from its cached tier, causing a cache miss.
@@ -254,11 +269,10 @@ N increment happens here, **before** the graduation check.
 
 ### Phase 2: Determine Items Entering L3
 
-Two sources:
-1. **Items leaving active context** — in active list last request, not in this request. If currently active tier, they enter L3
-2. **Controlled history graduation** — piggyback on L3 invalidation (if L3 already broken) or standalone (if eligible history tokens exceed `cache_target_tokens`, oldest messages graduate)
-
-Items do NOT auto-graduate while still in the active list, even if N ≥ 3.
+Three sources:
+1. **Items leaving active context** — in active list last request, not in this request. If currently active tier and N ≥ 3, they enter L3
+2. **Active items with N ≥ 3** — files and symbols still in the active items list that have accumulated N ≥ 3 graduate to L3. Their content moves from the uncached active section to the cached L3 block. L3 rebuilds (cache miss) but higher tiers stay cached
+3. **Controlled history graduation** — piggyback on L3 invalidation (if L3 already broken) or standalone (if eligible history tokens exceed `cache_target_tokens`, oldest messages graduate)
 
 ### Phase 3: Run Cascade
 

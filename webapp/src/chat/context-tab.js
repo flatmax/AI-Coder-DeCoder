@@ -273,6 +273,19 @@ class ContextTab extends RpcMixin(LitElement) {
     this._expanded = new Set();
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    this._boundRefresh = () => this._refresh();
+    window.addEventListener('stream-complete', this._boundRefresh);
+    window.addEventListener('compaction-event', this._boundRefresh);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('stream-complete', this._boundRefresh);
+    window.removeEventListener('compaction-event', this._boundRefresh);
+  }
+
   onRpcReady() {
     this._refresh();
   }

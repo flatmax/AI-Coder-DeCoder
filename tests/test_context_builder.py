@@ -390,3 +390,63 @@ class TestContextManagerTieredIntegration:
         cm.stability.register_item("history:0", ItemType.HISTORY, "h", 50)
         cm.reregister_history_items()
         assert cm.stability.get_item("history:0") is None
+
+    def test_graduated_files_excluded_from_active(self, tmp_path):
+        """Files graduated to L3 should not appear in active files section."""
+        from ac_dc.context import ContextManager
+        (tmp_path / "stable.py").write_text("x = 1\n")
+        (tmp_path / "new.py").write_text("y = 2\n")
+
+        cm = ContextManager(repo_root=tmp_path, cache_target_tokens=100)
+        cm.file_context.add_file("stable.py")
+        cm.file_context.add_file("new.py")
+
+        # Graduate stable.py to L3
+        cm.stability.register_item(
+            "file:stable.py", ItemType.FILE, "h", 50, tier=Tier.L3,
+        )
+
+        msgs = cm.assemble_tiered_messages(
+            user_prompt="Hello",
+            system_prompt="System",
+            file_contents={"file:stable.py": "x = 1\n"},
+        )
+
+        # Find the active files section
+        active_msg = None
+        for m in msgs:
+            content = str(m.get("content", ""))
+            if "Working Files" in content:
+                active_msg = m
+                break
+
+        # stable.py should NOT be in active files
+        if active_msg:
+            assert "stable.py" not in str(active_msg["content"])
+        # new.py should be in active files
+        assert active_msg is not None
+        assert "new.py" in str(active_msg["content"])
+
+    def test_all_files_graduated_no_active_section(self, tmp_path):
+        """If all selected files graduated, no active files section."""
+        from ac_dc.context import ContextManager
+        (tmp_path / "stable.py").write_text("x = 1\n")
+
+        cm = ContextManager(repo_root=tmp_path, cache_target_tokens=100)
+        cm.file_context.add_file("stable.py")
+
+        # Graduate to L3
+        cm.stability.register_item(
+            "file:stable.py", ItemType.FILE, "h", 50, tier=Tier.L3,
+        )
+
+        msgs = cm.assemble_tiered_messages(
+            user_prompt="Hello",
+            system_prompt="System",
+            file_contents={"file:stable.py": "x = 1\n"},
+        )
+
+        # No "Working Files" section should appear
+        for m in msgs:
+            content = str(m.get("content", ""))
+            assert "Working Files" not in content

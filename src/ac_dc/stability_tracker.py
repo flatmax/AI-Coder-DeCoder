@@ -221,18 +221,15 @@ class StabilityTracker:
         # Phase 4: Record
         self._prev_active_keys = set(active_items.keys())
 
-        log.info(
-            "Stability update: %d items, %d changes",
-            len(self._items), len(self._changes),
-        )
-        for change in self._changes:
-            direction = "📈" if change.is_promotion else "📉"
+        if self._changes:
             log.info(
-                "  %s %s → %s: %s",
-                direction,
-                TIER_CONFIG[change.old_tier]["name"],
-                TIER_CONFIG[change.new_tier]["name"],
-                change.key,
+                "Stability update: %d items, %d changes",
+                len(self._items), len(self._changes),
+            )
+        else:
+            log.debug(
+                "Stability update: %d items, no changes",
+                len(self._items),
             )
 
         return list(self._changes)
@@ -388,7 +385,21 @@ class StabilityTracker:
                     entering_l3.append(key)
             # History is immutable — always eligible (but controlled below)
 
-        # Source 2: Controlled history graduation
+        # Source 2: Active items with N ≥ 3 still in the active list
+        # These graduate to L3 while remaining in the active items list,
+        # so their content moves from the uncached active section to cached L3.
+        # L3 breaks each time (active content changes), but L0-L2 stay stable.
+        for key in current_active_keys:
+            item = self._items.get(key)
+            if item is None:
+                continue
+            if item.tier != Tier.ACTIVE:
+                continue
+            if item.item_type in (ItemType.FILE, ItemType.SYMBOL):
+                if item.n >= TIER_CONFIG[Tier.ACTIVE]["promotion_n"]:
+                    entering_l3.append(key)
+
+        # Source 3: Controlled history graduation
         # If file/symbol entries are about to enter L3, that will break L3 —
         # pre-set the broken flag so history can piggyback.
         if entering_l3:

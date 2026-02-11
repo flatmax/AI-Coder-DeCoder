@@ -213,16 +213,22 @@ class TestPhase2Graduation:
         assert item.tier == Tier.L3
         assert item.n == TIER_CONFIG[Tier.L3]["entry_n"]
 
-    def test_item_stays_active_while_selected(self):
-        """Items don't auto-graduate while still in active list, even at high N."""
+    def test_item_graduates_while_still_selected(self):
+        """Items with N ≥ 3 graduate to L3 even while still in active list."""
         st = StabilityTracker()
         active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
 
-        for _ in range(20):
+        # N goes 0, 1, 2 after 3 requests
+        for _ in range(3):
             st.update_after_response(active, [], {"a.py"})
-
-        # Still in active despite high N
         assert st.get_item("file:a.py").tier == Tier.ACTIVE
+        assert st.get_item("file:a.py").n == 2
+
+        # 4th request: N becomes 3 in phase 1, then graduates in phase 2
+        st.update_after_response(active, [], {"a.py"})
+        item = st.get_item("file:a.py")
+        assert item.tier == Tier.L3
+        assert item.n == TIER_CONFIG[Tier.L3]["entry_n"]
 
     def test_low_n_does_not_graduate(self):
         st = StabilityTracker()
@@ -236,6 +242,41 @@ class TestPhase2Graduation:
         st.update_after_response({}, [], {"a.py"})
         item = st.get_item("file:a.py")
         assert item.tier == Tier.ACTIVE
+
+    def test_edited_file_resets_to_active(self):
+        """An edited file demotes back to active with N=0."""
+        st = StabilityTracker()
+        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
+
+        # Build up N ≥ 3 and graduate to L3
+        for _ in range(4):
+            st.update_after_response(active, [], {"a.py"})
+        assert st.get_item("file:a.py").tier == Tier.L3
+
+        # File is edited — content hash changes, modified_files includes it
+        edited_active = {"file:a.py": {"hash": "h2", "tokens": 110, "type": ItemType.FILE}}
+        st.update_after_response(edited_active, ["a.py"], {"a.py"})
+
+        item = st.get_item("file:a.py")
+        assert item.tier == Tier.ACTIVE
+        assert item.n == 0
+
+    def test_graduated_active_file_history_piggyback(self):
+        """History piggybacks when active files graduate to L3."""
+        st = StabilityTracker()
+        file_active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
+        hist_active = {"history:0": {"hash": "hh", "tokens": 50, "type": ItemType.HISTORY}}
+        combined = {**file_active, **hist_active}
+
+        # Build up N for file, history is always eligible
+        for _ in range(4):
+            st.update_after_response(combined, [], {"a.py"})
+
+        # File graduates to L3 (still in active list), history piggybacks
+        item_f = st.get_item("file:a.py")
+        item_h = st.get_item("history:0")
+        assert item_f.tier == Tier.L3
+        assert item_h.tier == Tier.L3
 
 
 class TestHistoryGraduation:
@@ -524,24 +565,29 @@ class TestMultiRequestSequence:
         st.update_after_response(active1, [], {"a.py"})
         assert st.get_item("file:a.py").n == 0
 
-        # Request 2-4: Same file, unchanged
-        for _ in range(3):
-            st.update_after_response(active1, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 3
+        # Request 2-3: Same file, unchanged — N goes to 1, 2
+        st.update_after_response(active1, [], {"a.py"})
+        assert st.get_item("file:a.py").n == 1
+        st.update_after_response(active1, [], {"a.py"})
+        assert st.get_item("file:a.py").n == 2
 
-        # Request 5: File deselected → graduates to L3
-        st.update_after_response({}, [], {"a.py"})
+        # Request 4: N increments to 3, then graduates to L3 while still selected
+        st.update_after_response(active1, [], {"a.py"})
         assert st.get_item("file:a.py").tier == Tier.L3
 
-        # Request 6-10: File stays deselected, accumulating N in L3
+        # Request 5-9: File stays selected, accumulating N in L3
         for _ in range(5):
-            st.update_after_response({}, [], {"a.py"})
+            st.update_after_response(active1, [], {"a.py"})
 
-        # Request 11: File re-selected (content unchanged)
-        st.update_after_response(active1, [], {"a.py"})
-        # Should still be in L3 (being in active list doesn't demote)
+        # File may have promoted further through cascade
         item = st.get_item("file:a.py")
-        assert item.tier in (Tier.L3, Tier.L2, Tier.L1)  # May have promoted
+        assert item.tier in (Tier.L3, Tier.L2, Tier.L1)
+
+        # File edited — demotes to active, N=0
+        active2 = {"file:a.py": {"hash": "h2", "tokens": 100, "type": ItemType.FILE}}
+        st.update_after_response(active2, ["a.py"], {"a.py"})
+        assert st.get_item("file:a.py").tier == Tier.ACTIVE
+        assert st.get_item("file:a.py").n == 0
 
     def test_content_change_resets_everything(self):
         """Content change demotes from any tier."""

@@ -124,6 +124,10 @@ Runs in a thread pool to avoid blocking the async event loop:
 5. Track token usage from final chunk
 6. Return `(full_content, was_cancelled)`
 
+### Stream Options
+
+All providers receive `stream_options: {"include_usage": true}` to request token usage in the final streaming chunk. litellm translates this to each provider's native mechanism (e.g., Bedrock's streaming usage events). This ensures cache hit/write token counts are available for every provider.
+
 ### Chunk Delivery
 
 Each chunk carries the **full accumulated content** (not just the delta). This means:
@@ -407,6 +411,21 @@ Applied to the last message in each tier's sequence. Providers typically allow 4
 ### System Reminder
 
 A compact edit format reference exists as a code constant but is **not currently injected** into the streaming message assembly. Available as infrastructure for potential mid-conversation reinforcement.
+
+## Token Usage Extraction
+
+Token usage (including cache statistics) is extracted from the LLM provider's response, not computed locally. The extraction handles multiple provider formats since different providers report cache tokens under different field names:
+
+| Provider | Cache Read Field | Cache Write Field | Source |
+|----------|-----------------|-------------------|--------|
+| Anthropic direct | `cache_read_input_tokens` | `cache_creation_input_tokens` | `usage` object |
+| Bedrock Anthropic | `prompt_tokens_details.cached_tokens` | `cache_creation_input_tokens` | `usage` object or dict |
+| OpenAI | `prompt_tokens_details.cached_tokens` | — | `usage` object |
+| litellm unified | `cache_read_tokens` | `cache_creation_tokens` | varies |
+
+The extraction function uses a dual-mode getter that handles both attribute access (objects) and key access (dicts), since the `usage` payload format varies by provider and litellm version. Fields are checked in priority order with fallback chains.
+
+**Stream-level usage** is captured from any chunk that includes it (typically the final chunk). **Response-level usage** is merged as a fallback, filling in any fields the stream didn't provide. Completion tokens are estimated from content length (~4 chars/token) only if the provider reported no completion count.
 
 ## Token Usage HUD
 

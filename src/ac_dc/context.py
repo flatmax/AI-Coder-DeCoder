@@ -405,9 +405,15 @@ class ContextManager:
         # Build history tier map
         history_tier_map = self._build_history_tier_map()
 
-        # Active file contents
+        # Active file contents — exclude files that have graduated to cached tiers
         active_files = {}
         for path in self.file_context.get_files():
+            file_key = f"file:{path}"
+            item = self.stability.get_item(file_key)
+            if item and item.tier != Tier.ACTIVE:
+                # This file has graduated to a cached tier; its content
+                # is included in that tier's block, not in active files.
+                continue
             content = self.file_context.get_content(path)
             if content is not None:
                 active_files[path] = content
