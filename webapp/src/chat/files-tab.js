@@ -672,6 +672,17 @@ class FilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  // ── Stop streaming ──
+
+  async _onStopStreaming() {
+    if (!this._activeRequestId) return;
+    try {
+      await this.rpcCall('LLM.cancel_streaming', this._activeRequestId);
+    } catch (e) {
+      console.warn('Failed to cancel streaming:', e);
+    }
+  }
+
   // ── Panel divider drag ──
 
   _onDividerDown(e) {
@@ -928,6 +939,7 @@ class FilesTab extends RpcMixin(LitElement) {
           .disabled=${this.streaming}
           .snippets=${this.snippets}
           @send-message=${this._onSendMessage}
+          @stop-streaming=${this._onStopStreaming}
           @urls-detected=${this._onUrlsDetected}
         ></chat-input>
 

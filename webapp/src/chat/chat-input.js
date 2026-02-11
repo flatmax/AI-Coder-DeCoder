@@ -130,6 +130,20 @@ class ChatInput extends RpcMixin(LitElement) {
     .send-btn:hover { opacity: 0.9; }
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    .stop-btn {
+      background: var(--accent-error, #ef5350);
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 8px 14px;
+      color: white;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: opacity var(--transition-fast);
+    }
+    .stop-btn:hover { opacity: 0.85; }
+
     /* Snippet drawer */
     .snippet-drawer {
       display: flex;
@@ -342,6 +356,12 @@ class ChatInput extends RpcMixin(LitElement) {
     }
   }
 
+  _stop() {
+    this.dispatchEvent(new CustomEvent('stop-streaming', {
+      bubbles: true, composed: true,
+    }));
+  }
+
   // ── Image paste ──
 
   _onPaste(e) {
@@ -489,9 +509,15 @@ class ChatInput extends RpcMixin(LitElement) {
             rows="1"
           ></textarea>
 
-          <button class="send-btn" ?disabled=${this.disabled} @click=${this._send}>
-            Send
-          </button>
+          ${this.disabled ? html`
+            <button class="stop-btn" @click=${this._stop}>
+              ⏹ Stop
+            </button>
+          ` : html`
+            <button class="send-btn" @click=${this._send}>
+              Send
+            </button>
+          `}
         </div>
       </div>
     `;

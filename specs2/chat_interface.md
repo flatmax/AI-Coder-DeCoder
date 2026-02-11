@@ -303,6 +303,9 @@ Off-screen messages use CSS containment (`content-visibility: auto`) with intrin
 - Keyboard shortcuts: Enter to send (with modifier key option), Escape to clear
 - Image paste support (base64 encoding)
 
+### Stop Button
+During streaming, the **Send button transforms into a Stop button** (⏹ Stop) with a red/danger style. Clicking dispatches a `stop-streaming` event. The parent (Files tab) handles it by calling `LLM.cancel_streaming(request_id)`. The button reverts to Send when streaming ends (via `streamComplete`).
+
 ### Input History Navigation
 
 **Up arrow** (at cursor position 0): opens fuzzy history search overlay

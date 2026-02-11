@@ -142,7 +142,11 @@ Chunks are coalesced per animation frame to prevent render thrashing:
 
 ## Cancellation
 
-**Client:** calls `LLM.cancel_streaming(request_id)` via RPC
+### Stop Button
+
+During streaming, the **Send button transforms into a Stop button** (⏹ Stop). Clicking it calls `LLM.cancel_streaming(request_id)` via RPC. The button reverts to Send once `streamComplete` is received.
+
+### Server Behavior
 
 **Server:** adds request ID to a thread-safe cancelled set. The streaming thread checks this each iteration and breaks out.
 
