@@ -148,10 +148,12 @@ def get_webapp_base_url() -> str:
 
 async def run_server(args: argparse.Namespace):
     """Start the RPC server and run forever."""
-    from .config import ConfigManager
-    from .repo import Repo
-    from .llm_service import LLM
-    from .settings import Settings
+    # Use absolute imports so this works both as a package module
+    # and when run directly by PyInstaller as __main__
+    from ac_dc.config import ConfigManager
+    from ac_dc.repo import Repo
+    from ac_dc.llm_service import LLM
+    from ac_dc.settings import Settings
 
     repo_root = Path(args.repo_path).resolve()
 
@@ -258,7 +260,8 @@ async def run_server(args: argparse.Namespace):
     try:
         from jrpc_oo import JRPCServer
     except ImportError:
-        print("Error: jrpc-oo not installed. Run: pip install jrpc-oo", file=sys.stderr)
+        print("Error: jrpc-oo not installed. Run: pip install jrpc-oo",
+              file=sys.stderr)
         sys.exit(1)
 
     server = JRPCServer(server_port, remote_timeout=60)
