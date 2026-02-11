@@ -28,6 +28,8 @@ class FilesTab extends RpcMixin(LitElement) {
     _historyOpen: { type: Boolean, state: true },
     /** Flat list of repo file paths for file mention detection */
     _repoFiles: { type: Array, state: true },
+    /** Path of file currently active in the diff viewer */
+    _viewerActiveFile: { type: String, state: true },
   };
 
   static styles = css`
@@ -235,6 +237,7 @@ class FilesTab extends RpcMixin(LitElement) {
     this._confirmAction = null;
     this._historyOpen = false;
     this._repoFiles = [];
+    this._viewerActiveFile = '';
 
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
@@ -251,10 +254,12 @@ class FilesTab extends RpcMixin(LitElement) {
     this._boundOnStreamComplete = this._onStreamComplete.bind(this);
     this._boundOnCompactionEvent = this._onCompactionEvent.bind(this);
     this._boundOnFilesChanged = this._onFilesChanged.bind(this);
+    this._boundOnViewerActiveFile = this._onViewerActiveFile.bind(this);
     window.addEventListener('state-loaded', this._boundOnStateLoaded);
     window.addEventListener('stream-complete', this._boundOnStreamComplete);
     window.addEventListener('compaction-event', this._boundOnCompactionEvent);
     window.addEventListener('files-changed', this._boundOnFilesChanged);
+    window.addEventListener('viewer-active-file', this._boundOnViewerActiveFile);
   }
 
   disconnectedCallback() {
@@ -263,6 +268,7 @@ class FilesTab extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._boundOnStreamComplete);
     window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
     window.removeEventListener('files-changed', this._boundOnFilesChanged);
+    window.removeEventListener('viewer-active-file', this._boundOnViewerActiveFile);
     document.removeEventListener('mousemove', this._onDividerMove);
     document.removeEventListener('mouseup', this._onDividerUp);
     this._clearWatchdog();
@@ -379,6 +385,10 @@ class FilesTab extends RpcMixin(LitElement) {
         if (picker) picker.setSelectedFiles(selectedFiles);
       });
     }
+  }
+
+  _onViewerActiveFile(e) {
+    this._viewerActiveFile = e.detail?.path || '';
   }
 
   // ── File mention handling ──
@@ -855,6 +865,7 @@ class FilesTab extends RpcMixin(LitElement) {
       <div class="file-picker-panel ${this._pickerCollapsed ? 'collapsed' : ''}"
         style=${pickerStyle}>
         <file-picker
+          .viewerActiveFile=${this._viewerActiveFile}
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}
           @git-operation=${this._onGitOperation}

@@ -31,6 +31,8 @@ class FilePicker extends RpcMixin(LitElement) {
     _contextMenu: { type: Object, state: true },
     /** Whether initial auto-select has run */
     _autoSelected: { type: Boolean, state: true },
+    /** Path of the file currently open in the diff viewer */
+    viewerActiveFile: { type: String },
   };
 
   static styles = css`
@@ -88,6 +90,13 @@ class FilePicker extends RpcMixin(LitElement) {
     .node-row.focused {
       background: var(--bg-surface);
       border-left-color: var(--accent-primary);
+    }
+    .node-row.active-in-viewer {
+      background: rgba(100, 180, 255, 0.08);
+      border-left-color: var(--accent-primary);
+    }
+    .node-row.active-in-viewer:hover {
+      background: rgba(100, 180, 255, 0.14);
     }
 
     /* Indent spacer */
@@ -277,6 +286,7 @@ class FilePicker extends RpcMixin(LitElement) {
     this._contextMenu = null;
     this._autoSelected = false;
     this._overlayState = null; // {type:'confirm'|'prompt', ...}
+    this.viewerActiveFile = '';
     this._flatVisibleCache = null;
 
     this._onDocClick = this._onDocClick.bind(this);
@@ -787,8 +797,10 @@ class FilePicker extends RpcMixin(LitElement) {
     const stats = this.diffStats?.[node.path];
     const isFocused = this._focused === node.path;
 
+    const isActiveInViewer = this.viewerActiveFile === node.path;
+
     return html`
-      <div class="node-row ${isFocused ? 'focused' : ''}"
+      <div class="node-row ${isFocused ? 'focused' : ''} ${isActiveInViewer ? 'active-in-viewer' : ''}"
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
         @click=${() => { this._focused = node.path; }}

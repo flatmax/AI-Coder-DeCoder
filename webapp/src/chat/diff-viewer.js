@@ -60,6 +60,14 @@ class DiffViewer extends RpcMixin(LitElement) {
     _monacoReady: { type: Boolean, state: true },
   };
 
+  /** The path of the currently active file (read-only, for external consumers). */
+  get activePath() {
+    if (this._activeIndex >= 0 && this._activeIndex < this._files.length) {
+      return this._files[this._activeIndex].path;
+    }
+    return '';
+  }
+
   static styles = css`
     :host {
       display: block;
@@ -294,6 +302,7 @@ class DiffViewer extends RpcMixin(LitElement) {
       await this._ensureMonaco();
       this._showActiveFile();
       if (line) this._revealLine(line);
+      this._emitActiveFileChanged();
       return;
     }
 
@@ -316,6 +325,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     await this._ensureMonaco();
     this._showActiveFile();
     if (line) this._revealLine(line);
+    this._emitActiveFileChanged();
   }
 
   /**
@@ -440,6 +450,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     if (this._activeIndex < 0 && this._files.length > 0) this._activeIndex = 0;
     await this._ensureMonaco();
     this._showActiveFile();
+    this._emitActiveFileChanged();
   }
 
   /**
@@ -450,6 +461,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     this._activeIndex = -1;
     this._dirtyPaths = new Set();
     this._disposeEditor();
+    this._emitActiveFileChanged();
   }
 
   // ── Monaco setup ──
@@ -692,6 +704,13 @@ class DiffViewer extends RpcMixin(LitElement) {
     }));
   }
 
+  _emitActiveFileChanged() {
+    this.dispatchEvent(new CustomEvent('active-file-changed', {
+      detail: { path: this.activePath },
+      bubbles: true, composed: true,
+    }));
+  }
+
   // ── Save ──
 
   async _saveActive() {
@@ -756,6 +775,7 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     this._activeIndex = index;
     this._showActiveFile();
+    this._emitActiveFileChanged();
   }
 
   _closeTab(index, e) {
@@ -781,6 +801,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     }
 
     this._emitDirtyChanged();
+    this._emitActiveFileChanged();
   }
 
   _closeAll() {

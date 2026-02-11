@@ -100,6 +100,15 @@ This allows users to quickly reference paths in their messages to the LLM withou
 3. File picker dispatches `path-to-input` event with `{ path }`
 4. Files tab receives event and inserts ` path ` (space-padded) into chat input textarea at cursor position
 
+## Active File Highlight
+
+When a file is open in the diff viewer, its row in the file picker is visually highlighted with a distinct background and left border accent. This gives the user a clear indication of which file they're currently viewing/editing.
+
+- The diff viewer dispatches `active-file-changed` with `{ path }` whenever the active tab changes (tab switch, file open, tab close)
+- The app shell relays this to the dialog, which passes it to the files tab and down to the file picker
+- The file picker applies an `.active-in-viewer` class to the matching row
+- The highlight is independent of selection (checkbox) state
+
 ## State Persistence
 
 - **Expanded directories**: tracked and propagated via events

@@ -86,6 +86,7 @@ class AcApp extends JRPCClient {
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onFileSave = this._onFileSave.bind(this);
     this._onStreamCompleteForDiff = this._onStreamCompleteForDiff.bind(this);
+    this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
   }
 
   connectedCallback() {
@@ -93,6 +94,7 @@ class AcApp extends JRPCClient {
     this.addClass(this, 'AcApp');
     this.addEventListener('navigate-file', this._onNavigateFile);
     this.addEventListener('file-save', this._onFileSave);
+    this.addEventListener('active-file-changed', this._onActiveFileChanged);
     window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
   }
 
@@ -100,6 +102,7 @@ class AcApp extends JRPCClient {
     super.disconnectedCallback();
     this.removeEventListener('navigate-file', this._onNavigateFile);
     this.removeEventListener('file-save', this._onFileSave);
+    this.removeEventListener('active-file-changed', this._onActiveFileChanged);
     window.removeEventListener('stream-complete', this._onStreamCompleteForDiff);
   }
 
@@ -283,6 +286,13 @@ class AcApp extends JRPCClient {
     if (diffViewer) {
       diffViewer.openEditResults(result.edit_results, result.files_modified);
     }
+  }
+
+  _onActiveFileChanged(e) {
+    // Relay to files-tab via window event so it can highlight in file picker
+    window.dispatchEvent(new CustomEvent('viewer-active-file', {
+      detail: { path: e.detail?.path || '' },
+    }));
   }
 
   render() {
