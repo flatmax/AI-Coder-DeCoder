@@ -12,12 +12,15 @@ class ChatInput extends RpcMixin(LitElement) {
   static properties = {
     disabled: { type: Boolean },
     snippets: { type: Array },
+    /** Array of user message strings from conversation history (most recent first, deduplicated) */
+    userMessageHistory: { type: Array },
     _images: { type: Array, state: true },
     _showSnippets: { type: Boolean, state: true },
-    _historyItems: { type: Array, state: true },
-    _showHistory: { type: Boolean, state: true },
-    _historyIndex: { type: Number, state: true },
-    _savedInput: { type: String, state: true },
+    _showHistorySearch: { type: Boolean, state: true },
+    _historySearchQuery: { type: String, state: true },
+    _historySearchResults: { type: Array, state: true },
+    _historySearchIndex: { type: Number, state: true },
+    _savedInputBeforeHistory: { type: String, state: true },
   };
 
   static styles = css`
@@ -165,7 +168,7 @@ class ChatInput extends RpcMixin(LitElement) {
     }
     .snippet-btn:hover { background: var(--bg-elevated); color: var(--text-primary); }
 
-    /* Input history overlay */
+    /* Input history search overlay */
     .history-overlay {
       position: absolute;
       bottom: 100%;
@@ -175,9 +178,29 @@ class ChatInput extends RpcMixin(LitElement) {
       border: 1px solid var(--border-color);
       border-radius: var(--radius-md);
       box-shadow: var(--shadow-lg);
-      max-height: 300px;
-      overflow-y: auto;
+      max-height: 340px;
+      display: flex;
+      flex-direction: column;
       z-index: 50;
+    }
+
+    .history-search-input {
+      padding: 8px 10px;
+      background: var(--bg-primary);
+      border: none;
+      border-bottom: 1px solid var(--border-color);
+      border-radius: var(--radius-md) var(--radius-md) 0 0;
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      outline: none;
+    }
+    .history-search-input::placeholder { color: var(--text-muted); }
+
+    .history-results {
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
     }
 
     .history-item {
@@ -199,33 +222,16 @@ class ChatInput extends RpcMixin(LitElement) {
     super();
     this.disabled = false;
     this.snippets = [];
+    this.userMessageHistory = [];
     this._images = [];
     this._showSnippets = false;
-    this._inputHistory = this._loadInputHistory();
-    this._historyItems = [];
-    this._showHistory = false;
-    this._historyIndex = -1;
-    this._savedInput = '';
+    this._showHistorySearch = false;
+    this._historySearchQuery = '';
+    this._historySearchResults = [];
+    this._historySearchIndex = 0;
+    this._savedInputBeforeHistory = undefined;
     this._urlDetectTimer = null;
     this._lastDetectedText = '';
-  }
-
-  _loadInputHistory() {
-    try {
-      const stored = localStorage.getItem('ac-dc-input-history');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed.slice(0, 100);
-      }
-    } catch { /* ignore corrupt data */ }
-    return [];
-  }
-
-  _saveInputHistory() {
-    try {
-      localStorage.setItem('ac-dc-input-history',
-        JSON.stringify(this._inputHistory.slice(0, 100)));
-    } catch { /* storage full or unavailable */ }
   }
 
   // ── Auto-resize & URL detection ──
@@ -271,6 +277,10 @@ class ChatInput extends RpcMixin(LitElement) {
   _onKeyDown(e) {
     const textarea = e.target;
 
+    // If history search is open, don't handle keys on the textarea
+    // (the overlay input handles its own keys)
+    if (this._showHistorySearch) return;
+
     // Enter to send (without shift)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -278,46 +288,26 @@ class ChatInput extends RpcMixin(LitElement) {
       return;
     }
 
-    // Escape — close history/snippets or clear input
+    // Escape — close snippets or clear input
     if (e.key === 'Escape') {
-      if (this._showHistory) { this._showHistory = false; return; }
       if (this._showSnippets) { this._showSnippets = false; return; }
       textarea.value = '';
       this._autoResize(textarea);
       return;
     }
 
-    // Up arrow at position 0 — open history
+    // Up arrow at position 0 — open history search
     if (e.key === 'ArrowUp' && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
-      this._openHistory(textarea);
+      this._openHistorySearch();
       e.preventDefault();
       return;
     }
 
-    // Navigation in history overlay
-    if (this._showHistory) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this._historyIndex = Math.min(this._historyIndex + 1, this._historyItems.length - 1);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        this._historyIndex = Math.max(this._historyIndex - 1, 0);
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        this._selectHistory(textarea);
-        return;
-      }
-    }
-
-    // Down arrow at end — restore saved input
-    if (e.key === 'ArrowDown' && this._savedInput !== '' &&
+    // Down arrow at end — restore saved input from before history search
+    if (e.key === 'ArrowDown' && this._savedInputBeforeHistory !== undefined &&
         textarea.selectionStart === textarea.value.length) {
-      textarea.value = this._savedInput;
-      this._savedInput = '';
+      textarea.value = this._savedInputBeforeHistory;
+      this._savedInputBeforeHistory = undefined;
       this._autoResize(textarea);
       e.preventDefault();
     }
@@ -329,12 +319,6 @@ class ChatInput extends RpcMixin(LitElement) {
     const text = textarea.value.trim();
     if (!text && this._images.length === 0) return;
     if (this.disabled) return;
-
-    // Record in input history
-    if (text) {
-      this._inputHistory = [text, ...this._inputHistory.filter(h => h !== text)].slice(0, 100);
-      this._saveInputHistory();
-    }
 
     this.dispatchEvent(new CustomEvent('send-message', {
       detail: {
@@ -348,7 +332,8 @@ class ChatInput extends RpcMixin(LitElement) {
     this._images = [];
     this._autoResize(textarea);
     this._showSnippets = false;
-    this._showHistory = false;
+    this._showHistorySearch = false;
+    this._savedInputBeforeHistory = undefined;
     this._lastDetectedText = '';
     if (this._urlDetectTimer) {
       clearTimeout(this._urlDetectTimer);
@@ -415,22 +400,156 @@ class ChatInput extends RpcMixin(LitElement) {
     textarea.focus();
   }
 
-  // ── Input history ──
+  // ── Input history search ──
 
-  _openHistory(textarea) {
-    if (this._inputHistory.length === 0) return;
-    this._savedInput = textarea.value;
-    this._historyItems = [...this._inputHistory].slice(0, 20);
-    this._historyIndex = 0;
-    this._showHistory = true;
+  /** Get deduplicated user messages from conversation history, most recent first */
+  _getUserMessageHistory() {
+    if (!this.userMessageHistory || this.userMessageHistory.length === 0) return [];
+    return this.userMessageHistory;
   }
 
-  _selectHistory(textarea) {
-    if (this._historyIndex >= 0 && this._historyIndex < this._historyItems.length) {
-      textarea.value = this._historyItems[this._historyIndex];
+  _openHistorySearch() {
+    const history = this._getUserMessageHistory();
+    if (history.length === 0) return;
+    const textarea = this.shadowRoot.querySelector('textarea');
+    this._savedInputBeforeHistory = textarea?.value || '';
+    this._historySearchQuery = '';
+    // Reverse so oldest is first (index 0 = top), newest is last (bottom)
+    this._historySearchResults = [...history].reverse().slice(-20);
+    this._historySearchIndex = this._historySearchResults.length - 1; // Select newest (bottom)
+    this._showHistorySearch = true;
+    this._showSnippets = false;
+    // Focus the search input and scroll to bottom after render
+    this.updateComplete.then(() => {
+      this.shadowRoot.querySelector('.history-search-input')?.focus();
+      this._scrollHistoryToBottom();
+    });
+  }
+
+  _onHistorySearchInput(e) {
+    const query = e.target.value;
+    this._historySearchQuery = query;
+    this._filterHistoryResults(query);
+    // Select newest (bottom) after filtering
+    this._historySearchIndex = this._historySearchResults.length - 1;
+    this.updateComplete.then(() => this._scrollHistoryToBottom());
+  }
+
+  _filterHistoryResults(query) {
+    const history = this._getUserMessageHistory();
+    if (!query.trim()) {
+      // Reverse so oldest first (top), newest last (bottom)
+      this._historySearchResults = [...history].reverse().slice(-20);
+      return;
+    }
+
+    const q = query.toLowerCase();
+
+    // Score each message: exact substring first (scored by position), then fuzzy
+    const scored = [];
+    for (const msg of history) {
+      const lower = msg.toLowerCase();
+      const substringIdx = lower.indexOf(q);
+      if (substringIdx !== -1) {
+        // Exact substring match — score by position (earlier = better)
+        scored.push({ msg, score: 1000 - substringIdx });
+      } else if (this._fuzzyMatch(q, lower)) {
+        // Fuzzy match — lower priority
+        scored.push({ msg, score: 0 });
+      }
+    }
+
+    // Sort: exact substring matches first (by score desc), then fuzzy
+    // Then reverse so newest matches are at the bottom
+    scored.sort((a, b) => b.score - a.score);
+    this._historySearchResults = scored.slice(0, 20).map(s => s.msg).reverse();
+  }
+
+  /** Fuzzy match: all characters in query appear in order in text */
+  _fuzzyMatch(query, text) {
+    let qi = 0;
+    for (let ti = 0; ti < text.length && qi < query.length; ti++) {
+      if (text[ti] === query[qi]) qi++;
+    }
+    return qi === query.length;
+  }
+
+  _onHistorySearchKeyDown(e) {
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (this._historySearchIndex > 0) {
+        this._historySearchIndex--;
+      }
+      this._scrollHistoryItemIntoView();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (this._historySearchIndex < this._historySearchResults.length - 1) {
+        this._historySearchIndex++;
+      } else {
+        // Past the newest — restore saved input and close
+        this._restoreAndClose();
+        return;
+      }
+      this._scrollHistoryItemIntoView();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      this._selectHistoryResult();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this._restoreAndClose();
+      return;
+    }
+  }
+
+  _scrollHistoryItemIntoView() {
+    this.updateComplete.then(() => {
+      this.shadowRoot.querySelector('.history-item.selected')
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  _scrollHistoryToBottom() {
+    const container = this.shadowRoot.querySelector('.history-results');
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  _restoreAndClose() {
+    const textarea = this.shadowRoot.querySelector('textarea');
+    if (textarea && this._savedInputBeforeHistory !== undefined) {
+      textarea.value = this._savedInputBeforeHistory;
       this._autoResize(textarea);
     }
-    this._showHistory = false;
+    this._savedInputBeforeHistory = undefined;
+    this._showHistorySearch = false;
+    this.updateComplete.then(() => {
+      this.shadowRoot.querySelector('textarea')?.focus();
+    });
+  }
+
+  _selectHistoryResult() {
+    const results = this._historySearchResults;
+    if (this._historySearchIndex >= 0 && this._historySearchIndex < results.length) {
+      const textarea = this.shadowRoot.querySelector('textarea');
+      if (textarea) {
+        textarea.value = results[this._historySearchIndex];
+        this._autoResize(textarea);
+      }
+    }
+    this._showHistorySearch = false;
+    // Focus textarea after closing
+    this.updateComplete.then(() => {
+      this.shadowRoot.querySelector('textarea')?.focus();
+    });
+  }
+
+  _closeHistorySearch() {
+    this._restoreAndClose();
   }
 
   // ── Public API ──
@@ -461,14 +580,27 @@ class ChatInput extends RpcMixin(LitElement) {
     return html`
       <div class="input-area" style="position:relative;">
 
-        ${this._showHistory ? html`
+        ${this._showHistorySearch ? html`
           <div class="history-overlay">
-            ${this._historyItems.map((item, i) => html`
-              <div class="history-item ${i === this._historyIndex ? 'selected' : ''}"
-                @click=${() => { this._historyIndex = i; this._selectHistory(this.shadowRoot.querySelector('textarea')); }}>
-                ${item.length > 120 ? item.substring(0, 120) + '…' : item}
-              </div>
-            `)}
+            <input class="history-search-input"
+              type="text"
+              placeholder="Search message history…"
+              .value=${this._historySearchQuery}
+              @input=${this._onHistorySearchInput}
+              @keydown=${this._onHistorySearchKeyDown}
+            >
+            <div class="history-results">
+              ${this._historySearchResults.length === 0 ? html`
+                <div class="history-item" style="color:var(--text-muted); cursor:default;">
+                  No matches
+                </div>
+              ` : this._historySearchResults.map((item, i) => html`
+                <div class="history-item ${i === this._historySearchIndex ? 'selected' : ''}"
+                  @click=${() => { this._historySearchIndex = i; this._selectHistoryResult(); }}>
+                  ${item.length > 120 ? item.substring(0, 120) + '…' : item}
+                </div>
+              `)}
+            </div>
           </div>
         ` : nothing}
 

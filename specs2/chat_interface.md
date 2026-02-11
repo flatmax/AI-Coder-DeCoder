@@ -336,23 +336,23 @@ During streaming, the **Send button transforms into a Stop button** (⏹ Stop) w
 
 ### Input History Navigation
 
-**Up arrow** (at cursor position 0): opens fuzzy history search overlay
+**Up arrow** (at cursor position 0): opens a search overlay showing deduplicated user messages from the current session.
 
-**Fuzzy Search Overlay**:
-- Shows 10 most recent unique user messages
-- Most recent pre-selected
-- Typing filters with fuzzy matching (characters in order, not contiguous)
-- Ranking: exact substring first, then fuzzy matches
-- Full deduplicated history is searchable
+**Display order**: Most recent message at the **bottom** of the list, oldest at the top. The overlay scrolls to the bottom on open, with the most recent (bottom) item pre-selected.
+
+**Fuzzy search**: A text input at the top of the overlay filters results. Typing filters with fuzzy matching (characters in order, not necessarily contiguous). Ranking: exact substring matches first (scored by position), then fuzzy matches. Filtered results maintain the same bottom-is-newest order.
 
 **Keyboard in overlay**:
-- Up/Down: navigate selection
-- Enter: select message into textarea
-- Escape: close without change
+- **Up arrow**: move selection upward (toward older messages)
+- **Down arrow**: move selection downward (toward newer messages); past the newest item restores saved input and closes
+- **Enter**: select highlighted message into textarea and close
+- **Escape**: close without change, restore saved input
 
-**Down arrow** (after selecting from history): restores original textarea content
+**Saved input**: Original textarea content is saved when the overlay opens. Restored via Escape or Down arrow past the newest item.
 
-**Saved input**: Original content saved when overlay opens, restored via down arrow at end of text.
+**Click**: Clicking any item selects it into the textarea and closes the overlay.
+
+**Reset**: History index resets when the user sends a message.
 
 ### Snippet Drawer
 

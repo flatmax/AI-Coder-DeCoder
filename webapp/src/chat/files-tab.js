@@ -492,6 +492,25 @@ class FilesTab extends RpcMixin(LitElement) {
     input._autoResize(textarea);
   }
 
+  /** Extract deduplicated user messages from conversation history, most recent first */
+  _getUserMessageHistory() {
+    if (!this.messages || this.messages.length === 0) return [];
+    const seen = new Set();
+    const result = [];
+    // Walk from newest to oldest
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const msg = this.messages[i];
+      if (msg.role === 'user' && msg.content) {
+        const text = typeof msg.content === 'string' ? msg.content : '';
+        if (text && !seen.has(text)) {
+          seen.add(text);
+          result.push(text);
+        }
+      }
+    }
+    return result;
+  }
+
   // ── URL events ──
 
   _onUrlsDetected(e) {
@@ -956,6 +975,7 @@ class FilesTab extends RpcMixin(LitElement) {
         <chat-input
           .disabled=${this.streaming}
           .snippets=${this.snippets}
+          .userMessageHistory=${this._getUserMessageHistory()}
           @send-message=${this._onSendMessage}
           @stop-streaming=${this._onStopStreaming}
           @urls-detected=${this._onUrlsDetected}
