@@ -58,7 +58,7 @@ A complete specification for an **AI-assisted code editing tool** that runs as a
 | [Search Interface](search_interface.md) | Full-text search UI |
 | [Settings Interface](settings_interface.md) | Config editing UI |
 | [Speech to Text](speech_to_text.md) | Voice dictation via Web Speech API |
-| [Build and Deployment](build_and_deployment.md) | Build pipeline, versioning, startup |
+| [Build and Deployment](build_and_deployment.md) | Build pipeline, versioning, startup, README generation |
 
 ## Core Concepts
 

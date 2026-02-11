@@ -353,6 +353,33 @@ A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first ru
 
 This directory is **not** committed to the repository. The `.gitignore` entry is created automatically on first use.
 
+## README.md Generation
+
+The repository root contains a `README.md` that serves as a combined user guide and developer reference. Keep it as a single file with these sections in order:
+
+1. **Title & tagline** — project name with lightning bolt, one-sentence description
+2. **Philosophy** — speed-over-agency stance and the hybrid workflow (sprint → hit wall → agent → return)
+3. **Features** — one bullet per capability, one sentence each, no elaboration
+4. **Quick Start** — platform binaries from releases, `chmod`, run from git repo
+5. **Configuration** — two subsections:
+   - LLM config with provider examples (Anthropic, OpenAI, Ollama, OpenAI-compatible local, Bedrock, Azure, Vertex) as copy-pasteable JSON blocks, plus a field reference table
+   - App config with defaults table
+6. **Workflow** — numbered steps from task description through commit
+7. **Keyboard Shortcuts** — table reflecting actual implementations:
+   - `chat-input.js` `_onKeyDown`: Enter, Shift+Enter, Escape, ↑ at start, ↓ at end
+   - `diff-viewer.js` `_onKeyDown`: Ctrl/Cmd+S, Ctrl/Cmd+W
+   - `ac-dialog.js` `KEYBOARD_SHORTCUTS` + `_onGlobalKeyDown`: Alt+1..5, Alt+M
+   - When shortcuts change in code, update the table to match
+8. **Development** — prerequisites, setup, run modes table, CLI options table, test commands, tech stack with library links, project structure tree with one-line file descriptions
+9. **License** — MIT
+
+### Style rules
+
+- One sentence per feature bullet — no multi-paragraph explanations
+- Tables for all reference data (config fields, CLI options, shortcuts)
+- Project structure tree must mirror actual file layout — update on file add/remove/rename
+- No screenshots, videos, or embedded media in the markdown
+
 ## Graceful Degradation
 
 | Failure | Behavior |
