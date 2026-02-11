@@ -153,6 +153,15 @@ Rapid chunks are coalesced per animation frame:
 2. On next frame: create assistant card (first chunk) or update content
 3. Each chunk carries full accumulated content (not deltas)
 
+### Code Block Copy Button
+
+Fenced code blocks in assistant messages include a **copy-to-clipboard button** (📋) positioned in the top-right corner of the `<pre>` block. The button appears on hover with a subtle background, and shows brief "Copied!" feedback after clicking.
+
+- The button is injected by the markdown renderer into each `<pre class="code-block">` element
+- Click handling is delegated through the `.md-content` click handler (same pattern as file mentions)
+- On click: copy the code block's text content to clipboard, briefly change the button text to "✓ Copied" for 1.5 seconds
+- The button does **not** appear during streaming (to avoid flicker) — only on final rendered messages
+
 ### Edit Block Rendering
 
 During streaming, partially-received edit blocks render with an in-progress indicator. On completion, blocks show:
@@ -244,6 +253,25 @@ After all edits, a banner shows:
 - Counts of applied/failed/skipped
 - List of modified files (clickable)
 - Failed edit details with errors
+
+## Message Action Buttons
+
+Each message card (user and assistant) shows **hoverable action toolbars** at both the **top-right and bottom-right** corners. This ensures quick access regardless of scroll position within long messages. Each toolbar has two buttons:
+
+| Button | Icon | Action |
+|--------|------|--------|
+| Copy to clipboard | 📋 | Copies the message's raw text content to the clipboard. Shows brief "✓ Copied" toast feedback. |
+| Copy to prompt | ↩ | Inserts the message's raw text content into the chat input textarea. Dispatches a `copy-to-prompt` event with `{ text }` detail. |
+
+### Behavior
+- Toolbars fade in on message card hover, positioned top-right and bottom-right
+- Both toolbars have identical functionality
+- Buttons are small, unobtrusive, with icon-only display
+- Both buttons work for user and assistant messages
+- For assistant messages, the raw markdown text is copied (not rendered HTML)
+- The toolbars do **not** appear on the streaming message card
+- The `copy-to-prompt` event bubbles up to the Files tab, which sets the chat input value
+- **Rationale**: Long assistant messages can span many screens; placing toolbars at both ends avoids scrolling back to copy or paste
 
 ## Scrolling System
 

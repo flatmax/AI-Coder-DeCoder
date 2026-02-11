@@ -69,6 +69,45 @@ class ChatPanel extends RpcMixin(LitElement) {
       border-left-color: var(--accent-warning);
     }
 
+    /* Message action toolbars (top + bottom) */
+    .message-card {
+      position: relative;
+    }
+
+    .msg-actions {
+      position: absolute;
+      right: 8px;
+      display: flex;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity var(--transition-fast);
+      z-index: 2;
+    }
+    .msg-actions.top { top: 6px; }
+    .msg-actions.bottom { bottom: 6px; }
+    .message-card:hover .msg-actions {
+      opacity: 1;
+    }
+
+    .msg-action-btn {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-muted);
+      line-height: 1;
+      transition: color var(--transition-fast), background var(--transition-fast);
+    }
+    .msg-action-btn:hover {
+      color: var(--text-primary);
+      background: var(--bg-surface);
+    }
+    .msg-action-btn.copied {
+      color: var(--accent-success);
+    }
+
     .role-label {
       font-size: 11px;
       font-weight: 600;
@@ -122,6 +161,40 @@ class ChatPanel extends RpcMixin(LitElement) {
       font-size: 10px;
       color: var(--text-muted);
       font-family: var(--font-sans);
+    }
+
+    .md-content pre .code-copy-btn {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      padding: 2px 6px;
+      border: none;
+      border-radius: 3px;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity var(--transition-fast), background var(--transition-fast);
+      z-index: 1;
+      font-family: var(--font-sans);
+      line-height: 1;
+    }
+    .md-content pre .code-copy-btn:hover {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+    }
+    .md-content pre:hover .code-copy-btn {
+      opacity: 1;
+    }
+    .md-content pre .code-copy-btn.copied {
+      opacity: 1;
+      color: var(--accent-success);
+    }
+
+    /* Shift lang label left when copy button is present */
+    .md-content pre .code-lang {
+      right: 36px;
     }
 
     .md-content ul, .md-content ol { margin: 0.4em 0; padding-left: 1.5em; }
@@ -512,13 +585,24 @@ class ChatPanel extends RpcMixin(LitElement) {
     const isLast = idx === (this.messages || []).length - 1;
     const forceVisible = total - idx <= 15;
 
+    const actionBar = (pos) => html`
+      <div class="msg-actions ${pos}">
+        <button class="msg-action-btn" title="Copy to clipboard"
+          @click=${(e) => this._onCopyMessage(e, msg)}>📋</button>
+        <button class="msg-action-btn" title="Copy to prompt"
+          @click=${() => this._onCopyToPrompt(msg)}>↩</button>
+      </div>
+    `;
+
     return html`
       <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}">
+        ${actionBar('top')}
         <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser
           ? html`<div class="md-content">${unsafeHTML(this._renderUserContent(msg.content))}</div>`
           : this._renderAssistantContent(msg.content, isLast, true)
         }
+        ${actionBar('bottom')}
       </div>
     `;
   }
@@ -777,6 +861,29 @@ class ChatPanel extends RpcMixin(LitElement) {
   }
 
   _onMdContentClick(e) {
+    // Delegate clicks on code copy buttons
+    const copyBtn = e.target.closest('.code-copy-btn');
+    if (copyBtn) {
+      e.preventDefault();
+      const pre = copyBtn.closest('pre');
+      if (pre) {
+        const code = pre.querySelector('code');
+        const text = code ? code.textContent : pre.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+          copyBtn.textContent = '✓ Copied';
+          copyBtn.classList.add('copied');
+          setTimeout(() => {
+            copyBtn.textContent = '📋';
+            copyBtn.classList.remove('copied');
+          }, 1500);
+        }).catch(() => {
+          copyBtn.textContent = '✗ Failed';
+          setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
+        });
+      }
+      return;
+    }
+
     // Delegate clicks on file mentions within rendered markdown
     const mention = e.target.closest('.file-mention');
     if (mention) {
@@ -785,6 +892,41 @@ class ChatPanel extends RpcMixin(LitElement) {
         this._onFileMentionClick(filePath);
       }
     }
+  }
+
+  _getMessageText(msg) {
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+      return msg.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('\n');
+    }
+    return String(msg.content || '');
+  }
+
+  _onCopyMessage(e, msg) {
+    const btn = e.currentTarget;
+    const text = this._getMessageText(msg);
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '✓';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = '📋';
+        btn.classList.remove('copied');
+      }, 1500);
+    }).catch(() => {
+      btn.textContent = '✗';
+      setTimeout(() => { btn.textContent = '📋'; }, 1500);
+    });
+  }
+
+  _onCopyToPrompt(msg) {
+    const text = this._getMessageText(msg);
+    this.dispatchEvent(new CustomEvent('copy-to-prompt', {
+      detail: { text },
+      bubbles: true, composed: true,
+    }));
   }
 
   _onEditFileClick(filePath) {

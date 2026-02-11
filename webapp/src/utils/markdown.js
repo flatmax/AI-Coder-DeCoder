@@ -57,7 +57,8 @@ const marked = new Marked({
         highlighted = escapeHtml(text);
       }
       const langLabel = language ? `<span class="code-lang">${language}</span>` : '';
-      return `<pre class="code-block">${langLabel}<code class="hljs${language ? ` language-${language}` : ''}">${highlighted}</code></pre>`;
+      const copyBtn = `<button class="code-copy-btn" title="Copy code">📋</button>`;
+      return `<pre class="code-block">${langLabel}${copyBtn}<code class="hljs${language ? ` language-${language}` : ''}">${highlighted}</code></pre>`;
     },
   },
 });

@@ -683,6 +683,23 @@ class FilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  // ── Copy to prompt ──
+
+  _onCopyToPrompt(e) {
+    const { text } = e.detail;
+    if (!text) return;
+    const input = this.shadowRoot.querySelector('chat-input');
+    if (input) {
+      const textarea = input.shadowRoot?.querySelector('textarea');
+      if (textarea) {
+        textarea.value = text;
+        textarea.dispatchEvent(new Event('input'));
+        input._autoResize(textarea);
+        input.focus();
+      }
+    }
+  }
+
   // ── Panel divider drag ──
 
   _onDividerDown(e) {
@@ -921,6 +938,7 @@ class FilesTab extends RpcMixin(LitElement) {
           .repoFiles=${this._repoFiles}
           .selectedFiles=${new Set(this.selectedFiles)}
           @file-mention-click=${this._onFileMentionClick}
+          @copy-to-prompt=${this._onCopyToPrompt}
         ></chat-panel>
 
         <url-chips
