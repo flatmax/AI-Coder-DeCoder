@@ -88,7 +88,7 @@ The base URL is overridable via `AC_WEBAPP_BASE_URL` environment variable.
 
 ## Startup Sequence
 
-1. Validate git repository (exit with error if not a repo)
+1. Validate git repository (if not a repo, open a self-contained HTML page in the browser showing AC⚡DC branding, repo path, and instructions; print terminal banner with `git init` / `cd <repo>` instructions, and exit)
 2. Find available ports (server port required, webapp port for local modes)
 3. Initialize services: ConfigManager, Repo, LLM, Settings
 4. Register service classes with JRPCServer

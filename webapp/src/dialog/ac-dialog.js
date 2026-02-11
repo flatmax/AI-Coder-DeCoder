@@ -208,6 +208,52 @@ class AcDialog extends RpcMixin(LitElement) {
       font-size: 14px;
     }
 
+    .connecting-overlay {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 16px;
+      color: var(--text-secondary);
+      font-size: 14px;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .connecting-brand {
+      font-size: 3rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      opacity: 0.6;
+      letter-spacing: 2px;
+      font-family: var(--font-mono);
+    }
+
+    .connecting-spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--border-color);
+      border-top-color: var(--accent-primary);
+      border-radius: 50%;
+      animation: conn-spin 0.8s linear infinite;
+    }
+
+    @keyframes conn-spin { to { transform: rotate(360deg); } }
+
+    .connecting-message {
+      color: var(--text-muted);
+      font-size: 13px;
+      max-width: 300px;
+      line-height: 1.5;
+    }
+
+    .connecting-error {
+      color: var(--accent-error);
+      font-size: 13px;
+    }
+
     /* History bar */
     .history-bar {
       height: 3px;
@@ -552,21 +598,35 @@ class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <div class="content">
-          ${this._renderTabPanel('FILES', () => html`
-            <files-tab></files-tab>
-          `)}
-          ${this._renderTabPanel('SEARCH', () => html`
-            <search-tab></search-tab>
-          `)}
-          ${this._renderTabPanel('CONTEXT', () => html`
-            <context-tab></context-tab>
-          `)}
-          ${this._renderTabPanel('CACHE', () => html`
-            <cache-tab></cache-tab>
-          `)}
-          ${this._renderTabPanel('SETTINGS', () => html`
-            <settings-tab></settings-tab>
-          `)}
+          ${!this.connected ? html`
+            <div class="connecting-overlay">
+              <div class="connecting-brand">AC⚡DC</div>
+              ${this.error ? html`
+                <div class="connecting-error">${this.error}</div>
+                <div class="connecting-spinner"></div>
+                <div class="connecting-message">Attempting to reconnect to server...</div>
+              ` : html`
+                <div class="connecting-spinner"></div>
+                <div class="connecting-message">Connecting to server...</div>
+              `}
+            </div>
+          ` : html`
+            ${this._renderTabPanel('FILES', () => html`
+              <files-tab></files-tab>
+            `)}
+            ${this._renderTabPanel('SEARCH', () => html`
+              <search-tab></search-tab>
+            `)}
+            ${this._renderTabPanel('CONTEXT', () => html`
+              <context-tab></context-tab>
+            `)}
+            ${this._renderTabPanel('CACHE', () => html`
+              <cache-tab></cache-tab>
+            `)}
+            ${this._renderTabPanel('SETTINGS', () => html`
+              <settings-tab></settings-tab>
+            `)}
+          `}
         </div>
 
         <div class="history-bar" role="progressbar"

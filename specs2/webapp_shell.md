@@ -140,6 +140,7 @@ specs2/webapp_shell.md
 - On RPC ready: call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), load file tree, load snippets, sync history bar
 ═══════ REPL
 ### Startup
+- Validate git repository — if not a repo, write a self-contained HTML file (AC⚡DC branding, repo path, `git init`/`cd` instructions) to a temp file, open it as `file://` in the browser, print terminal banner, and exit. No server or webapp is started.
 - Initialize diff viewer (background layer) and dialog (foreground)
 - Register event listeners for file navigation and save events
 - On RPC ready: call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), load file tree, load snippets, sync history bar

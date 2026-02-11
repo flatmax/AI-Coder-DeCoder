@@ -155,9 +155,89 @@ async def run_server(args: argparse.Namespace):
 
     repo_root = Path(args.repo_path).resolve()
 
-    # Validate git repo
+    # Validate git repo — open browser with branding, print instructions, exit
     if not (repo_root / ".git").exists():
-        print(f"Error: {repo_root} is not a git repository", file=sys.stderr)
+        print()
+        print("=" * 60)
+        print("  AC⚡DC")
+        print()
+        print("  Not a git repository:")
+        print(f"  {repo_root}")
+        print()
+        print("  To get started, run one of:")
+        print(f"    git init {repo_root}")
+        print(f"    cd <existing-repo> && ac-dc")
+        print("=" * 60)
+        print()
+
+        if not args.no_browser:
+            import tempfile
+            html_content = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AC⚡DC</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh;
+  }}
+  .container {{
+    text-align: center; padding: 48px;
+    background: #16213e; border-radius: 16px;
+    border: 1px solid #2a2a4a; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    max-width: 520px;
+  }}
+  .brand {{
+    font-size: 4rem; font-weight: 700; letter-spacing: 2px;
+    margin-bottom: 32px; opacity: 0.85;
+  }}
+  .brand .bolt {{ color: #ffd700; }}
+  .error-title {{
+    font-size: 1.2rem; color: #ff6b6b; margin-bottom: 16px; font-weight: 600;
+  }}
+  .path {{
+    font-family: monospace; background: #0f3460; padding: 8px 16px;
+    border-radius: 8px; margin: 16px 0; font-size: 0.9rem;
+    word-break: break-all; color: #a0c4ff;
+  }}
+  .instructions {{
+    text-align: left; margin-top: 24px; padding: 16px 20px;
+    background: #0f3460; border-radius: 8px; line-height: 1.8;
+  }}
+  .instructions .label {{
+    color: #8888aa; font-size: 0.85rem; margin-bottom: 8px;
+  }}
+  code {{
+    background: #1a1a2e; padding: 4px 10px; border-radius: 4px;
+    font-size: 0.9rem; color: #7bed9f; display: inline-block;
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="brand">AC<span class="bolt">⚡</span>DC</div>
+  <div class="error-title">Not a Git Repository</div>
+  <div class="path">{repo_root}</div>
+  <div class="instructions">
+    <div class="label">To get started, run one of:</div>
+    <div><code>git init {repo_root}</code></div>
+    <div style="margin-top:4px"><code>cd &lt;existing-repo&gt; &amp;&amp; ac-dc</code></div>
+  </div>
+</div>
+</body>
+</html>"""
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".html", prefix="ac-dc-", delete=False, mode="w",
+            )
+            tmp.write(html_content)
+            tmp.close()
+            webbrowser.open(f"file://{tmp.name}")
+
         sys.exit(1)
 
     # Find ports
