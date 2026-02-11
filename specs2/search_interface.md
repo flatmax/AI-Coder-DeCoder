@@ -16,6 +16,22 @@ Three toggles (persisted to local storage):
 
 Toggling re-runs the current search immediately.
 
+## Global Shortcut
+
+**Ctrl+Shift+F** (Cmd+Shift+F on macOS) opens the Search tab from anywhere and pre-fills the search input:
+
+1. The browser's current text selection is captured **synchronously** in the keydown handler (before focus changes clear it)
+2. If the dialog is minimized, it un-minimizes
+3. The Search tab activates
+4. The search input is populated with the captured selection text and auto-searches
+
+**Priority chain** for pre-fill:
+1. **Browser selection** (`window.getSelection()`) — text highlighted in the UI (chat, diff viewer, search results). On Linux this mirrors the X11 primary selection within the app
+2. **Clipboard** (`navigator.clipboard.readText()`) — fallback to Ctrl+C clipboard
+3. **Just focus** — if both are empty or unavailable
+
+Multi-line selections are ignored (not useful as search queries). The populated text is auto-selected for easy replacement.
+
 ## Search Execution
 
 1. User types → debounced at 300ms

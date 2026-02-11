@@ -285,6 +285,42 @@ class SearchTab extends RpcMixin(LitElement) {
     });
   }
 
+  /**
+   * Focus the search input and pre-fill with the given text,
+   * falling back to clipboard if no text is provided.
+   */
+  async focusWithSelection(preCapturedText) {
+    await this.updateComplete;
+    const input = this.shadowRoot.querySelector('.search-input');
+    if (!input) return;
+
+    // 1. Use pre-captured selection text (grabbed before focus steals it)
+    const selected = (preCapturedText || '').trim();
+    if (selected && !selected.includes('\n')) {
+      this._query = selected;
+      input.value = selected;
+      input.focus();
+      input.select();
+      this._scheduleSearch();
+      return;
+    }
+
+    // 2. Fallback to clipboard
+    input.focus();
+    try {
+      const text = await navigator.clipboard.readText();
+      const trimmed = (text || '').trim();
+      if (trimmed && !trimmed.includes('\n')) {
+        this._query = trimmed;
+        input.value = trimmed;
+        input.select();
+        this._scheduleSearch();
+      }
+    } catch {
+      // Clipboard read denied or unavailable — just focus
+    }
+  }
+
   // ── Search execution ──
 
   _onInput(e) {

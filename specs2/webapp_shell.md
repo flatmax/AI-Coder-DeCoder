@@ -32,6 +32,16 @@ The diff viewer and dialog are **siblings** in the app shell. The diff viewer fi
 
 The dialog starts **docked to the left edge** of the viewport, filling the full height. Default width is 50% of the viewport (minimum 400px). This leaves the right half of the screen available for the diff viewer.
 
+### Global Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Alt+1..5 | Switch to tab (Files, Search, Context, Cache, Settings) |
+| Alt+M | Toggle minimize |
+| Ctrl+Shift+F | Open Search tab with current selection or clipboard text |
+
+Ctrl+Shift+F captures the browser's text selection synchronously before switching tabs (focus changes would otherwise clear the selection), then passes it to the search tab for pre-fill. See [Search Interface — Global Shortcut](search_interface.md#global-shortcut).
+
 ### Positioning & Dragging
 
 - Default: fixed positioning, left-docked, full height

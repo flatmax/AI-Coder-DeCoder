@@ -12,7 +12,7 @@ The following are explicitly deferred to implementation time:
 - **Error/loading UI states** — spinners, skeletons, reconnection indicators, toast system
 - **CSS/styling** — design tokens, color system, spacing conventions, responsive behavior
 - **Accessibility** — ARIA roles, focus management (can be added incrementally)
-- **Keyboard shortcuts** — Ctrl+S for save; others added as needed
+- **Keyboard shortcuts** — Ctrl+S for save, Ctrl+Shift+F for global search; others added as needed
 
 ### Tree-Sitter Integration
 Individual `tree-sitter-{language}` packages provide grammars. Per-language extractor classes walk the AST using tree-sitter's node API. The parser supports multiple API versions and falls back to `tree-sitter-languages` if individual packages are unavailable.

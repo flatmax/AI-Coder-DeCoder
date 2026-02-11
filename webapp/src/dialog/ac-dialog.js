@@ -350,6 +350,20 @@ class AcDialog extends RpcMixin(LitElement) {
   // ── Global keyboard shortcuts ──
 
   _onGlobalKeyDown(e) {
+    // Ctrl+Shift+F (or Cmd+Shift+F) to open search tab with selection/clipboard
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      // Capture selection NOW before focus change clears it
+      const sel = window.getSelection();
+      const selectedText = sel ? sel.toString() : '';
+      if (this.minimized) this._toggleMinimize();
+      this._switchTab('SEARCH');
+      this.updateComplete.then(() => {
+        const searchTab = this.shadowRoot.querySelector('search-tab');
+        if (searchTab) searchTab.focusWithSelection(selectedText);
+      });
+      return;
+    }
     // Alt+1..5 to switch tabs
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const tabId = AcDialog.KEYBOARD_SHORTCUTS[e.key];
