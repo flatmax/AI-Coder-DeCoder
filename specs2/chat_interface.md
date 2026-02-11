@@ -390,16 +390,17 @@ Users can paste images into the input area for multimodal LLM queries.
 | In-session display | Images are stored on the message object (base64 data URIs) for the duration of the active session. Thumbnails render inline in user message cards and can be clicked to view full-size in a lightbox overlay |
 | Re-send behavior | Previously sent images are **not** re-included in LLM context on subsequent messages — they are display-only after the original send |
 
-## Git Action Buttons
+## Action Bar
 
-Three buttons in the header (Files tab only):
+The header bar groups session actions on the left and git operations on the right. Git buttons are icon-only (tooltips provide labels).
 
-| Button | Action |
-|--------|--------|
-| 📋 Copy diff | Fetch staged + unstaged diffs, copy combined to clipboard |
-| 💾 Commit | Stage all → generate message via LLM → commit → show commit message in chat (auto-scroll only if already at bottom) → refresh tree |
-| ⚠️ Reset | Confirm dialog → hard reset to HEAD → refresh tree |
-| ✨ New session | Clear chat, start fresh session |
+| Side | Button | Action |
+|------|--------|--------|
+| Left | ✨ | New session — clear chat, start fresh session |
+| Left | 📜 | Browse history — open history browser modal |
+| Right | 📋 | Copy diff — fetch staged + unstaged diffs, copy combined to clipboard |
+| Right | 💾 | Commit — stage all → generate message via LLM → commit → show commit message in chat (auto-scroll only if already at bottom) → refresh tree |
+| Right | ⚠️ | Reset — confirm dialog → hard reset to HEAD → refresh tree |
 
 ## Token HUD Overlay
 
