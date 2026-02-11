@@ -940,26 +940,20 @@ class FilesTab extends RpcMixin(LitElement) {
       </div>
 
       <div class="chat-panel-container">
-        <div class="git-actions" role="toolbar" aria-label="Git actions">
-          <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard"
-            aria-label="Copy diff to clipboard">
-            📋 Diff
-          </button>
-          <button class="git-btn" @click=${this._commitWithMessage}
-            ?disabled=${this.streaming} title="Stage all, generate message, commit"
-            aria-label="Auto-commit with generated message">
-            💾 Commit
-          </button>
-          <button class="git-btn danger" @click=${this._requestReset}
-            ?disabled=${this.streaming} title="Reset to HEAD"
-            aria-label="Reset repository to HEAD">
-            ⚠️ Reset
-          </button>
-          <span class="git-spacer"></span>
+        <div class="git-actions" role="toolbar" aria-label="Session and git actions">
+          <button class="session-btn" @click=${this._newSession}
+            title="New session" aria-label="Start new session">✨</button>
           <button class="session-btn" @click=${this._openHistory}
             title="Browse history" aria-label="Browse conversation history">📜</button>
-          <button class="session-btn" @click=${this._newSession}
-            title="New session (clear chat)" aria-label="Start new session">🗑️</button>
+          <span class="git-spacer"></span>
+          <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard"
+            aria-label="Copy diff to clipboard">📋</button>
+          <button class="git-btn" @click=${this._commitWithMessage}
+            ?disabled=${this.streaming} title="Stage all, generate message, commit"
+            aria-label="Auto-commit with generated message">💾</button>
+          <button class="git-btn danger" @click=${this._requestReset}
+            ?disabled=${this.streaming} title="Reset to HEAD"
+            aria-label="Reset repository to HEAD">⚠️</button>
         </div>
 
         <chat-panel
