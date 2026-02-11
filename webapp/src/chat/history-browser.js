@@ -512,14 +512,16 @@ class HistoryBrowser extends RpcMixin(LitElement) {
         console.error('Load session failed:', result.error);
         return;
       }
+      // Use server-returned messages which include reconstructed images
+      const messages = result.messages || this._messages.map(m => ({
+        role: m.role,
+        content: m.content,
+      }));
       // Dispatch event so files-tab rebuilds messages
       this.dispatchEvent(new CustomEvent('session-loaded', {
         detail: {
           sessionId: this._selectedId,
-          messages: this._messages.map(m => ({
-            role: m.role,
-            content: m.content,
-          })),
+          messages,
         },
         bubbles: true, composed: true,
       }));
@@ -729,6 +731,14 @@ class HistoryBrowser extends RpcMixin(LitElement) {
           </div>
         </div>
         <div class="msg-content">${msg.content || ''}</div>
+        ${msg.images?.length ? html`
+          <div class="msg-files" style="gap:6px; padding:6px 10px;">
+            ${msg.images.map(src => html`
+              <img src=${src} style="max-width:80px; max-height:80px; border-radius:4px; border:1px solid var(--border-color);"
+                alt="Attached image" title="Attached image">
+            `)}
+          </div>
+        ` : nothing}
         ${msg.files?.length ? html`
           <div class="msg-files">
             ${msg.files.map(f => html`<span class="file-badge">${f}</span>`)}

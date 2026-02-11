@@ -26,7 +26,8 @@ HistoryMessage:
     timestamp: ISO 8601 UTC
     role: "user" | "assistant"
     content: string
-    images: integer?         // Count of attached images (data not stored)
+    image_refs: string[]?    // Filenames in .ac-dc/images/ (e.g. ["1736956800000-a1b2c3d4e5f6.png"])
+    images: integer?         // DEPRECATED — legacy count field for backward compatibility
     files: string[]?         // Files in context (user messages)
     files_modified: string[]? // Files changed (assistant messages)
     edit_results: object[]?  // Edit block results

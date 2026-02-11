@@ -4,15 +4,29 @@ Stores messages per-repository in `.ac-dc/history.jsonl`.
 Supports session management, search, and loading into active context.
 """
 
+import base64
+import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 log = logging.getLogger(__name__)
+
+# MIME type → file extension mapping for saved images
+_MIME_TO_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+# Extension → MIME type for reading
+_EXT_TO_MIME = {v: k for k, v in _MIME_TO_EXT.items()}
 
 
 def _make_message_id() -> str:
@@ -89,6 +103,81 @@ class HistoryStore:
     # Writing
     # ------------------------------------------------------------------
 
+    def _save_images(self, data_uris: list[str]) -> list[str]:
+        """Save base64 data URI images to .ac-dc/images/ and return filenames.
+
+        Each image is named {epoch_ms}-{hash12}.{ext} for chronological
+        sort order on disk with content-based deduplication.
+        """
+        images_dir = self._ac_dc_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        filenames = []
+        epoch_ms = int(time.time() * 1000)
+
+        for uri in data_uris:
+            try:
+                # Parse data URI: data:image/TYPE;base64,PAYLOAD
+                match = re.match(r"data:(image/[^;]+);base64,(.*)", uri, re.DOTALL)
+                if not match:
+                    log.warning("Skipping invalid image data URI (no match)")
+                    continue
+
+                mime_type = match.group(1)
+                b64_payload = match.group(2)
+
+                # Compute hash from full data URI for dedup
+                content_hash = hashlib.sha256(uri.encode()).hexdigest()[:12]
+
+                # Determine extension
+                ext = _MIME_TO_EXT.get(mime_type, ".png")
+
+                filename = f"{epoch_ms}-{content_hash}{ext}"
+                filepath = images_dir / filename
+
+                if not filepath.exists():
+                    binary_data = base64.b64decode(b64_payload)
+                    filepath.write_bytes(binary_data)
+
+                filenames.append(filename)
+            except Exception as e:
+                log.warning("Failed to save image: %s", e)
+
+        return filenames
+
+    def _load_image(self, filename: str) -> Optional[str]:
+        """Load an image file and return it as a base64 data URI.
+
+        Returns None if the file doesn't exist or can't be read.
+        """
+        filepath = self._ac_dc_dir / "images" / filename
+        if not filepath.exists():
+            log.warning("Image file not found: %s", filename)
+            return None
+        try:
+            binary_data = filepath.read_bytes()
+            ext = filepath.suffix.lower()
+            mime_type = _EXT_TO_MIME.get(ext, "image/png")
+            b64 = base64.b64encode(binary_data).decode("ascii")
+            return f"data:{mime_type};base64,{b64}"
+        except Exception as e:
+            log.warning("Failed to load image %s: %s", filename, e)
+            return None
+
+    def _reconstruct_images(self, msg: dict) -> list[str]:
+        """Reconstruct image data URIs from a message's image_refs.
+
+        Returns a list of data URI strings, skipping any that can't be loaded.
+        """
+        refs = msg.get("image_refs")
+        if not refs or not isinstance(refs, list):
+            return []
+        images = []
+        for filename in refs:
+            uri = self._load_image(filename)
+            if uri:
+                images.append(uri)
+        return images
+
     def append_message(
         self,
         session_id: str,
@@ -97,9 +186,15 @@ class HistoryStore:
         files: Optional[list[str]] = None,
         files_modified: Optional[list[str]] = None,
         edit_results: Optional[list[dict]] = None,
-        images: int = 0,
+        images: Union[int, list[str], None] = None,
     ) -> dict:
-        """Append a message to the JSONL file and in-memory index."""
+        """Append a message to the JSONL file and in-memory index.
+
+        Args:
+            images: Either a list of base64 data URIs (saves to disk,
+                    stores filenames as image_refs) or an integer count
+                    (legacy, stored as-is).
+        """
         self._ensure_loaded()
 
         msg = {
@@ -109,7 +204,12 @@ class HistoryStore:
             "role": role,
             "content": content,
         }
-        if images:
+        # Handle images — list of data URIs or legacy integer count
+        if isinstance(images, list) and images:
+            image_refs = self._save_images(images)
+            if image_refs:
+                msg["image_refs"] = image_refs
+        elif isinstance(images, int) and images:
             msg["images"] = images
         if files:
             msg["files"] = files
@@ -184,6 +284,16 @@ class HistoryStore:
         return results
 
     def get_session_messages_for_context(self, session_id: str) -> list[dict]:
-        """Get session messages in context manager format ({role, content})."""
+        """Get session messages in context manager format ({role, content}).
+
+        Reconstructs images from image_refs so the frontend can display them.
+        """
         msgs = self.get_session(session_id)
-        return [{"role": m["role"], "content": m["content"]} for m in msgs]
+        result = []
+        for m in msgs:
+            entry = {"role": m["role"], "content": m["content"]}
+            images = self._reconstruct_images(m)
+            if images:
+                entry["images"] = images
+            result.append(entry)
+        return result

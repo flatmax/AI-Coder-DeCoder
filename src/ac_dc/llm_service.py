@@ -282,7 +282,7 @@ class LLM:
                 role="user",
                 content=message,
                 files=valid_files or None,
-                images=len(images) if images else 0,
+                images=images if images else None,
             )
 
             # -- Stream LLM completion --
@@ -595,7 +595,13 @@ class LLM:
         return self._history_store.list_sessions(limit)
 
     def history_get_session(self, session_id: str) -> list[dict]:
-        return self._history_store.get_session(session_id)
+        """Get session messages with images reconstructed for display."""
+        msgs = self._history_store.get_session(session_id)
+        for msg in msgs:
+            images = self._history_store._reconstruct_images(msg)
+            if images:
+                msg["images"] = images
+        return msgs
 
     def history_search(self, query: str, role: str = None, limit: int = 50) -> list[dict]:
         return self._history_store.search(query, role, limit)
@@ -609,7 +615,12 @@ class LLM:
         self._session_id = session_id
         for msg in messages:
             self._context.add_message(msg["role"], msg["content"])
-        return {"ok": True, "message_count": len(messages), "session_id": session_id}
+        return {
+            "ok": True,
+            "message_count": len(messages),
+            "session_id": session_id,
+            "messages": messages,
+        }
 
     # ------------------------------------------------------------------
     # URL handling
