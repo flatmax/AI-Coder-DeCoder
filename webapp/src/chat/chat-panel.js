@@ -631,7 +631,7 @@ class ChatPanel extends RpcMixin(LitElement) {
     const segments = segmentResponse(content);
     const resultMap = showEditResults ? this.editResults : [];
 
-    // Collect all mentioned files across text segments (final render only)
+    // Collect all mentioned files across text segments and edit blocks (final render only)
     let allMentionedFiles = [];
 
     return html`
@@ -648,6 +648,8 @@ class ChatPanel extends RpcMixin(LitElement) {
           }
           if (seg.type === 'edit') {
             const result = resultMap.find(r => r.file_path === seg.filePath);
+            // Collect edit block file paths for the summary section
+            if (isFinal && seg.filePath) allMentionedFiles.push(seg.filePath);
             return this._renderEditBlock(seg, result);
           }
           if (seg.type === 'edit-pending') {
@@ -940,7 +942,22 @@ class ChatPanel extends RpcMixin(LitElement) {
 
   scrollToBottom() {
     this._userScrolledUp = false;
-    this._scrollToBottom();
+    // content-visibility: auto means off-screen messages have no height yet.
+    // Force scrollTop to scrollHeight repeatedly — each scroll reveals more
+    // content, increasing scrollHeight. Continue until stable or max retries.
+    let retries = 0;
+    let lastScrollHeight = 0;
+    const pump = () => {
+      const container = this.shadowRoot?.querySelector('.messages');
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+      // Stop when scrollHeight stabilizes or after enough retries
+      if (retries++ < 20 && container.scrollHeight !== lastScrollHeight) {
+        lastScrollHeight = container.scrollHeight;
+        requestAnimationFrame(pump);
+      }
+    };
+    this.updateComplete.then(() => requestAnimationFrame(pump));
   }
 
   /** Scroll to bottom only if the user hasn't scrolled up. */

@@ -16,14 +16,25 @@ Cards use efficient keyed rendering for DOM reuse.
 
 Assistant messages frequently reference repository file paths in prose (e.g., "You should edit `src/utils/helpers.js` to fix this"). The system detects these paths, highlights them as clickable links, and shows a summary section with buttons to add files to context.
 
+### Sources
+
+File mentions are collected from **two sources** within each assistant message:
+
+1. **Text segments** — file paths detected in prose via regex matching against known repo files
+2. **Edit block headers** — the `filePath` from each edit block (files the LLM proposed changes to)
+
+Both sources feed into the same deduplication and summary rendering. This ensures the "Files Referenced" section appears even when the assistant only produces edit blocks with no prose file mentions.
+
 ### Detection & Highlighting
 
-On **final render only** (not during streaming), the rendered HTML of each assistant message is scanned against the list of known repo files (from the file tree):
+On **final render only** (not during streaming), the rendered HTML of each text segment in an assistant message is scanned against the list of known repo files (from the file tree):
 
 1. **Pre-filter** — only check files whose path appears as a substring in the raw message text (cheap check before regex)
 2. **Sort candidates** by path length descending — so `src/utils/helpers.js` matches before `helpers.js`
 3. **Build a single combined regex** from all candidate paths
 4. **Replace matches** in the HTML with clickable spans
+
+Edit block file paths are collected directly from the parsed segment data — no regex matching needed.
 
 Each match becomes:
 ```html

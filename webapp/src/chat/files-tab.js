@@ -321,11 +321,18 @@ class FilesTab extends RpcMixin(LitElement) {
       this.selectedFiles = state.selected_files || [];
       this.streaming = state.streaming_active || false;
       // Sync selection to picker and scroll chat to bottom
+      // Double updateComplete: first waits for files-tab to pass messages down,
+      // second waits for chat-panel to render them, so scroll target exists.
       this.updateComplete.then(() => {
         const picker = this.shadowRoot.querySelector('file-picker');
         if (picker && this.selectedFiles.length) picker.setSelectedFiles(this.selectedFiles);
         if (this.messages.length > 0) {
-          this.shadowRoot.querySelector('chat-panel')?.scrollToBottom();
+          const panel = this.shadowRoot.querySelector('chat-panel');
+          if (panel) {
+            panel.updateComplete.then(() => {
+              panel.scrollToBottom();
+            });
+          }
         }
       });
     }
