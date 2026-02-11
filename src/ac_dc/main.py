@@ -67,11 +67,26 @@ def _start_vite_dev(webapp_dir: Path, port: int) -> subprocess.Popen | None:
 
 
 def get_version() -> str:
-    """Detect version from VERSION file or git."""
-    # Check for baked VERSION file
-    version_file = Path(__file__).parent / "VERSION"
-    if version_file.exists():
-        return version_file.read_text().strip()
+    """Detect version from VERSION file or git.
+
+    Returns a version string like '2025.01.15-14.32-a1b2c3d4' (baked)
+    or 'a1b2c3d4' (git) or 'dev' (fallback).
+    """
+    # Check for baked VERSION file (bundled releases)
+    locations = [Path(__file__).parent / "VERSION"]
+
+    # PyInstaller sets sys.frozen = True on bundled executables
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        locations.insert(0, bundle_dir / "ac_dc" / "VERSION")
+        locations.insert(1, bundle_dir / "VERSION")
+
+    for version_file in locations:
+        try:
+            if version_file.exists():
+                return version_file.read_text().strip()
+        except (OSError, IOError):
+            pass
 
     # Try git
     try:
@@ -85,7 +100,50 @@ def get_version() -> str:
     except Exception:
         pass
 
+    # Fallback: read .git/HEAD directly
+    try:
+        git_dir = Path(__file__).parent.parent.parent / ".git"
+        head_file = git_dir / "HEAD"
+        if head_file.exists():
+            head = head_file.read_text().strip()
+            if head.startswith("ref: "):
+                ref_path = git_dir / head[5:]
+                if ref_path.exists():
+                    return ref_path.read_text().strip()[:8]
+            elif len(head) >= 8:
+                return head[:8]
+    except (OSError, IOError):
+        pass
+
     return "dev"
+
+
+def get_git_sha(short: bool = True) -> str | None:
+    """Get the git SHA for webapp URL matching.
+
+    Extracts the short SHA from the baked version string or git.
+    """
+    version = get_version()
+    if version == "dev":
+        return None
+
+    # Baked version format: '2025.01.15-14.32-a1b2c3d4' — SHA is the last segment
+    if "." in version and "-" in version:
+        sha = version.rsplit("-", 1)[-1]
+        if len(sha) >= 7:
+            return sha[:8] if short else sha
+        return sha
+
+    # Raw SHA from git
+    return version[:8] if short else version
+
+
+def get_webapp_base_url() -> str:
+    """Get the base URL for the hosted webapp."""
+    return os.environ.get(
+        "AC_WEBAPP_BASE_URL",
+        "https://flatmax.github.io/AI-Coder-DeCoder",
+    )
 
 
 async def run_server(args: argparse.Namespace):
@@ -147,7 +205,14 @@ async def run_server(args: argparse.Namespace):
         if args.dev:
             url = f"http://localhost:{webapp_port}/?port={server_port}"
         else:
-            url = f"http://localhost:{server_port}/?port={server_port}"
+            base_url = get_webapp_base_url()
+            sha = get_git_sha(short=True)
+            if sha:
+                url = f"{base_url}/{sha}/?port={server_port}"
+            else:
+                # Fallback: root redirect via versions.json
+                url = f"{base_url}/?port={server_port}"
+
         print(f"Opening: {url}")
         webbrowser.open(url)
 

@@ -8,17 +8,17 @@ The webapp is a web-component-based SPA. It connects to the terminal backend ove
 
 ### Mode 1: Hosted Webapp (Default)
 
-No local webapp server. The terminal app starts only the RPC WebSocket server. The browser opens a pre-built webapp hosted externally (e.g., GitHub Pages).
+No local webapp server. The terminal app starts only the RPC WebSocket server. The browser opens a pre-built webapp hosted on GitHub Pages.
 
 ```pseudo
-URL = https://{hosted_domain}/{version_sha}/?port={server_port}
+URL = https://flatmax.github.io/AI-Coder-DeCoder/{version_sha}/?port={server_port}
 ```
 
 The version SHA matches the running codebase so the webapp is always compatible with the backend.
 
 ### Mode 2: Local Dev Server
 
-Starts a dev server alongside the RPC server. Provides hot module replacement for development.
+Starts a Vite dev server alongside the RPC server. Provides hot module replacement for development.
 
 ```pseudo
 URL = http://localhost:{webapp_port}/?port={server_port}
@@ -28,24 +28,75 @@ URL = http://localhost:{webapp_port}/?port={server_port}
 
 Builds the webapp, then serves the production bundle locally. For testing production builds.
 
-## Version Detection
+## Version-Matching Flow
 
-To match the webapp build to the backend:
-1. Check for a baked `VERSION` file (packaged builds)
-2. Run `git rev-parse HEAD`
-3. Read `.git/HEAD` directly (handles detached HEAD)
-4. Fallback: none (use root redirect URL)
+The core problem: the desktop binary must open the **exact** webapp version it was built with. This is solved by baking the version into the binary and deploying each commit's webapp to a SHA-specific directory on GitHub Pages.
+
+### End-to-End Flow
+
+```
+git push master
+    │
+    ├─ deploy-pages.yml: builds webapp at /AI-Coder-DeCoder/{sha}/
+    │
+    └─ release.yml: bakes version "2025.01.15-14.32-{sha}" into binary
+         │
+         ▼
+User runs binary
+    │
+    ├─ Reads VERSION file → "2025.01.15-14.32-a1b2c3d4"
+    ├─ Extracts SHA → "a1b2c3d4"
+    ├─ Constructs URL → https://flatmax.github.io/AI-Coder-DeCoder/a1b2c3d4/?port=18080
+    │
+    ▼
+Browser loads hosted webapp
+    │
+    ├─ Reads ?port=18080 from URL
+    └─ Connects ws://localhost:18080 back to local RPC server
+```
+
+### Version Detection (`get_version()`)
+
+Priority chain for determining the current version:
+
+1. **Baked VERSION file** — checked first; works in PyInstaller bundles
+   - PyInstaller bundle: `{_MEIPASS}/ac_dc/VERSION` or `{_MEIPASS}/VERSION`
+   - Source install: `src/ac_dc/VERSION`
+2. **`git rev-parse HEAD`** — subprocess call, works during development
+3. **`.git/HEAD` direct read** — fallback if git binary unavailable (reads ref, resolves to SHA)
+4. **Fallback**: `"dev"` (triggers root redirect URL)
+
+### SHA Extraction (`get_git_sha()`)
+
+Extracts the 8-character short SHA from the version string:
+
+| Version Format | Example | SHA Extracted |
+|----------------|---------|---------------|
+| Baked (date-sha) | `2025.01.15-14.32-a1b2c3d4` | `a1b2c3d4` (rsplit on `-`) |
+| Git (raw sha) | `a1b2c3d4` | `a1b2c3d4` (first 8 chars) |
+| Fallback | `dev` | `None` (use root redirect) |
+
+### Browser URL Construction
+
+| Mode | URL |
+|------|-----|
+| `--dev` | `http://localhost:{webapp_port}/?port={server_port}` |
+| Normal (SHA found) | `https://flatmax.github.io/AI-Coder-DeCoder/{sha}/?port={server_port}` |
+| Normal (no SHA) | `https://flatmax.github.io/AI-Coder-DeCoder/?port={server_port}` (root redirect) |
+
+The base URL is overridable via `AC_WEBAPP_BASE_URL` environment variable.
 
 ## Startup Sequence
 
 1. Validate git repository (exit with error if not a repo)
 2. Find available ports (server port required, webapp port for local modes)
-3. Print connection info
-4. Create and register RPC service objects: Repo, LLM, Settings
-5. If local mode: start webapp dev/preview server
-6. Start RPC WebSocket server
-7. Open browser (unless disabled)
-8. Serve forever
+3. Initialize services: ConfigManager, Repo, LLM, Settings
+4. Register service classes with JRPCServer
+5. Print connection info and version
+6. If `--dev` mode: start Vite dev server subprocess
+7. Start RPC WebSocket server
+8. Open browser (unless `--no-browser`)
+9. Serve forever (cleanup Vite subprocess and stop server on exit)
 
 ### CLI Arguments
 
@@ -57,40 +108,173 @@ To match the webapp build to the backend:
 | `--repo-path` | cwd | Git repository path |
 | `--dev` | false | Run local dev server |
 | `--preview` | false | Build and run preview server |
+| `--verbose` | false | Enable debug logging |
 
-## Webapp Process Management
+### Port Selection
 
-A process manager handles the local webapp server:
-- Port check: skip if port already in use (another instance)
-- Process lifecycle: child process, terminated on app exit
-- Port passed via environment variable
+`find_available_port(start, max_tries=50)` — tries binding to `127.0.0.1:{start}` through `{start+49}`, returns the first available port.
 
-## Hosted Deployment (CI)
+## Webapp Dev Server Management
 
-### Pipeline
+For `--dev` mode, a Vite dev server runs as a child process:
 
-1. Build webapp with versioned base path (`/{repo}/{sha}/`)
-2. Deploy to versioned directory
-3. Update version registry
-4. Clean up old versions (keep last ~20)
-5. Create root redirect page
+- **Port check**: skip if port already in use (assumes another instance running)
+- **Prerequisite check**: verify `node_modules/` exists, prompt `npm install` if not
+- **Process lifecycle**: `subprocess.Popen` with `npm run dev`, terminated on app exit
+- **Port passed** via `PORT` environment variable
+- **Cleanup**: `terminate()` with 5-second timeout, then `kill()` if needed
 
-### Version Registry
+## GitHub Pages Deployment (CI)
 
-```pseudo
+### Workflow: `deploy-pages.yml`
+
+**Trigger:** Push to `master` or manual dispatch.
+
+**Pipeline:**
+
+1. Checkout source into `source/`
+2. Checkout `gh-pages` branch into `gh-pages/` (or initialize fresh)
+3. Install Node.js 20, run `npm ci`
+4. Get short SHA (first 8 chars of commit hash)
+5. Build webapp: `npm run build -- --base=/AI-Coder-DeCoder/{sha}/`
+6. Copy build output to `gh-pages/{sha}/`
+7. Update `versions.json` manifest
+8. Clean up old versions (keep last 20)
+9. Create root `index.html` redirect page
+10. Commit and push to `gh-pages` branch
+11. Deploy via GitHub Pages action
+
+### Deployed Structure on GitHub Pages
+
+```
+/AI-Coder-DeCoder/
+├── index.html          ← redirect to latest version
+├── versions.json       ← version manifest
+├── a1b2c3d4/          ← build from commit a1b2c3d4
+│   ├── index.html
+│   └── assets/...
+├── e5f6g7h8/          ← build from commit e5f6g7h8
+│   ├── index.html
+│   └── assets/...
+└── ...                 ← up to 20 versions retained
+```
+
+### Version Registry (`versions.json`)
+
+```json
 {
-    latest: "a1b2c3d4",
-    versions: [
-        { sha, full_sha, date, branch }
+    "latest": "a1b2c3d4",
+    "versions": [
+        {"sha": "a1b2c3d4", "full_sha": "abc123...", "date": "2025-01-15T14:32:00Z", "branch": "master"},
+        {"sha": "e5f6g7h8", "full_sha": "def456...", "date": "2025-01-14T10:00:00Z", "branch": "master"}
     ]
 }
 ```
 
-Root page fetches registry and redirects to latest, preserving query parameters (especially `?port=`).
+New versions are prepended (newest first). `latest` always points to the most recent.
+
+### Root Redirect Page
+
+The root `index.html` dynamically computes the repo name and redirects:
+
+```javascript
+const repoName = 'AI-Coder-DeCoder';
+fetch('/' + repoName + '/versions.json')
+    .then(r => r.json())
+    .then(data => {
+        const query = window.location.search;
+        window.location.href = '/' + repoName + '/' + data.latest + '/' + query;
+    });
+```
+
+Query parameters (especially `?port=`) are preserved through the redirect. This is the fallback when the binary can't determine its SHA.
+
+### Version Cleanup
+
+On each deploy, the workflow:
+1. Trims `versions.json` to the 20 most recent entries
+2. Scans `gh-pages/` for SHA directories not in the keep list
+3. Deletes old directories
+
+## Binary Releases (CI)
+
+### Workflow: `release.yml`
+
+**Trigger:** Push to `master` or manual dispatch.
+
+**Platforms:**
+
+| Runner | Output Binary |
+|--------|---------------|
+| `ubuntu-latest` | `ac-dc-linux` |
+| `windows-latest` | `ac-dc-windows.exe` |
+| `macos-latest` (ARM) | `ac-dc-macos` |
+
+### Build Steps (per platform)
+
+1. Checkout source
+2. Setup Python 3.13
+3. Compute version: `YYYY.MM.DD-HH.MM-{short_sha}` (24-hour time for same-day ordering)
+4. Bake version file: write version string to `src/ac_dc/VERSION`
+5. Install dependencies: `pip install pyinstaller && pip install -e .`
+6. Run PyInstaller with `--onefile`
+7. Upload build artifact
+
+### PyInstaller Configuration
+
+```bash
+pyinstaller \
+    --onefile \
+    --name ac-dc-{platform} \
+    --add-data "src/ac_dc/VERSION:ac_dc" \
+    --add-data "src/ac_dc/config:ac_dc/config" \
+    --collect-all=litellm \
+    --collect-all=tiktoken \
+    --collect-all=tiktoken_ext \
+    --collect-all=tree_sitter \
+    --collect-all=tree_sitter_python \
+    --collect-all=tree_sitter_javascript \
+    --collect-all=tree_sitter_typescript \
+    --collect-all=tree_sitter_c \
+    --collect-all=tree_sitter_cpp \
+    --collect-all=trafilatura \
+    --hidden-import=boto3 \
+    --hidden-import=botocore \
+    src/ac_dc/main.py
+```
+
+**`--add-data` paths:**
+- Unix separator: `src:dst` (colon)
+- Windows separator: `src;dst` (semicolon)
+- Destination `ac_dc` matches the Python package name so `Path(__file__).parent` resolves correctly at runtime
+
+### Release Job
+
+After all platform builds complete:
+1. Download all artifacts
+2. Compute release tag: `YYYY.MM.DD-HH.MM-{short_sha}`
+3. Generate release notes with download table
+4. Create GitHub Release with all three binaries attached
+
+### Release Tag Format
+
+```
+2025.01.15-14.32-a1b2c3d4
+│         │     │
+│         │     └─ First 8 chars of git SHA
+│         └─ 24-hour time (UTC) — ensures ordering for same-day releases
+└─ Date (UTC)
+```
 
 ## WebSocket Connection
 
-The webapp extracts the server port from `?port=N` in the URL and constructs `ws://localhost:{port}` for the RPC connection.
+The webapp extracts the server port from `?port=N` in the URL and constructs `ws://localhost:{port}` for the RPC connection:
+
+```javascript
+const urlParams = new URLSearchParams(window.location.search);
+const port = urlParams.get('port') || '8765';
+this.serverURI = `ws://localhost:${port}`;
+```
 
 ## Build Considerations
 
