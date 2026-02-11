@@ -384,9 +384,11 @@ Users can paste images into the input area for multimodal LLM queries.
 | Max images per message | 5 |
 | Encoding | Base64 data URI |
 | Display (input) | Thumbnail previews with remove button, shown below textarea |
-| Display (message) | Inline images in user message cards |
+| Display (message) | Thumbnail previews in user message cards, clickable to enlarge in a lightbox overlay |
 | Token counting | Use provider's image token formula (e.g., pixel-based). Fallback: estimate 1000 tokens per image |
 | Persistence | **Not persisted** in history JSONL — `images: integer` field records count only. On session reload, image context is lost |
+| In-session display | Images are stored on the message object (base64 data URIs) for the duration of the active session. Thumbnails render inline in user message cards and can be clicked to view full-size in a lightbox overlay |
+| Re-send behavior | Previously sent images are **not** re-included in LLM context on subsequent messages — they are display-only after the original send |
 
 ## Git Action Buttons
 

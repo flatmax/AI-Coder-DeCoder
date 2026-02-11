@@ -434,6 +434,44 @@ class ChatPanel extends RpcMixin(LitElement) {
     }
     .scroll-to-bottom:hover { color: var(--text-primary); background: var(--bg-surface); }
 
+    /* User image thumbnails */
+    .user-images {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .user-image-thumb {
+      max-width: 200px;
+      max-height: 200px;
+      border-radius: 4px;
+      cursor: pointer;
+      border: 1px solid var(--border-color);
+      transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    }
+    .user-image-thumb:hover {
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 8px rgba(100, 180, 255, 0.2);
+    }
+
+    /* Image lightbox overlay */
+    .image-lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(0,0,0,0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .image-lightbox img {
+      max-width: 90vw;
+      max-height: 90vh;
+      border-radius: var(--radius-md);
+      box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+    }
+
     #scroll-sentinel { height: 0; overflow: hidden; }
 
     .empty-state {
@@ -457,6 +495,7 @@ class ChatPanel extends RpcMixin(LitElement) {
     this._userScrolledUp = false;
     this._pendingScroll = false;
     this._observer = null;
+    this._lightboxSrc = null;
   }
 
   connectedCallback() {
@@ -577,6 +616,12 @@ class ChatPanel extends RpcMixin(LitElement) {
           <button class="scroll-to-bottom" @click=${this._onScrollToBottomClick}>↓</button>
         ` : nothing}
       </div>
+
+      ${this._lightboxSrc ? html`
+        <div class="image-lightbox" @click=${this._closeLightbox}>
+          <img src=${this._lightboxSrc} @click=${(e) => e.stopPropagation()}>
+        </div>
+      ` : nothing}
     `;
   }
 
@@ -599,7 +644,7 @@ class ChatPanel extends RpcMixin(LitElement) {
         ${actionBar('top')}
         <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser
-          ? html`<div class="md-content">${unsafeHTML(this._renderUserContent(msg.content))}</div>`
+          ? html`<div class="md-content" @click=${this._onUserContentClick}>${unsafeHTML(this._renderUserContent(msg))}</div>`
           : this._renderAssistantContent(msg.content, isLast, true)
         }
         ${actionBar('bottom')}
@@ -607,24 +652,36 @@ class ChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
-  _renderUserContent(content) {
+  _renderUserContent(msg) {
+    const content = msg.content;
+    let textHtml = '';
     if (typeof content === 'string') {
       // Simple escape for user messages — render as plain text with line breaks
-      return content
+      textHtml = content
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/\n/g, '<br>');
-    }
-    // Multimodal content
-    if (Array.isArray(content)) {
-      return content.map(block => {
-        if (block.type === 'text') return block.text.replace(/</g, '&lt;').replace(/\n/g, '<br>');
-        if (block.type === 'image_url') return `<img src="${block.image_url.url}" style="max-width:200px;max-height:200px;border-radius:4px;margin:4px 0;">`;
+    } else if (Array.isArray(content)) {
+      // Multimodal content from loaded sessions
+      textHtml = content.map(block => {
+        if (block.type === 'text') return block.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+        if (block.type === 'image_url') return `<img class="user-image-thumb" src="${block.image_url.url}" title="Click to enlarge">`;
         return '';
       }).join('');
+    } else {
+      textHtml = String(content);
     }
-    return String(content);
+
+    // Append image thumbnails stored on the message object (current session)
+    if (msg.images && msg.images.length > 0) {
+      const imgs = msg.images.map(src =>
+        `<img class="user-image-thumb" src="${src}" title="Click to enlarge">`
+      ).join('');
+      textHtml += `<div class="user-images">${imgs}</div>`;
+    }
+
+    return textHtml;
   }
 
   _renderAssistantContent(content, showEditResults, isFinal) {
@@ -862,7 +919,31 @@ class ChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  _onUserContentClick(e) {
+    // Delegate clicks on image thumbnails to open lightbox
+    const img = e.target.closest('.user-image-thumb');
+    if (img) {
+      e.preventDefault();
+      this._lightboxSrc = img.src;
+      this.requestUpdate();
+    }
+  }
+
+  _closeLightbox() {
+    this._lightboxSrc = null;
+    this.requestUpdate();
+  }
+
   _onMdContentClick(e) {
+    // Delegate clicks on image thumbnails to open lightbox
+    const img = e.target.closest('.user-image-thumb');
+    if (img) {
+      e.preventDefault();
+      this._lightboxSrc = img.src;
+      this.requestUpdate();
+      return;
+    }
+
     // Delegate clicks on code copy buttons
     const copyBtn = e.target.closest('.code-copy-btn');
     if (copyBtn) {

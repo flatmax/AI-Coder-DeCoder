@@ -592,8 +592,12 @@ class FilesTab extends RpcMixin(LitElement) {
     const { message, images } = e.detail;
     if (this.streaming) return;
 
-    // Show user message immediately
-    this.messages = [...this.messages, { role: 'user', content: message }];
+    // Show user message immediately (include images for display)
+    const userMsg = { role: 'user', content: message };
+    if (images && images.length > 0) {
+      userMsg.images = [...images];
+    }
+    this.messages = [...this.messages, userMsg];
 
     // Clear detected URLs on send (fetched persist across messages)
     this._detectedUrls = [];
