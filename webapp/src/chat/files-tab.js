@@ -938,29 +938,34 @@ class FilesTab extends RpcMixin(LitElement) {
         <button class="collapse-btn"
           @mousedown=${(e) => e.stopPropagation()}
           @click=${this._togglePickerCollapsed}
-          title=${this._pickerCollapsed ? 'Show file picker' : 'Hide file picker'}>
+          title=${this._pickerCollapsed ? 'Show file picker' : 'Hide file picker'}
+          aria-label=${this._pickerCollapsed ? 'Show file picker' : 'Hide file picker'}
+          aria-expanded=${!this._pickerCollapsed}>
           ${this._pickerCollapsed ? '▶' : '◀'}
         </button>
       </div>
 
       <div class="chat-panel-container">
-        <div class="git-actions">
-          <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard">
+        <div class="git-actions" role="toolbar" aria-label="Git actions">
+          <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard"
+            aria-label="Copy diff to clipboard">
             📋 Diff
           </button>
           <button class="git-btn" @click=${this._commitWithMessage}
-            ?disabled=${this.streaming} title="Stage all, generate message, commit">
+            ?disabled=${this.streaming} title="Stage all, generate message, commit"
+            aria-label="Auto-commit with generated message">
             💾 Commit
           </button>
           <button class="git-btn danger" @click=${this._requestReset}
-            ?disabled=${this.streaming} title="Reset to HEAD">
+            ?disabled=${this.streaming} title="Reset to HEAD"
+            aria-label="Reset repository to HEAD">
             ⚠️ Reset
           </button>
           <span class="git-spacer"></span>
           <button class="session-btn" @click=${this._openHistory}
-            title="Browse history">📜</button>
+            title="Browse history" aria-label="Browse conversation history">📜</button>
           <button class="session-btn" @click=${this._newSession}
-            title="New session (clear chat)">🗑️</button>
+            title="New session (clear chat)" aria-label="Start new session">🗑️</button>
         </div>
 
         <chat-panel
@@ -1004,8 +1009,9 @@ class FilesTab extends RpcMixin(LitElement) {
       ></history-browser>
 
       ${this._confirmAction ? html`
-        <div class="confirm-backdrop" @click=${this._cancelConfirm}>
-          <div class="confirm-dialog" @click=${(e) => e.stopPropagation()}>
+        <div class="confirm-backdrop" @click=${this._cancelConfirm} role="presentation">
+          <div class="confirm-dialog" role="alertdialog" aria-label="Confirm action"
+            @click=${(e) => e.stopPropagation()}>
             <p>${this._confirmAction.message}</p>
             <div class="confirm-btns">
               <button @click=${this._cancelConfirm}>Cancel</button>

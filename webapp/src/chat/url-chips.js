@@ -209,7 +209,7 @@ class UrlChips extends RpcMixin(LitElement) {
     if (!hasDetected && !hasFetched && !hasFetching) return nothing;
 
     return html`
-      <div class="chips-row">
+      <div class="chips-row" role="list" aria-label="URL references">
         ${this.fetched.map(f => this._renderFetchedChip(f))}
         ${this.detected.map(d => this._renderDetectedChip(d))}
       </div>
@@ -221,14 +221,14 @@ class UrlChips extends RpcMixin(LitElement) {
     const icon = UrlChips.TYPE_ICONS[info.url_type] || '🔗';
 
     return html`
-      <span class="chip ${isFetching ? 'fetching' : ''}">
-        <span class="type-badge">${icon}</span>
+      <span class="chip ${isFetching ? 'fetching' : ''}" role="listitem">
+        <span class="type-badge" aria-hidden="true">${icon}</span>
         <span class="chip-label">${info.display_name || info.url}</span>
         ${isFetching
-          ? html`<span class="spinner"></span>`
-          : html`<button class="chip-btn" title="Fetch" @click=${() => this._fetchUrl(info.url)}>📥</button>`
+          ? html`<span class="spinner" aria-label="Fetching"></span>`
+          : html`<button class="chip-btn" title="Fetch" aria-label="Fetch ${info.display_name || info.url}" @click=${() => this._fetchUrl(info.url)}>📥</button>`
         }
-        <button class="chip-btn" title="Dismiss" @click=${() => this._dismiss(info.url)}>×</button>
+        <button class="chip-btn" title="Dismiss" aria-label="Dismiss ${info.display_name || info.url}" @click=${() => this._dismiss(info.url)}>×</button>
       </span>
     `;
   }
@@ -239,22 +239,24 @@ class UrlChips extends RpcMixin(LitElement) {
     const icon = UrlChips.TYPE_ICONS[info.url_type] || '🔗';
 
     return html`
-      <span class="chip fetched ${isExcluded ? 'excluded' : ''} ${hasError ? 'error' : ''}">
+      <span class="chip fetched ${isExcluded ? 'excluded' : ''} ${hasError ? 'error' : ''}" role="listitem">
         ${!hasError ? html`
           <input type="checkbox"
             class="chip-checkbox"
             .checked=${!isExcluded}
             @change=${() => this._toggleExclude(info.url)}
             title=${isExcluded ? 'Include in context' : 'Exclude from context'}
+            aria-label="${isExcluded ? 'Include' : 'Exclude'} ${info.title || info.display_name || info.url} ${isExcluded ? 'in' : 'from'} context"
           >
         ` : nothing}
-        <span class="type-badge">${hasError ? '⚠️' : icon}</span>
+        <span class="type-badge" aria-hidden="true">${hasError ? '⚠️' : icon}</span>
         <span class="chip-label clickable"
+          role="button"
           title=${info.url}
           @click=${() => this._viewContent(info.url)}>
           ${info.title || info.display_name || info.url}
         </span>
-        <button class="chip-btn" title="Remove" @click=${() => this._remove(info.url)}>×</button>
+        <button class="chip-btn" title="Remove" aria-label="Remove ${info.title || info.display_name || info.url}" @click=${() => this._remove(info.url)}>×</button>
       </span>
     `;
   }

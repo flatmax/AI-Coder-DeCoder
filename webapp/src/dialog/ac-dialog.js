@@ -27,6 +27,14 @@ class AcDialog extends RpcMixin(LitElement) {
     _historyPercent: { type: Number, state: true },
   };
 
+  static KEYBOARD_SHORTCUTS = {
+    '1': 'FILES',
+    '2': 'SEARCH',
+    '3': 'CONTEXT',
+    '4': 'CACHE',
+    '5': 'SETTINGS',
+  };
+
   static styles = css`
     :host {
       display: block;
@@ -262,6 +270,8 @@ class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('compaction-event', this._boundOnCompactionEvent);
     window.addEventListener('state-loaded', this._boundOnStateLoaded);
     window.addEventListener('session-reset', this._boundOnSessionReset);
+    this._boundOnGlobalKeyDown = this._onGlobalKeyDown.bind(this);
+    window.addEventListener('keydown', this._boundOnGlobalKeyDown);
   }
 
   disconnectedCallback() {
@@ -270,6 +280,7 @@ class AcDialog extends RpcMixin(LitElement) {
     window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
     window.removeEventListener('state-loaded', this._boundOnStateLoaded);
     window.removeEventListener('session-reset', this._boundOnSessionReset);
+    window.removeEventListener('keydown', this._boundOnGlobalKeyDown);
   }
 
   onRpcReady() {
@@ -287,6 +298,26 @@ class AcDialog extends RpcMixin(LitElement) {
       this.updateComplete.then(() => {
         this.shadowRoot.querySelector('search-tab')?.focus();
       });
+    }
+  }
+
+  // ── Global keyboard shortcuts ──
+
+  _onGlobalKeyDown(e) {
+    // Alt+1..5 to switch tabs
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      const tabId = AcDialog.KEYBOARD_SHORTCUTS[e.key];
+      if (tabId) {
+        e.preventDefault();
+        if (this.minimized) this._toggleMinimize();
+        this._switchTab(tabId);
+        return;
+      }
+    }
+    // Alt+M to toggle minimize
+    if (e.altKey && e.key === 'm' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      this._toggleMinimize();
     }
   }
 
@@ -469,43 +500,52 @@ class AcDialog extends RpcMixin(LitElement) {
     const activeLabel = TABS.find(t => t.id === this.activeTab)?.label || '';
 
     return html`
-      <div class="dialog">
+      <div class="dialog" role="region" aria-label="Main dialog">
 
         <!-- Right edge always available (primary handle for left-docked state) -->
-        <div class="resize-handle resize-e" @mousedown=${(e) => this._onResizeStart('e', e)}></div>
+        <div class="resize-handle resize-e" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('e', e)}></div>
 
         ${this._positioned ? html`
-          <div class="resize-handle resize-n" @mousedown=${(e) => this._onResizeStart('n', e)}></div>
-          <div class="resize-handle resize-s" @mousedown=${(e) => this._onResizeStart('s', e)}></div>
-          <div class="resize-handle resize-w" @mousedown=${(e) => this._onResizeStart('w', e)}></div>
-          <div class="resize-handle resize-ne" @mousedown=${(e) => this._onResizeStart('ne', e)}></div>
-          <div class="resize-handle resize-nw" @mousedown=${(e) => this._onResizeStart('nw', e)}></div>
-          <div class="resize-handle resize-se" @mousedown=${(e) => this._onResizeStart('se', e)}></div>
-          <div class="resize-handle resize-sw" @mousedown=${(e) => this._onResizeStart('sw', e)}></div>
+          <div class="resize-handle resize-n" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('n', e)}></div>
+          <div class="resize-handle resize-s" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('s', e)}></div>
+          <div class="resize-handle resize-w" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('w', e)}></div>
+          <div class="resize-handle resize-ne" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('ne', e)}></div>
+          <div class="resize-handle resize-nw" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('nw', e)}></div>
+          <div class="resize-handle resize-se" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('se', e)}></div>
+          <div class="resize-handle resize-sw" aria-hidden="true" @mousedown=${(e) => this._onResizeStart('sw', e)}></div>
         ` : ''}
 
-        <div class="header" @mousedown=${this._onHeaderMouseDown}>
+        <div class="header" @mousedown=${this._onHeaderMouseDown} role="toolbar" aria-label="Dialog controls">
           <div class="header-left" @click=${this._toggleMinimize}>
-            <span class="connection-dot ${this.connected ? 'connected' : ''}"></span>
+            <span class="connection-dot ${this.connected ? 'connected' : ''}"
+              role="status"
+              aria-label=${this.connected ? 'Connected to server' : 'Disconnected from server'}></span>
             <span class="title">${activeLabel}</span>
           </div>
 
-          <div class="tabs">
-            ${TABS.map(tab => html`
+          <nav class="tabs" role="tablist" aria-label="Main navigation">
+            ${TABS.map((tab, i) => html`
               <button
+                role="tab"
                 class="tab-btn ${this.activeTab === tab.id ? 'active' : ''}"
+                aria-selected=${this.activeTab === tab.id}
+                aria-controls="tabpanel-${tab.id}"
+                id="tab-${tab.id}"
                 @click=${(e) => { e.stopPropagation(); this._switchTab(tab.id); }}
-                title=${tab.label}
+                title="${tab.label} (Alt+${i + 1})"
+                aria-label="${tab.label}"
               >
                 ${tab.icon}
                 <span class="tooltip">${tab.label}</span>
               </button>
             `)}
-          </div>
+          </nav>
 
           <div class="header-right">
             <button class="header-btn" @click=${(e) => { e.stopPropagation(); this._toggleMinimize(); }}
-              title=${this.minimized ? 'Maximize' : 'Minimize'}>
+              title=${this.minimized ? 'Maximize (Alt+M)' : 'Minimize (Alt+M)'}
+              aria-label=${this.minimized ? 'Maximize dialog' : 'Minimize dialog'}
+              aria-expanded=${!this.minimized}>
               ${this.minimized ? '□' : '─'}
             </button>
           </div>
@@ -529,7 +569,11 @@ class AcDialog extends RpcMixin(LitElement) {
           `)}
         </div>
 
-        <div class="history-bar">
+        <div class="history-bar" role="progressbar"
+          aria-label="History token usage"
+          aria-valuenow=${this._historyPercent}
+          aria-valuemin="0"
+          aria-valuemax="100">
           <div class="history-fill ${this._historyBarClass()}"
                style="width: ${this._historyPercent}%"></div>
         </div>
@@ -540,10 +584,12 @@ class AcDialog extends RpcMixin(LitElement) {
   _renderTabPanel(tabId, contentFn) {
     // Only render tabs that have been visited (lazy loading)
     if (!this._visitedTabs.has(tabId)) {
-      return html`<div class="tab-panel" ?hidden=${this.activeTab !== tabId}></div>`;
+      return html`<div class="tab-panel" role="tabpanel" id="tabpanel-${tabId}"
+        aria-labelledby="tab-${tabId}" ?hidden=${this.activeTab !== tabId}></div>`;
     }
     return html`
-      <div class="tab-panel" ?hidden=${this.activeTab !== tabId}>
+      <div class="tab-panel" role="tabpanel" id="tabpanel-${tabId}"
+        aria-labelledby="tab-${tabId}" ?hidden=${this.activeTab !== tabId}>
         ${contentFn()}
       </div>
     `;

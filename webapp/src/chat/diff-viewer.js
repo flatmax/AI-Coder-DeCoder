@@ -848,14 +848,14 @@ class DiffViewer extends RpcMixin(LitElement) {
 
   render() {
     return html`
-      <div class="container">
+      <div class="container" role="region" aria-label="Diff viewer">
         ${this._files.length > 0 ? html`
           ${this._renderTabBar()}
           <div class="editor-wrapper">
             ${this._monacoReady ? html`
-              <div class="editor-container"></div>
+              <div class="editor-container" role="document" aria-label="Code diff editor"></div>
             ` : html`
-              <div class="loading-state"><span class="spinner"></span> Loading editor...</div>
+              <div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span> Loading editor...</div>
             `}
           </div>
         ` : html`
@@ -869,7 +869,7 @@ class DiffViewer extends RpcMixin(LitElement) {
     const hasDirty = this._dirtyPaths.size > 0;
 
     return html`
-      <div class="tab-bar">
+      <div class="tab-bar" role="tablist" aria-label="Open files">
         ${this._files.map((file, i) => {
           const isDirty = this._dirtyPaths.has(file.path);
           const isActive = i === this._activeIndex;
@@ -878,20 +878,31 @@ class DiffViewer extends RpcMixin(LitElement) {
             : file.path;
 
           return html`
-            <div class="tab ${isActive ? 'active' : ''}" @click=${() => this._selectTab(i)}>
-              ${file.is_new ? html`<span class="tab-badge new">NEW</span>` : nothing}
-              ${!file.is_new && file.original !== file.savedContent ? html`<span class="tab-badge mod">MOD</span>` : nothing}
+            <div class="tab ${isActive ? 'active' : ''}" role="tab"
+              aria-selected=${isActive}
+              aria-label="${file.path}${isDirty ? ' (unsaved changes)' : ''}"
+              tabindex=${isActive ? '0' : '-1'}
+              @click=${() => this._selectTab(i)}
+              @keydown=${(e) => {
+                if (e.key === 'ArrowRight') { e.preventDefault(); this._selectTab(Math.min(i + 1, this._files.length - 1)); }
+                if (e.key === 'ArrowLeft') { e.preventDefault(); this._selectTab(Math.max(i - 1, 0)); }
+              }}>
+              ${file.is_new ? html`<span class="tab-badge new" aria-label="New file">NEW</span>` : nothing}
+              ${!file.is_new && file.original !== file.savedContent ? html`<span class="tab-badge mod" aria-label="Modified">MOD</span>` : nothing}
               <span>${displayPath}</span>
-              ${isDirty ? html`<span class="tab-dirty">●</span>` : nothing}
-              <span class="tab-close" @click=${(e) => this._closeTab(i, e)}>✕</span>
+              ${isDirty ? html`<span class="tab-dirty" aria-hidden="true">●</span>` : nothing}
+              <span class="tab-close" role="button" aria-label="Close ${file.path}"
+                @click=${(e) => this._closeTab(i, e)}>✕</span>
             </div>
           `;
         })}
         <div class="tab-actions">
           ${hasDirty ? html`
-            <button class="tab-action-btn" @click=${this._saveAll}>💾 Save All</button>
+            <button class="tab-action-btn" @click=${this._saveAll}
+              aria-label="Save all modified files">💾 Save All</button>
           ` : nothing}
-          <button class="close-all-btn" @click=${this._closeAll} title="Close all files">✕ All</button>
+          <button class="close-all-btn" @click=${this._closeAll} title="Close all files"
+            aria-label="Close all open files">✕ All</button>
         </div>
       </div>
     `;

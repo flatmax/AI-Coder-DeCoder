@@ -146,7 +146,8 @@ class TokenHud extends LitElement {
       : 0;
 
     return html`
-      <div class="hud ${this._fading ? 'fading' : ''}" @click=${this._dismiss}>
+      <div class="hud ${this._fading ? 'fading' : ''}" @click=${this._dismiss}
+        role="status" aria-label="Token usage summary">
         <div class="hud-title">Token Usage</div>
         <div class="hud-row">
           <span class="hud-label">Prompt</span>

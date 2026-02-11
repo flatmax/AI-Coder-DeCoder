@@ -352,11 +352,12 @@ class CacheTab extends RpcMixin(LitElement) {
       <div class="toolbar">
         <input type="text" class="filter-input"
           placeholder="Filter items..."
+          aria-label="Filter cache items"
           .value=${this._filter}
           @input=${(e) => this._filter = e.target.value}>
-        <button class="refresh-btn" @click=${this._refresh}>↻ Refresh</button>
+        <button class="refresh-btn" @click=${this._refresh} aria-label="Refresh cache data">↻ Refresh</button>
       </div>
-      <div class="content">
+      <div class="content" role="region" aria-label="Cache tier details">
         ${this._loading ? html`<div class="loading-state">Loading...</div>`
         : this._error ? html`<div class="error-state">⚠ ${this._error}</div>`
         : !this._data ? html`<div class="empty-state">No cache data yet</div>`
@@ -393,14 +394,17 @@ class CacheTab extends RpcMixin(LitElement) {
 
     return html`
       <div class="tier-block">
-        <div class="tier-header" @click=${() => this._toggleTier(block.name)}>
-          <span class="tier-badge ${tierClass}">${block.name}</span>
+        <div class="tier-header" @click=${() => this._toggleTier(block.name)}
+          role="button" tabindex="0" aria-expanded=${expanded}
+          aria-label="${block.name} tier — ${this._fmt(block.tokens)} tokens, ${block.cached ? 'cached' : 'uncached'}"
+          @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleTier(block.name); } }}>
+          <span class="tier-badge ${tierClass}" aria-hidden="true">${block.name}</span>
           <span class="tier-name">${block.cached ? 'Cached' : 'Uncached'}</span>
           <span class="tier-tokens">${this._fmt(block.tokens)} tokens</span>
           <span class="tier-cached ${block.cached ? '' : 'uncached'}">
             ${block.cached ? '✓ cached' : '○ live'}
           </span>
-          <span class="tier-toggle">${expanded ? '▾' : '▸'}</span>
+          <span class="tier-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
         </div>
         ${expanded ? html`
           <div class="tier-body">
@@ -425,9 +429,12 @@ class CacheTab extends RpcMixin(LitElement) {
           <div class="item-row">
             <span class="item-key" title="${it.key}">${this._stripPrefix(it.key)}</span>
             <span class="item-n">${it.n}</span>
-            <div class="stability-bar" title="N=${it.n}/${it.threshold || '?'}">
+            <div class="stability-bar" role="meter" aria-label="Stability"
+              aria-valuenow=${it.n} aria-valuemin="0"
+              aria-valuemax=${it.threshold || 12}
+              title="N=${it.n}/${it.threshold || '?'}">
               <div class="stability-fill ${this._stabilityClass(it.n, it.threshold)}"
-                style="width:${this._stabilityPct(it.n, it.threshold)}%"></div>
+                style="width:${this._stabilityPct(it.n, it.threshold)}%" aria-hidden="true"></div>
             </div>
             <span class="item-tokens">${this._fmt(it.tokens)}</span>
           </div>

@@ -341,9 +341,9 @@ class ContextTab extends RpcMixin(LitElement) {
             Cache ${this._data.cache_hit_rate}%
           </span>
         ` : nothing}
-        <button class="refresh-btn" @click=${this._refresh}>↻ Refresh</button>
+        <button class="refresh-btn" @click=${this._refresh} aria-label="Refresh context data">↻ Refresh</button>
       </div>
-      <div class="content">
+      <div class="content" role="region" aria-label="Context budget details">
         ${this._loading ? html`<div class="loading-state">Loading...</div>`
         : this._error ? html`<div class="error-state">⚠ ${this._error}</div>`
         : !this._data ? html`<div class="empty-state">No context data yet</div>`
@@ -372,11 +372,13 @@ class ContextTab extends RpcMixin(LitElement) {
           <span class="budget-label">Token Budget</span>
           <span class="budget-value">${this._fmt(total)} / ${this._fmt(max)}</span>
         </div>
-        <div class="budget-bar">
+        <div class="budget-bar" role="meter" aria-label="Token budget usage"
+          aria-valuenow=${total} aria-valuemin="0" aria-valuemax=${max}>
           ${segments.map(s => html`
             <div class="budget-segment ${s.cls}"
               style="width:${this._pct(s.tokens, max)}%"
-              title="${s.label}: ${this._fmt(s.tokens)}"></div>
+              title="${s.label}: ${this._fmt(s.tokens)}"
+              aria-hidden="true"></div>
           `)}
         </div>
         <div class="budget-legend">
@@ -432,16 +434,21 @@ class ContextTab extends RpcMixin(LitElement) {
 
     return html`
       <div class="category">
-        <div class="category-header" @click=${() => hasDetail && this._toggle(key)}>
-          <span class="category-icon">${icon}</span>
+        <div class="category-header"
+          @click=${() => hasDetail && this._toggle(key)}
+          role=${hasDetail ? 'button' : 'presentation'}
+          tabindex=${hasDetail ? '0' : nothing}
+          aria-expanded=${hasDetail ? expanded : nothing}
+          @keydown=${(e) => { if (hasDetail && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); this._toggle(key); } }}>
+          <span class="category-icon" aria-hidden="true">${icon}</span>
           <span class="category-name">${name}</span>
           <span class="category-tokens">${this._fmt(tokens)}</span>
           ${hasDetail ? html`
-            <span class="category-toggle">${expanded ? '▾' : '▸'}</span>
+            <span class="category-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
           ` : nothing}
         </div>
         ${expanded && hasDetail ? html`
-          <div class="category-body">${detailFn()}</div>
+          <div class="category-body" role="region" aria-label="${name} details">${detailFn()}</div>
         ` : nothing}
       </div>
     `;

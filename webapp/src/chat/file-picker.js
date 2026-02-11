@@ -732,12 +732,15 @@ class FilePicker extends RpcMixin(LitElement) {
       <div class="filter-bar">
         <input type="text"
           placeholder="Filter files..."
+          aria-label="Filter files"
           .value=${this._filter}
           @input=${this._onFilterInput}
         >
       </div>
 
       <div class="tree-container"
+        role="tree"
+        aria-label="Repository files"
         tabindex="0"
         @keydown=${this._onTreeKeydown}
       >
@@ -769,16 +772,20 @@ class FilePicker extends RpcMixin(LitElement) {
 
     return html`
       <div class="node-row ${isFocused ? 'focused' : ''}"
+        role="treeitem"
+        aria-expanded=${expanded}
+        aria-selected=${checkState === 'all'}
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
         @click=${() => { this._focused = node.path; this._toggleExpand(node.path); }}
         @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
-        <span class="toggle" @click=${(e) => { e.stopPropagation(); this._toggleExpand(node.path); }}>
+        <span class="toggle" aria-hidden="true" @click=${(e) => { e.stopPropagation(); this._toggleExpand(node.path); }}>
           ${expanded ? '▾' : '▸'}
         </span>
         <input type="checkbox"
           class="node-check"
+          aria-label="Select ${node.name}"
           .checked=${checkState === 'all'}
           .indeterminate=${checkState === 'indeterminate'}
           @change=${() => this._toggleSelect(node.path, true, node.children || [])}
@@ -786,7 +793,7 @@ class FilePicker extends RpcMixin(LitElement) {
         >
         <span class="node-name dir">${node.name}</span>
       </div>
-      ${expanded ? this._renderNodes(node.children || [], depth + 1) : nothing}
+      ${expanded ? html`<div role="group">${this._renderNodes(node.children || [], depth + 1)}</div>` : nothing}
     `;
   }
 
@@ -801,19 +808,25 @@ class FilePicker extends RpcMixin(LitElement) {
 
     return html`
       <div class="node-row ${isFocused ? 'focused' : ''} ${isActiveInViewer ? 'active-in-viewer' : ''}"
+        role="treeitem"
+        aria-selected=${selected}
+        aria-current=${isActiveInViewer ? 'true' : nothing}
         style="padding-left: ${depth * 16 + 4}px"
         @contextmenu=${(e) => this._onContextMenu(e, node)}
         @click=${() => { this._focused = node.path; }}
         @mousedown=${(e) => this._onMiddleClick(e, node.path)}
       >
-        <span class="toggle"></span>
+        <span class="toggle" aria-hidden="true"></span>
         <input type="checkbox"
           class="node-check"
+          aria-label="Select ${node.name}"
           .checked=${selected}
           @change=${() => this._toggleSelect(node.path, false, [])}
           @click=${(e) => e.stopPropagation()}
         >
         <span class="node-name file-click"
+          role="link"
+          tabindex="-1"
           style=${this._nameColor(node.path)}
           @click=${(e) => { e.stopPropagation(); this._onFileNameClick(node.path); }}>
           ${node.name}
@@ -843,15 +856,19 @@ class FilePicker extends RpcMixin(LitElement) {
 
     return html`
       <div class="context-menu"
+        role="menu"
+        aria-label="File actions"
         style="left:${clampedX}px; top:${clampedY}px"
         @click=${(e) => e.stopPropagation()}>
         ${items.map(item =>
           item.sep
-            ? html`<div class="context-sep"></div>`
+            ? html`<div class="context-sep" role="separator"></div>`
             : html`
               <div class="context-item ${item.danger ? 'danger' : ''}"
+                role="menuitem"
+                tabindex="-1"
                 @click=${() => this._onContextItemClick(item)}>
-                <span>${item.icon}</span>
+                <span aria-hidden="true">${item.icon}</span>
                 <span>${item.label}</span>
               </div>`
         )}
@@ -864,7 +881,7 @@ class FilePicker extends RpcMixin(LitElement) {
     if (s.type === 'confirm') {
       return html`
         <div class="overlay-backdrop" @click=${() => { this._overlayState = null; this.requestUpdate(); }}></div>
-        <div class="overlay-dialog">
+        <div class="overlay-dialog" role="alertdialog" aria-label="Confirm ${s.item.label.toLowerCase()}">
           <p>Are you sure you want to <b>${s.item.label.toLowerCase()}</b>?</p>
           <p style="font-size:12px; color:var(--text-secondary)">${s.item.paths.join(', ')}</p>
           <div class="overlay-btns">
@@ -880,9 +897,10 @@ class FilePicker extends RpcMixin(LitElement) {
         : s.item.paths[0] || '';
       return html`
         <div class="overlay-backdrop" @click=${() => { this._overlayState = null; this.requestUpdate(); }}></div>
-        <div class="overlay-dialog">
+        <div class="overlay-dialog" role="dialog" aria-label="${s.item.label}">
           <p>${s.item.label}</p>
           <input type="text"
+            aria-label="${s.item.label} path"
             .value=${s.value}
             placeholder=${placeholder}
             @input=${(e) => { s.value = e.target.value; }}

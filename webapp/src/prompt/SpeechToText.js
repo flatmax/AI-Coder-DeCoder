@@ -186,6 +186,8 @@ class SpeechToText extends LitElement {
         class=${this._state}
         @click=${this._toggle}
         title=${this._state === 'inactive' ? 'Start voice dictation' : 'Stop voice dictation'}
+        aria-label=${this._state === 'inactive' ? 'Start voice dictation' : 'Stop voice dictation'}
+        aria-pressed=${this._state !== 'inactive'}
       >🎤</button>
     `;
   }

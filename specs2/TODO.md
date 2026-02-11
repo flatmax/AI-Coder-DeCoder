@@ -130,4 +130,4 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Hosted deployment** — GitHub Pages with version registry, root redirect
 - [x] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options, input history)
 - [x] **Content-visibility optimization** — CSS containment for off-screen messages
-- [ ] **Accessibility** — ARIA roles, focus management, keyboard shortcuts
+- [x] **Accessibility** — ARIA roles, focus management, keyboard shortcuts (ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics)

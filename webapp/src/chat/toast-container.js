@@ -157,10 +157,10 @@ class ToastContainer extends LitElement {
 
     return html`
       ${this._toasts.map(toast => html`
-        <div class="toast ${toast.type} ${toast.fading ? 'fading' : ''}">
-          <span class="toast-icon">${ToastContainer.ICONS[toast.type] || 'ℹ'}</span>
+        <div class="toast ${toast.type} ${toast.fading ? 'fading' : ''}" role="alert" aria-live="assertive">
+          <span class="toast-icon" aria-hidden="true">${ToastContainer.ICONS[toast.type] || 'ℹ'}</span>
           <span class="toast-message">${toast.message}</span>
-          <button class="toast-close" @click=${() => this._dismiss(toast.id)}>×</button>
+          <button class="toast-close" @click=${() => this._dismiss(toast.id)} aria-label="Dismiss notification">×</button>
         </div>
       `)}
     `;

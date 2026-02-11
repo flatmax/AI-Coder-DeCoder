@@ -621,14 +621,16 @@ class HistoryBrowser extends RpcMixin(LitElement) {
     const isSearching = this._query.trim().length > 0;
 
     return html`
-      <div class="backdrop" @click=${this._onBackdropClick} @keydown=${this._onKeyDown}>
+      <div class="backdrop" @click=${this._onBackdropClick} @keydown=${this._onKeyDown}
+        role="dialog" aria-modal="true" aria-label="History browser">
         <div class="modal">
           <div class="header">
-            <span class="header-title">📜 History</span>
+            <span class="header-title" id="history-dialog-title">📜 History</span>
             <div class="header-search">
               <input type="text"
                 class="search-input"
                 placeholder="Search messages..."
+                aria-label="Search conversation history"
                 .value=${this._query}
                 @input=${this._onSearchInput}
                 @keydown=${(e) => e.key === 'Escape' && this._close()}
@@ -638,15 +640,16 @@ class HistoryBrowser extends RpcMixin(LitElement) {
               <button class="header-btn primary"
                 ?disabled=${!this._selectedId}
                 @click=${this._loadIntoContext}
-                title="Load selected session into active context">
+                title="Load selected session into active context"
+                aria-label="Load selected session into active context">
                 Load Session
               </button>
             </div>
-            <button class="close-btn" @click=${this._close} title="Close">✕</button>
+            <button class="close-btn" @click=${this._close} title="Close" aria-label="Close history browser">✕</button>
           </div>
           <div class="body">
-            <div class="left-panel">
-              <div class="session-list">
+            <div class="left-panel" role="navigation" aria-label="Sessions">
+              <div class="session-list" role="listbox" aria-label="Session list">
                 ${isSearching
                   ? this._renderSearchResults()
                   : this._renderSessionList()}
@@ -654,13 +657,13 @@ class HistoryBrowser extends RpcMixin(LitElement) {
             </div>
             <div class="right-panel">
               ${this._loadingMessages ? html`
-                <div class="messages-empty"><span class="spinner"></span>&nbsp; Loading...</div>
+                <div class="messages-empty" role="status"><span class="spinner" aria-hidden="true"></span>&nbsp; Loading...</div>
               ` : this._messages.length === 0 ? html`
                 <div class="messages-empty">
                   ${this._selectedId ? 'No messages in this session' : 'Select a session to view messages'}
                 </div>
               ` : html`
-                <div class="messages-container">
+                <div class="messages-container" role="log" aria-label="Session messages">
                   ${this._messages.map(msg => this._renderMessage(msg))}
                 </div>
               `}
@@ -680,6 +683,8 @@ class HistoryBrowser extends RpcMixin(LitElement) {
     }
     return this._sessions.map(s => html`
       <div class="session-item ${this._selectedId === s.session_id ? 'selected' : ''}"
+        role="option"
+        aria-selected=${this._selectedId === s.session_id}
         @click=${() => this._selectSession(s.session_id)}>
         <div class="session-time">${this._formatTime(s.timestamp)}</div>
         <div class="session-preview">${this._truncate(s.preview, 80)}</div>
@@ -711,15 +716,16 @@ class HistoryBrowser extends RpcMixin(LitElement) {
   _renderMessage(msg) {
     const isHighlighted = this._highlightMsgId && msg.id === this._highlightMsgId;
     return html`
-      <div class="msg-card ${isHighlighted ? 'highlighted' : ''}">
+      <div class="msg-card ${isHighlighted ? 'highlighted' : ''}" role="article"
+        aria-label="${msg.role} message">
         <div class="msg-header">
           <span class="msg-role ${msg.role}">${msg.role}</span>
           <span class="msg-meta">${this._formatTime(msg.timestamp)}</span>
-          <div class="msg-actions">
+          <div class="msg-actions" role="toolbar" aria-label="Message actions">
             <button class="msg-action-btn" @click=${() => this._copyMessage(msg)}
-              title="Copy to clipboard">📋</button>
+              title="Copy to clipboard" aria-label="Copy to clipboard">📋</button>
             <button class="msg-action-btn" @click=${() => this._toPrompt(msg)}
-              title="Insert into prompt">📝</button>
+              title="Insert into prompt" aria-label="Insert into prompt">📝</button>
           </div>
         </div>
         <div class="msg-content">${msg.content || ''}</div>

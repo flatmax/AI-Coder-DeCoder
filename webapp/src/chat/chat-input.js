@@ -141,6 +141,18 @@ class ChatInput extends RpcMixin(LitElement) {
     .send-btn:hover { opacity: 0.9; }
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .stop-btn {
       background: var(--accent-error, #ef5350);
       border: none;
@@ -605,24 +617,30 @@ class ChatInput extends RpcMixin(LitElement) {
 
   render() {
     return html`
-      <div class="input-area" style="position:relative;">
+      <div class="input-area" style="position:relative;" role="region" aria-label="Chat input">
 
         ${this._showHistorySearch ? html`
-          <div class="history-overlay">
+          <div class="history-overlay" role="listbox" aria-label="Message history">
             <input class="history-search-input"
               type="text"
               placeholder="Search message history…"
+              aria-label="Search message history"
+              aria-controls="history-results-list"
+              aria-activedescendant=${this._historySearchIndex >= 0 ? `history-item-${this._historySearchIndex}` : nothing}
               .value=${this._historySearchQuery}
               @input=${this._onHistorySearchInput}
               @keydown=${this._onHistorySearchKeyDown}
             >
-            <div class="history-results">
+            <div class="history-results" id="history-results-list" role="group">
               ${this._historySearchResults.length === 0 ? html`
-                <div class="history-item" style="color:var(--text-muted); cursor:default;">
+                <div class="history-item" style="color:var(--text-muted); cursor:default;" role="option" aria-disabled="true">
                   No matches
                 </div>
               ` : this._historySearchResults.map((item, i) => html`
                 <div class="history-item ${i === this._historySearchIndex ? 'selected' : ''}"
+                  id="history-item-${i}"
+                  role="option"
+                  aria-selected=${i === this._historySearchIndex}
                   @click=${() => { this._historySearchIndex = i; this._selectHistoryResult(); }}>
                   ${item.length > 120 ? item.substring(0, 120) + '…' : item}
                 </div>
@@ -632,20 +650,22 @@ class ChatInput extends RpcMixin(LitElement) {
         ` : nothing}
 
         ${this._images.length > 0 ? html`
-          <div class="images-row">
+          <div class="images-row" role="list" aria-label="Attached images">
             ${this._images.map((src, i) => html`
-              <div class="image-thumb">
-                <img src=${src} alt="Pasted image">
-                <button class="image-remove" @click=${() => this._removeImage(i)}>×</button>
+              <div class="image-thumb" role="listitem">
+                <img src=${src} alt="Pasted image ${i + 1}">
+                <button class="image-remove" @click=${() => this._removeImage(i)}
+                  aria-label="Remove image ${i + 1}">×</button>
               </div>
             `)}
           </div>
         ` : nothing}
 
         ${this._showSnippets && this.snippets.length > 0 ? html`
-          <div class="snippet-drawer">
+          <div class="snippet-drawer" role="toolbar" aria-label="Quick insert snippets">
             ${this.snippets.map(s => html`
               <button class="snippet-btn" title=${s.tooltip || s.message}
+                aria-label="${s.tooltip || s.message.substring(0, 60)}"
                 @click=${() => this._insertSnippet(s.message)}>
                 ${s.icon} ${s.tooltip || s.message.substring(0, 30)}
               </button>
@@ -658,12 +678,15 @@ class ChatInput extends RpcMixin(LitElement) {
             <speech-to-text @transcript=${this._onTranscript}></speech-to-text>
             ${this.snippets.length > 0 ? html`
               <button class="snippet-toggle ${this._showSnippets ? 'active' : ''}"
-                @click=${this._toggleSnippets} title="Snippets">💡</button>
+                @click=${this._toggleSnippets} title="Snippets"
+                aria-label="Toggle snippet drawer"
+                aria-expanded=${this._showSnippets}>💡</button>
             ` : nothing}
           </div>
 
           <textarea
             placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+            aria-label="Chat message input"
             ?disabled=${this.disabled}
             @input=${this._onInput}
             @keydown=${this._onKeyDown}
@@ -672,15 +695,18 @@ class ChatInput extends RpcMixin(LitElement) {
           ></textarea>
 
           ${this.disabled ? html`
-            <button class="stop-btn" @click=${this._stop}>
+            <button class="stop-btn" @click=${this._stop} aria-label="Stop streaming response">
               ⏹ Stop
             </button>
           ` : html`
-            <button class="send-btn" @click=${this._send}>
+            <button class="send-btn" @click=${this._send} aria-label="Send message">
               Send
             </button>
           `}
         </div>
+        <span class="sr-only" aria-live="polite" id="input-status">
+          ${this.disabled ? 'Waiting for response...' : ''}
+        </span>
       </div>
     `;
   }

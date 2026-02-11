@@ -499,28 +499,36 @@ class SearchTab extends RpcMixin(LitElement) {
           <input type="text"
             class="search-input"
             placeholder="Search files..."
+            aria-label="Search repository files"
             .value=${this._query}
             @input=${this._onInput}
             @keydown=${this._onKeyDown}
           >
           ${totalMatches > 0 ? html`
-            <span class="result-count">${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${totalFiles} file${totalFiles !== 1 ? 's' : ''}</span>
+            <span class="result-count" role="status" aria-live="polite">${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${totalFiles} file${totalFiles !== 1 ? 's' : ''}</span>
           ` : nothing}
         </div>
-        <div class="option-row">
+        <div class="option-row" role="toolbar" aria-label="Search options">
           <button class="option-btn ${this._ignoreCase ? 'active' : ''}"
             @click=${() => this._toggleOption('ignoreCase')}
-            title="Ignore case">Aa</button>
+            title="Ignore case"
+            aria-label="Ignore case"
+            aria-pressed=${this._ignoreCase}>Aa</button>
           <button class="option-btn ${this._useRegex ? 'active' : ''}"
             @click=${() => this._toggleOption('useRegex')}
-            title="Regular expression">.*</button>
+            title="Regular expression"
+            aria-label="Use regular expression"
+            aria-pressed=${this._useRegex}>.*</button>
           <button class="option-btn ${this._wholeWord ? 'active' : ''}"
             @click=${() => this._toggleOption('wholeWord')}
-            title="Whole word">ab</button>
+            title="Whole word"
+            aria-label="Whole word match"
+            aria-pressed=${this._wholeWord}>ab</button>
         </div>
       </div>
 
-      <div class="results-container" @keydown=${this._onKeyDown} tabindex="-1">
+      <div class="results-container" @keydown=${this._onKeyDown} tabindex="-1"
+        role="region" aria-label="Search results">
         ${this._loading ? html`
           <div class="loading-state"><span class="spinner"></span> Searching...</div>
         ` : this._error ? html`

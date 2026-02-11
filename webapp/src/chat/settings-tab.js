@@ -81,6 +81,18 @@ class SettingsTab extends RpcMixin(LitElement) {
       margin-bottom: 12px;
     }
 
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .config-card {
       border: 1px solid var(--border-color);
       border-radius: var(--radius-md);
@@ -341,7 +353,7 @@ class SettingsTab extends RpcMixin(LitElement) {
         ${this._editing ? this._renderEditor() : nothing}
       </div>
       ${this._toast ? html`
-        <div class="toast ${this._toast.type}">${this._toast.message}</div>
+        <div class="toast ${this._toast.type}" role="alert" aria-live="assertive">${this._toast.message}</div>
       ` : nothing}
     `;
   }
@@ -368,12 +380,17 @@ class SettingsTab extends RpcMixin(LitElement) {
 
   _renderCardGrid() {
     return html`
-      <div class="card-grid">
+      <div class="card-grid" role="list" aria-label="Configuration files">
         ${CONFIG_CARDS.map(card => html`
           <div class="config-card ${this._editing === card.key ? 'active' : ''}"
-            @click=${() => this._openEditor(card.key)}>
+            role="listitem"
+            tabindex="0"
+            aria-label="Edit ${card.label}"
+            aria-current=${this._editing === card.key ? 'true' : nothing}
+            @click=${() => this._openEditor(card.key)}
+            @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._openEditor(card.key); } }}>
             <div class="card-header">
-              <span class="card-icon">${card.icon}</span>
+              <span class="card-icon" aria-hidden="true">${card.icon}</span>
               <span class="card-label">${card.label}</span>
               <span class="card-lang">${card.lang}</span>
             </div>
@@ -386,23 +403,27 @@ class SettingsTab extends RpcMixin(LitElement) {
   _renderEditor() {
     const card = CONFIG_CARDS.find(c => c.key === this._editing);
     return html`
-      <div class="editor-area">
-        <div class="editor-toolbar">
+      <div class="editor-area" role="region" aria-label="Editing ${card?.label || this._editing}">
+        <div class="editor-toolbar" role="toolbar" aria-label="Editor actions">
           <span class="editor-title">${card?.icon || ''} ${card?.label || this._editing}</span>
           <span class="editor-path" title="${this._configPath}">${this._configPath}</span>
           ${card?.reloadable ? html`
-            <button class="editor-btn" @click=${() => this._reload(this._editing)}>
+            <button class="editor-btn" @click=${() => this._reload(this._editing)}
+              aria-label="Reload ${card?.label} configuration">
               ↻ Reload
             </button>
           ` : nothing}
-          <button class="editor-btn primary" @click=${this._save} ?disabled=${this._saving}>
+          <button class="editor-btn primary" @click=${this._save} ?disabled=${this._saving}
+            aria-label="Save ${card?.label}">
             ${this._saving ? 'Saving...' : '💾 Save'}
           </button>
-          <button class="editor-btn" @click=${this._closeEditor}>✕</button>
+          <button class="editor-btn" @click=${this._closeEditor} aria-label="Close editor">✕</button>
         </div>
         <textarea class="editor-textarea"
+          aria-label="${card?.label || 'Config'} content"
           .value=${this._content}
           @input=${(e) => this._content = e.target.value}
+          @keydown=${(e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); this._save(); } }}
           spellcheck="false"
         ></textarea>
       </div>

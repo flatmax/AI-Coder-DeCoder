@@ -40,6 +40,18 @@ class ChatPanel extends RpcMixin(LitElement) {
       scroll-behavior: smooth;
     }
 
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .message-card {
       margin-bottom: 12px;
       padding: 10px 14px;
@@ -464,6 +476,7 @@ class ChatPanel extends RpcMixin(LitElement) {
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      outline: none;
     }
     .image-lightbox img {
       max-width: 90vw;
@@ -600,7 +613,7 @@ class ChatPanel extends RpcMixin(LitElement) {
 
     return html`
       <div class="messages-wrapper">
-        <div class="messages">
+        <div class="messages" role="log" aria-label="Conversation messages" aria-live="polite">
           ${!hasContent ? html`
             <div class="empty-state">Send a message to start</div>
           ` : nothing}
@@ -609,17 +622,20 @@ class ChatPanel extends RpcMixin(LitElement) {
 
           ${this.streaming ? this._renderStreamingMessage() : nothing}
 
-          <div id="scroll-sentinel"></div>
+          <div id="scroll-sentinel" aria-hidden="true"></div>
         </div>
 
         ${this._userScrolledUp ? html`
-          <button class="scroll-to-bottom" @click=${this._onScrollToBottomClick}>↓</button>
+          <button class="scroll-to-bottom" @click=${this._onScrollToBottomClick}
+            aria-label="Scroll to bottom of conversation">↓</button>
         ` : nothing}
       </div>
 
       ${this._lightboxSrc ? html`
-        <div class="image-lightbox" @click=${this._closeLightbox}>
-          <img src=${this._lightboxSrc} @click=${(e) => e.stopPropagation()}>
+        <div class="image-lightbox" role="dialog" aria-label="Image preview"
+          @click=${this._closeLightbox} @keydown=${this._onLightboxKeyDown}>
+          <img src=${this._lightboxSrc} alt="Enlarged image" @click=${(e) => e.stopPropagation()}>
+          <span class="sr-only">Press Escape to close</span>
         </div>
       ` : nothing}
     `;
@@ -631,18 +647,19 @@ class ChatPanel extends RpcMixin(LitElement) {
     const forceVisible = total - idx <= 15;
 
     const actionBar = (pos) => html`
-      <div class="msg-actions ${pos}">
-        <button class="msg-action-btn" title="Copy to clipboard"
+      <div class="msg-actions ${pos}" role="toolbar" aria-label="Message actions">
+        <button class="msg-action-btn" title="Copy to clipboard" aria-label="Copy message to clipboard"
           @click=${(e) => this._onCopyMessage(e, msg)}>📋</button>
-        <button class="msg-action-btn" title="Copy to prompt"
+        <button class="msg-action-btn" title="Copy to prompt" aria-label="Copy message to input"
           @click=${() => this._onCopyToPrompt(msg)}>↩</button>
       </div>
     `;
 
     return html`
-      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}">
+      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}" role="article"
+        aria-label="${isUser ? 'Your message' : 'Assistant response'}">
         ${actionBar('top')}
-        <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
+        <div class="role-label" aria-hidden="true">${isUser ? 'You' : 'Assistant'}</div>
         ${isUser
           ? html`<div class="md-content" @click=${this._onUserContentClick}>${unsafeHTML(this._renderUserContent(msg))}</div>`
           : this._renderAssistantContent(msg.content, isLast, true)
@@ -725,13 +742,14 @@ class ChatPanel extends RpcMixin(LitElement) {
     const status = result?.status || (seg.isCreate ? 'new' : '');
 
     return html`
-      <div class="edit-block">
+      <div class="edit-block" role="region" aria-label="Edit block for ${seg.filePath}">
         <div class="edit-header">
-          <span class="edit-file-path"
-            @click=${() => this._onEditFileClick(seg.filePath)}>
+          <span class="edit-file-path" role="link" tabindex="0"
+            @click=${() => this._onEditFileClick(seg.filePath)}
+            @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._onEditFileClick(seg.filePath); } }}>
             ${seg.filePath}
           </span>
-          ${status ? html`<span class="edit-badge ${status}">${status}</span>` : nothing}
+          ${status ? html`<span class="edit-badge ${status}" role="status">${status}</span>` : nothing}
         </div>
         <div class="edit-diff">
           ${diff.map(line => this._renderDiffLine(line))}
@@ -775,8 +793,8 @@ class ChatPanel extends RpcMixin(LitElement) {
 
   _renderStreamingMessage() {
     return html`
-      <div class="message-card assistant streaming">
-        <div class="role-label">Assistant</div>
+      <div class="message-card assistant streaming" role="article" aria-label="Assistant response (streaming)" aria-busy="true">
+        <div class="role-label" aria-hidden="true">Assistant</div>
         ${this._renderAssistantContent(this.streamContent, false, false)}
       </div>
     `;
@@ -878,11 +896,12 @@ class ChatPanel extends RpcMixin(LitElement) {
     const notInContext = files.filter(f => !selectedSet.has(f));
 
     return html`
-      <div class="file-summary">
+      <div class="file-summary" role="region" aria-label="Files referenced in this response">
         <div class="file-summary-header">
           <span>📁 Files Referenced</span>
           ${notInContext.length >= 2 ? html`
             <button class="add-all-btn"
+              aria-label="Add all ${notInContext.length} files to context"
               @click=${() => this._onAddAllFiles(notInContext)}>
               + Add All (${notInContext.length})
             </button>
@@ -926,6 +945,17 @@ class ChatPanel extends RpcMixin(LitElement) {
       e.preventDefault();
       this._lightboxSrc = img.src;
       this.requestUpdate();
+      // Focus the lightbox for keyboard dismissal
+      this.updateComplete.then(() => {
+        this.shadowRoot.querySelector('.image-lightbox')?.focus();
+      });
+    }
+  }
+
+  _onLightboxKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this._closeLightbox();
     }
   }
 
@@ -941,6 +971,9 @@ class ChatPanel extends RpcMixin(LitElement) {
       e.preventDefault();
       this._lightboxSrc = img.src;
       this.requestUpdate();
+      this.updateComplete.then(() => {
+        this.shadowRoot.querySelector('.image-lightbox')?.focus();
+      });
       return;
     }
 
