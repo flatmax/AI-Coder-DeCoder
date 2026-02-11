@@ -63,14 +63,19 @@ jobs:
           pip install pyinstaller
           pip install -e .
 
-      - name: Build executable (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Build executable
+        shell: bash
         run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            SEP=";"
+          else
+            SEP=":"
+          fi
           pyinstaller \
             --onefile \
             --name ac-dc-${{ matrix.name }} \
-            --add-data "src/ac_dc/VERSION:ac_dc" \
-            --add-data "src/ac_dc/config:ac_dc/config" \
+            --add-data "src/ac_dc/VERSION${SEP}ac_dc" \
+            --add-data "src/ac_dc/config${SEP}ac_dc/config" \
             --collect-all=litellm \
             --collect-all=tiktoken \
             --collect-all=tiktoken_ext \
@@ -83,28 +88,23 @@ jobs:
             --collect-all=trafilatura \
             --hidden-import=boto3 \
             --hidden-import=botocore \
-            src/ac_dc/main.py
-
-      - name: Build executable (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          pyinstaller `
-            --onefile `
-            --name ac-dc-${{ matrix.name }} `
-            --add-data "src/ac_dc/VERSION;ac_dc" `
-            --add-data "src/ac_dc/config;ac_dc/config" `
-            --collect-all=litellm `
-            --collect-all=tiktoken `
-            --collect-all=tiktoken_ext `
-            --collect-all=tree_sitter `
-            --collect-all=tree_sitter_python `
-            --collect-all=tree_sitter_javascript `
-            --collect-all=tree_sitter_typescript `
-            --collect-all=tree_sitter_c `
-            --collect-all=tree_sitter_cpp `
-            --collect-all=trafilatura `
-            --hidden-import=boto3 `
-            --hidden-import=botocore `
+            --hidden-import=ac_dc \
+            --hidden-import=ac_dc.config \
+            --hidden-import=ac_dc.repo \
+            --hidden-import=ac_dc.llm_service \
+            --hidden-import=ac_dc.settings \
+            --hidden-import=ac_dc.context \
+            --hidden-import=ac_dc.edit_parser \
+            --hidden-import=ac_dc.history_store \
+            --hidden-import=ac_dc.history_compactor \
+            --hidden-import=ac_dc.token_counter \
+            --hidden-import=ac_dc.topic_detector \
+            --hidden-import=ac_dc.stability_tracker \
+            --hidden-import=ac_dc.context_builder \
+            --hidden-import=ac_dc.url_handler \
+            --hidden-import=ac_dc.url_cache \
+            --hidden-import=ac_dc.symbol_index \
+            --hidden-import=jrpc_oo \
             src/ac_dc/main.py
 
       - name: Upload artifact
