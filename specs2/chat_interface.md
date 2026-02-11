@@ -402,11 +402,32 @@ Three buttons in the header (Files tab only):
 
 ## Token HUD Overlay
 
-Floating overlay after each response:
-- Cache tier breakdown with content summaries
-- Cache hit percentage badge (color-coded)
-- This-request prompt/completion/cache stats
-- History token budget warning
-- Tier promotions/demotions
-- Session cumulative totals
-- Auto-hides ~8 seconds, pauses on hover
+Floating overlay positioned in the **top-right corner of the diff viewer background** (not inside the chat panel). Appears after each LLM response with full context breakdown fetched via `LLM.get_context_breakdown`.
+
+### Placement
+
+- Rendered as a **top-level sibling** in the app-shell shadow DOM (not nested inside `.diff-background`)
+- Uses `position: fixed; top: 16px; right: 16px; z-index: 10000` — fixed positioning escapes all stacking contexts, and z-index 10000 outranks Monaco's internal overlays (typically ≤2000)
+- Uses `RpcMixin` to fetch breakdown data independently
+- Triggered by `app-shell._onStreamCompleteForDiff` which calls `hud.show(result)`
+
+### Content Sections
+
+All sections are collapsible (▼ toggle):
+
+| Section | Content |
+|---------|---------|
+| **Header** | Model name, cache hit % badge (color-coded: excellent ≥80%, good ≥60%, fair ≥30%, poor >0%, none), dismiss button |
+| **Cache Tiers** | Per-tier bar chart with token counts, content detail lines (⚙ system, ◆ symbols, 📄 files, 💬 history), total token sum |
+| **This Request** | Prompt tokens, completion tokens, cache read (green), cache write (blue) |
+| **History Budget** | Token usage bar (green/orange/red), percentage, compact warning indicator |
+| **Tier Changes** | Promotions (📈 green) and demotions (📉 amber) with key names and tier transitions |
+| **Session Totals** | Cumulative total tokens and cache saved |
+
+### Behavior
+
+- **Auto-hide**: Starts fade after 8 seconds, completes fade in 800ms
+- **Hover pause**: Mouse enter pauses/cancels auto-hide; mouse leave restarts with fresh 8-second timer
+- **Dismiss**: Click ✕ button for immediate dismiss
+- **Async data**: Shows basic token usage immediately from `streamComplete` result; fetches full breakdown via RPC (breakdown is optional — HUD works without it)
+- **Backdrop**: Semi-transparent dark background with blur effect (`backdrop-filter: blur(8px)`)

@@ -409,12 +409,18 @@ class DiffViewer extends RpcMixin(LitElement) {
   }
 
   /**
-   * Open files from edit results (post-edit refresh).
+   * Refresh already-open files from edit results (post-edit).
+   * Does NOT auto-open new tabs — only reloads files already in the tab bar.
    */
   async openEditResults(editResults, filesModified) {
     if (!this.rpcConnected || !filesModified?.length) return;
 
-    for (const fpath of filesModified) {
+    // Only process files that are already open
+    const openPaths = new Set(this._files.map(f => f.path));
+    const toReload = filesModified.filter(f => openPaths.has(f));
+    if (!toReload.length) return;
+
+    for (const fpath of toReload) {
       let original = '';
       let modified = '';
       let is_new = false;
@@ -434,7 +440,7 @@ class DiffViewer extends RpcMixin(LitElement) {
         continue;
       }
 
-      // Update if already open, else add
+      // Update the already-open file
       const existingIdx = this._files.findIndex(f => f.path === fpath);
       if (existingIdx >= 0) {
         const updated = [...this._files];
@@ -447,23 +453,17 @@ class DiffViewer extends RpcMixin(LitElement) {
         };
         this._files = updated;
         this._dirtyPaths = new Set([...this._dirtyPaths].filter(p => p !== fpath));
-      } else {
-        this._files = [...this._files, {
-          path: fpath,
-          original,
-          modified,
-          is_new,
-          is_read_only: false,
-          is_config: false,
-          config_type: '',
-          real_path: '',
-          savedContent: modified,
-        }];
       }
     }
 
-    this._activeIndex = this._files.findIndex(f => filesModified.includes(f.path));
-    if (this._activeIndex < 0 && this._files.length > 0) this._activeIndex = 0;
+    // Keep current active tab, or switch to first reloaded file
+    const currentActive = this._activeIndex >= 0 && this._activeIndex < this._files.length
+      ? this._files[this._activeIndex].path : null;
+    if (currentActive && toReload.includes(currentActive)) {
+      // Stay on current tab — it was reloaded
+    } else if (this._activeIndex < 0 && this._files.length > 0) {
+      this._activeIndex = 0;
+    }
     await this._ensureMonaco();
     this._showActiveFile();
     this._emitActiveFileChanged();

@@ -3,6 +3,7 @@ import { JRPCClient } from '@flatmax/jrpc-oo';
 import { SharedRpc } from './rpc-mixin.js';
 import './dialog/ac-dialog.js';
 import './chat/diff-viewer.js';
+import './chat/token-hud.js';
 import './chat/toast-container.js';
 
 /**
@@ -281,10 +282,20 @@ class AcApp extends JRPCClient {
 
   _onStreamCompleteForDiff(e) {
     const { result } = e.detail || {};
-    if (!result?.files_modified?.length) return;
-    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
-    if (diffViewer) {
-      diffViewer.openEditResults(result.edit_results, result.files_modified);
+    if (!result) return;
+
+    // Show token HUD overlay on diff background
+    if (result.token_usage) {
+      const hud = this.shadowRoot.querySelector('token-hud');
+      if (hud) hud.show(result);
+    }
+
+    // Open modified files in diff viewer
+    if (result.files_modified?.length) {
+      const diffViewer = this.shadowRoot.querySelector('diff-viewer');
+      if (diffViewer) {
+        diffViewer.openEditResults(result.edit_results, result.files_modified);
+      }
     }
   }
 
@@ -297,6 +308,7 @@ class AcApp extends JRPCClient {
 
   render() {
     return html`
+      <token-hud></token-hud>
       <div class="diff-background">
         <diff-viewer></diff-viewer>
       </div>

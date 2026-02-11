@@ -142,9 +142,13 @@ For applied edits:
 
 ### Post-Edit Refresh
 
-When edits are applied to files currently open:
-1. Re-fetch HEAD and working copy for each
+When edits are applied, `openEditResults` **only reloads files that are already open** in the tab bar — it does not auto-open new tabs.
+
+For each already-open modified file:
+1. Re-fetch HEAD and working copy
 2. Update editor models in place (preserves editor state)
+3. Clear dirty state for that file
+4. Maintain current active tab selection
 
 ## File Object Schema
 

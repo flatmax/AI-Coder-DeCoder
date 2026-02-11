@@ -212,6 +212,29 @@ Session total: 182,756
 
 ---
 
+## Token HUD (Diff Viewer Overlay)
+
+A floating `<token-hud>` overlay positioned in the top-right of the diff viewer background. Separate from the Cache and Context viewer tabs — this is a transient post-response summary that auto-dismisses.
+
+### Data Flow
+
+1. `streamComplete` fires with `token_usage` in result
+2. `app-shell._onStreamCompleteForDiff` calls `hud.show(result)` on the `<token-hud>` element
+3. HUD displays immediate token data and asynchronously fetches `LLM.get_context_breakdown` via RPC
+4. Full breakdown populates cache tiers, history budget, tier changes, and session totals
+
+### Relationship to Tabs
+
+| Component | Location | Trigger | Persistence |
+|-----------|----------|---------|-------------|
+| Token HUD | Diff viewer background (top-right) | Each `streamComplete` | Transient (~8s auto-hide) |
+| Context Viewer tab | Dialog tab panel | Tab switch / file change | Persistent while visible |
+| Cache Viewer tab | Dialog tab panel | Tab switch / file change | Persistent while visible |
+
+All three consume `LLM.get_context_breakdown` but serve different purposes: the HUD is a quick glance after each response; the tabs provide detailed inspection.
+
+---
+
 ## Color Palette (Reference)
 
 Tiers use a warm-to-cool spectrum:

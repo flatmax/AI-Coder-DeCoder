@@ -180,7 +180,7 @@ After cancellation: partial content is stored with a `[stopped]` marker, `stream
 2. Clear streaming state, watchdog
 3. Handle errors — auto-deselect binary/invalid files
 4. Finalize message — mark as final, attach edit results
-5. Refresh file tree if edits were applied
+5. Refresh file tree if edits were applied (diff viewer only reloads already-open files, does not auto-open new tabs)
 6. Run file mention detection on the finalized assistant message (see [Chat Interface](chat_interface.md#file-mentions))
 7. Show token usage HUD
 7. Refresh cache/context viewers
@@ -436,9 +436,23 @@ The extraction function uses a dual-mode getter that handles both attribute acce
 - Session cumulative totals
 
 ### Browser Overlay
-- Context breakdown with tier details
-- Cache hit percentage (color-coded)
-- This-request stats
-- History budget warning
-- Tier change notifications
-- Auto-hides after ~8 seconds, pauses on hover
+
+Positioned in the **top-right of the diff viewer background** (inside `.diff-background`, not inside the chat panel or dialog). Triggered by `app-shell._onStreamCompleteForDiff`.
+
+**Immediate data** (from `streamComplete` result):
+- Prompt/completion/cache read/cache write token counts
+
+**Async data** (fetched via `LLM.get_context_breakdown` RPC):
+- Cache tier bar chart with per-tier token counts and content breakdowns
+- History budget bar with percentage and compaction warning
+- Tier promotions (📈) and demotions (📉)
+- Session cumulative totals (total tokens, cache saved)
+- Model name in header
+
+**Behavior:**
+- Header shows model name and color-coded cache hit % badge (excellent/good/fair/poor/none)
+- All sections collapsible via ▼ toggles
+- Auto-hides after ~8 seconds with 800ms fade
+- Hover pauses auto-hide; mouse leave restarts timer
+- Click ✕ to dismiss immediately
+- Semi-transparent dark background with backdrop blur

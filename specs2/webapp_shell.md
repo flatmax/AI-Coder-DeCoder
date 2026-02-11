@@ -119,40 +119,44 @@ On the Files tab, a vertical resizer separates the file picker from the chat pan
 
 ## Diff Viewer (Background)
 
-The app shell hosts a `<diff-viewer>` component that fills the viewport behind the dialog:
+The app shell hosts a `<diff-viewer>` component and a `<token-hud>` component that fill the viewport behind the dialog:
 - `position: fixed; inset: 0; z-index: 0` — always behind the dialog
 - Shows an empty state with the **AC⚡DC** brand watermark when no files are open (large, semi-transparent text at 75% horizontal, vertically centered)
 - File tab bar appears at the top when files are loaded
 - Monaco diff editor fills the remaining space
 - The app shell listens for `navigate-file` events and routes them to the diff viewer
-- Post-edit file updates are routed from the `stream-complete` handler to the diff viewer
+- Post-edit file updates are routed from the `stream-complete` handler to the diff viewer (only reloads already-open files; does not auto-open new tabs)
 - Save events from the diff viewer (`file-save`) are handled by the app shell, which calls the appropriate Repo or Settings RPC
 - File mention clicks (`file-mention-click`) bubble from chat panel through the dialog to the files tab, which updates file selection
 
+### Token HUD
+
+A `<token-hud>` component rendered as a top-level sibling in the app-shell shadow DOM (outside `.diff-background`). It uses `position: fixed` with `z-index: 10000` to guarantee visibility above Monaco editor overlays. Appears after each LLM response when `streamComplete` includes `token_usage` data. The app shell's `_onStreamCompleteForDiff` handler triggers the HUD via `hud.show(result)`. The HUD uses `RpcMixin` to independently fetch the full context breakdown from `LLM.get_context_breakdown`. See [Chat Interface — Token HUD Overlay](chat_interface.md#token-hud-overlay) for full details.
+
 ## Lifecycle
-═══════ REPL
 
-specs2/webapp_shell.md
-««« EDIT
 ### Startup
-- Initialize input handling, window controls, streaming, URL service, scroll observer
-- Register event listeners for snippets and panel resize
-- On RPC ready: call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), load file tree, load snippets, sync history bar
-═══════ REPL
-### Startup
+
+**Server (main.py):**
 - Validate git repository — if not a repo, write a self-contained HTML file (AC⚡DC branding, repo path, `git init`/`cd` instructions) to a temp file, open it as `file://` in the browser, print terminal banner, and exit. No server or webapp is started.
+
+**App Shell (app-shell.js):**
 - Initialize diff viewer (background layer) and dialog (foreground)
-- Register event listeners for file navigation and save events
-- On RPC ready: call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), load file tree, load snippets, sync history bar
+- Register event listeners for file navigation, save events, and stream-complete
+- On RPC ready (`setupDone`): publish call proxy to `SharedRpc`, call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), dispatch `state-loaded` event
 
-### Startup
-- Initialize input handling, window controls, streaming, URL service, scroll observer
-- Register event listeners for snippets and panel resize
-- On RPC ready: call `LLM.get_current_state()` to restore session (messages, selected files, streaming status), load file tree, load snippets, sync history bar
+**Files Tab (files-tab.js):**
+- On RPC ready: load snippets, load file tree
+- On `state-loaded`: restore messages, selected files, streaming status, sync file picker, scroll chat to bottom
 
-### Reconnection (Browser Refresh)
-- jrpc-oo handles WebSocket reconnection automatically
-- On `setupDone`: fetch current state from server, rebuild chat display and file selection
+**Dialog (ac-dialog.js):**
+- On RPC ready: sync history bar via `LLM.get_history_status()`
+
+### Reconnection
+
+- jrpc-oo provides the base WebSocket transport; app shell implements reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
+- On disconnect: reset `SharedRpc`, show reconnecting banner with attempt count, dispatch error toast
+- On reconnect (`setupDone`): re-publish call proxy to `SharedRpc`, fetch current state from server, rebuild chat display and file selection, dispatch success toast
 - Scroll chat to bottom after state is loaded (so the user sees the most recent messages)
 - If a stream is active (from another tab or pre-refresh), display existing messages but don't receive in-progress chunks
 

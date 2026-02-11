@@ -5,7 +5,6 @@ import './chat-input.js';
 import './url-chips.js';
 import './file-picker.js';
 import './history-browser.js';
-import './token-hud.js';
 
 /**
  * Files & Chat tab — left panel (file picker) + right panel (chat).
@@ -649,11 +648,6 @@ class FilesTab extends RpcMixin(LitElement) {
       }];
     }
 
-    // Show token usage HUD
-    if (result.token_usage) {
-      this.shadowRoot.querySelector('token-hud')?.show(result);
-    }
-
     // Refresh file tree if edits were applied
     if (result.files_modified?.length > 0) {
       this._loadFileTree();
@@ -997,8 +991,6 @@ class FilesTab extends RpcMixin(LitElement) {
           @stop-streaming=${this._onStopStreaming}
           @urls-detected=${this._onUrlsDetected}
         ></chat-input>
-
-        <token-hud></token-hud>
       </div>
 
       <history-browser
