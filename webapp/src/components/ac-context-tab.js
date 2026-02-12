@@ -1,0 +1,510 @@
+/**
+ * Context Viewer tab — token budget bar, category breakdown, expandable details.
+ *
+ * Shows: system prompt, symbol map, files, URLs, history token usage.
+ * Calls LLM.get_context_breakdown for data.
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import { theme, scrollbarStyles } from '../styles/theme.js';
+import { RpcMixin } from '../rpc-mixin.js';
+
+function formatTokens(n) {
+  if (n == null) return '—';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
+}
+
+export class AcContextTab extends RpcMixin(LitElement) {
+  static properties = {
+    _data: { type: Object, state: true },
+    _loading: { type: Boolean, state: true },
+    _expandedSections: { type: Object, state: true },
+    _stale: { type: Boolean, state: true },
+  };
+
+  static styles = [theme, scrollbarStyles, css`
+    :host {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow-y: auto;
+    }
+
+    /* Budget bar */
+    .budget-section {
+      padding: 12px 16px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border-primary);
+    }
+
+    .budget-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .budget-label {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .budget-values {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-primary);
+    }
+
+    .budget-bar {
+      height: 8px;
+      background: var(--bg-primary);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+
+    .budget-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+    .budget-bar-fill.green { background: var(--accent-green); }
+    .budget-bar-fill.yellow { background: #e5c07b; }
+    .budget-bar-fill.red { background: var(--accent-red); }
+
+    .budget-percent {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-align: right;
+    }
+
+    /* Model info */
+    .model-info {
+      padding: 8px 16px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-primary);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .model-info span {
+      font-family: var(--font-mono);
+    }
+
+    /* Categories */
+    .categories {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+
+    .category {
+      border-bottom: 1px solid var(--border-primary);
+    }
+
+    .category-header {
+      display: flex;
+      align-items: center;
+      padding: 8px 16px;
+      cursor: pointer;
+      user-select: none;
+      gap: 8px;
+      font-size: 0.82rem;
+      transition: background 0.15s;
+    }
+    .category-header:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .category-toggle {
+      font-size: 0.6rem;
+      color: var(--text-muted);
+      width: 12px;
+      flex-shrink: 0;
+    }
+
+    .category-name {
+      color: var(--text-secondary);
+      flex: 1;
+    }
+
+    .category-bar {
+      width: 80px;
+      height: 4px;
+      background: var(--bg-primary);
+      border-radius: 2px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .category-bar-fill {
+      height: 100%;
+      background: var(--accent-primary);
+      border-radius: 2px;
+    }
+
+    .category-tokens {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--accent-green);
+      min-width: 5ch;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* Category detail */
+    .category-detail {
+      display: none;
+      padding: 4px 16px 8px 36px;
+    }
+    .category-detail.expanded {
+      display: block;
+    }
+
+    .detail-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .detail-name {
+      flex: 1;
+      font-family: var(--font-mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .detail-tokens {
+      font-family: var(--font-mono);
+      color: var(--accent-green);
+      flex-shrink: 0;
+    }
+
+    /* Session totals */
+    .session-section {
+      padding: 8px 16px;
+      border-top: 1px solid var(--border-primary);
+      background: var(--bg-tertiary);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .session-section .label {
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .session-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px 12px;
+    }
+
+    .session-item {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .session-value {
+      font-family: var(--font-mono);
+      color: var(--text-primary);
+    }
+
+    /* Loading / Refresh */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-bottom: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+    }
+
+    .refresh-btn {
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 2px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      margin-left: auto;
+    }
+    .refresh-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .loading-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .stale-badge {
+      font-size: 0.65rem;
+      color: var(--accent-orange);
+      margin-left: 4px;
+    }
+  `];
+
+  constructor() {
+    super();
+    this._data = null;
+    this._loading = false;
+    this._expandedSections = new Set();
+    this._stale = false;
+
+    this._onStreamComplete = this._onStreamComplete.bind(this);
+    this._onFilesChanged = this._onFilesChanged.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener('stream-complete', this._onStreamComplete);
+    window.addEventListener('files-changed', this._onFilesChanged);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener('files-changed', this._onFilesChanged);
+  }
+
+  onRpcReady() {
+    this._refresh();
+  }
+
+  _onStreamComplete() {
+    // Mark stale; auto-refresh if visible
+    if (this._isVisible()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
+  _onFilesChanged() {
+    if (this._isVisible()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
+  _isVisible() {
+    // Check if we're in the active tab
+    return this.offsetParent !== null;
+  }
+
+  updated(changed) {
+    // Refresh when becoming visible and stale
+    if (this._stale && this._isVisible()) {
+      this._stale = false;
+      this._refresh();
+    }
+  }
+
+  async _refresh() {
+    if (!this.rpcConnected || this._loading) return;
+    this._loading = true;
+    this._stale = false;
+
+    try {
+      const data = await this.rpcExtract('LLMService.get_context_breakdown');
+      if (data) {
+        this._data = data;
+      }
+    } catch (e) {
+      console.warn('Failed to load context breakdown:', e);
+    } finally {
+      this._loading = false;
+    }
+  }
+
+  _toggleSection(name) {
+    const next = new Set(this._expandedSections);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    this._expandedSections = next;
+  }
+
+  // === Render ===
+
+  _getBudgetColor(percent) {
+    if (percent > 90) return 'red';
+    if (percent > 75) return 'yellow';
+    return 'green';
+  }
+
+  _renderBudget() {
+    const d = this._data;
+    if (!d) return nothing;
+
+    const total = d.total_tokens || 0;
+    const max = d.max_input_tokens || 1;
+    const percent = Math.min(100, (total / max) * 100);
+    const color = this._getBudgetColor(percent);
+
+    return html`
+      <div class="budget-section">
+        <div class="budget-header">
+          <span class="budget-label">Token Budget</span>
+          <span class="budget-values">${formatTokens(total)} / ${formatTokens(max)}</span>
+        </div>
+        <div class="budget-bar">
+          <div class="budget-bar-fill ${color}" style="width: ${percent}%"></div>
+        </div>
+        <div class="budget-percent">${percent.toFixed(1)}% used</div>
+      </div>
+    `;
+  }
+
+  _renderCategories() {
+    const d = this._data;
+    if (!d?.breakdown) return nothing;
+
+    const b = d.breakdown;
+    const total = d.total_tokens || 1;
+
+    const categories = [
+      { name: 'System Prompt', key: 'system', tokens: b.system || 0, details: null },
+      {
+        name: `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
+        key: 'symbol_map',
+        tokens: b.symbol_map || 0,
+        details: d.blocks?.filter(bl => bl.name?.includes('symbol'))?.map(bl => ({
+          name: bl.name, tokens: bl.tokens,
+        })),
+      },
+      {
+        name: `Files${b.file_count ? ` (${b.file_count})` : ''}`,
+        key: 'files',
+        tokens: b.files || 0,
+        details: b.file_details,
+      },
+      {
+        name: 'URLs',
+        key: 'urls',
+        tokens: b.urls || 0,
+        details: b.url_details,
+      },
+      {
+        name: 'History',
+        key: 'history',
+        tokens: b.history || 0,
+        details: null,
+      },
+    ];
+
+    return html`
+      <div class="categories">
+        ${categories.map(cat => {
+          const pct = total > 0 ? (cat.tokens / total) * 100 : 0;
+          const expanded = this._expandedSections.has(cat.key);
+          const hasDetails = cat.details && cat.details.length > 0;
+
+          return html`
+            <div class="category">
+              <div class="category-header"
+                @click=${() => hasDetails && this._toggleSection(cat.key)}>
+                <span class="category-toggle">${hasDetails ? (expanded ? '▼' : '▶') : ' '}</span>
+                <span class="category-name">${cat.name}</span>
+                <div class="category-bar">
+                  <div class="category-bar-fill" style="width: ${pct}%"></div>
+                </div>
+                <span class="category-tokens">${formatTokens(cat.tokens)}</span>
+              </div>
+              ${hasDetails ? html`
+                <div class="category-detail ${expanded ? 'expanded' : ''}">
+                  ${cat.details.map(item => html`
+                    <div class="detail-item">
+                      <span class="detail-name">${item.name || item.path || item.url || '—'}</span>
+                      <span class="detail-tokens">${formatTokens(item.tokens)}</span>
+                    </div>
+                  `)}
+                </div>
+              ` : nothing}
+            </div>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  _renderSessionTotals() {
+    const s = this._data?.session_totals;
+    if (!s) return nothing;
+
+    return html`
+      <div class="session-section">
+        <div class="label">Session Totals</div>
+        <div class="session-grid">
+          <div class="session-item">
+            <span>Prompt In</span>
+            <span class="session-value">${formatTokens(s.prompt)}</span>
+          </div>
+          <div class="session-item">
+            <span>Completion Out</span>
+            <span class="session-value">${formatTokens(s.completion)}</span>
+          </div>
+          <div class="session-item">
+            <span>Total</span>
+            <span class="session-value">${formatTokens(s.total)}</span>
+          </div>
+          <div class="session-item">
+            <span>Cache Hit</span>
+            <span class="session-value">${formatTokens(s.cache_hit)}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  render() {
+    return html`
+      <div class="toolbar">
+        <span style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">
+          Context Budget
+          ${this._stale ? html`<span class="stale-badge">● stale</span>` : nothing}
+        </span>
+        <button class="refresh-btn" @click=${() => this._refresh()}
+          ?disabled=${this._loading}>↻ Refresh</button>
+      </div>
+
+      ${this._loading && !this._data ? html`
+        <div class="loading-indicator">Loading context breakdown...</div>
+      ` : html`
+        ${this._renderBudget()}
+        ${this._data ? html`
+          <div class="model-info">
+            <span>Model: ${this._data.model || '—'}</span>
+            ${this._data.cache_hit_rate != null ? html`
+              <span>Cache: ${(this._data.cache_hit_rate * 100).toFixed(0)}% hit</span>
+            ` : nothing}
+          </div>
+        ` : nothing}
+        ${this._renderCategories()}
+        ${this._renderSessionTotals()}
+      `}
+    `;
+  }
+}
+
+customElements.define('ac-context-tab', AcContextTab);

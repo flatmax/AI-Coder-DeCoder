@@ -11,6 +11,14 @@ import { RpcMixin } from '../rpc-mixin.js';
 // Import child components so custom elements are registered
 import './ac-files-tab.js';
 
+// Lazy-loaded tab imports
+const lazyImports = {
+  search: () => import('./ac-search-tab.js'),
+  context: () => import('./ac-context-tab.js'),
+  cache: () => import('./ac-cache-tab.js'),
+  settings: () => import('./ac-settings-tab.js'),
+};
+
 const TABS = [
   { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
   { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
@@ -223,10 +231,18 @@ export class AcDialog extends RpcMixin(LitElement) {
       this.minimized = !this.minimized;
       return;
     }
-    // Ctrl+Shift+F → Search tab
+    // Ctrl+Shift+F → Search tab with selection/clipboard prefill
     if (e.ctrlKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
+      // Capture selection synchronously before focus change clears it
+      const sel = window.getSelection()?.toString()?.trim() || '';
       this._switchTab('search');
+      if (sel && !sel.includes('\n')) {
+        this.updateComplete.then(() => {
+          const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
+          if (searchTab) searchTab.prefill(sel);
+        });
+      }
       return;
     }
   }
@@ -236,6 +252,17 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._visitedTabs.add(tabId);
     if (this.minimized) {
       this.minimized = false;
+    }
+    // Trigger lazy import for the tab
+    if (lazyImports[tabId]) {
+      lazyImports[tabId]();
+    }
+    // Focus search input when switching to search
+    if (tabId === 'search') {
+      this.updateComplete.then(() => {
+        const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
+        if (searchTab) searchTab.focus();
+      });
     }
   }
 
@@ -283,25 +310,25 @@ export class AcDialog extends RpcMixin(LitElement) {
         <!-- Lazy-loaded tabs — only render once visited -->
         ${this._visitedTabs.has('search') ? html`
           <div class="tab-panel ${this.activeTab === 'search' ? 'active' : ''}">
-            <div class="placeholder">Search — coming soon</div>
+            <ac-search-tab></ac-search-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('context') ? html`
           <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}">
-            <div class="placeholder">Context Budget — coming soon</div>
+            <ac-context-tab></ac-context-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('cache') ? html`
           <div class="tab-panel ${this.activeTab === 'cache' ? 'active' : ''}">
-            <div class="placeholder">Cache Tiers — coming soon</div>
+            <ac-cache-tab></ac-cache-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('settings') ? html`
           <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}">
-            <div class="placeholder">Settings — coming soon</div>
+            <ac-settings-tab></ac-settings-tab>
           </div>
         ` : ''}
       </div>

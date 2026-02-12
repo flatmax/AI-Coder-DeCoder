@@ -18,6 +18,112 @@ const EDIT_SEP = '═══════ REPL';
 const EDIT_END = '»»» EDIT END';
 
 /**
+ * Detect repo file paths in rendered HTML and wrap them with clickable spans.
+ * Skips matches inside <pre>, <code>, or HTML tags.
+ * Also collects edit block file paths.
+ * Returns { html, referencedFiles: string[] }
+ */
+function applyFileMentions(html, repoFiles, selectedFiles, editFilePaths = []) {
+  if (!repoFiles || repoFiles.length === 0) return { html, referencedFiles: [] };
+
+  const selectedSet = new Set(selectedFiles || []);
+  const referencedSet = new Set(editFilePaths);
+
+  // Pre-filter: only files whose path appears as substring in the html
+  const candidates = repoFiles.filter(f => html.includes(f));
+  if (candidates.length === 0) return { html, referencedFiles: [...referencedSet] };
+
+  // Sort by path length descending so longer paths match first
+  candidates.sort((a, b) => b.length - a.length);
+
+  // Build combined regex — escape special chars, word boundary before filename
+  const escaped = candidates.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const combined = new RegExp('(' + escaped.join('|') + ')', 'g');
+
+  // Split HTML into segments: inside tags/pre/code vs plain text
+  // We'll walk through and only replace in "safe" text segments
+  const result = [];
+  let lastIndex = 0;
+  let inPre = false;
+  let inCode = false;
+
+  // Regex to find HTML tags
+  const tagRe = /<\/?[a-zA-Z][^>]*>/g;
+  let tagMatch;
+  const tags = [];
+  while ((tagMatch = tagRe.exec(html)) !== null) {
+    tags.push({ index: tagMatch.index, end: tagMatch.index + tagMatch[0].length, tag: tagMatch[0] });
+  }
+
+  // Process text between tags
+  let tagIdx = 0;
+  let pos = 0;
+
+  while (pos < html.length) {
+    // Find next tag
+    while (tagIdx < tags.length && tags[tagIdx].end <= pos) tagIdx++;
+    const nextTag = tagIdx < tags.length ? tags[tagIdx] : null;
+    const textEnd = nextTag ? nextTag.index : html.length;
+
+    if (pos < textEnd && !inPre && !inCode) {
+      // Process this text segment for file mentions
+      const textSegment = html.slice(pos, textEnd);
+      const replaced = textSegment.replace(combined, (match) => {
+        referencedSet.add(match);
+        const cls = selectedSet.has(match) ? 'file-mention in-context' : 'file-mention';
+        return `<span class="${cls}" data-file="${escapeHtml(match)}">${escapeHtml(match)}</span>`;
+      });
+      result.push(replaced);
+    } else if (pos < textEnd) {
+      // Inside pre/code — don't replace
+      result.push(html.slice(pos, textEnd));
+    }
+
+    if (nextTag) {
+      result.push(nextTag.tag);
+      const lower = nextTag.tag.toLowerCase();
+      if (lower.startsWith('<pre')) inPre = true;
+      else if (lower.startsWith('</pre')) inPre = false;
+      else if (lower.startsWith('<code')) inCode = true;
+      else if (lower.startsWith('</code')) inCode = false;
+      pos = nextTag.end;
+    } else {
+      pos = textEnd;
+    }
+  }
+
+  return { html: result.join(''), referencedFiles: [...referencedSet] };
+}
+
+/**
+ * Render the file summary section below an assistant message.
+ * Returns HTML string with file chips.
+ */
+function renderFileSummary(referencedFiles, selectedFiles) {
+  if (!referencedFiles || referencedFiles.length === 0) return '';
+
+  const selectedSet = new Set(selectedFiles || []);
+  const inContext = referencedFiles.filter(f => selectedSet.has(f));
+  const notInContext = referencedFiles.filter(f => !selectedSet.has(f));
+
+  const chips = [];
+  for (const f of inContext) {
+    const name = f.split('/').pop();
+    chips.push(`<span class="file-chip in-context" data-file="${escapeHtml(f)}" title="${escapeHtml(f)}">✓ ${escapeHtml(name)}</span>`);
+  }
+  for (const f of notInContext) {
+    const name = f.split('/').pop();
+    chips.push(`<span class="file-chip addable" data-file="${escapeHtml(f)}" title="${escapeHtml(f)}">+ ${escapeHtml(name)}</span>`);
+  }
+
+  const addAllBtn = notInContext.length >= 2
+    ? `<button class="add-all-btn" data-files="${escapeHtml(JSON.stringify(notInContext))}">+ Add All (${notInContext.length})</button>`
+    : '';
+
+  return `<div class="file-summary"><span class="file-summary-label">📁 Files Referenced</span>${addAllBtn}<div class="file-chips">${chips.join('')}</div></div>`;
+}
+
+/**
  * Parse edit blocks out of raw LLM text, returning an array of
  * { type: 'text'|'edit', content, filePath, oldLines, newLines }
  */
@@ -241,6 +347,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _confirmAction: { type: Object, state: true },
     _toast: { type: Object, state: true },
     _committing: { type: Boolean, state: true },
+    _repoFiles: { type: Array, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -797,6 +904,79 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .edit-summary .stat.fail { color: var(--accent-red); }
     .edit-summary .stat.skip { color: #f0a030; }
 
+    /* File mentions */
+    .file-mention {
+      color: var(--accent-primary);
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 0 2px;
+      margin: 0 1px;
+      transition: background 0.15s;
+    }
+    .file-mention:hover {
+      background: rgba(79, 195, 247, 0.15);
+      text-decoration: underline;
+    }
+    .file-mention.in-context {
+      color: var(--text-muted);
+    }
+
+    /* File summary section */
+    .file-summary {
+      margin-top: 10px;
+      padding: 8px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      font-size: 0.8rem;
+    }
+    .file-summary-label {
+      color: var(--text-secondary);
+      margin-right: 8px;
+      font-weight: 600;
+    }
+    .add-all-btn {
+      background: none;
+      border: 1px solid var(--accent-primary);
+      color: var(--accent-primary);
+      font-size: 0.7rem;
+      padding: 1px 8px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+    .add-all-btn:hover {
+      background: rgba(79, 195, 247, 0.15);
+    }
+    .file-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .file-chip {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .file-chip.in-context {
+      background: var(--bg-secondary);
+      color: var(--text-muted);
+      border: 1px solid var(--border-primary);
+    }
+    .file-chip.addable {
+      background: rgba(79, 195, 247, 0.1);
+      color: var(--accent-primary);
+      border: 1px solid var(--accent-primary);
+    }
+    .file-chip.addable:hover {
+      background: rgba(79, 195, 247, 0.2);
+    }
+
   `];
 
   constructor() {
@@ -818,6 +998,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._confirmAction = null;
     this._toast = null;
     this._committing = false;
+    this._repoFiles = [];
 
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -855,6 +1036,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._loadSnippets();
+    this._loadRepoFiles();
+  }
+
+  async _loadRepoFiles() {
+    try {
+      const result = await this.rpcExtract('Repo.get_flat_file_list');
+      if (Array.isArray(result)) {
+        this._repoFiles = result;
+      } else if (result?.files && Array.isArray(result.files)) {
+        this._repoFiles = result.files;
+      }
+    } catch (e) {
+      console.warn('Failed to load repo files:', e);
+    }
   }
 
   async _loadSnippets() {
@@ -942,6 +1137,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         detail: { files: result.files_modified },
         bubbles: true, composed: true,
       }));
+      // Refresh repo file list (new files may have been created)
+      this._loadRepoFiles();
     }
   }
 
@@ -1321,30 +1518,61 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const isUser = msg.role === 'user';
     const content = msg.content || '';
 
-    if (!isUser && msg.editResults) {
-      // Assistant message with edit blocks — use rich renderer
+    if (isUser) {
       return html`
-        <div class="message-card ${msg.role}" data-msg-index="${index}">
-          <div class="role-label">Assistant</div>
-          ${this._renderEditSummary(msg)}
+        <div class="message-card user" data-msg-index="${index}">
+          <div class="role-label">You</div>
           <div class="md-content" @click=${this._onContentClick}>
-            ${unsafeHTML(renderAssistantContent(content, msg.editResults))}
+            ${unsafeHTML(renderMarkdown(content))}
           </div>
         </div>
       `;
     }
 
+    // Assistant message — apply edit block rendering if applicable
+    let renderedHtml;
+    const editFilePaths = msg.editResults ? Object.keys(msg.editResults) : [];
+
+    if (msg.editResults) {
+      renderedHtml = renderAssistantContent(content, msg.editResults);
+    } else {
+      renderedHtml = renderMarkdown(content);
+    }
+
+    // Apply file mentions (on final render, not streaming)
+    const { html: mentionHtml, referencedFiles } = applyFileMentions(
+      renderedHtml, this._repoFiles, this.selectedFiles, editFilePaths
+    );
+
+    const fileSummaryHtml = renderFileSummary(referencedFiles, this.selectedFiles);
+
     return html`
-      <div class="message-card ${msg.role}" data-msg-index="${index}">
-        <div class="role-label">${isUser ? 'You' : 'Assistant'}</div>
+      <div class="message-card assistant" data-msg-index="${index}">
+        <div class="role-label">Assistant</div>
+        ${this._renderEditSummary(msg)}
         <div class="md-content" @click=${this._onContentClick}>
-          ${unsafeHTML(renderMarkdown(content))}
+          ${unsafeHTML(mentionHtml)}
         </div>
+        ${fileSummaryHtml ? html`
+          <div class="file-summary-container" @click=${this._onFileSummaryClick}>
+            ${unsafeHTML(fileSummaryHtml)}
+          </div>
+        ` : nothing}
       </div>
     `;
   }
 
   _onContentClick(e) {
+    // Handle file mention clicks
+    const mention = e.target.closest('.file-mention');
+    if (mention) {
+      const filePath = mention.dataset.file;
+      if (filePath) {
+        this._dispatchFileMentionClick(filePath);
+      }
+      return;
+    }
+
     // Handle file path clicks in edit blocks
     const pathEl = e.target.closest('.edit-file-path');
     if (pathEl) {
@@ -1372,6 +1600,40 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         }
       }
     }
+  }
+
+  _onFileSummaryClick(e) {
+    // Handle individual file chip clicks
+    const chip = e.target.closest('.file-chip');
+    if (chip) {
+      const filePath = chip.dataset.file;
+      if (filePath) {
+        this._dispatchFileMentionClick(filePath);
+      }
+      return;
+    }
+
+    // Handle "Add All" button
+    const addAllBtn = e.target.closest('.add-all-btn');
+    if (addAllBtn) {
+      try {
+        const files = JSON.parse(addAllBtn.dataset.files);
+        if (Array.isArray(files)) {
+          for (const f of files) {
+            this._dispatchFileMentionClick(f);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to parse add-all files:', err);
+      }
+    }
+  }
+
+  _dispatchFileMentionClick(filePath) {
+    this.dispatchEvent(new CustomEvent('file-mention-click', {
+      detail: { path: filePath },
+      bubbles: true, composed: true,
+    }));
   }
 
   render() {
