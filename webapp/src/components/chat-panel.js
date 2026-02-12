@@ -10,6 +10,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 // Import child components
 import './input-history.js';
 import './url-chips.js';
+import './ac-history-browser.js';
 
 // Simple markdown → HTML (basic: headers, code blocks, bold, italic, links)
 // Edit block markers (from edit_parser.py)
@@ -1369,6 +1370,37 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.dispatchEvent(new CustomEvent('new-session', { bubbles: true, composed: true }));
   }
 
+  _openHistoryBrowser() {
+    const browser = this.shadowRoot?.querySelector('ac-history-browser');
+    if (browser) browser.show();
+  }
+
+  _onSessionLoaded(e) {
+    const { messages, sessionId } = e.detail;
+    if (Array.isArray(messages)) {
+      this.messages = [...messages];
+      this._autoScroll = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+    }
+    // Notify parent about the session change
+    this.dispatchEvent(new CustomEvent('session-loaded', {
+      detail: { sessionId, messages },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  _onPasteToPrompt(e) {
+    const text = e.detail?.text || '';
+    if (!text) return;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      this._inputValue = text;
+      textarea.value = text;
+      this._autoResize(textarea);
+      textarea.focus();
+    }
+  }
+
   // === Git Actions ===
 
   async _copyDiff() {
@@ -1643,7 +1675,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       <!-- Action Bar -->
       <div class="action-bar">
         <button class="action-btn" title="New session" @click=${this._newSession}>✨</button>
-        <button class="action-btn" title="Browse history">📜</button>
+        <button class="action-btn" title="Browse history" @click=${this._openHistoryBrowser}>📜</button>
         <div class="action-spacer"></div>
         <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
@@ -1743,6 +1775,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           `}
         </div>
       </div>
+
+      <!-- History Browser -->
+      <ac-history-browser
+        @session-loaded=${this._onSessionLoaded}
+        @paste-to-prompt=${this._onPasteToPrompt}
+      ></ac-history-browser>
 
       <!-- Confirm Dialog -->
       ${this._confirmAction ? html`
