@@ -1,0 +1,39 @@
+{
+    "snippets": [
+        {
+            "icon": "✂️",
+            "tooltip": "Continue truncated edit",
+            "message": "Your last edit was truncated, please continue from where you left off."
+        },
+        {
+            "icon": "🔍",
+            "tooltip": "Check context",
+            "message": "Please check the current context and tell me what files you can see."
+        },
+        {
+            "icon": "✏️",
+            "tooltip": "Fix malformed edits",
+            "message": "Your last edit block was malformed. Please try again with the correct format."
+        },
+        {
+            "icon": "⏸️",
+            "tooltip": "Pause before implementing",
+            "message": "Before implementing, please outline your plan and wait for my approval."
+        },
+        {
+            "icon": "✅",
+            "tooltip": "Verify tests",
+            "message": "Please verify that all relevant tests pass after your changes."
+        },
+        {
+            "icon": "📦",
+            "tooltip": "Pre-commit checklist",
+            "message": "Please review all changes, ensure tests pass, and prepare a commit message."
+        },
+        {
+            "icon": "🏁",
+            "tooltip": "Pre-commit with plan completion",
+            "message": "Please verify the implementation is complete per the plan, run tests, and prepare a commit."
+        }
+    ]
+}

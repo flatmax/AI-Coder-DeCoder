@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ac-dc"
+version = "0.1.0"
+description = "AC⚡DC — AI-assisted code editing tool"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
+    "litellm>=1.0.0",
+    "tiktoken>=0.5.0",
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-c>=0.21.0",
+    "trafilatura>=1.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+ac-dc = "ac_dc.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
