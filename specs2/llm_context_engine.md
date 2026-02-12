@@ -73,6 +73,10 @@ Tracks files included in the conversation with their contents.
 
 Paths are normalized to relative paths from repo root.
 
+### File Deselection and Cache Tiers
+
+When a file is unchecked in the file picker, its `file:{path}` entry is removed from the stability tracker at assembly time (before the LLM request is sent). This ensures the file's full content is immediately excluded from cached tier blocks. The file's `symbol:{path}` entry remains in its earned tier, providing the compact symbol map representation. See [Cache Tiering — Item Removal](cache_tiering.md#item-removal).
+
 ## Token Counting
 
 Wraps the LLM provider's tokenizer with:

@@ -156,9 +156,16 @@ Demotion removes the item from its tier, causing a cache miss (ripple).
 
 ## Item Removal
 
-- **File unchecked** — file entry removed from its tier; symbol entry returns to active (N = 0) since it's no longer redundant
+- **File unchecked** — `file:{path}` entry removed from its tier (causing a cache miss); the `symbol:{path}` entry remains in whichever tier it has earned independently (it was always tracked separately). The symbol block is no longer excluded from the symbol map output since the full file content is no longer in context
 - **File deleted** — both file and symbol entries removed entirely
 - Either causes a cache miss in the affected tier
+
+**Implementation note:** Deselected file cleanup happens at **two points** to avoid a one-request lag:
+
+1. **At assembly time** (in `_gather_tiered_content`, before the LLM request) — `file:*` entries for files not in the current selected files list are removed from the stability tracker immediately. This ensures the deselected file's full content is never sent in a cached tier block after the user unchecks it.
+2. **After the response** (in `_update_stability`) — the same check runs again as part of the normal stability update cycle, catching any edge cases.
+
+Both steps mark the affected tier as broken to trigger cascade rebalancing.
 
 ## Cache Block Structure
 

@@ -1012,6 +1012,22 @@ class LLM:
         if self._symbol_index is None:
             return []
         try:
+            # Remove file entries for deselected files from the stability tracker.
+            # When a file is deselected, its full content should no longer be in
+            # any cached tier — only its symbol block should remain.
+            selected_set = set(selected_files)
+            to_remove = []
+            for key, item in self._context.stability.get_all_items().items():
+                if item.item_type == ItemType.FILE:
+                    path = key.split(":", 1)[1] if ":" in key else key
+                    if path not in selected_set:
+                        to_remove.append(key)
+            for key in to_remove:
+                item = self._context.stability.get_item(key)
+                if item and item.tier != Tier.ACTIVE:
+                    self._context.stability._tier_broken[item.tier] = True
+                self._context.stability._items.pop(key, None)
+
             # Build symbol blocks for selected files
             symbol_blocks = {}
             for fpath in self._symbol_index.all_symbols:
@@ -1059,12 +1075,31 @@ class LLM:
         """Gather symbol blocks and file contents for tiered assembly.
 
         Returns (symbol_blocks, file_contents) keyed by tracker keys.
+
+        Also removes file entries for deselected files from the stability
+        tracker *before* assembly, so their full content is never sent in
+        cached tier blocks after deselection.
         """
         symbol_blocks: dict[str, str] = {}
         file_contents: dict[str, str] = {}
 
         if self._symbol_index is None:
             return symbol_blocks, file_contents
+
+        # Remove file entries for deselected files immediately so they don't
+        # appear in cached tier blocks this request (not just after the response).
+        selected_set = set(selected_files)
+        to_remove = []
+        for key, item in self._context.stability.get_all_items().items():
+            if item.item_type == ItemType.FILE:
+                path = key.split(":", 1)[1] if ":" in key else key
+                if path not in selected_set:
+                    to_remove.append(key)
+        for key in to_remove:
+            item = self._context.stability.get_item(key)
+            if item and item.tier != Tier.ACTIVE:
+                self._context.stability._tier_broken[item.tier] = True
+            self._context.stability._items.pop(key, None)
 
         # Determine which selected files have graduated to cached tiers
         # (their content goes in the tier block, not in active files)

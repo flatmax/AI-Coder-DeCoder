@@ -81,6 +81,10 @@ Content is organized into 5 stability tiers for prompt caching:
 
 See [Cache Tiering](cache_tiering.md) for the stability algorithm.
 
+### Deselected File Cleanup
+
+Before assembling tiered messages, the system removes `file:*` entries from the stability tracker for any files no longer in the selected files list. This ensures that deselected files' full content is immediately dropped from cached tier blocks — not carried over for one extra request. The affected tier is marked as broken, triggering cascade rebalancing. The symbol block for the deselected file remains in its earned tier, restoring the compact representation.
+
 ### Message Array Structure
 
 ```

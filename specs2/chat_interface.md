@@ -168,10 +168,10 @@ Rapid chunks are coalesced per animation frame:
 
 Fenced code blocks in assistant messages include a **copy-to-clipboard button** (📋) positioned in the top-right corner of the `<pre>` block. The button appears on hover with a subtle background, and shows brief "Copied!" feedback after clicking.
 
-- The button is injected by the markdown renderer into each `<pre class="code-block">` element
+- The button is injected by the markdown renderer into each `<pre class="code-block">` element unconditionally (including during streaming)
+- The button has `opacity: 0` by default and fades in on `<pre>` hover via CSS, so it doesn't cause visual flicker during streaming
 - Click handling is delegated through the `.md-content` click handler (same pattern as file mentions)
 - On click: copy the code block's text content to clipboard, briefly change the button text to "✓ Copied" for 1.5 seconds
-- The button does **not** appear during streaming (to avoid flicker) — only on final rendered messages
 
 ### Edit Block Rendering
 
@@ -329,9 +329,8 @@ Off-screen messages use CSS containment (`content-visibility: auto`) with intrin
 **Tab switching**: Container stays in DOM (hidden), scroll position passively preserved. No auto-scroll on tab return.
 
 **Minimize/maximize**:
-- On minimize: save `distanceFromBottom` and `scrollRatio`
-- On maximize: restore to bottom (if was near bottom) or proportional position
-- Uses double-requestAnimationFrame for layout settling
+- Container stays in DOM (hidden via CSS), scroll position passively preserved
+- No explicit save/restore logic — the browser maintains scroll offset since the element is not removed
 
 **Session load**: Reset scroll state, double-rAF → scroll to bottom
 
