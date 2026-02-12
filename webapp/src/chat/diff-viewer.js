@@ -1,6 +1,36 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 
+// Set MonacoEnvironment BEFORE any Monaco import can occur.
+// This must be at module top level to intercept worker creation
+// during Monaco's module initialization.
+//
+// ALL worker types use the generic editor.worker — we never load
+// specialized workers (ts.worker, css.worker, etc.) because they
+// call $loadForeignModule → FileAccess.toUrl which crashes in Vite.
+// The generic worker handles diff computation; we get syntax
+// highlighting from Monaco's monarch tokenizer (no worker needed).
+if (!self.MonacoEnvironment) {
+  self.MonacoEnvironment = {
+    getWorker: function (moduleId, label) {
+      return new Worker(
+        new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url),
+        { type: 'module' }
+      );
+    },
+  };
+
+  // Suppress Monaco's transient "no diff result available" error.
+  // This fires when the diff editor's setModel races ahead of the
+  // web worker initialization. The diff re-computes correctly once
+  // the worker is ready, so the error is harmless noise.
+  window.addEventListener('unhandledrejection', (evt) => {
+    if (evt.reason?.message?.includes('no diff result available')) {
+      evt.preventDefault();
+    }
+  });
+}
+
 /**
  * Diff Viewer — side-by-side Monaco diff editor with file tabs,
  * dirty tracking, language detection, and save flow.
@@ -347,7 +377,7 @@ class DiffViewer extends RpcMixin(LitElement) {
   /**
    * Open a repo file with HEAD vs working copy diff.
    */
-  async openRepoFile(path, line = null) {
+  async openRepoFile(path, line = null, searchText = null) {
     if (!this.rpcConnected) return;
 
     let original = '';
@@ -379,6 +409,11 @@ class DiffViewer extends RpcMixin(LitElement) {
       is_read_only: false,
       line,
     });
+
+    // If no line number but we have search text, find and scroll to it
+    if (!line && searchText) {
+      this._revealSearchText(searchText);
+    }
   }
 
   /**
@@ -487,9 +522,35 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     try {
       // Dynamic import — lazy load Monaco
-      // Workers are configured by vite-plugin-monaco-editor automatically
       const monaco = await import('monaco-editor');
       this._monaco = monaco;
+
+      // Disable ALL built-in language services to prevent $loadForeignModule
+      // calls inside the editor worker, which crash on FileAccess.toUrl in Vite.
+      // We provide our own LSP features via the backend symbol index.
+
+      // Disable TypeScript/JavaScript
+      monaco.languages.typescript?.typescriptDefaults?.setDiagnosticsOptions({
+        noSemanticValidation: true,
+        noSyntaxValidation: true,
+      });
+      monaco.languages.typescript?.javascriptDefaults?.setDiagnosticsOptions({
+        noSemanticValidation: true,
+        noSyntaxValidation: true,
+      });
+
+      // Disable JSON validation
+      monaco.languages.json?.jsonDefaults?.setDiagnosticsOptions?.({
+        validate: false,
+      });
+
+      // Disable CSS/SCSS/LESS validation
+      monaco.languages.css?.cssDefaults?.setOptions?.({ validate: false });
+      monaco.languages.css?.scssDefaults?.setOptions?.({ validate: false });
+      monaco.languages.css?.lessDefaults?.setOptions?.({ validate: false });
+
+      // Disable HTML validation
+      monaco.languages.html?.htmlDefaults?.setOptions?.({ validate: false });
 
       this._monacoReady = true;
       this._tryRegisterLsp();
@@ -521,6 +582,15 @@ class DiffViewer extends RpcMixin(LitElement) {
       fontFamily: "var(--font-mono), 'Fira Code', 'Cascadia Code', monospace",
       fixedOverflowWidgets: true,
     });
+
+    // Warm up the diff worker by setting an empty model pair.
+    // This forces the worker to initialize before real content arrives,
+    // preventing the "no diff result available" race on first use.
+    // These models stay alive until replaced by _showActiveFile's setModel,
+    // which disposes them via the oldModel cleanup path.
+    const warmOriginal = this._monaco.editor.createModel('', 'plaintext');
+    const warmModified = this._monaco.editor.createModel('', 'plaintext');
+    this._editor.setModel({ original: warmOriginal, modified: warmModified });
 
     // Watch for content changes on the modified editor
     const modifiedEditor = this._editor.getModifiedEditor();
@@ -627,8 +697,16 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     if (!this._editor) return;
 
-    const originalModel = this._monaco.editor.createModel(file.original, lang);
-    const modifiedModel = this._monaco.editor.createModel(file.modified, lang);
+    // Languages with built-in rich services (JS, TS, JSON, CSS, HTML)
+    // trigger $loadForeignModule in the worker, which crashes in Vite.
+    // Use plaintext for those; our own LSP providers cover the features.
+    // Other languages (python, c, cpp, etc.) only use monarch tokenizers.
+    const WORKER_LANGUAGES = new Set([
+      'javascript', 'typescript', 'json', 'css', 'scss', 'less', 'html',
+    ]);
+    const safeLang = WORKER_LANGUAGES.has(lang) ? 'plaintext' : lang;
+    const originalModel = this._monaco.editor.createModel(file.original, safeLang);
+    const modifiedModel = this._monaco.editor.createModel(file.modified, safeLang);
 
     // Capture old models before replacing
     const oldModel = this._editor.getModel();
@@ -691,6 +769,39 @@ class DiffViewer extends RpcMixin(LitElement) {
   }
 
   // ── Content change tracking ──
+
+  /** Search for text in the modified editor and scroll to the first match */
+  _revealSearchText(searchText) {
+    if (!this._editor || !searchText) return;
+    requestAnimationFrame(() => {
+      const editor = this._editor.getModifiedEditor();
+      const model = editor.getModel();
+      if (!model) return;
+
+      // Try searching for progressively shorter prefixes
+      const lines = searchText.split('\n');
+      for (let tryLines = lines.length; tryLines >= 1; tryLines--) {
+        const search = lines.slice(0, tryLines).join('\n').trim();
+        if (!search) continue;
+        const match = model.findNextMatch(search, { lineNumber: 1, column: 1 }, false, true, null, false);
+        if (match) {
+          editor.revealLineInCenter(match.range.startLineNumber);
+          editor.setPosition({ lineNumber: match.range.startLineNumber, column: 1 });
+          // Highlight the match briefly
+          const decoration = editor.deltaDecorations([], [{
+            range: match.range,
+            options: {
+              className: 'findMatch',
+              isWholeLine: false,
+            },
+          }]);
+          // Remove highlight after 3 seconds
+          setTimeout(() => editor.deltaDecorations(decoration, []), 3000);
+          return;
+        }
+      }
+    });
+  }
 
   _onContentChanged() {
     if (this._activeIndex < 0 || this._activeIndex >= this._files.length) return;

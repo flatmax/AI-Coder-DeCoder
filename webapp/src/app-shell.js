@@ -248,11 +248,11 @@ class AcApp extends JRPCClient {
   // ── Diff viewer event routing ──
 
   _onNavigateFile(e) {
-    const { path, line } = e.detail || {};
+    const { path, line, searchText } = e.detail || {};
     if (!path) return;
     const diffViewer = this.shadowRoot.querySelector('diff-viewer');
     if (diffViewer) {
-      diffViewer.openRepoFile(path, line || null);
+      diffViewer.openRepoFile(path, line || null, searchText || null);
     }
   }
 

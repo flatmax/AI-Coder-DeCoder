@@ -752,8 +752,8 @@ class ChatPanel extends RpcMixin(LitElement) {
       <div class="edit-block" role="region" aria-label="Edit block for ${seg.filePath}">
         <div class="edit-header">
           <span class="edit-file-path" role="link" tabindex="0"
-            @click=${() => this._onEditFileClick(seg.filePath)}
-            @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._onEditFileClick(seg.filePath); } }}>
+            @click=${() => this._onEditFileClick(seg.filePath, (seg.oldLines || seg.newLines || []).join('\n'))}
+            @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._onEditFileClick(seg.filePath, (seg.oldLines || seg.newLines || []).join('\n')); } }}>
             ${seg.filePath}
           </span>
           ${status ? html`<span class="edit-badge ${status}" role="status">${status}</span>` : nothing}
@@ -1052,9 +1052,9 @@ class ChatPanel extends RpcMixin(LitElement) {
     }));
   }
 
-  _onEditFileClick(filePath) {
+  _onEditFileClick(filePath, searchText) {
     this.dispatchEvent(new CustomEvent('navigate-file', {
-      detail: { path: filePath },
+      detail: { path: filePath, searchText },
       bubbles: true, composed: true,
     }));
   }

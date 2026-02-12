@@ -63,3 +63,11 @@ If an edit fails:
 2. Search for actual current text
 3. Resubmit ONE edit at a time
 4. Never guess—verify before retrying
+
+## 6. CRITICAL: CONTEXT VS CHAT HISTORY
+- **Only trust file content shown in context** (the "Working Files" / "Reference Files" sections)
+- **Never assume prior edits were applied** — previous edit blocks in chat history may have failed silently
+- If you proposed edits earlier in the conversation, the file in context shows the **actual current state** — use that, not your memory of what you changed
+- When in doubt, read the file content in context **character by character** around the edit site before writing an edit block
+- The context files are refreshed each turn — they are always authoritative
+- **Never request files that are already visible** in Working Files or Reference Files sections — they are complete and current. Read them directly.
