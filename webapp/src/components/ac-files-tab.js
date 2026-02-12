@@ -135,20 +135,24 @@ export class AcFilesTab extends RpcMixin(LitElement) {
   _onFilesChanged(e) {
     const files = e.detail?.selectedFiles;
     if (Array.isArray(files)) {
+      this._syncMessagesFromChat();
       this._selectedFiles = files;
     }
   }
 
   _onSelectionChanged(e) {
     const files = e.detail?.selectedFiles || [];
+    // Sync messages before updating state to prevent stale overwrites
+    this._syncMessagesFromChat();
     this._selectedFiles = files;
     // Notify server
     if (this.rpcConnected) {
       this.rpcCall('LLMService.set_selected_files', files).catch(() => {});
     }
-    // Force chat panel to re-render file mentions with updated selection
+    // Update chat panel's selectedFiles directly without triggering full parent re-render
     const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
     if (chatPanel) {
+      chatPanel.selectedFiles = files;
       chatPanel.requestUpdate();
     }
   }
@@ -160,6 +164,17 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       window.dispatchEvent(new CustomEvent('navigate-file', {
         detail: { path },
       }));
+    }
+  }
+
+  /**
+   * Sync messages from chat panel back to parent state so re-renders
+   * don't overwrite with stale data.
+   */
+  _syncMessagesFromChat() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      this._messages = chatPanel.messages;
     }
   }
 
@@ -196,8 +211,16 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     const path = e.detail?.path;
     if (!path) return;
 
+    // Sync messages before updating state to prevent stale overwrites
+    this._syncMessagesFromChat();
+
+    // Determine if this is a "navigate" mention (from inline text) or
+    // a "toggle" mention (from file summary chips).
+    const navigateToFile = e.detail?.navigate !== false;
+
     let newFiles;
-    if (this._selectedFiles.includes(path)) {
+    const wasSelected = this._selectedFiles.includes(path);
+    if (wasSelected) {
       // Already selected → remove from selection
       newFiles = this._selectedFiles.filter(f => f !== path);
     } else {
@@ -221,9 +244,10 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       picker.requestUpdate();
     }
 
-    // Force chat panel to re-render file mentions with updated selection
+    // Update chat panel's selectedFiles without replacing messages
     const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
     if (chatPanel) {
+      chatPanel.selectedFiles = newFiles;
       chatPanel.requestUpdate();
     }
 
@@ -232,10 +256,12 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       this.rpcCall('LLMService.set_selected_files', newFiles).catch(() => {});
     }
 
-    // Navigate to the file in diff viewer
-    window.dispatchEvent(new CustomEvent('navigate-file', {
-      detail: { path },
-    }));
+    // Navigate to the file in diff viewer only for inline text mentions
+    if (navigateToFile) {
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+      }));
+    }
   }
 
   _onFilesModified(e) {

@@ -1890,12 +1890,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onContentClick(e) {
-    // Handle file mention clicks
+    // Handle file mention clicks (inline text mentions — navigate to file)
     const mention = e.target.closest('.file-mention');
     if (mention) {
       const filePath = mention.dataset.file;
       if (filePath) {
-        this._dispatchFileMentionClick(filePath);
+        this._dispatchFileMentionClick(filePath, true);
       }
       return;
     }
@@ -1930,24 +1930,24 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onFileSummaryClick(e) {
-    // Handle individual file chip clicks
+    // Handle individual file chip clicks (toggle only — no navigation)
     const chip = e.target.closest('.file-chip');
     if (chip) {
       const filePath = chip.dataset.file;
       if (filePath) {
-        this._dispatchFileMentionClick(filePath);
+        this._dispatchFileMentionClick(filePath, false);
       }
       return;
     }
 
-    // Handle "Add All" button
+    // Handle "Add All" button (toggle only — no navigation)
     const addAllBtn = e.target.closest('.add-all-btn');
     if (addAllBtn) {
       try {
         const files = JSON.parse(addAllBtn.dataset.files);
         if (Array.isArray(files)) {
           for (const f of files) {
-            this._dispatchFileMentionClick(f);
+            this._dispatchFileMentionClick(f, false);
           }
         }
       } catch (err) {
@@ -1956,9 +1956,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
   }
 
-  _dispatchFileMentionClick(filePath) {
+  _dispatchFileMentionClick(filePath, navigate = true) {
     this.dispatchEvent(new CustomEvent('file-mention-click', {
-      detail: { path: filePath },
+      detail: { path: filePath, navigate },
       bubbles: true, composed: true,
     }));
   }
