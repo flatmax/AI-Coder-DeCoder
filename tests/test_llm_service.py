@@ -245,6 +245,32 @@ class TestTokenUsageExtraction:
         assert usage["output_tokens"] == 100
 
 
+# === URL Handling ===
+
+
+class TestURLHandling:
+    def test_detect_urls(self, service):
+        """detect_urls returns classified results."""
+        results = service.detect_urls("Check https://github.com/owner/repo")
+        assert len(results) == 1
+        assert results[0]["url_type"] == "github_repo"
+
+    def test_get_url_content_unfetched(self, service):
+        """get_url_content returns error for unfetched URL."""
+        result = service.get_url_content("https://unfetched.com")
+        assert result.get("error") is not None
+
+    def test_invalidate_url_cache(self, service):
+        """invalidate_url_cache returns success."""
+        result = service.invalidate_url_cache("https://example.com")
+        assert result.get("success") is True
+
+    def test_clear_url_cache(self, service):
+        """clear_url_cache returns success."""
+        result = service.clear_url_cache()
+        assert result.get("success") is True
+
+
 # === History Search ===
 
 

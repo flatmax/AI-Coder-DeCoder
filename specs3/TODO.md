@@ -87,12 +87,12 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **History compactor** — Truncation/summarization strategies with verbatim window (`history_compactor.py`)
 - [x] **Compaction integration** — Post-response trigger in LLM service, stability re-registration, message persistence (`context.py`, `llm_service.py`)
 
-### Phase 6: URL Handling
-- [ ] **URL detector** — Pattern matching and type classification (`url_handler.py`)
-- [ ] **GitHub handler** — Shallow clone, README, symbol map generation (`url_handler.py`)
-- [ ] **Web handler** — Content extraction with fallback (`url_handler.py`)
-- [ ] **URL cache** — Filesystem TTL cache (`url_cache.py`)
-- [ ] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
+### Phase 6: URL Handling ✅
+- [x] **URL detector** — Pattern matching and type classification (`url_handler.py`)
+- [x] **GitHub handler** — Shallow clone, README, symbol map generation (`url_handler.py`)
+- [x] **Web handler** — Content extraction with fallback (`url_handler.py`)
+- [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
+- [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
 ### Phase 7: Webapp Foundation
 - [ ] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration

@@ -28,6 +28,8 @@ from .edit_parser import (
 from .history_store import HistoryStore
 from .stability_tracker import TIER_CONFIG, Tier
 from .token_counter import TokenCounter
+from .url_cache import URLCache
+from .url_handler import URLService
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +156,9 @@ class LLMService:
         self._session_id = self._new_session_id()
         self._executor = ThreadPoolExecutor(max_workers=2)
 
+        # URL service
+        self._url_service = self._init_url_service()
+
         # Session totals
         self._session_totals = {
             "input_tokens": 0,
@@ -264,6 +269,27 @@ class LLMService:
             if self._repo:
                 flat_files = self._repo.get_flat_file_list()
                 file_tree = f"# File Tree ({len(flat_files)} files)\n\n" + "\n".join(flat_files)
+
+            # Detect and fetch URLs from prompt
+            try:
+                detected = self._url_service.detect_urls(message)
+                for url_info in detected:
+                    url = url_info["url"]
+                    # Skip already-fetched URLs
+                    existing = self._url_service.get_url_content(url)
+                    if existing.error == "URL not yet fetched":
+                        await self._url_service.fetch_url(
+                            url, use_cache=True, summarize=True,
+                            user_text=message,
+                        )
+                # Update URL context on the context manager
+                url_context_text = self._url_service.format_url_context()
+                if url_context_text:
+                    self._context.set_url_context(
+                        [url_context_text]
+                    )
+            except Exception as e:
+                logger.warning(f"URL detection/fetch failed: {e}")
 
             # Persist user message
             if self._history_store:
@@ -714,3 +740,47 @@ class LLMService:
             "session_id": self._session_id,
             "message_count": len(self._context.get_history()),
         }
+
+    # === URL Handling (RPC) ===
+
+    def _init_url_service(self):
+        """Initialize the URL service with cache and model."""
+        cache = None
+        try:
+            url_config = self._config.url_cache_config or {}
+            cache_dir = url_config.get("path")
+            ttl_hours = url_config.get("ttl_hours", 24)
+            cache = URLCache(cache_dir=cache_dir, ttl_hours=ttl_hours)
+        except Exception as e:
+            logger.warning(f"Failed to initialize URL cache: {e}")
+
+        model = self._config.smaller_model or self._config.model
+        return URLService(cache=cache, model=model)
+
+    def detect_urls(self, text):
+        """Find and classify URLs in text. (RPC)"""
+        return self._url_service.detect_urls(text)
+
+    async def fetch_url(self, url, use_cache=True, summarize=True,
+                        summary_type=None, user_text=""):
+        """Fetch URL content, cache, and optionally summarize. (RPC)"""
+        result = await self._url_service.fetch_url(
+            url, use_cache=use_cache, summarize=summarize,
+            summary_type=summary_type, user_text=user_text,
+        )
+        return result.to_dict()
+
+    def get_url_content(self, url):
+        """Get cached/fetched content for a URL. (RPC)"""
+        result = self._url_service.get_url_content(url)
+        return result.to_dict()
+
+    def invalidate_url_cache(self, url):
+        """Remove URL from cache. (RPC)"""
+        self._url_service.invalidate_url_cache(url)
+        return {"success": True}
+
+    def clear_url_cache(self):
+        """Clear all cached URLs. (RPC)"""
+        self._url_service.clear_url_cache()
+        return {"success": True}
