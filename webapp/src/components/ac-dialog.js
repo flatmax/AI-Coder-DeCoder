@@ -8,6 +8,9 @@ import { LitElement, html, css } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 
+// Import child components so custom elements are registered
+import './ac-files-tab.js';
+
 const TABS = [
   { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
   { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
@@ -114,12 +117,16 @@ export class AcDialog extends RpcMixin(LitElement) {
     .tab-panel {
       position: absolute;
       inset: 0;
-      overflow: auto;
+      overflow: hidden;
       display: none;
     }
     .tab-panel.active {
       display: flex;
       flex-direction: column;
+    }
+    .tab-panel > * {
+      flex: 1;
+      min-height: 0;
     }
 
     /* Placeholder for unimplemented tabs */

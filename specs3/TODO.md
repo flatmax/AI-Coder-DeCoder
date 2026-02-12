@@ -94,7 +94,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
 - [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
-### Phase 7: Webapp Foundation
+### Phase 7: Webapp Foundation ✅
 - [x] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
 - [x] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
 - [x] **Dialog component** — Dragging, resizing, minimizing, tab bar
@@ -102,8 +102,8 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
 - [x] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
 - [x] **jrpc-oo integration** — App shell extends JRPCClient, SharedRpc publishes call proxy on setupDone, RpcMixin for child components
-- [ ] **Input history** — Up-arrow fuzzy search overlay, history navigation
-- [ ] **URL chips** — Detection display, fetch triggers, inclusion toggles
+- [x] **Input history** — Up-arrow fuzzy search overlay, history navigation
+- [x] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
 ### Phase 8: Webapp Features
 - [ ] **File picker** — Tree rendering, checkbox selection, git status badges, context menu

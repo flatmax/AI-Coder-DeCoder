@@ -7,6 +7,10 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 
+// Import child components
+import './input-history.js';
+import './url-chips.js';
+
 // Simple markdown → HTML (basic: headers, code blocks, bold, italic, links)
 function renderMarkdown(text) {
   if (!text) return '';
@@ -43,6 +47,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _inputValue: { type: String, state: true },
     _images: { type: Array, state: true },
     _autoScroll: { type: Boolean, state: true },
+    _snippetDrawerOpen: { type: Boolean, state: true },
+    _historyOpen: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -246,6 +252,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     /* Input area */
     .input-area {
+      position: relative;
       border-top: 1px solid var(--border-primary);
       padding: 8px 12px;
       background: var(--bg-secondary);
@@ -342,6 +349,47 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       align-items: center;
       justify-content: center;
     }
+
+    /* Snippet drawer */
+    .snippet-drawer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 6px 0;
+    }
+
+    .snippet-btn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .snippet-btn:hover {
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .snippet-toggle {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      padding: 4px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .snippet-toggle:hover {
+      color: var(--text-primary);
+    }
+    .snippet-toggle.active {
+      color: var(--accent-primary);
+    }
+
   `];
 
   constructor() {
@@ -352,6 +400,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._inputValue = '';
     this._images = [];
     this._autoScroll = true;
+    this._snippetDrawerOpen = false;
+    this._historyOpen = false;
+    this._snippets = [];
     this._observer = null;
     this._pendingChunk = null;
     this._rafId = null;
@@ -387,6 +438,21 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         { root: container, threshold: 0.1 }
       );
       this._observer.observe(sentinel);
+    }
+  }
+
+  onRpcReady() {
+    this._loadSnippets();
+  }
+
+  async _loadSnippets() {
+    try {
+      const snippets = await this.rpcExtract('Settings.get_snippets');
+      if (Array.isArray(snippets)) {
+        this._snippets = snippets;
+      }
+    } catch (e) {
+      console.warn('Failed to load snippets:', e);
     }
   }
 
@@ -435,6 +501,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   _onInput(e) {
     this._inputValue = e.target.value;
     this._autoResize(e.target);
+    this._onInputForUrlDetection();
   }
 
   _autoResize(textarea) {
@@ -443,9 +510,44 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
+    // If history overlay is open, delegate to it
+    const historyEl = this.shadowRoot?.querySelector('ac-input-history');
+    if (historyEl?.open) {
+      if (historyEl.handleKey(e)) return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this._send();
+      return;
+    }
+
+    // Up arrow at position 0 → open input history
+    if (e.key === 'ArrowUp') {
+      const textarea = e.target;
+      if (textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+        e.preventDefault();
+        if (historyEl) {
+          historyEl.show(this._inputValue);
+          this._historyOpen = true;
+        }
+        return;
+      }
+    }
+
+    // Escape priority chain
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (this._snippetDrawerOpen) {
+        this._snippetDrawerOpen = false;
+      } else if (this._inputValue) {
+        this._inputValue = '';
+        const textarea = this.shadowRoot?.querySelector('.input-textarea');
+        if (textarea) {
+          textarea.value = '';
+          textarea.style.height = 'auto';
+        }
+      }
     }
   }
 
@@ -491,12 +593,23 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (!message && this._images.length === 0) return;
     if (!this.rpcConnected) return;
 
+    // Record in input history
+    const historyEl = this.shadowRoot?.querySelector('ac-input-history');
+    if (historyEl && message) {
+      historyEl.addEntry(message);
+    }
+
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const images = this._images.length > 0 ? [...this._images] : null;
+
+    // Get URL context before clearing
+    const urlChips = this.shadowRoot?.querySelector('ac-url-chips');
+    urlChips?.onSend();
 
     // Clear input
     this._inputValue = '';
     this._images = [];
+    this._snippetDrawerOpen = false;
     const textarea = this.shadowRoot?.querySelector('.input-textarea');
     if (textarea) {
       textarea.value = '';
@@ -518,6 +631,64 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _stop() {
     // TODO: implement cancel
+  }
+
+  // === Snippets ===
+
+  _toggleSnippets() {
+    this._snippetDrawerOpen = !this._snippetDrawerOpen;
+  }
+
+  _insertSnippet(snippet) {
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (!textarea) return;
+
+    const msg = snippet.message || '';
+    const start = textarea.selectionStart;
+    const before = this._inputValue.slice(0, start);
+    const after = this._inputValue.slice(textarea.selectionEnd);
+    this._inputValue = before + msg + after;
+    textarea.value = this._inputValue;
+    this._autoResize(textarea);
+
+    // Place cursor after inserted text
+    const newPos = start + msg.length;
+    textarea.setSelectionRange(newPos, newPos);
+    textarea.focus();
+  }
+
+  // === Input History ===
+
+  _onHistorySelect(e) {
+    const text = e.detail?.text ?? '';
+    this._inputValue = text;
+    this._historyOpen = false;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      textarea.value = text;
+      this._autoResize(textarea);
+      textarea.focus();
+    }
+  }
+
+  _onHistoryCancel(e) {
+    const text = e.detail?.text ?? '';
+    this._inputValue = text;
+    this._historyOpen = false;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      textarea.value = text;
+      textarea.focus();
+    }
+  }
+
+  // === URL Detection ===
+
+  _onInputForUrlDetection() {
+    const urlChips = this.shadowRoot?.querySelector('ac-url-chips');
+    if (urlChips) {
+      urlChips.detectUrls(this._inputValue);
+    }
   }
 
   // === Actions ===
@@ -606,6 +777,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
       <!-- Input Area -->
       <div class="input-area">
+        <ac-input-history
+          @history-select=${this._onHistorySelect}
+          @history-cancel=${this._onHistoryCancel}
+        ></ac-input-history>
+
+        <ac-url-chips></ac-url-chips>
+
         ${this._images.length > 0 ? html`
           <div class="image-previews">
             ${this._images.map((img, i) => html`
@@ -617,7 +795,23 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : nothing}
 
+        ${this._snippetDrawerOpen && this._snippets.length > 0 ? html`
+          <div class="snippet-drawer">
+            ${this._snippets.map(s => html`
+              <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
+                ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
+              </button>
+            `)}
+          </div>
+        ` : nothing}
+
         <div class="input-row">
+          <button
+            class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
+            @click=${this._toggleSnippets}
+            title="Quick snippets"
+          >📌</button>
+
           <textarea
             class="input-textarea"
             placeholder="Message AC⚡DC..."

@@ -40,6 +40,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       height: 100%;
+      min-height: 0;
       background: var(--bg-primary);
       border-right: 1px solid var(--border-primary);
       overflow: hidden;
@@ -104,7 +105,14 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     .chat-panel {
       flex: 1;
       min-width: 0;
+      min-height: 0;
       overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .chat-panel > * {
+      flex: 1;
+      min-height: 0;
     }
   `];
 
