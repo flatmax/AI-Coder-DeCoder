@@ -121,6 +121,17 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 - [x] **Speech to text** — Auto-transcribe toggle button using Web Speech API, LED states, transcript appended to input (`SpeechToText.js`)
 
+### Phase 10: Code Review
+- [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit, merge base detection (`repo.py`, `tests/test_repo.py`)
+- [ ] **Review mode state** — LLM service review state management, symbol map before capture, structural diff (`llm_service.py`)
+- [ ] **Review context assembly** — Commit log, symbol diff, selected file diffs injected into prompt (`context.py`, `context_builder.py`)
+- [ ] **Commit selector UI** — Branch dropdown, fuzzy commit search, merge base shortcut, SHA input (`webapp/src/chat/review-selector.js`)
+- [ ] **Review diff chips** — Chip bar showing review state and per-file diff inclusion toggles (`webapp/src/chat/review-chips.js`)
+- [ ] **Review banner** — File picker header showing active review info with exit button (`webapp/src/chat/file-picker.js`)
+- [ ] **Review snippets** — Review-specific quick-insert buttons loaded when review mode is active (`src/ac_dc/config/review_snippets.json`)
+- [ ] **Symbol map diff** — Compare pre-review and post-review symbol maps, annotate removed symbols with reference counts (`llm_service.py`, `symbol_index/`)
+- [ ] **Review mode detection on restart** — Detect soft-reset state on server start, prompt user to re-enter or exit review mode
+
 ### Phase 9: Polish
 - [x] **Bedrock token usage** — Streaming usage capture for all providers including Bedrock (unified stream_options, multi-format usage extraction with dict/object dual-mode getter, cache_read/cache_write field fallback chains, response-level merge, completion token estimation)
 - [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
