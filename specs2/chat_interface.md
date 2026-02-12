@@ -196,7 +196,7 @@ Each edit block renders as a card:
 </div>
 ```
 
-File path is clickable (dispatches `navigate-file` event). Status badges: `✓ Applied` (green), `✗ Failed: reason` (red), `⊘ Skipped` (grey).
+File path is clickable — dispatches a `navigate-file` event with `{ path, searchText }` where `searchText` is the edit block's old lines (or new lines for creates) joined as a string. The diff viewer uses this to scroll directly to the relevant code. Status badges: `✓ Applied` (green), `✗ Failed: reason` (red), `⊘ Skipped` (grey).
 
 #### Two-Level Diff Highlighting
 

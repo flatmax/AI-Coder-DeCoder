@@ -62,6 +62,10 @@ Map of common extensions to language identifiers:
 - Shell scripts, C/C++, etc.
 - Fallback: plaintext
 
+### Worker-Safe Language Assignment
+
+Languages with built-in rich services in Monaco (JavaScript, TypeScript, JSON, CSS, SCSS, LESS, HTML) trigger `$loadForeignModule` calls in the editor worker, which crash under Vite's dev server. Models for these languages are created as `plaintext` instead. The application's own LSP providers (hover, definition, completions via the backend symbol index) cover the important features. Other languages (Python, C, C++, etc.) only use Monaco's monarch tokenizer, which requires no worker and is safe to assign directly.
+
 ## File Tabs
 
 When multiple files are loaded, a tab bar shows:
@@ -114,8 +118,8 @@ File navigation events originate from multiple sources and are routed through th
 | Source | Event | Route |
 |--------|-------|-------|
 | File picker (name click) | `file-clicked` → `navigate-file` | files-tab → app-shell → diff-viewer |
-| Chat edit result (path click) | `navigate-file` | chat-panel → app-shell → diff-viewer |
-| Search result (match click) | `search-navigate` → `navigate-file` | search-tab → ac-dialog → app-shell → diff-viewer |
+| Chat edit result (path click) | `navigate-file` with `searchText` | chat-panel → app-shell → diff-viewer (scrolls to edit anchor) |
+| Search result (match click) | `search-navigate` → `navigate-file` with `line` | search-tab → ac-dialog → app-shell → diff-viewer |
 | Edit applied (post-stream) | Direct call | files-tab → app-shell → diff-viewer |
 | Config edit | Direct call | settings-tab → app-shell → diff-viewer |
 
@@ -139,6 +143,12 @@ For applied edits:
 2. Fetch working copy
 3. If different: show as editable diff
 4. If identical: fall back to read-only view
+
+### Scroll to Edit Anchor
+
+When a user clicks an edit block's file path in a chat message, the diff viewer opens the file and scrolls to the relevant code. The edit block's old/new lines are passed as `searchText` in the `navigate-file` event. The diff viewer searches for progressively shorter prefixes of this text in the modified editor until a match is found, then scrolls to and briefly highlights the match location (3-second highlight).
+
+This ensures that clicking an edit block navigates directly to the changed code rather than leaving the user at the top of a large file.
 
 ### Post-Edit Refresh
 
