@@ -81,57 +81,57 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Stability update** — Post-response: stale removal, active item processing, graduation, cascade, change logging
 - [x] **Context integration** — Tiered message assembly in ContextManager, active items building, stability initialization
 
-### Phase 5: History Management ✅
-- [x] **History store** — JSONL persistence, session management, search (`history_store.py`, `tests/test_history.py`)
-- [x] **Topic detector** — LLM-based boundary detection with JSON parsing fallbacks (`topic_detector.py`)
-- [x] **History compactor** — Truncation/summarization strategies with verbatim window (`history_compactor.py`)
-- [x] **Compaction integration** — Post-response trigger in LLM service, stability re-registration, message persistence (`context.py`, `llm_service.py`)
+### Phase 5: History Management
+- [ ] **History store** — JSONL persistence, session management, search (`history_store.py`, `tests/test_history.py`)
+- [ ] **Topic detector** — LLM-based boundary detection with JSON parsing fallbacks (`topic_detector.py`)
+- [ ] **History compactor** — Truncation/summarization strategies with verbatim window (`history_compactor.py`)
+- [ ] **Compaction integration** — Post-response trigger in LLM service, stability re-registration, message persistence (`context.py`, `llm_service.py`)
 
-### Phase 6: URL Handling ✅
-- [x] **URL detector** — Pattern matching and type classification (`url_handler.py`)
-- [x] **GitHub handler** — Shallow clone, README, symbol map generation (`url_handler.py`)
-- [x] **Web handler** — Content extraction with fallback (`url_handler.py`)
-- [x] **URL cache** — Filesystem TTL cache (`url_cache.py`)
-- [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
+### Phase 6: URL Handling
+- [ ] **URL detector** — Pattern matching and type classification (`url_handler.py`)
+- [ ] **GitHub handler** — Shallow clone, README, symbol map generation (`url_handler.py`)
+- [ ] **Web handler** — Content extraction with fallback (`url_handler.py`)
+- [ ] **URL cache** — Filesystem TTL cache (`url_cache.py`)
+- [ ] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
-### Phase 7: Webapp Foundation ✅
-- [x] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
-- [x] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
-- [x] **Dialog component** — Dragging, resizing, minimizing, tab bar
-- [x] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
-- [x] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
-- [x] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
-- [x] **Input history** — Up-arrow fuzzy search overlay, history navigation
-- [x] **URL chips** — Detection display, fetch triggers, inclusion toggles
+### Phase 7: Webapp Foundation
+- [ ] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
+- [ ] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
+- [ ] **Dialog component** — Dragging, resizing, minimizing, tab bar
+- [ ] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
+- [ ] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
+- [ ] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
+- [ ] **Input history** — Up-arrow fuzzy search overlay, history navigation
+- [ ] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
-### Phase 8: Webapp Features ✅
-- [x] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
-- [x] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
-- [x] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
-- [x] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
-- [x] **Context viewer** — Token budget bar, category breakdown, expandable details
-- [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
-- [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
-- [x] **History browser** — Modal overlay, session list, search, message preview, load into context
-- [x] **File mentions** — Detect repo file paths in assistant responses, clickable links, summary chips
-- [x] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
-- [x] **Diff viewer layout** — Background placement, navigate-file routing, file-save handling, post-edit refresh
-- [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
-- [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
-- [x] **Speech to text** — Auto-transcribe toggle using Web Speech API
+### Phase 8: Webapp Features
+- [ ] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
+- [ ] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
+- [ ] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
+- [ ] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
+- [ ] **Context viewer** — Token budget bar, category breakdown, expandable details
+- [ ] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
+- [ ] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
+- [ ] **History browser** — Modal overlay, session list, search, message preview, load into context
+- [ ] **File mentions** — Detect repo file paths in assistant responses, clickable links, summary chips
+- [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
+- [ ] **Diff viewer layout** — Background placement, navigate-file routing, file-save handling, post-edit refresh
+- [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
+- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
+- [ ] **Speech to text** — Auto-transcribe toggle using Web Speech API
 
-### Phase 9: Polish ✅
+### Phase 9: Polish (partial)
 - [x] **Bedrock token usage** — Streaming usage capture for all providers
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
-- [x] **Error handling** — Reconnection with exponential backoff, toast notifications
-- [x] **Build pipeline** — Production bundling, versioned deployment, CI
-- [x] **Hosted deployment** — GitHub Pages with version registry
-- [x] **State persistence** — Local storage for UI preferences
-- [x] **Content-visibility optimization** — CSS containment for off-screen messages
-- [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
-- [x] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity, 75% horizontal position)
+- [ ] **Error handling** — Reconnection with exponential backoff, toast notifications
+- [ ] **Build pipeline** — Production bundling, versioned deployment, CI
+- [ ] **Hosted deployment** — GitHub Pages with version registry
+- [ ] **State persistence** — Local storage for UI preferences
+- [ ] **Content-visibility optimization** — CSS containment for off-screen messages
+- [ ] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
+- [ ] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity, 75% horizontal position)
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
-- [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
+- [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
 ### Phase 10: Code Review
 - [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit
