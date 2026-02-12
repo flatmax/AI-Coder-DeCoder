@@ -19,6 +19,14 @@ A tree view of repository files with checkboxes for selection, git status indica
 
 A text filter narrows visible nodes. Directories auto-expand when filtered. Matching checks path substring.
 
+### @-Filter from Chat Input
+
+Typing `@` followed by text in the chat input textarea activates the file picker filter in real-time. The `@query` text is used as the filter string. Escape dismisses the filter, removes the `@query` from the textarea (preserving other text), and resets the picker to show all files. Sending the message also clears the filter. See [Chat Interface — @-Filter](chat_interface.md#at-filter).
+
+### Clear Selection
+
+A small **☐** (empty checkbox) button sits beside the filter input. Clicking it deselects all files and dispatches a `selection-changed` event. No label — icon only, with a "Clear selection" tooltip.
+
 ### Keyboard Navigation
 
 - Arrow keys move focus through visible files

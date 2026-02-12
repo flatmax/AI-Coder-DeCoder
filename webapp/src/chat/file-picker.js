@@ -50,10 +50,14 @@ class FilePicker extends RpcMixin(LitElement) {
       padding: 6px 8px;
       border-bottom: 1px solid var(--border-color);
       flex-shrink: 0;
+      display: flex;
+      gap: 4px;
+      align-items: center;
     }
 
     .filter-bar input {
-      width: 100%;
+      flex: 1;
+      min-width: 0;
       padding: 4px 8px;
       background: var(--bg-primary);
       border: 1px solid var(--border-color);
@@ -65,6 +69,23 @@ class FilePicker extends RpcMixin(LitElement) {
     }
     .filter-bar input:focus { border-color: var(--accent-primary); }
     .filter-bar input::placeholder { color: var(--text-muted); }
+
+    .clear-btn {
+      background: none;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 6px;
+      line-height: 1;
+      flex-shrink: 0;
+      transition: color var(--transition-fast), border-color var(--transition-fast);
+    }
+    .clear-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--text-secondary);
+    }
 
     /* ── Tree container ── */
     .tree-container {
@@ -408,6 +429,11 @@ class FilePicker extends RpcMixin(LitElement) {
     }));
   }
 
+  _clearSelection() {
+    this.selectedFiles = new Set();
+    this._emitSelection();
+  }
+
   // ── Expand / Collapse ──
 
   _toggleExpand(path) {
@@ -725,6 +751,10 @@ class FilePicker extends RpcMixin(LitElement) {
     this.selectedFiles = new Set(files);
   }
 
+  setFilter(query) {
+    this._filter = query;
+  }
+
   // ── Render ──
 
   render() {
@@ -736,6 +766,10 @@ class FilePicker extends RpcMixin(LitElement) {
           .value=${this._filter}
           @input=${this._onFilterInput}
         >
+        <button class="clear-btn"
+          title="Clear selection"
+          aria-label="Clear all selected files"
+          @click=${this._clearSelection}>☐</button>
       </div>
 
       <div class="tree-container"

@@ -306,11 +306,13 @@ class FilesTab extends RpcMixin(LitElement) {
     this._boundOnCompactionEvent = this._onCompactionEvent.bind(this);
     this._boundOnFilesChanged = this._onFilesChanged.bind(this);
     this._boundOnViewerActiveFile = this._onViewerActiveFile.bind(this);
+    this._boundOnFileFilter = this._onFileFilter.bind(this);
     window.addEventListener('state-loaded', this._boundOnStateLoaded);
     window.addEventListener('stream-complete', this._boundOnStreamComplete);
     window.addEventListener('compaction-event', this._boundOnCompactionEvent);
     window.addEventListener('files-changed', this._boundOnFilesChanged);
     window.addEventListener('viewer-active-file', this._boundOnViewerActiveFile);
+    this.shadowRoot.addEventListener('file-filter', this._boundOnFileFilter);
   }
 
   disconnectedCallback() {
@@ -320,6 +322,7 @@ class FilesTab extends RpcMixin(LitElement) {
     window.removeEventListener('compaction-event', this._boundOnCompactionEvent);
     window.removeEventListener('files-changed', this._boundOnFilesChanged);
     window.removeEventListener('viewer-active-file', this._boundOnViewerActiveFile);
+    this.shadowRoot.removeEventListener('file-filter', this._boundOnFileFilter);
     document.removeEventListener('mousemove', this._onDividerMove);
     document.removeEventListener('mouseup', this._onDividerUp);
     this._clearWatchdog();
@@ -447,6 +450,13 @@ class FilesTab extends RpcMixin(LitElement) {
 
   _onViewerActiveFile(e) {
     this._viewerActiveFile = e.detail?.path || '';
+  }
+
+  _onFileFilter(e) {
+    const picker = this.shadowRoot.querySelector('file-picker');
+    if (picker) {
+      picker.setFilter(e.detail?.query || '');
+    }
   }
 
   // ── File mention handling ──

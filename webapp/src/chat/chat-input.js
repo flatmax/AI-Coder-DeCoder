@@ -240,6 +240,8 @@ class ChatInput extends RpcMixin(LitElement) {
 
   constructor() {
     super();
+    this._atFilterActive = false;
+    this._atFilterQuery = '';
     this.disabled = false;
     this.snippets = [];
     this.userMessageHistory = [];
@@ -259,6 +261,40 @@ class ChatInput extends RpcMixin(LitElement) {
   _onInput(e) {
     this._autoResize(e.target);
     this._scheduleUrlDetection(e.target.value);
+    this._checkAtFilter(e.target);
+  }
+
+  /**
+   * Detect @filter pattern at cursor and dispatch file-filter event.
+   * Pattern: @ followed by non-whitespace chars, at cursor position.
+   * Clears when cursor moves away or @ is removed.
+   */
+  _checkAtFilter(textarea) {
+    const text = textarea.value;
+    const cursor = textarea.selectionStart;
+    // Walk backwards from cursor to find @ not preceded by non-whitespace
+    let atPos = -1;
+    for (let i = cursor - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === '@') {
+        // Valid if at start of input or preceded by whitespace
+        if (i === 0 || /\s/.test(text[i - 1])) {
+          atPos = i;
+        }
+        break;
+      }
+      if (/\s/.test(ch)) break; // hit whitespace before @
+    }
+    const query = atPos >= 0 ? text.slice(atPos + 1, cursor) : '';
+    const active = atPos >= 0;
+    if (active !== this._atFilterActive || query !== this._atFilterQuery) {
+      this._atFilterActive = active;
+      this._atFilterQuery = query;
+      this.dispatchEvent(new CustomEvent('file-filter', {
+        detail: { query: active ? query : '', active },
+        bubbles: true, composed: true,
+      }));
+    }
   }
 
   _scheduleUrlDetection(text) {
@@ -308,8 +344,14 @@ class ChatInput extends RpcMixin(LitElement) {
       return;
     }
 
-    // Escape — close snippets or clear input
+    // Escape — close @filter, close snippets, or clear input
     if (e.key === 'Escape') {
+      if (this._atFilterActive) {
+        // Remove the @query text from the textarea
+        this._removeAtToken(textarea);
+        this._clearAtFilter();
+        return;
+      }
       if (this._showSnippets) { this._showSnippets = false; return; }
       textarea.value = '';
       this._autoResize(textarea);
@@ -351,6 +393,7 @@ class ChatInput extends RpcMixin(LitElement) {
     textarea.value = '';
     this._images = [];
     this._autoResize(textarea);
+    this._clearAtFilter();
     this._showSnippets = false;
     this._showHistorySearch = false;
     this._savedInputBeforeHistory = undefined;
@@ -417,6 +460,41 @@ class ChatInput extends RpcMixin(LitElement) {
 
     this._autoResize(textarea);
     this._scheduleUrlDetection(textarea.value);
+  }
+
+  _clearAtFilter() {
+    if (this._atFilterActive) {
+      this._atFilterActive = false;
+      this._atFilterQuery = '';
+      this.dispatchEvent(new CustomEvent('file-filter', {
+        detail: { query: '', active: false },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
+  /** Remove the @query token from the textarea at cursor position */
+  _removeAtToken(textarea) {
+    const text = textarea.value;
+    const cursor = textarea.selectionStart;
+    let atPos = -1;
+    for (let i = cursor - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === '@') {
+        if (i === 0 || /\s/.test(text[i - 1])) {
+          atPos = i;
+        }
+        break;
+      }
+      if (/\s/.test(ch)) break;
+    }
+    if (atPos >= 0) {
+      const before = text.slice(0, atPos);
+      const after = text.slice(cursor);
+      textarea.value = before + after;
+      textarea.selectionStart = textarea.selectionEnd = atPos;
+      this._autoResize(textarea);
+    }
   }
 
   // ── Snippets ──

@@ -339,8 +339,24 @@ Off-screen messages use CSS containment (`content-visibility: auto`) with intrin
 
 ### Text Input
 - Auto-resizing textarea
-- Keyboard shortcuts: Enter to send (with modifier key option), Escape to clear
+- Keyboard shortcuts: Enter to send (with modifier key option), Escape (see priority chain below)
 - Image paste support (base64 encoding)
+
+### @-Filter
+
+Typing `@` followed by text (e.g., `@html`) activates the file picker filter in real-time. The text after `@` is dispatched as a `file-filter` event, narrowing the picker to matching files. The `@` must be at the start of input or preceded by whitespace.
+
+### Escape Key Priority Chain
+
+Escape behavior in the chat input follows this priority:
+
+| Priority | Condition | Action |
+|----------|-----------|--------|
+| 1 | `@filter` is active | Remove the `@query` token from textarea, clear picker filter |
+| 2 | Snippet drawer is open | Close snippet drawer |
+| 3 | Default | Clear textarea content |
+
+This ensures `@filter` can be dismissed without losing unrelated text in the input.
 
 ### Stop Button
 During streaming, the **Send button transforms into a Stop button** (⏹ Stop) with a red/danger style. Clicking dispatches a `stop-streaming` event. The parent (Files tab) handles it by calling `LLM.cancel_streaming(request_id)`. The button reverts to Send when streaming ends (via `streamComplete`).
