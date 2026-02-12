@@ -1905,9 +1905,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (pathEl) {
       const filePath = pathEl.dataset.path;
       if (filePath) {
-        this.dispatchEvent(new CustomEvent('navigate-file', {
+        // Dispatch on window for app shell to route to diff viewer
+        window.dispatchEvent(new CustomEvent('navigate-file', {
           detail: { path: filePath },
-          bubbles: true, composed: true,
         }));
       }
       return;

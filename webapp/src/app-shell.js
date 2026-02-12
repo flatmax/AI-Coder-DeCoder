@@ -12,6 +12,7 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 
 // Import child components so custom elements are registered
 import './components/ac-dialog.js';
+import './components/diff-viewer.js';
 
 /**
  * Extract WebSocket port from URL query parameter ?port=N
@@ -37,24 +38,17 @@ class AcApp extends JRPCClient {
       height: 100%;
     }
 
-    /* Diff viewer background — watermark for now */
+    /* Diff viewer background */
     .diff-background {
       position: fixed;
       inset: 0;
       z-index: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       background: var(--bg-primary);
     }
 
-    .watermark {
-      font-size: 8rem;
-      opacity: 0.18;
-      user-select: none;
-      position: absolute;
-      left: 75%;
-      transform: translateX(-50%);
+    .diff-background ac-diff-viewer {
+      width: 100%;
+      height: 100%;
     }
 
     /* Dialog container */
@@ -108,6 +102,13 @@ class AcApp extends JRPCClient {
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
     this.remoteTimeout = 60;
+
+    // Bind event handlers
+    this._onNavigateFile = this._onNavigateFile.bind(this);
+    this._onFileSave = this._onFileSave.bind(this);
+    this._onStreamCompleteForDiff = this._onStreamCompleteForDiff.bind(this);
+    this._onFilesModified = this._onFilesModified.bind(this);
+    this._onSearchNavigate = this._onSearchNavigate.bind(this);
   }
 
   connectedCallback() {
@@ -116,6 +117,22 @@ class AcApp extends JRPCClient {
 
     // Register methods the server can call on us
     this.addClass(this, 'AcApp');
+
+    // Listen for events from child components
+    window.addEventListener('navigate-file', this._onNavigateFile);
+    window.addEventListener('file-save', this._onFileSave);
+    window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
+    window.addEventListener('files-modified', this._onFilesModified);
+    window.addEventListener('search-navigate', this._onSearchNavigate);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('navigate-file', this._onNavigateFile);
+    window.removeEventListener('file-save', this._onFileSave);
+    window.removeEventListener('stream-complete', this._onStreamCompleteForDiff);
+    window.removeEventListener('files-modified', this._onFilesModified);
+    window.removeEventListener('search-navigate', this._onSearchNavigate);
   }
 
   // === jrpc-oo lifecycle callbacks ===
@@ -203,11 +220,90 @@ class AcApp extends JRPCClient {
     return result;
   }
 
+  // === Event Routing ===
+
+  /**
+   * Route navigate-file events from file picker, chat edit blocks, and search
+   * to the diff viewer.
+   */
+  _onNavigateFile(e) {
+    const detail = e.detail;
+    if (!detail?.path) return;
+
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (!viewer) return;
+
+    viewer.openFile({
+      path: detail.path,
+      original: detail.original,
+      modified: detail.modified,
+      is_new: detail.is_new,
+      is_read_only: detail.is_read_only,
+      is_config: detail.is_config,
+      config_type: detail.config_type,
+      real_path: detail.real_path,
+      searchText: detail.searchText,
+      line: detail.line,
+    });
+  }
+
+  /**
+   * Route search-navigate events to navigate-file format.
+   */
+  _onSearchNavigate(e) {
+    const detail = e.detail;
+    if (!detail?.path) return;
+    this._onNavigateFile({
+      detail: { path: detail.path, line: detail.line },
+    });
+  }
+
+  /**
+   * Route file-save events to Repo or Settings RPC.
+   */
+  async _onFileSave(e) {
+    const { path, content, isConfig, configType } = e.detail;
+    if (!path) return;
+
+    try {
+      if (isConfig && configType) {
+        await this.call['Settings.save_config_content'](configType, content);
+      } else {
+        await this.call['Repo.write_file'](path, content);
+      }
+    } catch (err) {
+      console.error('File save failed:', err);
+    }
+  }
+
+  /**
+   * After stream completes with edits, refresh only already-open files.
+   */
+  _onStreamCompleteForDiff(e) {
+    const result = e.detail?.result;
+    if (!result?.files_modified?.length) return;
+
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer) {
+      viewer.refreshOpenFiles();
+    }
+  }
+
+  /**
+   * Handle files-modified events (e.g., from commit, reset).
+   */
+  _onFilesModified(e) {
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer && viewer._files.length > 0) {
+      viewer.refreshOpenFiles();
+    }
+  }
+
   render() {
     return html`
       <div class="viewport">
         <div class="diff-background">
-          <div class="watermark">AC⚡DC</div>
+          <ac-diff-viewer></ac-diff-viewer>
         </div>
 
         <div class="dialog-container">

@@ -30,7 +30,7 @@ const TABS = [
 export class AcDialog extends RpcMixin(LitElement) {
   static properties = {
     activeTab: { type: String, state: true },
-    minimized: { type: Boolean, state: true },
+    minimized: { type: Boolean, reflect: true },
     _historyPercent: { type: Number, state: true },
   };
 
@@ -43,6 +43,9 @@ export class AcDialog extends RpcMixin(LitElement) {
       border-right: 1px solid var(--border-primary);
       overflow: hidden;
     }
+    :host([minimized]) {
+      height: auto;
+    }
 
     /* Header bar */
     .header {
@@ -53,8 +56,11 @@ export class AcDialog extends RpcMixin(LitElement) {
       background: var(--bg-tertiary);
       border-bottom: 1px solid var(--border-primary);
       padding: 0 8px;
-      cursor: default;
+      cursor: grab;
       user-select: none;
+    }
+    .header:active {
+      cursor: grabbing;
     }
 
     .header-label {
@@ -165,13 +171,14 @@ export class AcDialog extends RpcMixin(LitElement) {
     .resize-handle {
       position: absolute;
       top: 0;
-      right: -3px;
-      width: 6px;
+      right: -4px;
+      width: 8px;
       height: 100%;
       cursor: col-resize;
       z-index: 10;
     }
-    .resize-handle:hover {
+    .resize-handle:hover,
+    .resize-handle:active {
       background: var(--accent-primary);
       opacity: 0.3;
     }
@@ -184,6 +191,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._historyPercent = 0;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._undocked = false;
   }
 
   connectedCallback() {
@@ -276,25 +284,124 @@ export class AcDialog extends RpcMixin(LitElement) {
     return 'green';
   }
 
+  // === Resize (right edge) ===
+
+  _getContainer() {
+    // <ac-dialog> sits inside <div class="dialog-container"> in app-shell's shadow DOM.
+    // this.getRootNode() returns app-shell's shadow root (since ac-dialog is
+    // a child element within that shadow root, not inside its own shadow root).
+    // this.parentElement is the .dialog-container div.
+    return this.parentElement;
+  }
+
+  _onResizeStart(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    this._isResizing = true;
+    const container = this._getContainer();
+    if (!container) return;
+
+    const startX = e.clientX;
+    const startWidth = container.offsetWidth;
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const newWidth = Math.max(300, startWidth + dx);
+      container.style.width = `${newWidth}px`;
+    };
+
+    const onUp = () => {
+      this._isResizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // === Drag (header) ===
+
+  _onHeaderMouseDown(e) {
+    // Only handle left mouse button
+    if (e.button !== 0) return;
+
+    e.preventDefault();
+
+    const container = this._getContainer();
+    if (!container) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const rect = container.getBoundingClientRect();
+    const startLeft = rect.left;
+    const startTop = rect.top;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+    let thresholdMet = false;
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+
+      if (!thresholdMet) {
+        if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+        thresholdMet = true;
+
+        // Undock: switch to explicit position so we can move freely
+        if (!this._undocked) {
+          this._undocked = true;
+          container.style.position = 'fixed';
+          container.style.top = `${startTop}px`;
+          container.style.left = `${startLeft}px`;
+          container.style.width = `${startWidth}px`;
+          container.style.height = `${startHeight}px`;
+          container.style.right = 'auto';
+          container.style.bottom = 'auto';
+        }
+      }
+
+      const newLeft = Math.max(0, startLeft + dx);
+      const newTop = Math.max(0, startTop + dy);
+      container.style.left = `${newLeft}px`;
+      container.style.top = `${newTop}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+
+      if (!thresholdMet) {
+        // Click (under 5px threshold) → toggle minimize
+        this._toggleMinimize();
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   render() {
     const currentTab = TABS.find(t => t.id === this.activeTab);
 
     return html`
-      <div class="header" @click=${this._toggleMinimize}>
+      <div class="header" @mousedown=${this._onHeaderMouseDown}>
         <span class="header-label">${currentTab?.label || 'Files'}</span>
 
-        <div class="tab-buttons" @click=${(e) => e.stopPropagation()}>
+        <div class="tab-buttons">
           ${TABS.map(tab => html`
             <button
               class="tab-btn ${tab.id === this.activeTab ? 'active' : ''}"
               title="${tab.label} (${tab.shortcut})"
-              @click=${() => this._switchTab(tab.id)}
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${(e) => { e.stopPropagation(); this._switchTab(tab.id); }}
             >${tab.icon}</button>
           `)}
         </div>
 
-        <div class="header-actions" @click=${(e) => e.stopPropagation()}>
+        <div class="header-actions">
           <button class="header-action" title="Minimize (Alt+M)"
+            @mousedown=${(e) => e.stopPropagation()}
             @click=${this._toggleMinimize}>
             ${this.minimized ? '▲' : '▼'}
           </button>
@@ -340,7 +447,7 @@ export class AcDialog extends RpcMixin(LitElement) {
         ></div>
       </div>
 
-      <div class="resize-handle"></div>
+      <div class="resize-handle" @mousedown=${this._onResizeStart}></div>
     `;
   }
 }

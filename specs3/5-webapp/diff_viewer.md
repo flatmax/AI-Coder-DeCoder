@@ -81,14 +81,14 @@ When clicking an edit block's file path: open file, search for progressively sho
 | Source | Mode |
 |--------|------|
 | Edit applied | HEAD vs working copy diff (editable) |
-| Search result | Read-only, scroll to line |
-| File picker | Read-only |
+| Search result | Editable, scroll to line |
+| File picker | Editable |
 | LSP navigation | Add or replace file, scroll to position |
 | Config edit | Config content with special path prefix |
 
 ### HEAD vs Working Copy
 
-For applied edits: fetch committed version (HEAD) and working copy. If different: show as editable diff. If identical: fall back to read-only view.
+Fetch committed version (HEAD) and working copy. Original (left) is always read-only. Modified (right) is always editable — the user can make changes and save with Ctrl+S regardless of whether the file has uncommitted changes.
 
 ### Post-Edit Refresh
 

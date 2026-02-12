@@ -156,9 +156,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
   _onFileClicked(e) {
     const path = e.detail?.path;
     if (path) {
-      this.dispatchEvent(new CustomEvent('navigate-file', {
+      // Dispatch on window so app shell can route to diff viewer
+      window.dispatchEvent(new CustomEvent('navigate-file', {
         detail: { path },
-        bubbles: true, composed: true,
       }));
     }
   }
@@ -233,17 +233,20 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }
 
     // Navigate to the file in diff viewer
-    this.dispatchEvent(new CustomEvent('navigate-file', {
+    window.dispatchEvent(new CustomEvent('navigate-file', {
       detail: { path },
-      bubbles: true, composed: true,
     }));
   }
 
-  _onFilesModified() {
+  _onFilesModified(e) {
     const picker = this.shadowRoot?.querySelector('ac-file-picker');
     if (picker) {
       picker.loadTree();
     }
+    // Re-dispatch on window so app shell can route to diff viewer
+    window.dispatchEvent(new CustomEvent('files-modified', {
+      detail: e.detail,
+    }));
   }
 
   _onStateLoaded(e) {
