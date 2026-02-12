@@ -44,7 +44,16 @@ Clicking a file mention dispatches `file-mention-click`. The Files tab **toggles
 - **Not selected** → add to selection, update picker checkbox, accumulate input text
 - **Already selected** → remove from selection, update picker checkbox
 
-In both cases, navigate to the file in the diff viewer.
+**Inline text mentions** (in message body): navigate to the file in the diff viewer in both cases.
+
+**File summary chips** (in the "Files Referenced" section): only toggle selection — no navigation. The "Add All" button also only toggles without navigation.
+
+### File Summary Chips vs Inline Mentions
+
+**Inline text mentions** (in message body) navigate to the diff viewer on click.
+
+**File summary chips** (in the "Files Referenced" section below messages) only toggle selection — they do not open the diff viewer. The "Add All" button also only toggles selection without navigation.
+═══════ REPL is wrong, let me redo
 
 ### Input Accumulation (on add)
 

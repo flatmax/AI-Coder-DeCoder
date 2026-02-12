@@ -61,12 +61,19 @@ path/to/file.ext
 ## Failure Recovery
 
 If an edit fails:
-1. Check the error message for diagnostics
-2. Re-read the file to get current content
-3. Verify your anchor matches exactly one location
-4. Ensure old text matches the file exactly
-5. Retry with corrected edit block
+1. Request fresh file content — do not retry from memory
+2. Read the error diagnostics carefully
+3. Search the file for the actual current text around the edit site
+4. Verify your anchor matches exactly one location
+5. Ensure old text matches the file **character by character**
+6. Resubmit ONE edit at a time
+7. Never guess — verify before retrying
 
-## Context Trust
+## CRITICAL: Context vs Chat History
 
-Only trust file content shown in your context. Do not assume file contents from memory. If you need to see a file, ask for it to be added to context.
+- **Only trust file content shown in context** — these are the actual current files
+- **Never assume prior edits were applied** — previous edit blocks in chat history may have failed silently
+- **Never assume prior edits failed** — the file in context shows the actual current state, not what you remember
+- If you proposed edits earlier in the conversation, the file in context shows the **authoritative state** — use that, not your memory of what you changed
+- When in doubt, read the file content in context **character by character** around the edit site before writing an edit block
+- **Copy-paste from the file in context** — never type old text from memory

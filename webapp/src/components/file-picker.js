@@ -147,6 +147,15 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       color: var(--text-secondary);
       font-weight: 500;
     }
+    .node-name.modified {
+      color: var(--accent-orange);
+    }
+    .node-name.staged {
+      color: var(--accent-green);
+    }
+    .node-name.untracked {
+      color: var(--accent-green);
+    }
 
     /* Badges */
     .badges {
@@ -723,7 +732,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           @change=${(e) => e.stopPropagation()}
         />
 
-        <span class="node-name ${isDir ? 'dir' : ''}">${node.name}</span>
+        <span class="node-name ${isDir ? 'dir' : ''}${!isDir && gitStatus ? ` ${gitStatus}` : ''}">${node.name}</span>
 
         <span class="badges">
           ${!isDir && node.lines > 0 ? html`

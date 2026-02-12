@@ -393,6 +393,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: none;
       color: var(--text-muted);
     }
+    .action-btn.committing {
+      color: var(--accent-primary);
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
 
     .action-spacer { flex: 1; }
 
@@ -1161,7 +1169,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           this._streamingContent = this._pendingChunk;
           this._pendingChunk = null;
           if (this._autoScroll) {
-            this._scrollToBottom();
+            this.updateComplete.then(() => {
+              this._scrollToBottom();
+            });
           }
         }
       });
@@ -1450,8 +1460,27 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   // === Actions ===
 
-  _newSession() {
-    this.dispatchEvent(new CustomEvent('new-session', { bubbles: true, composed: true }));
+  async _newSession() {
+    if (!this.rpcConnected) return;
+    try {
+      await this.rpcExtract('LLMService.new_session');
+      // Clear local state
+      this.messages = [];
+      this._streamingContent = '';
+      this._currentRequestId = null;
+      this.streamingActive = false;
+      this._chatSearchQuery = '';
+      this._chatSearchMatches = [];
+      this._chatSearchCurrent = -1;
+      this._clearSearchHighlights();
+      // Clear URL chips
+      const urlChips = this.shadowRoot?.querySelector('ac-url-chips');
+      if (urlChips) urlChips.clear();
+      this._showToast('New session started', 'success');
+    } catch (e) {
+      console.error('Failed to start new session:', e);
+      this._showToast('Failed to start new session', 'error');
+    }
   }
 
   _openHistoryBrowser() {
@@ -1513,10 +1542,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (!this.rpcConnected || this._committing) return;
     this._committing = true;
 
+    // Show progress message in chat
+    const progressMsg = { role: 'assistant', content: '⏳ **Staging changes and generating commit message...**' };
+    this.messages = [...this.messages, progressMsg];
+    if (this._autoScroll) {
+      requestAnimationFrame(() => this._scrollToBottom());
+    }
+
     try {
       // Stage all changes
       const stageResult = await this.rpcExtract('Repo.stage_all');
       if (stageResult?.error) {
+        this._removeProgressMsg(progressMsg);
         this._showToast(`Stage failed: ${stageResult.error}`, 'error');
         return;
       }
@@ -1525,6 +1562,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       const diffResult = await this.rpcExtract('Repo.get_staged_diff');
       const diff = diffResult?.diff || '';
       if (!diff.trim()) {
+        this._removeProgressMsg(progressMsg);
         this._showToast('Nothing to commit', 'error');
         return;
       }
@@ -1532,12 +1570,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       // Generate commit message via LLM
       const msgResult = await this.rpcExtract('LLMService.generate_commit_message', diff);
       if (msgResult?.error) {
+        this._removeProgressMsg(progressMsg);
         this._showToast(`Message generation failed: ${msgResult.error}`, 'error');
         return;
       }
 
       const commitMessage = msgResult?.message;
       if (!commitMessage) {
+        this._removeProgressMsg(progressMsg);
         this._showToast('Failed to generate commit message', 'error');
         return;
       }
@@ -1545,6 +1585,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       // Commit
       const commitResult = await this.rpcExtract('Repo.commit', commitMessage);
       if (commitResult?.error) {
+        this._removeProgressMsg(progressMsg);
         this._showToast(`Commit failed: ${commitResult.error}`, 'error');
         return;
       }
@@ -1552,8 +1593,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       const sha = commitResult?.sha?.slice(0, 7) || '';
       this._showToast(`Committed ${sha}: ${commitMessage.split('\n')[0]}`, 'success');
 
-      // Add commit info as a system-like message in chat
-      this.messages = [...this.messages, {
+      // Replace progress message with commit info
+      const msgs = this.messages.filter(m => m !== progressMsg);
+      this.messages = [...msgs, {
         role: 'assistant',
         content: `**Committed** \`${sha}\`\n\n\`\`\`\n${commitMessage}\n\`\`\``,
       }];
@@ -1569,10 +1611,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       }));
     } catch (e) {
       console.error('Commit failed:', e);
+      this._removeProgressMsg(progressMsg);
       this._showToast(`Commit failed: ${e.message || 'Unknown error'}`, 'error');
     } finally {
       this._committing = false;
     }
+  }
+
+  _removeProgressMsg(progressMsg) {
+    this.messages = this.messages.filter(m => m !== progressMsg);
   }
 
   _confirmReset() {
@@ -1990,8 +2037,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
         <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
-        <button class="action-btn" title="Stage all & commit" @click=${this._commitWithMessage}
-          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive}>💾</button>
+        <button class="action-btn ${this._committing ? 'committing' : ''}"
+          title="Stage all & commit" @click=${this._commitWithMessage}
+          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive}>
+          ${this._committing ? '⏳' : '💾'}
+        </button>
         <button class="action-btn danger" title="Reset to HEAD" @click=${this._confirmReset}
           ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
       </div>
