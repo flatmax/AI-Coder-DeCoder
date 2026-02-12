@@ -12,6 +12,142 @@ import './input-history.js';
 import './url-chips.js';
 
 // Simple markdown → HTML (basic: headers, code blocks, bold, italic, links)
+// Edit block markers (from edit_parser.py)
+const EDIT_START = '««« EDIT';
+const EDIT_SEP = '═══════ REPL';
+const EDIT_END = '»»» EDIT END';
+
+/**
+ * Parse edit blocks out of raw LLM text, returning an array of
+ * { type: 'text'|'edit', content, filePath, oldLines, newLines }
+ */
+function parseEditSegments(text) {
+  const lines = text.split('\n');
+  const segments = [];
+  let textBuf = [];
+  let state = 'text'; // text | expect_edit | old | new
+  let filePath = '';
+  let oldLines = [];
+  let newLines = [];
+
+  function flushText() {
+    if (textBuf.length > 0) {
+      segments.push({ type: 'text', content: textBuf.join('\n') });
+      textBuf = [];
+    }
+  }
+
+  function isFilePath(line) {
+    const s = line.trim();
+    if (!s || s.length > 200) return false;
+    if (/^[#\/*\->]|^```/.test(s)) return false;
+    if (s.includes('/') || s.includes('\\')) return true;
+    if (/^[\w\-.]+\.\w+$/.test(s)) return true;
+    return false;
+  }
+
+  for (const line of lines) {
+    const stripped = line.trim();
+
+    if (state === 'text') {
+      if (isFilePath(stripped) && stripped !== EDIT_START) {
+        filePath = stripped;
+        state = 'expect_edit';
+      } else {
+        textBuf.push(line);
+      }
+    } else if (state === 'expect_edit') {
+      if (stripped === EDIT_START) {
+        flushText();
+        oldLines = [];
+        newLines = [];
+        state = 'old';
+      } else if (isFilePath(stripped) && stripped !== EDIT_START) {
+        textBuf.push(filePath); // previous path was just text
+        filePath = stripped;
+      } else {
+        textBuf.push(filePath);
+        textBuf.push(line);
+        filePath = '';
+        state = 'text';
+      }
+    } else if (state === 'old') {
+      if (stripped === EDIT_SEP || stripped.startsWith('═══════')) {
+        state = 'new';
+      } else {
+        oldLines.push(line);
+      }
+    } else if (state === 'new') {
+      if (stripped === EDIT_END) {
+        segments.push({
+          type: 'edit',
+          filePath,
+          oldLines: [...oldLines],
+          newLines: [...newLines],
+        });
+        filePath = '';
+        oldLines = [];
+        newLines = [];
+        state = 'text';
+      } else {
+        newLines.push(line);
+      }
+    }
+  }
+
+  // Flush remaining text (including any incomplete edit block)
+  if (state === 'expect_edit') {
+    textBuf.push(filePath);
+  } else if (state === 'old' || state === 'new') {
+    textBuf.push(filePath);
+    textBuf.push(EDIT_START);
+    textBuf.push(...oldLines);
+    if (state === 'new') {
+      textBuf.push(EDIT_SEP);
+      textBuf.push(...newLines);
+    }
+  }
+  flushText();
+
+  return segments;
+}
+
+/**
+ * Compute a simple line diff between old and new, returning
+ * arrays of {text, type} where type is 'context'|'remove'|'add'.
+ */
+function computeLineDiff(oldLines, newLines) {
+  // Find common prefix (anchor lines)
+  let prefixLen = 0;
+  const minLen = Math.min(oldLines.length, newLines.length);
+  for (let i = 0; i < minLen; i++) {
+    if (oldLines[i] === newLines[i]) prefixLen++;
+    else break;
+  }
+
+  const result = [];
+  // Context (anchor) lines
+  for (let i = 0; i < prefixLen; i++) {
+    result.push({ text: oldLines[i], type: 'context' });
+  }
+  // Removed lines
+  for (let i = prefixLen; i < oldLines.length; i++) {
+    result.push({ text: oldLines[i], type: 'remove' });
+  }
+  // Added lines
+  for (let i = prefixLen; i < newLines.length; i++) {
+    result.push({ text: newLines[i], type: 'add' });
+  }
+  return result;
+}
+
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function renderMarkdown(text) {
   if (!text) return '';
   let result = text
@@ -37,6 +173,57 @@ function renderMarkdown(text) {
     .replace(/\n/g, '<br>');
 
   return result;
+}
+
+/**
+ * Render a full assistant message with edit blocks rendered inline.
+ * editResultsMap: { filePath -> { status, message } }
+ */
+function renderAssistantContent(text, editResultsMap = {}) {
+  const segments = parseEditSegments(text);
+  const parts = [];
+
+  for (const seg of segments) {
+    if (seg.type === 'text') {
+      parts.push(renderMarkdown(seg.content));
+    } else {
+      const info = editResultsMap[seg.filePath] || {};
+      const status = info.status || 'unknown';
+      const statusMsg = info.message || '';
+
+      // Status badge
+      let badge = '';
+      if (status === 'applied') badge = '<span class="edit-badge applied">✅ applied</span>';
+      else if (status === 'failed') badge = `<span class="edit-badge failed">❌ failed</span>`;
+      else if (status === 'skipped') badge = '<span class="edit-badge skipped">⚠️ skipped</span>';
+      else if (status === 'validated') badge = '<span class="edit-badge validated">☑ validated</span>';
+      else badge = '<span class="edit-badge pending">⏳ pending</span>';
+
+      // Diff lines
+      const diffLines = computeLineDiff(seg.oldLines, seg.newLines);
+      const diffHtml = diffLines.map(d => {
+        const prefix = d.type === 'remove' ? '-' : d.type === 'add' ? '+' : ' ';
+        return `<div class="diff-line ${d.type}"><span class="diff-prefix">${prefix}</span>${escapeHtml(d.text)}</div>`;
+      }).join('');
+
+      const failMsg = (status === 'failed' && statusMsg)
+        ? `<div class="edit-error">${escapeHtml(statusMsg)}</div>`
+        : '';
+
+      parts.push(`
+        <div class="edit-block-card">
+          <div class="edit-block-header">
+            <span class="edit-file-path" data-path="${escapeHtml(seg.filePath)}">${escapeHtml(seg.filePath)}</span>
+            ${badge}
+          </div>
+          ${failMsg}
+          <pre class="edit-diff">${diffHtml}</pre>
+        </div>
+      `);
+    }
+  }
+
+  return parts.join('');
 }
 
 export class AcChatPanel extends RpcMixin(LitElement) {
@@ -490,6 +677,126 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       color: var(--accent-primary);
     }
 
+    /* Edit block cards */
+    .edit-block-card {
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      margin: 10px 0;
+      overflow: hidden;
+      background: var(--bg-primary);
+    }
+
+    .edit-block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border-primary);
+      font-size: 0.8rem;
+      gap: 8px;
+    }
+
+    .edit-file-path {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--accent-primary);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .edit-file-path:hover {
+      text-decoration: underline;
+    }
+
+    .edit-badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .edit-badge.applied {
+      background: rgba(80, 200, 120, 0.15);
+      color: var(--accent-green);
+    }
+    .edit-badge.failed {
+      background: rgba(255, 80, 80, 0.15);
+      color: var(--accent-red);
+    }
+    .edit-badge.skipped {
+      background: rgba(255, 180, 50, 0.15);
+      color: #f0a030;
+    }
+    .edit-badge.validated {
+      background: rgba(80, 160, 255, 0.15);
+      color: var(--accent-primary);
+    }
+    .edit-badge.pending {
+      background: rgba(160, 160, 160, 0.15);
+      color: var(--text-muted);
+    }
+
+    .edit-error {
+      padding: 4px 12px;
+      font-size: 0.75rem;
+      color: var(--accent-red);
+      background: rgba(255, 80, 80, 0.08);
+      border-bottom: 1px solid var(--border-primary);
+    }
+
+    .edit-diff {
+      margin: 0;
+      padding: 8px 0;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      overflow-x: auto;
+    }
+
+    .diff-line {
+      padding: 0 12px;
+      white-space: pre;
+    }
+    .diff-line.remove {
+      background: rgba(255, 80, 80, 0.12);
+      color: var(--accent-red);
+    }
+    .diff-line.add {
+      background: rgba(80, 200, 120, 0.12);
+      color: var(--accent-green);
+    }
+    .diff-line.context {
+      color: var(--text-muted);
+    }
+    .diff-prefix {
+      display: inline-block;
+      width: 1.5ch;
+      user-select: none;
+      color: inherit;
+      opacity: 0.6;
+    }
+
+    /* Edit summary banner */
+    .edit-summary {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 12px;
+      margin: 8px 0 4px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+    .edit-summary .stat { font-weight: 600; }
+    .edit-summary .stat.pass { color: var(--accent-green); }
+    .edit-summary .stat.fail { color: var(--accent-red); }
+    .edit-summary .stat.skip { color: #f0a030; }
+
   `];
 
   constructor() {
@@ -601,8 +908,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       // Show error as assistant message
       this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${result.error}` }];
     } else if (result?.response) {
-      // Add the assistant response to messages
-      this.messages = [...this.messages, { role: 'assistant', content: result.response }];
+      // Build edit results map from backend data
+      const editMeta = {};
+      if (result.edit_results) {
+        editMeta.editResults = {};
+        for (const er of result.edit_results) {
+          editMeta.editResults[er.file] = { status: er.status, message: er.message };
+        }
+      }
+      if (result.passed || result.failed || result.skipped) {
+        editMeta.passed = result.passed || 0;
+        editMeta.failed = result.failed || 0;
+        editMeta.skipped = result.skipped || 0;
+      }
+      // Add the assistant response with edit metadata
+      this.messages = [...this.messages, {
+        role: 'assistant',
+        content: result.response,
+        ...(Object.keys(editMeta).length > 0 ? editMeta : {}),
+      }];
     }
 
     this._streamingContent = '';
@@ -984,9 +1308,31 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   // === Rendering ===
 
+  _renderEditSummary(msg) {
+    if (!msg.passed && !msg.failed && !msg.skipped) return nothing;
+    const parts = [];
+    if (msg.passed) parts.push(html`<span class="stat pass">✅ ${msg.passed} applied</span>`);
+    if (msg.failed) parts.push(html`<span class="stat fail">❌ ${msg.failed} failed</span>`);
+    if (msg.skipped) parts.push(html`<span class="stat skip">⚠️ ${msg.skipped} skipped</span>`);
+    return html`<div class="edit-summary">${parts}</div>`;
+  }
+
   _renderMessage(msg, index) {
     const isUser = msg.role === 'user';
     const content = msg.content || '';
+
+    if (!isUser && msg.editResults) {
+      // Assistant message with edit blocks — use rich renderer
+      return html`
+        <div class="message-card ${msg.role}" data-msg-index="${index}">
+          <div class="role-label">Assistant</div>
+          ${this._renderEditSummary(msg)}
+          <div class="md-content" @click=${this._onContentClick}>
+            ${unsafeHTML(renderAssistantContent(content, msg.editResults))}
+          </div>
+        </div>
+      `;
+    }
 
     return html`
       <div class="message-card ${msg.role}" data-msg-index="${index}">
@@ -999,6 +1345,19 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onContentClick(e) {
+    // Handle file path clicks in edit blocks
+    const pathEl = e.target.closest('.edit-file-path');
+    if (pathEl) {
+      const filePath = pathEl.dataset.path;
+      if (filePath) {
+        this.dispatchEvent(new CustomEvent('navigate-file', {
+          detail: { path: filePath },
+          bubbles: true, composed: true,
+        }));
+      }
+      return;
+    }
+
     // Handle copy button clicks on code blocks
     const btn = e.target.closest('.copy-btn');
     if (btn) {
