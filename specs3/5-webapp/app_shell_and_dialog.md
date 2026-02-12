@@ -53,6 +53,10 @@ Methods the server calls on the client (registered via `addClass`):
 
 **App Shell:** On `setupDone`: publish call proxy → fetch `LLM.get_current_state()` → dispatch `state-loaded` event.
 
+**Files Tab:** On RPC ready: load snippets, load file tree. On `state-loaded`: restore messages, selected files, streaming status, sync file picker, scroll chat to bottom.
+
+**Dialog:** On RPC ready: sync history bar via `LLM.get_history_status()`.
+
 ## Dialog
 
 ### Layout
@@ -88,6 +92,15 @@ Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change 
 - All 8 directional handles after undocking
 - Min: 300px × 200px
 
+### Header Sections
+
+| Section | Content |
+|---------|---------|
+| Left | Active tab label; click toggles minimize |
+| Center | Tab icon buttons |
+| Git actions | Clipboard, commit, reset buttons (Files tab only) |
+| Right | History browser, clear context, minimize button |
+
 ### Minimizing
 
 Toggle via header click or Alt+M. Minimized: 48px header only.
@@ -112,8 +125,13 @@ See [Diff Viewer](diff_viewer.md) for full editor details.
 
 | Failure | Behavior |
 |---------|----------|
-| Tree-sitter parse failure | Skip file in symbol index, log warning |
-| LLM provider down | streamComplete with error in chat |
-| Git operation fails | Error toast |
-| WebSocket disconnect | Reconnecting banner, auto-retry |
-| Config file corrupt | Use defaults, log warning |
+| Tree-sitter parse failure | Skip file in symbol index, log warning. File still in tree and selectable |
+| LLM provider down/timeout | streamComplete with error in chat. User can retry |
+| Git operation fails | Return `{error}` from RPC. Error toast. File tree doesn't update |
+| Commit fails | Error shown in chat. Files remain staged |
+| URL fetch fails | Chip shows error state. Content not included. User can retry |
+| WebSocket disconnect | Reconnecting banner with attempt count, auto-retry with exponential backoff (1s, 2s, 4s, 8s, max 15s). On disconnect: reset `SharedRpc`, show banner, dispatch error toast. On reconnect: re-publish call proxy, fetch state, rebuild UI, dispatch success toast |
+| Config file corrupt/missing | Use built-in defaults. Log warning. Settings panel displays the error |
+| Symbol cache corrupt | Clear in-memory cache, rebuild from source |
+| Compaction LLM failure | Safe defaults (no boundary, 0 confidence). History unchanged. Retry next trigger |
+| Emergency token overflow | Oldest messages truncated without summarization if > 2× compaction trigger |

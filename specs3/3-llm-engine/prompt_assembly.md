@@ -26,9 +26,9 @@ The main prompt covers:
 
 | Prompt | Used For |
 |--------|----------|
-| **Commit message prompt** | Inline constant for generating git commit messages |
+| **Commit message prompt** | Inline constant for generating git commit messages. Role: expert software engineer. Rules: conventional commit style with type prefix, imperative mood, 50-char subject line limit, 72-char body wrap, no commentary — output the commit message only |
 | **Compaction skill prompt** | Loaded by topic detector for history compaction LLM calls |
-| **System reminder** | Compact edit format reference (exists as infrastructure, not currently injected) |
+| **System reminder** | Compact edit format reference defined as a code constant (not loaded from file). Exists as infrastructure for potential mid-conversation reinforcement if the LLM drifts from the edit format. Not currently injected into streaming assembly |
 
 ## Message Array Structure
 
@@ -57,6 +57,22 @@ Content is organized into 5 stability tiers (see [Cache Tiering](cache_tiering.m
 ```
 
 Empty tiers are skipped entirely.
+
+## Header Constants
+
+The following named constants are used when building the message array:
+
+| Constant | Value |
+|----------|-------|
+| `REPO_MAP_HEADER` | `# Repository Structure\n\n...` |
+| `FILE_TREE_HEADER` | `# Repository Files\n\n...` |
+| `URL_CONTEXT_HEADER` | `# URL Context\n\n...` |
+| `FILES_ACTIVE_HEADER` | `# Working Files\n\n...` |
+| `FILES_L0_HEADER` | `# Reference Files (Stable)\n\n...` |
+| `FILES_L1_HEADER` | `# Reference Files\n\n...` |
+| `FILES_L2_HEADER` | `# Reference Files (L2)\n\n...` |
+| `FILES_L3_HEADER` | `# Reference Files (L3)\n\n...` |
+| `TIER_SYMBOLS_HEADER` | `# Repository Structure (continued)\n\n` |
 
 ## Block Details
 

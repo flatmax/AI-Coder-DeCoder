@@ -6,6 +6,13 @@ Three components that consume the same backend data (`LLM.get_context_breakdown`
 
 ## Shared Backend
 
+Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
+- URL content modal (view fetched URL content)
+- Symbol map modal (view full symbol map)
+- URL inclusion toggling and removal
+- Deduplication of concurrent requests (one in-flight at a time)
+- Auto-refresh when selected files or URLs change while visible; mark stale when hidden
+
 `LLM.get_context_breakdown(selected_files, included_urls)` returns:
 
 ```pseudo
@@ -41,6 +48,10 @@ Model: name | Session Totals: In/Out/Total/Cache
 ### Budget Bar Colors
 
 ≤ 75% Green, 75–90% Yellow, > 90% Red.
+
+### Session Totals
+
+Below the category breakdown: cumulative session totals (prompt in, completion out, total, cache reads, cache writes).
 
 ### Expandable Categories
 
@@ -96,6 +107,29 @@ Per-item: `N/threshold` fill with tier color.
 
 Character-by-character matching. Hides non-matching items and empty tiers.
 
+### Defaults
+
+L0 and active tiers expanded by default; L1/L2/L3 collapsed.
+
+### Color Palette
+
+Tiers use a warm-to-cool spectrum:
+- L0: Green (most stable)
+- L1: Teal
+- L2: Blue
+- L3: Amber
+- Active: Orange
+
+Token values in monospace green. Cache writes in yellow. Errors in red.
+
+### Relationship to Tabs
+
+| Component | Location | Trigger | Persistence |
+|-----------|----------|---------|-------------|
+| Token HUD | Diff viewer background | Each `streamComplete` | Transient (~8s) |
+| Context Viewer | Dialog tab | Tab switch / file change | Persistent while visible |
+| Cache Viewer | Dialog tab | Tab switch / file change | Persistent while visible |
+
 ---
 
 ## Token HUD (Floating Overlay)
@@ -141,6 +175,19 @@ Printed after each response (not a UI component):
 ├───────────────────────────────────┤
 │ Total: 55,448 | Cache hit: 23%   │
 ╰───────────────────────────────────╯
+```
+
+### Token Usage
+```
+Model: model-name
+System:         1,622
+Symbol Map:    34,355
+Files:              0
+History:       21,532
+Total:         57,347 / 1,000,000
+Last request:  74,708 in, 34 out
+Cache:         write: 48,070
+Session total: 182,756
 ```
 
 ### Tier Changes

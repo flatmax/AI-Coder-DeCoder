@@ -62,7 +62,7 @@ class LLM:
         await self.call["streamChunk"](request_id, content)
 ```
 
-**Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key.
+**Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key. In practice, many server→browser calls are fire-and-forget notifications where the browser returns `true` as an acknowledgement and the Python side just awaits without inspecting the result.
 
 ### Browser Side (JavaScript)
 
@@ -116,6 +116,7 @@ streamChunk(requestId, content) {
 | Event | Description |
 |-------|-------------|
 | WebSocket opens | jrpc-oo handshake begins |
+| `remoteIsUp()` | Connection confirmed, remote is ready |
 | `setupDone()` | `call` proxy populated — can now make RPC calls |
 | Normal operation | Request/response pairs over the shared connection |
 | `setupSkip()` | Connection failed |
@@ -195,3 +196,15 @@ Three top-level service classes:
 - RPC errors follow JSON-RPC 2.0 error format
 - Application-level errors return `{error: "message"}` dicts
 - Connection loss triggers reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
+
+## Threading Notes
+
+From a background thread (e.g., LLM streaming worker), use `asyncio.run_coroutine_threadsafe` to schedule calls on the event loop. Use `asyncio.wait_for` for timeouts on server→browser calls.
+
+## Version Reporting
+
+On `setupDone`, the server includes its version SHA in the connection metadata. The client logs this to console for debugging. No version negotiation or compatibility enforcement — the hosted webapp URL already includes the matching SHA.
+
+## serverURI Changes
+
+A top-level change to `serverURI` triggers reconnection to the new URI in all classes inheriting from jrpc-oo.

@@ -60,6 +60,10 @@ Built from `git ls-files` (tracked) + `git ls-files --others --exclude-standard`
 
 Binary files (null bytes in first 8KB) report 0 lines. Text files count newlines.
 
+### Diff Stats
+
+Per-file addition/deletion counts from `git diff --numstat` (both staged and unstaged). Used for `+N -N` indicators in the file picker UI.
+
 ## Commit Operations
 
 | Method | Description |
@@ -69,6 +73,15 @@ Binary files (null bytes in first 8KB) report 0 lines. Text files count newlines
 | `Repo.stage_all()` | `git add -A` |
 | `Repo.commit(message)` | Create commit. Handles repos without HEAD |
 | `Repo.reset_hard()` | `git reset --hard HEAD` |
+
+### Commit Flow (UI-Driven)
+
+1. Stage all changes (`stage_all`)
+2. Get staged diff (`get_staged_diff`)
+3. Send diff to LLM to generate commit message
+4. Commit with generated message (`commit`)
+5. Display commit message as assistant message in chat
+6. Refresh file tree
 
 ## Search
 
@@ -93,7 +106,21 @@ SearchResult:
 
 ## Path Handling
 
-All paths are relative to the repository root. Paths containing `..` traversal are rejected. The resolved absolute path is verified to remain under the repo root before any read or write.
+All paths are relative to the repository root. The tree includes the repository name as the root node. UI operations strip this root prefix before making RPC calls.
+
+Paths containing `..` traversal are rejected. The resolved absolute path is verified to remain under the repo root before any read or write.
+
+## Testing
+
+- File read/write, read at HEAD version, create-exists error
+- Path traversal blocked (../../../etc/passwd)
+- Binary file detection (null bytes in first 8KB)
+- Stage, unstage, staged diff verification
+- Commit, reset hard restores content
+- Rename tracked file
+- Tree includes modified, untracked, staged arrays
+- Flat file list contains expected paths
+- Search finds content, case-insensitive, no-results returns empty
 
 ## Flat File List
 

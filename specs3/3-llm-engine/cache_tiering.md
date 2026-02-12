@@ -42,9 +42,11 @@ Files/symbols with N ≥ 3 graduate to L3 **regardless of whether they're still 
 
 History is immutable, so N ≥ 3 waiting is unnecessary. History graduation is **controlled**:
 
-1. **Piggyback on L3 invalidation** — if L3 is already being rebuilt, all eligible history graduates for free
-2. **Token threshold met** — if eligible history tokens exceed `cache_target_tokens`, oldest messages graduate
-3. **Never** (if `cache_target_tokens = 0`)
+1. **Piggyback on L3 invalidation** — if L3 is already being rebuilt this cycle (files/symbols graduating, items demoted, stale items removed), all eligible history graduates for free. Zero additional cache cost
+2. **Token threshold met** — if eligible history tokens exceed `cache_target_tokens`, the **oldest** messages graduate, keeping the most recent `cache_target_tokens` worth in active (since recent history is most likely to be referenced)
+3. **Never** (if `cache_target_tokens = 0`) — history stays active permanently
+
+The `cache_target_tokens` = `cache_min_tokens × buffer_multiplier` (default: 1024 × 1.5 = 1536).
 
 ## Ripple Promotion
 
@@ -66,11 +68,13 @@ N is reset to the destination tier's `entry_n` on promotion.
 
 The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until no promotions occur.
 
+**A tier is processed when:** it has incoming items, OR it hasn't been processed yet AND either it or the tier above is broken.
+
 **For each tier:**
-1. **Place incoming items** with tier's `entry_n`
-2. **Process veterans** (if `cache_target_tokens > 0`): sort by N ascending, accumulate tokens. Items below `cache_target_tokens` are **anchored** (N frozen). Items past threshold get N++ (capped at promotion threshold if tier above is stable)
-3. **Check promotion**: if tier above is broken and N exceeds threshold → promote out
-4. **Post-cascade**: demote items from underfilled tiers
+1. **Place incoming items** with tier's `entry_n` (N is reset, not preserved)
+2. **Process veterans** (at most once per cascade cycle, tracked by a "processed" set): if `cache_target_tokens > 0`, sort by N ascending, accumulate tokens. Items consumed before reaching `cache_target_tokens` are **anchored** (N frozen, cannot promote). Items past the threshold get N++, but N is **capped at the promotion threshold** if the tier above is stable
+3. **Check promotion**: if tier above is broken/empty and N exceeds threshold → promote out, mark source tier as broken
+4. **Post-cascade consolidation**: any tier below `cache_target_tokens` has its items demoted one tier down (keeping their current N) to avoid wasting a cache breakpoint
 
 ## Demotion
 
@@ -78,12 +82,34 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 ## Item Removal
 
-- **File unchecked** — file entry removed; symbol entry returns to active (N = 0)
-- **File deleted** — both entries removed entirely
+- **File unchecked** — `file:{path}` entry removed from its tier (causing a cache miss); the `symbol:{path}` entry **remains in whichever tier it has earned** independently (it was always tracked separately). The symbol block is no longer excluded from the symbol map output since the full file content is no longer in context
+- **File deleted** — both file and symbol entries removed entirely
+- Either causes a cache miss in the affected tier
+
+**Deselected file cleanup** happens at **two points** to avoid a one-request lag:
+
+1. **At assembly time** (in `_gather_tiered_content`, before the LLM request) — `file:*` entries for files not in the current selected files list are removed immediately
+2. **After the response** (in `_update_stability`) — the same check runs again as part of the normal stability update cycle
+
+Both steps mark the affected tier as broken to trigger cascade rebalancing.
+
+## The Active Items List
+
+On each request, the system builds an active items list — the set of items explicitly in active (uncached) context:
+
+1. **Selected file paths** — files the user has checked in the file picker
+2. **Symbol entries for selected files** — `symbol:{path}` for each selected file (excluded from symbol map output since full content is present)
+3. **Non-graduating history messages** — `history:N` entries not yet graduated
+
+Symbol entries for **unselected** files are never in this list — they live in whichever cached tier they've earned through initialization or promotion.
+
+When a selected file graduates to L3, its full content moves from the "Working Files" (uncached active) prompt section to the L3 cached block. The symbol map exclusion for that file is lifted since it's no longer in the active section.
 
 ## Initialization from Reference Graph
 
-On startup, tier assignments are initialized from the cross-file reference graph. **No persistence** — rebuilt fresh each session.
+On startup, tier assignments are initialized from the cross-file reference graph. **No persistence** — rebuilt fresh each session. Initialized items receive their tier's `entry_n` as their starting N value and a placeholder content hash.
+
+**Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
 
 ### Clustering Algorithm
 
@@ -93,6 +119,16 @@ On startup, tier assignments are initialized from the cross-file reference graph
 4. **Respect minimums** — tiers below `cache_target_tokens` merge into the smallest other tier
 
 **L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
+
+**Fallback** (when no reference index is available): sort all files by reference count descending, fill L1 first (to `cache_target_tokens`), then L2, then L3.
+
+## Cache Block Structure
+
+See [Prompt Assembly](prompt_assembly.md) for the complete message ordering. Each non-empty tier uses one cache breakpoint. Providers typically allow 4 breakpoints per request. Blocks under the provider minimum (e.g., 1024 tokens for Anthropic) won't actually be cached.
+
+## Cache Hit Reporting
+
+Cache hit statistics are **read directly from the LLM provider's usage response**, not estimated locally. The provider reports cache read tokens and cache write tokens. The application requests usage reporting via `stream_options: {"include_usage": true}`.
 
 ## Order of Operations (Per Request)
 
@@ -121,3 +157,21 @@ Log promotions/demotions for frontend display. Store current active items for ne
 ## Symbol Map Exclusion
 
 When a file is in active context (selected), its symbol map entry is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted.
+
+## History Compaction Interaction
+
+When compaction runs, all `history:*` entries are purged from the tracker. Compacted messages re-enter as new active items with N = 0. This causes a one-time cache miss for tiers that contained history. The cost is temporary — the shorter history re-stabilizes within a few requests.
+
+## Testing Invariants
+
+- N increments only on unchanged content; resets to 0 on hash mismatch or modification
+- Graduation requires N ≥ 3 for files/symbols; history graduates via piggyback or token threshold
+- Promoted items enter destination tier with that tier's `entry_n`, not preserved N
+- Ripple cascade propagates only into broken/empty tiers; stable tiers block promotion
+- Anchored items (below `cache_target_tokens`) have frozen N
+- N is capped at promotion threshold when tier above is stable
+- Underfilled tiers demote one level down
+- Stale items (deleted files) are removed; affected tier marked broken
+- A file never appears as both symbol block and full content — when full content is in any tier, the symbol block is excluded
+- History purge after compaction removes all `history:*` entries from tracker
+- Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate

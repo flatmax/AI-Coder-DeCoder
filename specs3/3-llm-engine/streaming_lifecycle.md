@@ -50,11 +50,14 @@ Post-response compaction (→ context_and_history.md)
 ## Client-Side Initiation
 
 1. Guard — skip if empty input
-2. Show user message immediately
-3. Clear input, images, detected URLs
-4. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
-5. Set streaming state (disable input, start watchdog)
-6. RPC call: `LLM.chat_streaming(request_id, message, files, images)`
+2. Reset scroll — re-enable auto-scroll
+3. Build URL context — get included fetched URLs, append to LLM message (not shown in UI)
+4. Show user message immediately
+5. Clear input, images, detected URLs
+6. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
+7. Track request — store in pending requests map
+8. Set streaming state (disable input, start watchdog)
+9. RPC call: `LLM.chat_streaming(request_id, message, files, images)`
 
 ## LLM Streaming (Worker Thread)
 
@@ -139,8 +142,9 @@ Token usage is extracted from the LLM provider's response. Different providers r
 | Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` |
 | Bedrock | `prompt_tokens_details.cached_tokens` | `cache_creation_input_tokens` |
 | OpenAI | `prompt_tokens_details.cached_tokens` | — |
+| litellm unified | `cache_read_tokens` | `cache_creation_tokens` |
 
-The extraction uses a dual-mode getter (attribute + key access) with fallback chains. Stream-level usage is captured from any chunk with it (typically the final chunk). Response-level usage merged as fallback.
+The extraction uses a dual-mode getter (attribute + key access) with fallback chains. Stream-level usage is captured from any chunk with it (typically the final chunk). Response-level usage merged as fallback. Completion tokens are estimated from content length (~4 chars/token) only if the provider reported no completion count.
 
 ## Terminal HUD
 
@@ -159,9 +163,15 @@ Two reports printed after each response:
 
 ### Token Usage
 ```
-System: 1,622  Symbol Map: 34,355  Files: 0  History: 21,532
-Total: 57,347 / 1,000,000
-Last: 74,708 in, 34 out | Cache: write 48,070
+Model: model-name
+System:         1,622
+Symbol Map:    34,355
+Files:              0
+History:       21,532
+Total:         57,347 / 1,000,000
+Last request:  74,708 in, 34 out
+Cache:         write: 48,070
+Session total: 182,756
 ```
 
 ## Error Handling
@@ -174,3 +184,35 @@ Last: 74,708 in, 34 out | Cache: write 48,070
 | Client watchdog | 5-minute timeout forces recovery |
 | History token emergency | Oldest messages truncated if > 2× compaction trigger |
 | Budget exceeded | Largest files shed with warning |
+
+## Testing
+
+### State Management
+- get_current_state returns messages, selected_files, streaming_active, session_id
+- set_selected_files updates and returns copy; get_selected_files returns independent copy
+
+### Streaming Guards
+- Concurrent stream rejected with error
+- cancel_streaming succeeds for matching request_id; wrong id returns error
+
+### History
+- New session changes session_id and clears history
+
+### Context Breakdown
+- Returns breakdown with system/symbol_map/files/history categories
+- Returns total_tokens, max_input_tokens, model, session_totals
+- Session totals initially zero
+
+### Shell Command Detection
+- Extracts from ```bash blocks, $ prefix, > prefix
+- Comments skipped, non-command text returns empty
+
+### Commit Message
+- Empty/whitespace diff rejected
+- Mocked LLM returns generated message
+
+### Tiered Content Deduplication
+- File in cached tier excludes its symbol block
+- Selected non-graduated file excluded from symbol blocks
+- Graduated selected file gets file content, not symbol block
+- Unselected file without cached content gets symbol block only

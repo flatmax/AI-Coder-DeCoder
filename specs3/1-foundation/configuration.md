@@ -98,6 +98,16 @@ A whitelisted set of config types can be read, written, and reloaded:
 
 Only these types are accepted — arbitrary file paths are rejected.
 
+### Testing
+
+- Creates `.ac-dc/` directory and `.gitignore` entry on init; no duplicate entries
+- Default LLM and app configs contain expected keys
+- Save and read-back round-trip for config content
+- Invalid config type key rejected with error
+- Cache target tokens computed from defaults (1024 × 1.5 = 1536)
+- Snippets fallback returns non-empty list
+- System prompt assembly returns non-empty string
+
 ### RPC Methods
 
 | Method | Description |

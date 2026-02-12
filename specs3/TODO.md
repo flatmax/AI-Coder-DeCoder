@@ -128,7 +128,10 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Hosted deployment** — GitHub Pages with version registry
 - [x] **State persistence** — Local storage for UI preferences
 - [x] **Content-visibility optimization** — CSS containment for off-screen messages
-- [x] **Accessibility** — ARIA roles, focus management, keyboard shortcuts
+- [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
+- [x] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity, 75% horizontal position)
+- [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
+- [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
 ### Phase 10: Code Review
 - [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit
@@ -138,4 +141,5 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Review diff chips** — Chip bar showing review state and per-file diff toggles
 - [ ] **Review banner** — File picker header showing active review info
 - [ ] **Review snippets** — Review-specific quick-insert buttons
-- [ ] **Symbol map diff** — Compare pre/post symbol maps, annotate removed symbols
+- [ ] **Symbol map diff** — Compare pre/post symbol maps, annotate removed symbols with reference counts
+- [ ] **Review mode detection on restart** — Detect soft-reset state on server start, prompt user to re-enter or exit

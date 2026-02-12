@@ -90,12 +90,15 @@ URLContent:
     url: string
     url_type: URLType
     title: string?
+    description: string?
     content: string?
     symbol_map: string?
     readme: string?
     github_info: GitHubInfo?
+    fetched_at: datetime?
     error: string?
     summary: string?
+    summary_type: string?
 
     format_for_prompt(max_length):
         // Priority: summary → readme → content
@@ -111,7 +114,32 @@ GitHubInfo:
     branch: string?
     path: string?
     issue_number: integer?
+    pr_number: integer?
 ```
+
+## URL Service
+
+The `URLService` class manages the lifecycle of URL content:
+
+| State | Description |
+|-------|-------------|
+| `_cache` | Filesystem cache for fetched content |
+| `_model` | Smaller model for summarization |
+| `_fetched` | Dict of fetched `URLContent` objects (in-memory, keyed by URL) |
+
+| Method | Description |
+|--------|-------------|
+| `detect_urls(text)` | Find and classify URLs in text |
+| `fetch_url(url, ...)` | Fetch, cache, optionally summarize |
+| `get_url_content(url)` | Return cached content for display |
+| `invalidate_url_cache(url)` | Remove from cache and fetched dict |
+| `clear_url_cache()` | Clear all cached and fetched URLs |
+| `get_fetched_urls()` | List all fetched URLContent objects |
+| `remove_fetched(url)` | Remove from in-memory fetched dict |
+| `clear_fetched()` | Clear in-memory fetched dict |
+| `format_url_context(urls, excluded?, max_length?)` | Format fetched URLs for prompt injection, excluding specified URLs and errors |
+
+Known documentation domains include: official language docs (docs.python.org, developer.mozilla.org/MDN), ReadTheDocs subdomains, and paths containing `/docs/`, `/api/`, or `/reference/`.
 
 ## RPC Methods
 
@@ -122,3 +150,49 @@ GitHubInfo:
 | `LLM.get_url_content(url)` | Get cached content |
 | `LLM.invalidate_url_cache(url)` | Remove from cache |
 | `LLM.clear_url_cache()` | Clear all cached URLs |
+
+## Testing
+
+### URL Cache
+- Set/get round-trip; miss returns None; expired returns None
+- Invalidate removes entry; clear removes all
+- cleanup_expired returns count of removed entries
+- Corrupt JSON entry handled (cleaned up, returns None)
+- URL hash: deterministic, 16 chars, different URLs produce different hashes
+- Default cache dir created automatically
+
+### URL Detection
+- Basic detection, multiple URLs, deduplication
+- Trailing punctuation/comma stripped
+- No URLs returns empty; http supported; file:// rejected
+
+### URL Classification
+- GitHub repo (with trailing slash, .git suffix), file (owner/repo/branch/path), issue (#N), PR (!N)
+- Documentation: known domains, readthedocs, /docs/ and /api/ paths
+- Generic fallback for unrecognized URLs
+
+### Display Name
+- GitHub: owner/repo, owner/repo/filename, owner/repo#N, owner/repo!N
+- Generic: hostname/path; long URLs truncated to 40 chars; root URL strips trailing slash
+
+### Summary Type Selection
+- GitHub repo with/without symbols → ARCHITECTURE/BRIEF
+- Documentation → USAGE; Generic → BRIEF
+- User hints: "how to" → USAGE, "api" → API, "architecture" → ARCHITECTURE, "compare" → EVALUATION
+
+### URLContent
+- format_for_prompt: includes URL header and title; summary preferred over raw content; readme fallback; symbol map appended; truncation with ellipsis
+- Round-trip serialization (to_dict/from_dict) preserves all fields including github_info
+
+### HTML Extraction
+- Extracts title, strips scripts and styles, cleans whitespace
+
+### URL Service
+- detect_urls returns classified results
+- get_url_content returns error for unfetched URL
+- Invalidate and clear cache operations
+- get_fetched_urls empty initially; remove_fetched and clear_fetched
+- format_url_context joins multiple URLs with separator; excludes specified URLs; skips errors
+- Fetch uses cache when available; web page fetch via mocked urlopen; GitHub file fetch
+- Error results not cached
+- Summarization via mocked LLM appends summary to result

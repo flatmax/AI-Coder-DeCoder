@@ -141,6 +141,86 @@ Compares `symbol_map_before` against current symbol map:
 | `LLM.end_review()` | Exit + cleanup |
 | `LLM.get_review_state()` | Current review state |
 
+## UI Components
+
+### Review Diff Chips
+
+A chip bar displayed above the chat input (similar to URL chips), showing the active review and which file diffs are included in context:
+
+```
+📋 Review: abc1234→HEAD · 12 commits · 34 files
+[📄 handler.py ✓] [📄 models.py ✓] [📄 connection.py ○]  +31 more
+                                                    [Clear Review]
+```
+
+| Element | Behavior |
+|---------|----------|
+| Summary line | Branch, commit range, totals |
+| File chip (✓) | Diff included in context; click to open in diff viewer |
+| File chip (○) | Diff excluded; click to toggle inclusion |
+| "+N more" | Expand to show all files |
+| "Clear Review" | Exit review mode (with confirmation) |
+
+Chips are synchronized with the file picker selection — checking a file in the picker also includes its diff.
+
+### Review Banner
+
+Displayed at the top of the file picker when review mode is active:
+
+```
+📋 Reviewing: feature-auth
+abc1234 → HEAD · 12 commits
+34 files · +1847 -423           [Exit ✕]
+```
+
+### Token Budget for Large Reviews
+
+Not all file diffs can fit in context. The system prioritizes:
+
+1. **Files selected (checked) in the picker** — diffs always included
+2. **High blast-radius files** — sorted by reference count from symbol map
+3. **Largest diffs last** — small changes are cheap; large rewrites may need individual review
+
+## Review Snippets
+
+When review mode is active, additional snippet buttons appear:
+
+| Icon | Purpose |
+|------|---------|
+| 🔍 | Full review — structured summary with severity categories |
+| 🔒 | Security review — input validation, auth, injection, secrets |
+| 🚶 | Commit walkthrough — per-commit intent and issues |
+| 🏗️ | Architecture review — modularity, coupling, design patterns |
+| ✅ | Test coverage — coverage gaps, edge cases, assertion quality |
+| 📝 | PR description — summary, motivation, testing notes |
+| 🧹 | Code quality — naming, duplication, complexity, patterns |
+
+These supplement (not replace) standard snippets. Loaded when `get_review_state().active` is true.
+
+## Integration with Existing Systems
+
+| System | Impact |
+|--------|--------|
+| **File Picker** | No changes — staged files from soft reset appear naturally with S badges |
+| **Diff Viewer** | No changes — HEAD (pre-review) vs disk (reviewed code) is standard cached diff |
+| **Symbol Map** | Current map reflects reviewed codebase; AI navigates normally |
+| **Cache Tiering** | Review context graduates to cached tiers; file diffs stay active |
+| **History / Compaction** | Standard system; review context re-injected each message |
+| **Streaming Chat** | No changes; review context is additional prompt content |
+
+## Notes
+
+- Edit blocks proposed during review are **not applied** by default — review mode is for reading
+- On restart, detect soft-reset state and prompt user to re-enter or exit review mode
+
+## Future Enhancements
+
+- **Review Annotations** — structured annotations exportable as GitHub PR comments or markdown reports
+- **Suggested Fixes** — AI proposes edit blocks during review, optionally applied
+- **Review Checklists** — configurable checklists (security, performance, style) with pass/fail per criterion
+- **Incremental Review** — track reviewed vs pending files, focus AI on remaining files
+- **Cross-Branch Comparison** — compare two branches side by side
+
 ## Limitations
 
 - Single review session at a time

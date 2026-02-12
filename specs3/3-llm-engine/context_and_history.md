@@ -51,6 +51,7 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 | `get_history()` | Return a copy |
 | `set_history(messages)` | Replace entirely (after compaction or session load) |
 | `clear_history()` | Empty list + purge history from stability tracker |
+| `reregister_history_items()` | Purge stability entries without clearing history |
 | `history_token_count()` | Token count of current history |
 
 ---
@@ -71,7 +72,7 @@ Tracks files included in the conversation with their contents.
 | `count_tokens(counter)` | Total tokens across all files |
 | `get_tokens_by_file(counter)` | Per-file token counts |
 
-Paths are normalized relative to repo root.
+Paths are normalized relative to repo root. Binary files are rejected. Path traversal (`../`) is blocked.
 
 ---
 
@@ -82,6 +83,18 @@ Wraps the LLM provider's tokenizer:
 - **Fallback** — estimates ~4 characters per token on any error
 - **Multiple input types** — strings, message dicts, or lists
 - **Model info** — `max_input_tokens`, `max_output_tokens`, `max_history_tokens` (= max_input / 16)
+
+### Token Budget Reporting
+
+```pseudo
+get_token_budget() -> {
+    history_tokens,
+    max_history_tokens,
+    max_input_tokens,
+    remaining,
+    needs_summary        // delegates to should_compact()
+}
+```
 
 ---
 
@@ -127,6 +140,19 @@ HistoryMessage:
 ### Sessions
 
 A session groups related messages by `session_id` (format: `sess_{epoch_ms}_{uuid6}`).
+
+### Session Summary
+
+```pseudo
+SessionSummary:
+    session_id: string
+    timestamp: string
+    message_count: integer
+    preview: string          // First ~100 chars of first message
+    first_role: string
+```
+
+This is the schema returned by `list_sessions()` for each session.
 
 | Operation | Behavior |
 |-----------|----------|
@@ -195,6 +221,12 @@ A smaller/cheaper LLM analyzes the conversation to find where the topic shifted.
 
 **Input:** Messages formatted as indexed blocks (truncated to ~1000 chars, at most 50 messages).
 
+**What counts as a boundary:**
+- Explicit task switches ("now let's work on...")
+- Shift to different file/component
+- Change in work type (debugging → feature development)
+- Context resets ("forget that", "let's try something else")
+
 **Output:**
 ```pseudo
 TopicBoundary:
@@ -228,6 +260,90 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 | `compaction_complete` | Rebuild message display from compacted messages |
 | `compaction_error` | Show error, re-enable input |
 | `case: "none"` | Remove "Compacting..." silently |
+
+---
+
+## Testing
+
+### FileContext
+- Add with explicit content, add from disk, missing file returns false
+- Binary file rejected, path traversal blocked
+- Remove, get_files sorted, clear
+- format_for_prompt includes path and fenced content
+
+### ContextManager
+- add_message, add_exchange, get_history returns copy (mutation-safe)
+- set_history replaces, clear_history empties
+- history_token_count > 0 for non-empty history
+- Token budget has required keys, remaining > 0
+- should_compact false when disabled or below trigger
+- Compaction status returns enabled/trigger/percent
+
+### Prompt Assembly (non-tiered)
+- System message first with system prompt content
+- Symbol map appended to system message under Repository Structure header
+- File tree as user/assistant pair with Repository Files header
+- URL context as user/assistant pair with acknowledgement
+- Active files as user/assistant pair with Working Files header
+- History messages appear before current user prompt
+- Images produce multimodal content blocks; no images produces string
+- estimate_prompt_tokens > 0
+
+### Prompt Assembly (tiered)
+- Graduated files excluded from active files section
+- All files graduated → no Working Files section
+- L0 system message has cache_control when no L0 history
+- L0 with history: cache_control on last history message, not system
+- L1 block produces user/assistant pair containing symbol content
+- Empty tiers produce no messages
+- File tree, URL context, active files included at correct positions
+- Active history appears after active files, before user prompt
+- Multi-tier message order: L0 < L1 < L3 < tree < active < prompt
+- Each non-empty cached tier has a cache_control breakpoint
+
+### Budget Enforcement
+- shed_files_if_needed removes largest files when budget exceeded; no-op when under budget
+- emergency_truncate reduces message count, preserves user/assistant pairs
+
+### History Store
+- Append and retrieve messages by session
+- Session grouping isolates messages
+- list_sessions returns all sessions with preview and message_count; respects limit
+- Search: case-insensitive substring, role filter, empty query returns empty
+- Persistence: new HistoryStore instance reads previously written messages
+- Corrupt JSONL line skipped (partial write recovery)
+- Message has required fields (id, timestamp, session_id, files, images)
+- get_session_messages_for_context returns only role/content (no metadata)
+- Empty/nonexistent session returns empty list
+
+### Message ID Generation
+- Format: `{epoch_ms}-{uuid8}`; session format: `sess_{epoch_ms}_{uuid6}`
+- 100 generated IDs are unique
+
+### Topic Detector
+- Empty messages and no-model return SAFE_BOUNDARY
+- Successful LLM detection returns boundary_index and confidence
+- LLM failure returns SAFE_BOUNDARY
+- Format: messages formatted as `[N] ROLE: content`, truncated at max_chars
+- Parse: clean JSON, null boundary, markdown-fenced JSON, partial regex fallback, completely invalid returns null/0.0
+
+### History Compactor
+- Below trigger: should_compact false
+- Above trigger: should_compact true, compact returns truncate or summarize
+- Empty messages: case = none
+- apply_compaction reduces message count
+- apply_compaction with case=none returns messages unchanged
+- min_verbatim_exchanges preserved after compaction
+- Disabled compactor never triggers
+- Truncate and summarize apply correctly; summary text produces History Summary message
+- High-confidence boundary near verbatim window → truncate
+- Low-confidence boundary → summarize
+
+### Context Manager Integration
+- init_compactor creates compactor
+- compact_history_if_needed returns None below trigger
+- Compaction purges stability history items
+- should_compact works with and without compactor instance
 
 ---
 

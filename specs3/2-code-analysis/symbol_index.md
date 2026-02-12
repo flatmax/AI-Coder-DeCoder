@@ -63,6 +63,16 @@ Import:
     level: integer         // 0 = absolute, 1+ = relative
 ```
 
+### FileSymbols
+
+```pseudo
+FileSymbols:
+    file_path: string
+    symbols: Symbol[]       // Top-level symbols
+    imports: Import[]
+    all_symbols_flat: list[Symbol]  // Property: flattened including nested children
+```
+
 ## Supported Languages
 
 | Language | Extensions |
@@ -78,6 +88,13 @@ Tree-sitter grammars via individual `tree-sitter-{language}` pip packages. The p
 1. `tree-sitter-languages` global — smoke test
 2. `tree-sitter-languages` per-language — lazy calls
 3. Plain tree-sitter + individual packages — with parser API auto-detection
+
+### Adding a New Language
+
+1. Install the `tree-sitter-{language}` package
+2. Create an extractor subclass defining node type sets and extraction methods
+3. Add entry to `LANGUAGE_MAP` in `parser.py`
+4. Register the extractor in `extractors/__init__.py`
 
 ### Per-Language Extractors
 
@@ -193,6 +210,21 @@ The symbol map can be split into chunks for cache tier distribution.
 
 Individual file symbol blocks can be generated independently. A stable hash of a file's symbol signatures enables change detection for the stability tracker.
 
+## Indexing Pipeline
+
+### Per-File
+1. Check cache — skip if mtime unchanged
+2. Parse — tree-sitter produces AST
+3. Extract — language-specific extractor walks AST, collects symbols
+4. Post-process — method detection, parameters, async, instance vars
+5. Resolve imports — map import statements to repo file paths
+6. Store in cache
+
+### Multi-File
+1. Index each file (cache-aware)
+2. Resolve cross-file call targets
+3. Build reference index
+
 ## LSP Queries
 
 | RPC Method | Description |
@@ -204,7 +236,13 @@ Individual file symbol blocks can be generated independently. A stable hash of a
 
 ### Symbol at Position
 
-Binary search through sorted symbols by line/column range. For nested symbols, return the deepest match.
+Binary search through sorted symbols by line/column range. For nested symbols, return the deepest match. If the cursor is on a call site within a function body, match against the function's `call_sites` list.
+
+### Definition Resolution
+
+1. If cursor is on a **call site**: use `CallSite.target_file` and `target_symbol` to locate definition
+2. If cursor is on an **import name**: use import resolver to find source file, then locate named symbol
+3. If cursor is on a **local symbol**: return its own definition range
 
 ### Completion Scope
 
@@ -218,3 +256,53 @@ Binary search through sorted symbols by line/column range. For nested symbols, r
 - **Symbol cache** — in-memory, per-file, mtime-based invalidation
 - **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt on startup and before each LLM request
 - **Import resolution cache** — cleared when new files are detected
+
+## Testing
+
+### Python Extractor
+- Classes extracted with inheritance (bases list)
+- Methods extracted as children of class; property detected via @property
+- Async methods detected; parameters extracted (self omitted); return types captured
+- Instance variables from self.x assignments in __init__
+- Imports: absolute and relative with level; names list
+- Top-level variables (private excluded), functions, and call sites
+
+### JavaScript Extractor
+- Class with inheritance (extends); methods including getter (property kind)
+- Async method detected; top-level function and const variable
+- Imports from multiple modules
+
+### C Extractor
+- Struct extracted as class; functions with parameters
+- #include extracted as imports
+
+### Symbol Cache
+- Put/get by path and mtime; stale mtime returns None
+- Invalidate removes entry
+- Content hash: deterministic and distinct
+- cached_files returns set of stored paths
+
+### Import Resolver
+- Python: absolute, package (__init__.py), relative (level 1 and 2), not-found returns None
+- JavaScript: relative path, index file resolution, external module returns None
+- C: #include header file resolution
+
+### Reference Index
+- Build from FileSymbols with call sites; query references to symbol
+- Bidirectional edges detected; connected components grouped
+- file_ref_count returns incoming reference count
+
+### Compact Formatter
+- Output includes file path, class/method/function with line numbers
+- Legend header present; imports formatted; instance variables listed
+- exclude_files omits specified files; test files collapsed to summary (Nc/Nm)
+- Chunks split evenly with correct total file count
+- Async prefix (af/am); path aliases generated for repeated prefixes
+
+### Integration
+- Index repo extracts symbols from multiple files
+- Symbol map output contains expected class/function names
+- Exclude active files from symbol map
+- Single file reindex after modification picks up new symbols
+- Hover info returns symbol name; completions filtered by prefix
+- Signature hash: stable across repeated calls, 16-char length

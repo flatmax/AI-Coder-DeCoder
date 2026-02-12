@@ -104,6 +104,49 @@ import sys
 
 Applied **sequentially**, top to bottom. After edit A, edit B's anchor must match the file **after** A. Adjacent/overlapping edits should be **merged into one block**.
 
+### Why Merging Matters
+
+```
+# WRONG — second edit fails because first changed the anchor
+
+src/app.py
+««« EDIT
+def process():
+    step_one()
+═══════ REPL
+def process():
+    step_one_updated()
+»»» EDIT END
+```
+
+```
+src/app.py
+««« EDIT
+    step_one()
+    step_two()
+═══════ REPL
+    step_one()
+    step_two_updated()
+»»» EDIT END
+```
+
+The second edit looks for `step_one()` but it was already changed to `step_one_updated()`.
+
+```
+# CORRECT — merged into one block
+
+src/app.py
+««« EDIT
+def process():
+    step_one()
+    step_two()
+═══════ REPL
+def process():
+    step_one_updated()
+    step_two_updated()
+»»» EDIT END
+```
+
 ### Merge Rules
 
 Merge when edits are: overlapping, adjacent (within 3 lines), or have sequential dependencies.
@@ -185,3 +228,34 @@ During streaming, partially received blocks are tracked. The parser maintains st
 ## Partial Failure
 
 Edits applied sequentially — earlier successes remain on disk and staged in git. No rollback. Failed edit details (file path, error, diagnostics) visible to AI in subsequent exchanges for retry with corrected anchors.
+
+## Testing
+
+### Parsing
+- Basic edit block extraction from prose text (file path, anchor, old/new lines)
+- Create file (empty EDIT section)
+- Insert after (anchor-only EDIT, new lines in REPL)
+- Delete lines (lines in EDIT absent from REPL)
+- Multiple blocks from one response
+- Single filename without path separator recognized
+- Comment-prefixed lines not treated as file paths
+
+### Validation
+- Valid edit passes (anchor found, old text matches)
+- Anchor not found returns error
+- Ambiguous match (multiple locations) returns error
+- Create blocks always valid
+- Whitespace mismatch diagnosed
+
+### Application
+- Basic replacement preserves surrounding content
+- Create writes new file
+- Insert adds line after anchor
+- Failed apply returns original content unchanged
+- Repo application writes to disk, status = APPLIED
+- Create makes parent directories
+- Dry run validates without writing (status = VALIDATED)
+- Path escape (../) blocked (status = SKIPPED)
+- Binary file skipped
+- Missing file fails
+- Multiple sequential edits to same file
