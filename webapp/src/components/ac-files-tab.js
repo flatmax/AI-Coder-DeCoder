@@ -11,6 +11,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 
 // Import child components
 import './chat-panel.js';
+import './file-picker.js';
 
 const DEFAULT_PICKER_WIDTH = 280;
 const MIN_PICKER_WIDTH = 150;
@@ -51,15 +52,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       border-right: none;
     }
 
-    .picker-placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: var(--text-muted);
-      font-size: 0.8rem;
-      padding: 8px;
-      text-align: center;
+    .picker-panel ac-file-picker {
+      flex: 1;
+      min-height: 0;
     }
 
     /* Resizer */
@@ -129,10 +124,74 @@ export class AcFilesTab extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('state-loaded', (e) => this._onStateLoaded(e));
+    window.addEventListener('files-changed', (e) => this._onFilesChanged(e));
   }
 
   onRpcReady() {
     // State will be loaded via state-loaded event from app-shell
+    // File picker loads its own tree via onRpcReady
+  }
+
+  _onFilesChanged(e) {
+    const files = e.detail?.selectedFiles;
+    if (Array.isArray(files)) {
+      this._selectedFiles = files;
+    }
+  }
+
+  _onSelectionChanged(e) {
+    const files = e.detail?.selectedFiles || [];
+    this._selectedFiles = files;
+    // Notify server
+    if (this.rpcConnected) {
+      this.rpcCall('LLMService.set_selected_files', files).catch(() => {});
+    }
+  }
+
+  _onFileClicked(e) {
+    const path = e.detail?.path;
+    if (path) {
+      this.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
+  _onInsertPath(e) {
+    const path = e.detail?.path;
+    if (!path) return;
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      const textarea = chatPanel.shadowRoot?.querySelector('.input-textarea');
+      if (textarea) {
+        const start = textarea.selectionStart;
+        const before = textarea.value.slice(0, start);
+        const after = textarea.value.slice(textarea.selectionEnd);
+        const pad = before.length > 0 && !before.endsWith(' ') ? ' ' : '';
+        const padAfter = after.length > 0 && !after.startsWith(' ') ? ' ' : '';
+        textarea.value = before + pad + path + padAfter + after;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        const newPos = start + pad.length + path.length + padAfter.length;
+        textarea.setSelectionRange(newPos, newPos);
+        textarea.focus();
+      }
+    }
+  }
+
+  _onFilterFromChat(e) {
+    const filter = e.detail?.filter || '';
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.setFilter(filter);
+    }
+  }
+
+  _onFilesModified() {
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.loadTree();
+    }
   }
 
   _onStateLoaded(e) {
@@ -141,6 +200,14 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       this._messages = state.messages || [];
       this._selectedFiles = state.selected_files || [];
       this._streamingActive = state.streaming_active || false;
+
+      // Sync file picker selection
+      requestAnimationFrame(() => {
+        const picker = this.shadowRoot?.querySelector('ac-file-picker');
+        if (picker && this._selectedFiles.length > 0) {
+          picker.selectedFiles = new Set(this._selectedFiles);
+        }
+      });
     }
   }
 
@@ -203,9 +270,12 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         class="picker-panel ${this._pickerCollapsed ? 'collapsed' : ''}"
         style="width: ${this._pickerCollapsed ? 0 : this._pickerWidth}px"
       >
-        <div class="picker-placeholder">
-          📁 File Picker<br>Coming soon
-        </div>
+        <ac-file-picker
+          .selectedFiles=${new Set(this._selectedFiles)}
+          @selection-changed=${this._onSelectionChanged}
+          @file-clicked=${this._onFileClicked}
+          @insert-path=${this._onInsertPath}
+        ></ac-file-picker>
       </div>
 
       <div
@@ -221,7 +291,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       <div class="chat-panel">
         <ac-chat-panel
           .messages=${this._messages}
+          .selectedFiles=${this._selectedFiles}
           .streamingActive=${this._streamingActive}
+          @files-modified=${this._onFilesModified}
         ></ac-chat-panel>
       </div>
     `;

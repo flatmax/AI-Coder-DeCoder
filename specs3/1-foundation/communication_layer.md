@@ -59,7 +59,7 @@ class LLM:
             return None
 
     async def _notify_browser(self, data):
-        await self.call["streamChunk"](request_id, content)
+        await self.call["AcApp.streamChunk"](request_id, content)
 ```
 
 **Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key. In practice, many server→browser calls are fire-and-forget notifications where the browser returns `true` as an acknowledgement and the Python side just awaits without inspecting the result.
@@ -102,9 +102,12 @@ async _extract(method, ...args) {
 }
 ```
 
-**Methods the server can call** must be registered via `addClass` and must return a value (the server awaits each call):
+**Methods the server can call** must be registered via `addClass` and must return a value (the server awaits each call). The server calls them using `ClassName.method` format, matching the name passed to `addClass`:
 
 ```javascript
+// Browser registers: this.addClass(this, 'AcApp');
+// Server calls:      await call["AcApp.streamChunk"](requestId, content);
+
 streamChunk(requestId, content) {
     this._dispatch('stream-chunk', { requestId, content });
     return true;  // acknowledgement
@@ -149,10 +152,10 @@ The mixin provides:
 The bidirectional nature enables server-push streaming:
 
 ```
-1. Browser → Server:  LLM.chat_streaming(request_id, prompt, files, images)
-2. Server → Browser:  streamChunk(request_id, content)     // repeated
-3. Server → Browser:  streamComplete(request_id, result)    // once
-4. Server → Browser:  compactionEvent(request_id, event)    // optional
+1. Browser → Server:  LLMService.chat_streaming(request_id, prompt, files, images)
+2. Server → Browser:  AcApp.streamChunk(request_id, content)     // repeated
+3. Server → Browser:  AcApp.streamComplete(request_id, result)    // once
+4. Server → Browser:  AcApp.compactionEvent(request_id, event)    // optional
 ```
 
 Each chunk/completion is a full JSON-RPC method call from server to client.

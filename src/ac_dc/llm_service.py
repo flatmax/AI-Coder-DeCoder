@@ -217,12 +217,12 @@ class LLMService:
         self._streaming_active = True
         self._current_request_id = request_id
 
-        # Launch background task
-        asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: asyncio.run(
-                self._stream_chat(request_id, message, files or [], images or [])
-            )
+        # Store the main event loop so callbacks can schedule on it
+        self._main_loop = asyncio.get_event_loop()
+
+        # Launch background task on the main event loop (not a nested one)
+        asyncio.ensure_future(
+            self._stream_chat(request_id, message, files or [], images or [])
         )
 
         return {"status": "started"}
@@ -427,7 +427,7 @@ class LLMService:
             # Send streamComplete
             if self._event_callback:
                 try:
-                    await self._event_callback("streamComplete", result)
+                    await self._event_callback("streamComplete", request_id, result)
                 except Exception as e:
                     logger.error(f"streamComplete callback failed: {e}")
 
@@ -446,7 +446,7 @@ class LLMService:
         was_cancelled = False
         usage = {}
 
-        loop = asyncio.get_event_loop()
+        loop = self._main_loop
 
         def _stream_sync():
             nonlocal full_content, was_cancelled, usage

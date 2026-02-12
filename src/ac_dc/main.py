@@ -373,17 +373,21 @@ def main(args=None):
             try:
                 call = llm_service.get_call()
                 if call:
-                    await call["streamChunk"](request_id, content)
-            except Exception:
-                pass
+                    await call["AcApp.streamChunk"](request_id, content)
+                else:
+                    logger.warning("chunk_callback: get_call() returned None")
+            except Exception as e:
+                logger.error(f"chunk_callback failed: {e}")
 
-        async def event_callback(event_name, data):
+        async def event_callback(event_name, *args):
             try:
                 call = llm_service.get_call()
                 if call:
-                    await call[event_name](data)
-            except Exception:
-                pass
+                    await call[f"AcApp.{event_name}"](*args)
+                else:
+                    logger.warning(f"event_callback: get_call() returned None for {event_name}")
+            except Exception as e:
+                logger.error(f"event_callback failed for AcApp.{event_name}: {e}")
 
         llm_service._chunk_callback = chunk_callback
         llm_service._event_callback = event_callback

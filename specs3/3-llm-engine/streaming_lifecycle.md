@@ -64,14 +64,14 @@ Post-response compaction (→ context_and_history.md)
 Runs in a thread pool to avoid blocking the async event loop:
 
 1. Call LLM provider with `stream=True` and `stream_options: {"include_usage": true}`
-2. For each chunk: accumulate text, fire chunk callback
+2. For each chunk: accumulate text, fire chunk callback (`AcApp.streamChunk`)
 3. Check cancellation flag each iteration
 4. Track token usage from final chunk
 5. Return `(full_content, was_cancelled)`
 
 ### Chunk Delivery
 
-Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls.
+Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls. Server→browser calls use `ClassName.method` format (e.g., `AcApp.streamChunk`), matching the class name registered via `addClass` on the browser side.
 
 ### Client Chunk Processing
 

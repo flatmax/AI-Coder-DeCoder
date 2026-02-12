@@ -42,6 +42,7 @@ function renderMarkdown(text) {
 export class AcChatPanel extends RpcMixin(LitElement) {
   static properties = {
     messages: { type: Array },
+    selectedFiles: { type: Array },
     streamingActive: { type: Boolean },
     _streamingContent: { type: String, state: true },
     _inputValue: { type: String, state: true },
@@ -49,6 +50,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _autoScroll: { type: Boolean, state: true },
     _snippetDrawerOpen: { type: Boolean, state: true },
     _historyOpen: { type: Boolean, state: true },
+    _currentRequestId: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -395,6 +397,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   constructor() {
     super();
     this.messages = [];
+    this.selectedFiles = [];
     this.streamingActive = false;
     this._streamingContent = '';
     this._inputValue = '';
@@ -406,6 +409,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._observer = null;
     this._pendingChunk = null;
     this._rafId = null;
+    this._currentRequestId = null;
 
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -459,7 +463,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   // === Streaming ===
 
   _onStreamChunk(e) {
-    const { content } = e.detail;
+    const { requestId, content } = e.detail;
+    if (requestId !== this._currentRequestId) return;
+
+    this.streamingActive = true;
     // Coalesce per animation frame
     this._pendingChunk = content;
     if (!this._rafId) {
@@ -477,9 +484,40 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onStreamComplete(e) {
+    const { requestId, result } = e.detail;
+    if (requestId !== this._currentRequestId) return;
+
+    // Flush any pending chunk
+    if (this._pendingChunk !== null) {
+      this._streamingContent = this._pendingChunk;
+      this._pendingChunk = null;
+    }
+
+    this.streamingActive = false;
+    this._currentRequestId = null;
+
+    if (result?.error) {
+      // Show error as assistant message
+      this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${result.error}` }];
+    } else if (result?.response) {
+      // Add the assistant response to messages
+      this.messages = [...this.messages, { role: 'assistant', content: result.response }];
+    }
+
     this._streamingContent = '';
     this._pendingChunk = null;
-    // Messages will be updated from parent
+
+    if (this._autoScroll) {
+      requestAnimationFrame(() => this._scrollToBottom());
+    }
+
+    // Refresh file tree if edits were applied
+    if (result?.files_modified?.length > 0) {
+      this.dispatchEvent(new CustomEvent('files-modified', {
+        detail: { files: result.files_modified },
+        bubbles: true, composed: true,
+      }));
+    }
   }
 
   // === Scrolling ===
@@ -600,11 +638,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
 
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this._currentRequestId = requestId;
     const images = this._images.length > 0 ? [...this._images] : null;
+    const files = this.selectedFiles?.length > 0 ? [...this.selectedFiles] : null;
 
     // Get URL context before clearing
     const urlChips = this.shadowRoot?.querySelector('ac-url-chips');
     urlChips?.onSend();
+
+    // Add user message to display immediately
+    this.messages = [...this.messages, { role: 'user', content: message }];
 
     // Clear input
     this._inputValue = '';
@@ -618,19 +661,26 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     // Auto-scroll on send
     this._autoScroll = true;
+    this.streamingActive = true;
+    requestAnimationFrame(() => this._scrollToBottom());
 
     try {
-      // Get selected files from parent
-      const files = []; // TODO: get from file picker
-
       await this.rpcExtract('LLMService.chat_streaming', requestId, message, files, images);
     } catch (e) {
       console.error('Failed to start stream:', e);
+      this.streamingActive = false;
+      this._currentRequestId = null;
+      this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${e.message || 'Failed to connect'}` }];
     }
   }
 
-  _stop() {
-    // TODO: implement cancel
+  async _stop() {
+    if (!this._currentRequestId || !this.rpcConnected) return;
+    try {
+      await this.rpcExtract('LLMService.cancel_streaming', this._currentRequestId);
+    } catch (e) {
+      console.error('Failed to cancel:', e);
+    }
   }
 
   // === Snippets ===

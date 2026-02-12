@@ -106,8 +106,9 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
 ### Phase 8: Webapp Features
-- [ ] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
-- [ ] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
+- [x] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
+- [x] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
+- [x] **Streaming integration** — Chunk delivery, streamComplete, requestId correlation, streaming indicator
 - [ ] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
 - [ ] **Search tab** — Full-text search with debounce, result grouping, keyboard navigation
 - [ ] **Context viewer** — Token budget bar, category breakdown, expandable details
@@ -124,6 +125,7 @@ Recommended implementation sequence, with dependencies noted:
 ### Phase 9: Polish (partial)
 - [x] **Bedrock token usage** — Streaming usage capture for all providers
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
+- [x] **Server→browser callback wiring** — `AcApp.method` format for jrpc-oo class-prefixed calls, main event loop for async callbacks
 - [ ] **Error handling** — Reconnection with exponential backoff, toast notifications
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry
