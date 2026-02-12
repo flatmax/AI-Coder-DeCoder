@@ -19,11 +19,11 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 
 ```pseudo
 {
-    env: { ENV_VAR: "value" },        // Environment variables to set
-    model: "provider/model-name",      // Primary LLM model
-    smaller_model: "provider/model",   // Faster/cheaper model for tasks like commit messages
-    cache_min_tokens: 1024,            // Minimum tokens for a cache block
-    cache_buffer_multiplier: 1.5       // Safety margin on cache threshold
+    env: { ENV_VAR: "value" },
+    model: "provider/model-name",
+    smaller_model: "provider/model",
+    cache_min_tokens: 1024,
+    cache_buffer_multiplier: 1.5
 }
 ```
 
@@ -34,8 +34,8 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 ```pseudo
 {
     url_cache: {
-        path: "/tmp/url_cache",        // Cache directory
-        ttl_hours: 24                  // Expiration
+        path: "/tmp/url_cache",
+        ttl_hours: 24
     },
     history_compaction: {
         enabled: true,
@@ -60,6 +60,8 @@ Configuration is split across multiple files, each serving a distinct purpose. A
     ]
 }
 ```
+
+Default snippets: ✂️ Continue truncated edit, 🔍 Check context, ✏️ Fix malformed edits, ⏸️ Pause before implementing, ✅ Verify tests, 📦 Pre-commit checklist, 🏁 Pre-commit with plan completion.
 
 ## Config Directory Resolution
 
@@ -100,11 +102,12 @@ Only these types are accepted — arbitrary file paths are rejected.
 
 | Method | Description |
 |--------|-------------|
-| `get_config_content(type)` | Read a config file |
-| `save_config_content(type, content)` | Write a config file |
-| `reload_llm_config()` | Hot-reload LLM config and apply |
-| `reload_app_config()` | Hot-reload app config |
-| `get_config_info()` | Current model names and config paths |
+| `Settings.get_config_content(type)` | Read a config file |
+| `Settings.save_config_content(type, content)` | Write a config file |
+| `Settings.reload_llm_config()` | Hot-reload LLM config and apply |
+| `Settings.reload_app_config()` | Hot-reload app config |
+| `Settings.get_config_info()` | Current model names and config paths |
+| `Settings.get_snippets()` | Load prompt snippets |
 
 ### Config Editing Flow
 
@@ -114,12 +117,13 @@ Only these types are accepted — arbitrary file paths are rejected.
 4. Content written via `save_config_content`
 5. User clicks Reload to apply changes
 
-## Testing
+## `.ac-dc/` Directory
 
-- Creates `.ac-dc/` directory and `.gitignore` entry on init; no duplicate entries
-- Default LLM and app configs contain expected keys
-- Save and read-back round-trip for config content
-- Invalid config type key rejected with error
-- Cache target tokens computed from defaults (1024 × 1.5 = 1536)
-- Snippets fallback returns non-empty list
-- System prompt assembly returns non-empty string
+A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first run and added to `.gitignore`.
+
+| File | Purpose | Lifecycle |
+|------|---------|-----------|
+| `history.jsonl` | Persistent conversation history | Append-only |
+| `symbol_map.txt` | Current symbol map | Rebuilt on startup and before each LLM request |
+| `snippets.json` | Per-repo prompt snippets (optional) | User-managed |
+| `images/` | Persisted chat images | Write on paste, read on session load |

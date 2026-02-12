@@ -286,6 +286,20 @@ Bottom-up pass through L3 → L2 → L1 → L0:
 
 Log promotions and demotions for frontend HUD display. Store current active items list for comparison on next request.
 
+## Testing Invariants
+
+- N increments only on unchanged content; resets to 0 on hash mismatch or modification
+- Graduation requires N ≥ 3 for files/symbols; history graduates via piggyback or token threshold
+- Promoted items enter destination tier with that tier's `entry_n`, not preserved N
+- Ripple cascade propagates only into broken/empty tiers; stable tiers block promotion
+- Anchored items (below `cache_target_tokens`) have frozen N
+- N is capped at promotion threshold when tier above is stable
+- Underfilled tiers demote one level down
+- Stale items (deleted files) are removed; affected tier marked broken
+- A file never appears as both symbol block and full content — when full content is in any tier, the symbol block is excluded; when a file is selected (active), its symbol entry is excluded from all tiers
+- History purge after compaction removes all `history:*` entries from tracker
+- Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate
+
 ## History Compaction Interaction
 
 When compaction runs, all `history:*` entries are purged from the tracker. Compacted messages re-enter as new active items with N = 0. This causes a one-time cache miss for tiers that contained history. The cost is temporary — the shorter history re-stabilizes within a few requests.

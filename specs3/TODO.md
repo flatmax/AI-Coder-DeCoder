@@ -20,7 +20,7 @@ Individual `tree-sitter-{language}` packages provide grammars. Per-language extr
 ## Testing Approach
 
 ### Unit Tests (Algorithmic Cores)
-- **Cache tiering**: N-value progression, ripple promotion, threshold-aware anchoring, demotion/removal. Simulate multi-request sequences and assert tier assignments. Symbol/file deduplication: verify that a file never appears as both a symbol block and full file content simultaneously — when full content is in a cached tier, the symbol block is excluded; when a file is selected (active), its symbol entry is excluded from all tiers.
+- **Cache tiering**: N-value progression, ripple promotion, threshold-aware anchoring, demotion/removal. Simulate multi-request sequences and assert tier assignments.
 - **Edit block parsing**: State machine extraction from streamed text. Anchor matching against file content. Conflict detection (ambiguous anchors, missing context).
 - **Token counting**: Model-aware counting, fallback estimation, budget calculations.
 - **Import resolution**: Python absolute/relative, JS/TS with extension probing, edge cases (missing files, circular imports).
@@ -104,7 +104,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Input history** — Up-arrow fuzzy search overlay, history navigation
 - [x] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
-### Phase 8: Webapp Features
+### Phase 8: Webapp Features ✅
 - [x] **File picker** — Tree rendering, checkbox selection, git status badges, context menu
 - [x] **File picker resize** — Draggable panel divider, collapse/expand, local storage persistence
 - [x] **Git action buttons** — Copy diff, commit with LLM message, reset with confirmation
@@ -113,34 +113,29 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
 - [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
 - [x] **History browser** — Modal overlay, session list, search, message preview, load into context
-- [x] **File mentions** — Detect repo file paths in assistant responses, render as clickable links, summary section with add-to-context chips, input text accumulation with LLM prompt
+- [x] **File mentions** — Detect repo file paths in assistant responses, clickable links, summary chips
 - [x] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
-- [x] **Diff viewer layout** — Background placement in app-shell, navigate-file event routing from dialog/files-tab/search, file-save handling, post-edit refresh
-- [x] **Diff viewer Monaco integration** — vite-plugin-monaco-editor for proper workers, Shadow DOM style syncing via MutationObserver, diff highlighting, find widget, scrolling fixes
-- [x] **LSP integration** — Hover, definition, references, completions providers for Monaco, URI-based model matching, cross-file go-to-definition
+- [x] **Diff viewer layout** — Background placement, navigate-file routing, file-save handling, post-edit refresh
+- [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
-- [x] **Speech to text** — Auto-transcribe toggle button using Web Speech API, LED states, transcript appended to input (`SpeechToText.js`)
+- [x] **Speech to text** — Auto-transcribe toggle using Web Speech API
+
+### Phase 9: Polish ✅
+- [x] **Bedrock token usage** — Streaming usage capture for all providers
+- [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
+- [x] **Error handling** — Reconnection with exponential backoff, toast notifications
+- [x] **Build pipeline** — Production bundling, versioned deployment, CI
+- [x] **Hosted deployment** — GitHub Pages with version registry
+- [x] **State persistence** — Local storage for UI preferences
+- [x] **Content-visibility optimization** — CSS containment for off-screen messages
+- [x] **Accessibility** — ARIA roles, focus management, keyboard shortcuts
 
 ### Phase 10: Code Review
-- [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit, merge base detection (`repo.py`, `tests/test_repo.py`)
-- [ ] **Review mode state** — LLM service review state management, symbol map before capture, structural diff (`llm_service.py`)
-- [ ] **Review context assembly** — Commit log, symbol diff, selected file diffs injected into prompt (`context.py`, `context_builder.py`)
-- [ ] **Commit selector UI** — Branch dropdown, fuzzy commit search, merge base shortcut, SHA input (`webapp/src/chat/review-selector.js`)
-- [ ] **Review diff chips** — Chip bar showing review state and per-file diff inclusion toggles (`webapp/src/chat/review-chips.js`)
-- [ ] **Review banner** — File picker header showing active review info with exit button (`webapp/src/chat/file-picker.js`)
-- [ ] **Review snippets** — Review-specific quick-insert buttons loaded when review mode is active (`src/ac_dc/config/review_snippets.json`)
-- [ ] **Symbol map diff** — Compare pre-review and post-review symbol maps, annotate removed symbols with reference counts (`llm_service.py`, `symbol_index/`)
-- [ ] **Review mode detection on restart** — Detect soft-reset state on server start, prompt user to re-enter or exit review mode
-
-### Phase 9: Polish
-- [x] **Bedrock token usage** — Streaming usage capture for all providers including Bedrock (unified stream_options, multi-format usage extraction with dict/object dual-mode getter, cache_read/cache_write field fallback chains, response-level merge, completion token estimation)
-- [x] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
-- [x] **Terminal HUD** — Cache blocks report, token usage, tier changes printed to terminal after each request
-- [x] **Error handling** — Reconnection with exponential backoff, toast notification system, error toasts for git ops/streaming/session management
-- [x] **Build pipeline** — Production bundling, versioned deployment, CI (`vite build`, npm scripts, GitHub Actions)
-- [x] **Hosted deployment** — GitHub Pages with version registry, root redirect
-- [x] **State persistence** — Local storage for UI preferences (panel width, collapsed state, search options, input history)
-- [x] **Content-visibility optimization** — CSS containment for off-screen messages
-- [x] **Accessibility** — ARIA roles, focus management, keyboard shortcuts (ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics)
-- [x] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity, 75% horizontal position)
-- [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit. The HTML is written to a temp file and opened as `file://` — no server or webapp dependency needed
+- [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit
+- [ ] **Review mode state** — LLM service review state, symbol map before capture, structural diff
+- [ ] **Review context assembly** — Commit log, symbol diff, selected file diffs in prompt
+- [ ] **Commit selector UI** — Branch dropdown, fuzzy commit search, merge base shortcut
+- [ ] **Review diff chips** — Chip bar showing review state and per-file diff toggles
+- [ ] **Review banner** — File picker header showing active review info
+- [ ] **Review snippets** — Review-specific quick-insert buttons
+- [ ] **Symbol map diff** — Compare pre/post symbol maps, annotate removed symbols

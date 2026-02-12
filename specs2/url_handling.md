@@ -220,3 +220,49 @@ GitHubInfo:
 | `invalidate_url_cache(url)` | Remove from cache |
 | `clear_url_cache()` | Clear all cached URLs |
 | `get_url_content(url)` | Get cached content for display |
+
+## Testing
+
+### URL Cache
+- Set/get round-trip; miss returns None; expired returns None
+- Invalidate removes entry; clear removes all
+- cleanup_expired returns count of removed entries
+- Corrupt JSON entry handled (cleaned up, returns None)
+- URL hash: deterministic, 16 chars, different URLs produce different hashes
+- Default cache dir created automatically
+
+### URL Detection
+- Basic detection, multiple URLs, deduplication
+- Trailing punctuation/comma stripped
+- No URLs returns empty; http supported; file:// rejected
+
+### URL Classification
+- GitHub repo (with trailing slash, .git suffix), file (owner/repo/branch/path), issue (#N), PR (!N)
+- Documentation: known domains, readthedocs, /docs/ and /api/ paths
+- Generic fallback for unrecognized URLs
+
+### Display Name
+- GitHub: owner/repo, owner/repo/filename, owner/repo#N, owner/repo!N
+- Generic: hostname/path; long URLs truncated to 40 chars; root URL strips trailing slash
+
+### Summary Type Selection
+- GitHub repo with/without symbols → ARCHITECTURE/BRIEF
+- Documentation → USAGE; Generic → BRIEF
+- User hints: "how to" → USAGE, "api" → API, "architecture" → ARCHITECTURE, "compare" → EVALUATION
+
+### URLContent
+- format_for_prompt: includes URL header and title; summary preferred over raw content; readme fallback; symbol map appended; truncation with ellipsis
+- Round-trip serialization (to_dict/from_dict) preserves all fields including github_info
+
+### HTML Extraction
+- Extracts title, strips scripts and styles, cleans whitespace
+
+### URL Service
+- detect_urls returns classified results
+- get_url_content returns error for unfetched URL
+- Invalidate and clear cache operations
+- get_fetched_urls empty initially; remove_fetched and clear_fetched
+- format_url_context joins multiple URLs with separator; excludes specified URLs; skips errors
+- Fetch uses cache when available; web page fetch via mocked urlopen; GitHub file fetch
+- Error results not cached
+- Summarization via mocked LLM appends summary to result

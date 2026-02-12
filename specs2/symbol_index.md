@@ -383,6 +383,56 @@ The symbol map can be split into chunks for cache tier distribution:
 
 Individual file symbol blocks can be generated independently, used by the stability tracker to detect when a file's symbols have changed. A stable hash of a file's symbol signatures enables change detection.
 
+## Testing
+
+### Python Extractor
+- Classes extracted with inheritance (bases list)
+- Methods extracted as children of class; property detected via @property
+- Async methods detected; parameters extracted (self omitted); return types captured
+- Instance variables from self.x assignments in __init__
+- Imports: absolute and relative with level; names list
+- Top-level variables (private excluded), functions, and call sites
+
+### JavaScript Extractor
+- Class with inheritance (extends); methods including getter (property kind)
+- Async method detected; top-level function and const variable
+- Imports from multiple modules
+
+### C Extractor
+- Struct extracted as class; functions with parameters
+- #include extracted as imports
+
+### Symbol Cache
+- Put/get by path and mtime; stale mtime returns None
+- Invalidate removes entry
+- Content hash: deterministic and distinct
+- cached_files returns set of stored paths
+
+### Import Resolver
+- Python: absolute, package (__init__.py), relative (level 1 and 2), not-found returns None
+- JavaScript: relative path, index file resolution, external module returns None
+- C: #include header file resolution
+
+### Reference Index
+- Build from FileSymbols with call sites; query references to symbol
+- Bidirectional edges detected; connected components grouped
+- file_ref_count returns incoming reference count
+
+### Compact Formatter
+- Output includes file path, class/method/function with line numbers
+- Legend header present; imports formatted; instance variables listed
+- exclude_files omits specified files; test files collapsed to summary (Nc/Nm)
+- Chunks split evenly with correct total file count
+- Async prefix (af/am); path aliases generated for repeated prefixes
+
+### Integration (full index)
+- Index repo extracts symbols from multiple files
+- Symbol map output contains expected class/function names
+- Exclude active files from symbol map
+- Single file reindex after modification picks up new symbols
+- Hover info returns symbol name; completions filtered by prefix
+- Signature hash: stable across repeated calls, 16-char length
+
 ## LSP Format (Editor Output)
 
 JSON structure compatible with editor APIs for:

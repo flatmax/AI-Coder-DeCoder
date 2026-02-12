@@ -131,3 +131,15 @@ When `context_lines > 0`, the grep output includes surrounding lines. A separato
 ## Path Handling
 
 All paths are relative to the repository root. The tree includes the repository name as the root node. UI operations strip this root prefix before making RPC calls.
+
+## Testing
+
+- File read/write, read at HEAD version, create-exists error
+- Path traversal blocked (../../../etc/passwd)
+- Binary file detection (null bytes in first 8KB)
+- Stage, unstage, staged diff verification
+- Commit, reset hard restores content
+- Rename tracked file
+- Tree includes modified, untracked, staged arrays
+- Flat file list contains expected paths
+- Search finds content, case-insensitive, no-results returns empty

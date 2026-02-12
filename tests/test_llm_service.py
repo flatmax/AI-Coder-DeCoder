@@ -153,6 +153,101 @@ class TestShellCommandDetection:
         assert "echo hello" in cmds
 
 
+class TestGatherTieredContentDeduplication:
+    """Test that _gather_tiered_content never includes both symbol and file for the same path."""
+
+    def test_file_in_cached_tier_excludes_symbol_block(self, git_repo):
+        """When a file has full content in a cached tier, its symbol block is excluded."""
+        config = ConfigManager(git_repo, dev_mode=True)
+        repo = Repo(git_repo)
+        llm = LLM(config, repo)
+
+        # Simulate a file graduated to L3 with full content
+        from ac_dc.stability_tracker import Tier, ItemType
+        llm._context.stability.register_item(
+            "file:src/main.py", ItemType.FILE, "h", 500, tier=Tier.L3,
+        )
+
+        # Set up a mock symbol index that has a block for src/main.py
+        mock_symbol_index = MagicMock()
+        mock_symbol_index.all_symbols = {"src/main.py": ["some_symbols"]}
+        mock_symbol_index.get_file_block.return_value = "f main():1\n  v x"
+        llm._symbol_index = mock_symbol_index
+
+        # Gather tiered content with src/main.py NOT selected (so it's not excluded by that path)
+        symbol_blocks, file_contents = llm._gather_tiered_content([])
+
+        # The file's full content should be in file_contents (from L3 tier)
+        assert "file:src/main.py" in file_contents
+
+        # The symbol block should NOT be present — full content already covers it
+        assert "symbol:src/main.py" not in symbol_blocks
+
+    def test_selected_file_not_graduated_excluded_from_symbols(self, git_repo):
+        """A selected file that hasn't graduated should have its symbol excluded."""
+        config = ConfigManager(git_repo, dev_mode=True)
+        repo = Repo(git_repo)
+        llm = LLM(config, repo)
+
+        mock_symbol_index = MagicMock()
+        mock_symbol_index.all_symbols = {
+            "src/main.py": ["syms"],
+            "README.md": ["syms"],
+        }
+        mock_symbol_index.get_file_block.return_value = "f func():1"
+        llm._symbol_index = mock_symbol_index
+
+        # src/main.py is selected but not graduated — its symbol should be excluded
+        symbol_blocks, file_contents = llm._gather_tiered_content(["src/main.py"])
+
+        # Selected non-graduated file excluded from symbol blocks
+        assert "symbol:src/main.py" not in symbol_blocks
+        # Other files still have symbol blocks
+        assert "symbol:README.md" in symbol_blocks
+
+    def test_graduated_selected_file_has_content_not_symbol(self, git_repo):
+        """A selected file that graduated to a cached tier gets file content, not symbol block."""
+        config = ConfigManager(git_repo, dev_mode=True)
+        repo = Repo(git_repo)
+        llm = LLM(config, repo)
+
+        from ac_dc.stability_tracker import Tier, ItemType
+
+        # Graduate the file to L3
+        llm._context.stability.register_item(
+            "file:src/main.py", ItemType.FILE, "h", 500, tier=Tier.L3,
+        )
+
+        mock_symbol_index = MagicMock()
+        mock_symbol_index.all_symbols = {"src/main.py": ["syms"]}
+        mock_symbol_index.get_file_block.return_value = "f main():1"
+        llm._symbol_index = mock_symbol_index
+
+        # Selected AND graduated
+        symbol_blocks, file_contents = llm._gather_tiered_content(["src/main.py"])
+
+        # Full content in file_contents, no symbol block
+        assert "file:src/main.py" in file_contents
+        assert "symbol:src/main.py" not in symbol_blocks
+
+    def test_unselected_file_without_cached_content_has_symbol(self, git_repo):
+        """An unselected file with no cached full content should have its symbol block."""
+        config = ConfigManager(git_repo, dev_mode=True)
+        repo = Repo(git_repo)
+        llm = LLM(config, repo)
+
+        mock_symbol_index = MagicMock()
+        mock_symbol_index.all_symbols = {"src/main.py": ["syms"]}
+        mock_symbol_index.get_file_block.return_value = "f main():1"
+        llm._symbol_index = mock_symbol_index
+
+        symbol_blocks, file_contents = llm._gather_tiered_content([])
+
+        # Should have symbol block, no file content
+        assert "symbol:src/main.py" in symbol_blocks
+        assert "file:src/main.py" not in file_contents
+
+
 class TestCommitMessage:
 
     @patch("ac_dc.llm_service.litellm", create=True)

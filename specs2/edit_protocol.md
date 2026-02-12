@@ -270,6 +270,37 @@ Each edit result includes:
 5. **Verify before editing** — Always read the file's current content before emitting an edit block
 6. **One concept per block** — Keep edits focused; use multiple blocks for unrelated changes (but merge adjacent ones)
 
+## Testing
+
+### Parsing
+- Basic edit block extraction from prose text (file path, anchor, old/new lines)
+- Create file (empty EDIT section)
+- Insert after (anchor-only EDIT, new lines in REPLACE)
+- Delete lines (lines in EDIT absent from REPLACE)
+- Multiple blocks from one response
+- Single filename without path separator recognized
+- Comment-prefixed lines not treated as file paths
+
+### Validation
+- Valid edit passes (anchor found, old text matches)
+- Anchor not found returns error
+- Ambiguous match (multiple locations) returns error
+- Create blocks always valid
+- Whitespace mismatch diagnosed
+
+### Application
+- Basic replacement preserves surrounding content
+- Create writes new file
+- Insert adds line after anchor
+- Failed apply returns original content unchanged
+- Repo application writes to disk, status = APPLIED
+- Create makes parent directories
+- Dry run validates without writing (status = VALIDATED)
+- Path escape (../) blocked (status = SKIPPED)
+- Binary file skipped
+- Missing file fails
+- Multiple sequential edits to same file
+
 ## Partial Failure Handling
 
 When multiple edits are applied to a file and one fails:

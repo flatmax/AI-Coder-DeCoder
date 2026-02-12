@@ -1,0 +1,176 @@
+# Streaming Lifecycle
+
+## Overview
+
+The full lifecycle of a user message: UI submission → file validation → message assembly → LLM streaming → edit parsing → stability tracking → post-response compaction. For message array structure, see [Prompt Assembly](prompt_assembly.md).
+
+## Request Flow
+
+```
+User clicks Send
+    │
+    ├─ Show user message in UI immediately
+    ├─ Generate request ID for callback correlation
+    ├─ Start watchdog timer (5 min safety timeout)
+    │
+    ▼
+Server: LLM.chat_streaming(request_id, message, files, images)
+    │
+    ├─ Guard: reject if another stream is active
+    ├─ Persist user message to history store
+    ├─ Launch background streaming task
+    ├─ Return immediately: {status: "started"}
+    │
+    ▼
+Background task: _stream_chat
+    │
+    ├─ Validate files (reject binary/missing)
+    ├─ Load files into context
+    ├─ Detect & fetch URLs from prompt
+    ├─ Assemble tiered message array (→ prompt_assembly.md)
+    ├─ Run LLM completion (threaded, streaming)
+    │       │
+    │       ├─ streamChunk callbacks → browser
+    │       └─ return (full_content, was_cancelled)
+    │
+    ├─ Add exchange to context manager
+    ├─ Save symbol map to .ac-dc/
+    ├─ Print terminal HUD
+    ├─ Parse & apply edit blocks (→ edit_protocol.md)
+    ├─ Persist assistant message
+    ├─ Update cache stability (→ cache_tiering.md)
+    │
+    ▼
+Send streamComplete → browser
+    │
+    ▼
+Post-response compaction (→ context_and_history.md)
+```
+
+## Client-Side Initiation
+
+1. Guard — skip if empty input
+2. Show user message immediately
+3. Clear input, images, detected URLs
+4. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
+5. Set streaming state (disable input, start watchdog)
+6. RPC call: `LLM.chat_streaming(request_id, message, files, images)`
+
+## LLM Streaming (Worker Thread)
+
+Runs in a thread pool to avoid blocking the async event loop:
+
+1. Call LLM provider with `stream=True` and `stream_options: {"include_usage": true}`
+2. For each chunk: accumulate text, fire chunk callback
+3. Check cancellation flag each iteration
+4. Track token usage from final chunk
+5. Return `(full_content, was_cancelled)`
+
+### Chunk Delivery
+
+Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls.
+
+### Client Chunk Processing
+
+Coalesced per animation frame:
+1. Store pending chunk
+2. On next frame: create assistant card (first chunk) or update content
+3. Trigger scroll-to-bottom (respecting user scroll override)
+
+## Cancellation
+
+During streaming, the Send button transforms into a **Stop button** (⏹). Clicking calls `LLM.cancel_streaming(request_id)`. The server adds the request ID to a cancelled set; the streaming thread checks each iteration and breaks out. Partial content stored with `[stopped]` marker, `streamComplete` sent with `cancelled: true`.
+
+## Stream Completion
+
+### Result Object
+
+| Field | Description |
+|-------|-------------|
+| `response` | Full assistant response text |
+| `token_usage` | Token counts for HUD display |
+| `edit_blocks` | Parsed blocks (preview text) |
+| `shell_commands` | Detected shell suggestions |
+| `passed/failed/skipped` | Edit application results |
+| `files_modified` | Paths of changed files |
+| `edit_results` | Detailed per-edit results |
+| `cancelled` | Present if cancelled |
+| `error` | Present if fatal error |
+| `binary_files` | Rejected binary files |
+| `invalid_files` | Not-found files |
+
+### Client Processing
+
+1. Flush pending chunks
+2. Clear streaming state, watchdog
+3. Handle errors — auto-deselect binary/invalid files
+4. Finalize message — attach edit results
+5. Refresh file tree if edits applied
+6. Run file mention detection on assistant message
+7. Show token usage HUD
+8. Focus input for next message
+
+## Post-Response Processing
+
+### Stability Update
+
+1. Remove tracked items whose files no longer exist
+2. Process active context items (hash, N increment)
+3. Controlled history graduation
+4. Run cascade (→ [Cache Tiering](cache_tiering.md))
+5. Log tier changes (📈 promotions, 📉 demotions)
+
+### Post-Response Compaction
+
+Runs asynchronously after `streamComplete`:
+1. Check if history exceeds trigger
+2. Wait 500ms for frontend to process
+3. Notify start → run compaction → notify complete
+4. Re-register history items in stability tracker
+
+See [Context and History](context_and_history.md) for the compaction algorithm.
+
+## Token Usage Extraction
+
+Token usage is extracted from the LLM provider's response. Different providers report cache tokens under different field names:
+
+| Provider | Cache Read Field | Cache Write Field |
+|----------|-----------------|-------------------|
+| Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` |
+| Bedrock | `prompt_tokens_details.cached_tokens` | `cache_creation_input_tokens` |
+| OpenAI | `prompt_tokens_details.cached_tokens` | — |
+
+The extraction uses a dual-mode getter (attribute + key access) with fallback chains. Stream-level usage is captured from any chunk with it (typically the final chunk). Response-level usage merged as fallback.
+
+## Terminal HUD
+
+Two reports printed after each response:
+
+### Cache Blocks
+```
+╭─ Cache Blocks ───────────────────────╮
+│ L0 (12+)    1,622 tokens [cached]    │
+│ L1 (9+)    11,137 tokens [cached]    │
+│ active     19,643 tokens             │
+├──────────────────────────────────────┤
+│ Total: 55,448 | Cache hit: 23%      │
+╰──────────────────────────────────────╯
+```
+
+### Token Usage
+```
+System: 1,622  Symbol Map: 34,355  Files: 0  History: 21,532
+Total: 57,347 / 1,000,000
+Last: 74,708 in, 34 out | Cache: write 48,070
+```
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Invalid/binary files | streamComplete with error, client auto-deselects |
+| Concurrent stream | Rejected immediately |
+| Streaming exception | Caught, traceback printed, streamComplete with error |
+| Client watchdog | 5-minute timeout forces recovery |
+| History token emergency | Oldest messages truncated if > 2× compaction trigger |
+| Budget exceeded | Largest files shed with warning |

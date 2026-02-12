@@ -158,3 +158,45 @@ Clears history, purges stability tracker history entries, starts new persistent 
 2. Read messages from persistent store
 3. Add each to context manager
 4. Set persistent store's session ID to continue in the loaded session
+
+## Testing
+
+### FileContext
+- Add with explicit content, add from disk, missing file returns false
+- Binary file rejected, path traversal blocked
+- Remove, get_files sorted, clear
+- format_for_prompt includes path and fenced content
+
+### ContextManager
+- add_message, add_exchange, get_history returns copy (mutation-safe)
+- set_history replaces, clear_history empties
+- history_token_count > 0 for non-empty history
+- Token budget has required keys, remaining > 0
+- should_compact false when disabled or below trigger
+- Compaction status returns enabled/trigger/percent
+
+### Prompt Assembly (non-tiered)
+- System message first with system prompt content
+- Symbol map appended to system message under Repository Structure header
+- File tree as user/assistant pair with Repository Files header
+- URL context as user/assistant pair with acknowledgement
+- Active files as user/assistant pair with Working Files header
+- History messages appear before current user prompt
+- Images produce multimodal content blocks; no images produces string
+- estimate_prompt_tokens > 0
+
+### Prompt Assembly (tiered)
+- Graduated files excluded from active files section
+- All files graduated → no Working Files section
+- L0 system message has cache_control when no L0 history
+- L0 with history: cache_control on last history message, not system
+- L1 block produces user/assistant pair containing symbol content
+- Empty tiers produce no messages
+- File tree, URL context, active files included at correct positions
+- Active history appears after active files, before user prompt
+- Multi-tier message order: L0 < L1 < L3 < tree < active < prompt
+- Each non-empty cached tier has a cache_control breakpoint
+
+### Budget Enforcement
+- shed_files_if_needed removes largest files when budget exceeded; no-op when under budget
+- emergency_truncate reduces message count, preserves user/assistant pairs

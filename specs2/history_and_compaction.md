@@ -227,3 +227,45 @@ A modal overlay for browsing past conversations.
 
 ### State Preservation
 When closed and reopened: selected session, messages, search query, results, and scroll positions are preserved.
+
+## Testing
+
+### History Store
+- Append and retrieve messages by session
+- Session grouping isolates messages
+- list_sessions returns all sessions with preview and message_count; respects limit
+- Search: case-insensitive substring, role filter, empty query returns empty
+- Persistence: new HistoryStore instance reads previously written messages
+- Corrupt JSONL line skipped (partial write recovery)
+- Message has required fields (id, timestamp, session_id, files, images)
+- get_session_messages_for_context returns only role/content (no metadata)
+- Empty/nonexistent session returns empty list
+
+### Message ID Generation
+- Format: `{epoch_ms}-{uuid8}`; session format: `sess_{epoch_ms}_{uuid6}`
+- 100 generated IDs are unique
+
+### Topic Detector
+- Empty messages and no-model return SAFE_BOUNDARY
+- Successful LLM detection returns boundary_index and confidence
+- LLM failure returns SAFE_BOUNDARY
+- Format: messages formatted as `[N] ROLE: content`, truncated at max_chars
+- Parse: clean JSON, null boundary, markdown-fenced JSON, partial regex fallback, completely invalid returns null/0.0
+
+### History Compactor
+- Below trigger: should_compact false
+- Above trigger: should_compact true, compact returns truncate or summarize
+- Empty messages: case = none
+- apply_compaction reduces message count
+- apply_compaction with case=none returns messages unchanged
+- min_verbatim_exchanges preserved after compaction
+- Disabled compactor never triggers
+- Truncate and summarize apply correctly; summary text produces History Summary message
+- High-confidence boundary near verbatim window → truncate
+- Low-confidence boundary → summarize
+
+### Context Manager Integration
+- init_compactor creates compactor
+- compact_history_if_needed returns None below trigger
+- Compaction purges stability history items
+- should_compact works with and without compactor instance

@@ -1078,8 +1078,18 @@ class LLM:
         # Symbol blocks for all files NOT in selected (those are in active context),
         # UNLESS they've graduated to a cached tier
         excluded = set(selected_files) - graduated_files
+
+        # Also exclude files whose full content is already in a cached tier —
+        # including the symbol block would be redundant
+        files_with_cached_content = set()
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+            for item in self._context.stability.get_tier_items(tier):
+                if item.item_type == ItemType.FILE:
+                    path = item.key.split(":", 1)[1] if ":" in item.key else item.key
+                    files_with_cached_content.add(path)
+
         for fpath, fsyms in self._symbol_index.all_symbols.items():
-            if fpath not in excluded:
+            if fpath not in excluded and fpath not in files_with_cached_content:
                 key = f"symbol:{fpath}"
                 block = self._symbol_index.get_file_block(fpath)
                 if block:

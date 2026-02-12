@@ -231,6 +231,38 @@ See [History and Compaction](history_and_compaction.md).
 | History token emergency | Oldest messages truncated if > 2× compaction trigger |
 | Pre-request budget exceeded | Largest files shed with warning |
 
+## Testing
+
+### State Management
+- get_current_state returns messages, selected_files, streaming_active, session_id
+- set_selected_files updates and returns copy; get_selected_files returns independent copy
+
+### Streaming Guards
+- Concurrent stream rejected with error
+- cancel_streaming succeeds for matching request_id; wrong id returns error
+
+### History
+- New session changes session_id and clears history
+
+### Context Breakdown
+- Returns breakdown with system/symbol_map/files/history categories
+- Returns total_tokens, max_input_tokens, model, session_totals
+- Session totals initially zero
+
+### Shell Command Detection
+- Extracts from ```bash blocks, $ prefix, > prefix
+- Comments skipped, non-command text returns empty
+
+### Commit Message
+- Empty/whitespace diff rejected
+- Mocked LLM returns generated message
+
+### Tiered Content Deduplication
+- File in cached tier excludes its symbol block
+- Selected non-graduated file excluded from symbol blocks
+- Graduated selected file gets file content, not symbol block
+- Unselected file without cached content gets symbol block only
+
 ## Prompt Assembly Format
 
 ### Complete Message Array
