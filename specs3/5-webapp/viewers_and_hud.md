@@ -10,8 +10,8 @@ Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
 - URL content modal (view fetched URL content)
 - Symbol map modal (view full symbol map)
 - URL inclusion toggling and removal
-- Deduplication of concurrent requests (one in-flight at a time)
-- Auto-refresh when selected files or URLs change while visible; mark stale when hidden
+- Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)
+- Auto-refresh on `stream-complete` and `files-changed` events while visible; mark stale when hidden
 
 `LLMService.get_context_breakdown()` returns:
 
