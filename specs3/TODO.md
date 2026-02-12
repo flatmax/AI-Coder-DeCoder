@@ -132,20 +132,20 @@ Recommended implementation sequence, with dependencies noted:
   - Scroll-to-edit-anchor with progressive prefix search and 3s highlight
   - App shell wiring: route navigate-file, file-save events
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
-- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide ← NEXT
+- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 - [ ] **Speech to text** — Auto-transcribe toggle using Web Speech API
 
 ### Phase 9: Polish (partial)
 - [x] **Bedrock token usage** — Streaming usage capture for all providers
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
 - [x] **Server→browser callback wiring** — `AcApp.method` format for jrpc-oo class-prefixed calls, main event loop for async callbacks
+- [x] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity)
 - [ ] **Error handling** — Reconnection with exponential backoff, toast notifications
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry
 - [ ] **State persistence** — Local storage for UI preferences
 - [ ] **Content-visibility optimization** — CSS containment for off-screen messages
-- [ ] **Duplicate streamChunk cleanup** — Remove duplicate method in app-shell.js
-- [ ] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity, 75% horizontal position)
+- [x] **Duplicate streamChunk cleanup** — Only one streamChunk method in app-shell.js
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
 - [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
