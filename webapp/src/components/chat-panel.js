@@ -51,6 +51,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _snippetDrawerOpen: { type: Boolean, state: true },
     _historyOpen: { type: Boolean, state: true },
     _currentRequestId: { type: String, state: true },
+    _confirmAction: { type: Object, state: true },
+    _toast: { type: Object, state: true },
+    _committing: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -85,8 +88,103 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
       color: var(--text-primary);
     }
+    .action-btn.danger:hover {
+      color: var(--accent-red);
+    }
+    .action-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .action-btn:disabled:hover {
+      background: none;
+      color: var(--text-muted);
+    }
 
     .action-spacer { flex: 1; }
+
+    /* Confirm dialog overlay */
+    .confirm-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .confirm-dialog {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      padding: 24px;
+      max-width: 400px;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .confirm-dialog h3 {
+      margin: 0 0 12px;
+      color: var(--text-primary);
+      font-size: 1rem;
+    }
+
+    .confirm-dialog p {
+      margin: 0 0 20px;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    .confirm-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .confirm-actions button {
+      padding: 6px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 0.85rem;
+      cursor: pointer;
+      border: 1px solid var(--border-primary);
+    }
+
+    .confirm-cancel {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+    }
+    .confirm-cancel:hover {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+
+    .confirm-danger {
+      background: var(--accent-red);
+      color: white;
+      border-color: var(--accent-red);
+    }
+    .confirm-danger:hover {
+      opacity: 0.9;
+    }
+
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      z-index: 10001;
+      box-shadow: var(--shadow-md);
+      transition: opacity 0.3s;
+    }
+    .toast.success { border-color: var(--accent-green); color: var(--accent-green); }
+    .toast.error { border-color: var(--accent-red); color: var(--accent-red); }
 
     /* Messages area */
     .messages {
@@ -410,6 +508,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._pendingChunk = null;
     this._rafId = null;
     this._currentRequestId = null;
+    this._confirmAction = null;
+    this._toast = null;
+    this._committing = false;
 
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -747,6 +848,140 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.dispatchEvent(new CustomEvent('new-session', { bubbles: true, composed: true }));
   }
 
+  // === Git Actions ===
+
+  async _copyDiff() {
+    if (!this.rpcConnected) return;
+    try {
+      const staged = await this.rpcExtract('Repo.get_staged_diff');
+      const unstaged = await this.rpcExtract('Repo.get_unstaged_diff');
+      const stagedDiff = staged?.diff || '';
+      const unstagedDiff = unstaged?.diff || '';
+
+      const combined = [stagedDiff, unstagedDiff].filter(Boolean).join('\n');
+      if (!combined.trim()) {
+        this._showToast('No changes to copy', 'error');
+        return;
+      }
+
+      await navigator.clipboard.writeText(combined);
+      this._showToast('Diff copied to clipboard', 'success');
+    } catch (e) {
+      console.error('Failed to copy diff:', e);
+      this._showToast('Failed to copy diff', 'error');
+    }
+  }
+
+  async _commitWithMessage() {
+    if (!this.rpcConnected || this._committing) return;
+    this._committing = true;
+
+    try {
+      // Stage all changes
+      const stageResult = await this.rpcExtract('Repo.stage_all');
+      if (stageResult?.error) {
+        this._showToast(`Stage failed: ${stageResult.error}`, 'error');
+        return;
+      }
+
+      // Get staged diff for commit message generation
+      const diffResult = await this.rpcExtract('Repo.get_staged_diff');
+      const diff = diffResult?.diff || '';
+      if (!diff.trim()) {
+        this._showToast('Nothing to commit', 'error');
+        return;
+      }
+
+      // Generate commit message via LLM
+      const msgResult = await this.rpcExtract('LLMService.generate_commit_message', diff);
+      if (msgResult?.error) {
+        this._showToast(`Message generation failed: ${msgResult.error}`, 'error');
+        return;
+      }
+
+      const commitMessage = msgResult?.message;
+      if (!commitMessage) {
+        this._showToast('Failed to generate commit message', 'error');
+        return;
+      }
+
+      // Commit
+      const commitResult = await this.rpcExtract('Repo.commit', commitMessage);
+      if (commitResult?.error) {
+        this._showToast(`Commit failed: ${commitResult.error}`, 'error');
+        return;
+      }
+
+      const sha = commitResult?.sha?.slice(0, 7) || '';
+      this._showToast(`Committed ${sha}: ${commitMessage.split('\n')[0]}`, 'success');
+
+      // Add commit info as a system-like message in chat
+      this.messages = [...this.messages, {
+        role: 'assistant',
+        content: `**Committed** \`${sha}\`\n\n\`\`\`\n${commitMessage}\n\`\`\``,
+      }];
+
+      if (this._autoScroll) {
+        requestAnimationFrame(() => this._scrollToBottom());
+      }
+
+      // Refresh file tree
+      this.dispatchEvent(new CustomEvent('files-modified', {
+        detail: { files: [] },
+        bubbles: true, composed: true,
+      }));
+    } catch (e) {
+      console.error('Commit failed:', e);
+      this._showToast(`Commit failed: ${e.message || 'Unknown error'}`, 'error');
+    } finally {
+      this._committing = false;
+    }
+  }
+
+  _confirmReset() {
+    this._confirmAction = {
+      title: 'Reset to HEAD',
+      message: 'This will discard ALL uncommitted changes (staged and unstaged). This cannot be undone.',
+      action: () => this._resetHard(),
+    };
+  }
+
+  async _resetHard() {
+    this._confirmAction = null;
+    if (!this.rpcConnected) return;
+
+    try {
+      const result = await this.rpcExtract('Repo.reset_hard');
+      if (result?.error) {
+        this._showToast(`Reset failed: ${result.error}`, 'error');
+        return;
+      }
+
+      this._showToast('Reset to HEAD — all changes discarded', 'success');
+
+      // Refresh file tree
+      this.dispatchEvent(new CustomEvent('files-modified', {
+        detail: { files: [] },
+        bubbles: true, composed: true,
+      }));
+    } catch (e) {
+      console.error('Reset failed:', e);
+      this._showToast(`Reset failed: ${e.message || 'Unknown error'}`, 'error');
+    }
+  }
+
+  _dismissConfirm() {
+    this._confirmAction = null;
+  }
+
+  _showToast(message, type = '') {
+    this._toast = { message, type };
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      this._toast = null;
+    }, 3000);
+  }
+
   // === Rendering ===
 
   _renderMessage(msg, index) {
@@ -789,9 +1024,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         <button class="action-btn" title="New session" @click=${this._newSession}>✨</button>
         <button class="action-btn" title="Browse history">📜</button>
         <div class="action-spacer"></div>
-        <button class="action-btn" title="Copy diff">📋</button>
-        <button class="action-btn" title="Commit">💾</button>
-        <button class="action-btn" title="Reset to HEAD">⚠️</button>
+        <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
+          ?disabled=${!this.rpcConnected}>📋</button>
+        <button class="action-btn" title="Stage all & commit" @click=${this._commitWithMessage}
+          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive}>💾</button>
+        <button class="action-btn danger" title="Reset to HEAD" @click=${this._confirmReset}
+          ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
       </div>
 
       <!-- Messages -->
@@ -884,6 +1122,27 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           `}
         </div>
       </div>
+
+      <!-- Confirm Dialog -->
+      ${this._confirmAction ? html`
+        <div class="confirm-overlay" @click=${this._dismissConfirm}>
+          <div class="confirm-dialog" @click=${(e) => e.stopPropagation()}>
+            <h3>${this._confirmAction.title}</h3>
+            <p>${this._confirmAction.message}</p>
+            <div class="confirm-actions">
+              <button class="confirm-cancel" @click=${this._dismissConfirm}>Cancel</button>
+              <button class="confirm-danger" @click=${this._confirmAction.action}>
+                ${this._confirmAction.title}
+              </button>
+            </div>
+          </div>
+        </div>
+      ` : nothing}
+
+      <!-- Toast -->
+      ${this._toast ? html`
+        <div class="toast ${this._toast.type}">${this._toast.message}</div>
+      ` : nothing}
     `;
   }
 }
