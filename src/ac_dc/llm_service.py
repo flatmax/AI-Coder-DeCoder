@@ -25,6 +25,7 @@ from .edit_parser import (
     detect_shell_commands,
     parse_edit_blocks,
 )
+from .history_store import HistoryStore
 from .stability_tracker import TIER_CONFIG, Tier
 from .token_counter import TokenCounter
 
@@ -136,6 +137,14 @@ class LLMService:
             compaction_config=config_manager.compaction_config,
             system_prompt=config_manager.get_system_prompt(),
         )
+
+        # History store (persistent)
+        self._history_store = None
+        if repo:
+            try:
+                self._history_store = HistoryStore(str(repo.root))
+            except Exception as e:
+                logger.warning(f"Failed to initialize history store: {e}")
 
         # State
         self._selected_files = []
@@ -256,6 +265,19 @@ class LLMService:
                 flat_files = self._repo.get_flat_file_list()
                 file_tree = f"# File Tree ({len(flat_files)} files)\n\n" + "\n".join(flat_files)
 
+            # Persist user message
+            if self._history_store:
+                try:
+                    self._history_store.append_message(
+                        session_id=self._session_id,
+                        role="user",
+                        content=message,
+                        files=files if files else None,
+                        images=images if images else None,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist user message: {e}")
+
             # Budget enforcement
             shed = self._context.shed_files_if_needed()
             if shed:
@@ -332,6 +354,19 @@ class LLMService:
                         }
                         for r in edit_results
                     ]
+
+            # Persist assistant message
+            if self._history_store:
+                try:
+                    self._history_store.append_message(
+                        session_id=self._session_id,
+                        role="assistant",
+                        content=full_content,
+                        files_modified=result.get("files_modified"),
+                        edit_results=result.get("edit_results"),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist assistant message: {e}")
 
             # Detect shell commands
             shell_cmds = detect_shell_commands(full_content)
@@ -605,9 +640,20 @@ class LLMService:
     # === History RPC Methods ===
 
     def history_search(self, query, role=None, limit=50):
-        """Search conversation history (delegates to history store if available)."""
+        """Search conversation history.
+
+        Searches persistent store first, falls back to in-memory history.
+        """
         if not query:
             return []
+
+        # Try persistent store first
+        if self._history_store:
+            results = self._history_store.search(query, role=role, limit=limit)
+            if results:
+                return results
+
+        # Fall back to in-memory history
         results = []
         for msg in self._context.get_history():
             if role and msg["role"] != role:
@@ -618,6 +664,53 @@ class LLMService:
                     break
         return results
 
+    def history_get_session(self, session_id):
+        """Get all messages from a session."""
+        if self._history_store:
+            return self._history_store.get_session_messages(session_id)
+        return []
+
+    def history_list_sessions(self, limit=None):
+        """List recent sessions, newest first."""
+        if self._history_store:
+            return self._history_store.list_sessions(limit=limit)
+        return []
+
     def history_new_session(self):
         """Start new session — alias for new_session."""
         return self.new_session()
+
+    def load_session_into_context(self, session_id):
+        """Load a previous session into active context.
+
+        Clears current history, reads messages from store,
+        adds each to context manager, and sets session ID.
+        """
+        if not self._history_store:
+            return {"error": "No history store available"}
+
+        msgs = self._history_store.get_session_messages_for_context(session_id)
+        if not msgs:
+            return {"error": "Session not found or empty"}
+
+        self._context.clear_history()
+        for msg in msgs:
+            self._context.add_message(msg["role"], msg["content"])
+
+        self._session_id = session_id
+        return {
+            "session_id": session_id,
+            "message_count": len(msgs),
+            "messages": self._context.get_history(),
+        }
+
+    def get_history_status(self):
+        """Return history status for the history bar.
+
+        Includes token counts and compaction status.
+        """
+        return {
+            **self._context.get_compaction_status(),
+            "session_id": self._session_id,
+            "message_count": len(self._context.get_history()),
+        }
