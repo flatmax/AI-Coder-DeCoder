@@ -95,12 +95,13 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Summarizer** — Type-aware LLM summarization (`url_handler.py`)
 
 ### Phase 7: Webapp Foundation
-- [ ] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
-- [ ] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
-- [ ] **Dialog component** — Dragging, resizing, minimizing, tab bar
-- [ ] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
-- [ ] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
-- [ ] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
+- [x] **Build setup** — Vite config, npm project, Lit dependency, jrpc-oo browser integration
+- [x] **App shell** — Root component extending JRPCClient, WebSocket connection, dialog container
+- [x] **Dialog component** — Dragging, resizing, minimizing, tab bar
+- [x] **RPC mixin** — Shared singleton, convenience methods (extract, stateful call)
+- [x] **Chat panel** — Message cards, markdown rendering, streaming display, scroll management
+- [x] **Input handling** — Auto-resize textarea, Enter to send, image paste, snippet drawer
+- [x] **jrpc-oo integration** — App shell extends JRPCClient, SharedRpc publishes call proxy on setupDone, RpcMixin for child components
 - [ ] **Input history** — Up-arrow fuzzy search overlay, history navigation
 - [ ] **URL chips** — Detection display, fetch triggers, inclusion toggles
 
