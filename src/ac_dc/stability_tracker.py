@@ -298,22 +298,27 @@ class StabilityTracker:
 
                 if self._cache_target_tokens > 0:
                     # Threshold-aware processing
+                    # Only anchor if the tier has enough content to protect
+                    total_tier_tokens = sum(i.tokens for i in veterans)
+                    do_anchoring = total_tier_tokens > self._cache_target_tokens
+
                     accumulated = 0
                     for item in veterans:
-                        accumulated += item.tokens
-                        if accumulated <= self._cache_target_tokens:
-                            # Below threshold — anchored (N frozen)
-                            pass
+                        if do_anchoring and accumulated + item.tokens <= self._cache_target_tokens:
+                            # Below threshold — anchored (N frozen, cannot promote)
+                            accumulated += item.tokens
+                            item._anchored = True
                         else:
-                            # Above threshold — N can increment
-                            # But cap at promotion threshold if tier above is stable
+                            accumulated += item.tokens
+                            item._anchored = False
+                            # Cap N at promotion threshold if tier above is stable
                             if not tier_above_broken and item.n >= promo_n:
                                 item.n = promo_n  # cap
 
                 # Check for promotions
                 to_promote = []
                 for item in veterans:
-                    if tier_above_broken and item.n >= promo_n:
+                    if tier_above_broken and item.n >= promo_n and not getattr(item, '_anchored', False):
                         to_promote.append(item)
 
                 for item in to_promote:
@@ -335,13 +340,25 @@ class StabilityTracker:
         self._demote_underfilled()
 
     def _demote_underfilled(self):
-        """Demote items from tiers below cache_target_tokens to the tier below."""
+        """Demote items from tiers below cache_target_tokens to the tier below.
+
+        Each item demotes at most one level per call to avoid cascading
+        double-demotions within a single pass.
+        Skips tiers that were just promoted into this cycle (broken).
+        """
         if self._cache_target_tokens <= 0:
             return
+
+        demoted_keys = set()
 
         for tier in reversed(CASCADE_ORDER):
             if tier == Tier.L3:
                 continue  # L3 items would demote to active, handled differently
+
+            # Skip tiers that received promotions this cycle — they are
+            # intentionally populated and should not be immediately undone
+            if tier in self._broken_tiers:
+                continue
 
             tier_tokens = self.get_tier_tokens(tier)
             if 0 < tier_tokens < self._cache_target_tokens:
@@ -357,8 +374,9 @@ class StabilityTracker:
 
                 # Demote all items one tier down (keeping their N)
                 for item in list(self._items.values()):
-                    if item.tier == tier:
+                    if item.tier == tier and item.key not in demoted_keys:
                         item.tier = below
+                        demoted_keys.add(item.key)
                         self._broken_tiers.add(tier)
                         self._changes.append({
                             "action": "demoted_underfilled", "key": item.key,

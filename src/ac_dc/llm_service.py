@@ -25,6 +25,7 @@ from .edit_parser import (
     detect_shell_commands,
     parse_edit_blocks,
 )
+from .stability_tracker import TIER_CONFIG, Tier
 from .token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
@@ -505,10 +506,13 @@ class LLMService:
     # === Terminal HUD ===
 
     def _print_hud(self, usage):
-        """Print terminal HUD after response."""
+        """Print terminal HUD after response.
+
+        Two reports: Cache Blocks (boxed) and Token Usage.
+        """
         counter = self._context.counter
 
-        # Token usage report
+        # Gather token counts
         system_tokens = counter.count(self._config.get_system_prompt())
         symbol_map_tokens = 0
         if self._symbol_index:
@@ -527,6 +531,44 @@ class LLMService:
         cache_read = usage.get("cache_read_tokens", 0)
         cache_write = usage.get("cache_write_tokens", 0)
 
+        # --- Cache Blocks Report (boxed) ---
+        tracker = self._context._stability_tracker
+        cache_lines = []
+        cached_tokens = 0
+        if tracker:
+            for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                tier_items = tracker.get_tier_items(tier)
+                if tier_items:
+                    tier_tokens = sum(i.tokens for i in tier_items.values())
+                    entry_n = TIER_CONFIG[tier]["entry_n"]
+                    cache_lines.append(
+                        f"│ {tier.name:<10} ({entry_n}+) {tier_tokens:>8,} tokens [cached]"
+                    )
+                    cached_tokens += tier_tokens
+            active_items = tracker.get_tier_items(Tier.ACTIVE)
+            if active_items:
+                active_tokens = sum(i.tokens for i in active_items.values())
+                cache_lines.append(
+                    f"│ active     {active_tokens:>14,} tokens"
+                )
+
+        if cache_lines:
+            cache_hit = round(cached_tokens / total * 100) if total > 0 else 0
+            # Compute box width
+            content_width = max(len(line) for line in cache_lines)
+            footer = f"│ Total: {total:,} | Cache hit: {cache_hit}%"
+            content_width = max(content_width, len(footer))
+            box_width = content_width + 2  # padding
+
+            print()
+            print(f"╭─ Cache Blocks {'─' * (box_width - 15)}╮")
+            for line in cache_lines:
+                print(f"{line:<{box_width}}│")
+            print(f"├{'─' * box_width}┤")
+            print(f"{footer:<{box_width}}│")
+            print(f"╰{'─' * box_width}╯")
+
+        # --- Token Usage Report ---
         print(f"\nModel: {counter.model_name}")
         print(f"System:     {system_tokens:>8,}")
         print(f"Symbol Map: {symbol_map_tokens:>8,}")
@@ -545,6 +587,19 @@ class LLMService:
         session_total = sum(self._session_totals.values())
         if session_total:
             print(f"Session total: {session_total:,}")
+
+        # --- Tier Changes ---
+        if tracker:
+            changes = tracker.changes
+            promotions = [c for c in changes if c["action"] == "promoted"]
+            demotions = [c for c in changes if c["action"] in ("demoted", "demoted_underfilled")]
+            if promotions:
+                for p in promotions:
+                    print(f"📈 {p.get('from', '?')} → {p.get('to', '?')}: {p['key']}")
+            if demotions:
+                for d in demotions:
+                    print(f"📉 {d.get('from', '?')} → {d.get('to', '?')}: {d['key']}")
+
         print()
 
     # === History RPC Methods ===
