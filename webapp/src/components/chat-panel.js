@@ -114,7 +114,7 @@ function renderFileSummary(referencedFiles, selectedFiles) {
   }
 
   const addAllBtn = notInContext.length >= 2
-    ? `<button class="add-all-btn" data-files="${escapeHtml(JSON.stringify(notInContext))}">+ Add All (${notInContext.length})</button>`
+    ? `<button class="add-all-btn" data-files='${JSON.stringify(notInContext).replace(/'/g, '&#39;')}'>+ Add All (${notInContext.length})</button>`
     : '';
 
   return `<div class="file-summary"><span class="file-summary-label">📁 Files Referenced</span>${addAllBtn}<div class="file-chips">${chips.join('')}</div></div>`;
