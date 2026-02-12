@@ -460,9 +460,9 @@ class StabilityTracker:
         if not all_files:
             return
 
-        # Try clustering via mutual references
-        if ref_index and hasattr(ref_index, 'get_mutual_components'):
-            components = ref_index.get_mutual_components()
+        # Try clustering via mutual references (bidirectional edges)
+        if ref_index and hasattr(ref_index, 'connected_components'):
+            components = ref_index.connected_components()
             if components:
                 self._init_from_clusters(components, counter)
                 return

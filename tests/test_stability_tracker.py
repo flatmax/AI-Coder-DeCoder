@@ -428,6 +428,42 @@ class TestInitialization:
         tracker.initialize_from_reference_graph(None, [])
         assert len(tracker.items) == 0
 
+    def test_clustering_via_connected_components(self, tracker):
+        """Initialization uses connected_components from reference index."""
+        from unittest.mock import MagicMock
+        ref_index = MagicMock()
+        ref_index.connected_components.return_value = [
+            {"src/a.py", "src/b.py"},
+            {"src/c.py"},
+        ]
+        files = ["src/a.py", "src/b.py", "src/c.py"]
+        tracker.initialize_from_reference_graph(ref_index, files)
+
+        # All files should have symbol entries
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            assert item is not None
+            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+        # Clustered files (a, b) should be in the same tier
+        tier_a = tracker.get_item("symbol:src/a.py").tier
+        tier_b = tracker.get_item("symbol:src/b.py").tier
+        assert tier_a == tier_b
+
+    def test_l0_never_assigned_by_clustering(self, tracker):
+        """L0 is never assigned by initialization — must be earned via promotion."""
+        from unittest.mock import MagicMock
+        ref_index = MagicMock()
+        ref_index.connected_components.return_value = [
+            {f"src/file{i}.py" for i in range(20)},
+        ]
+        files = [f"src/file{i}.py" for i in range(20)]
+        tracker.initialize_from_reference_graph(ref_index, files)
+
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            assert item.tier != Tier.L0
+
 
 # === Threshold Anchoring ===
 

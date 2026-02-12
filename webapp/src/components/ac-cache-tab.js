@@ -313,7 +313,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     super();
     this._data = null;
     this._loading = false;
-    this._expandedTiers = new Set(['L0', 'active']);
+    this._expandedTiers = new Set(['L0', 'L1', 'L2', 'L3', 'active']);
     this._filter = '';
     this._stale = false;
 
@@ -338,7 +338,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
   }
 
   _onStreamComplete() {
-    if (this._isVisible()) {
+    if (this._isTabActive()) {
       this._refresh();
     } else {
       this._stale = true;
@@ -346,19 +346,25 @@ export class AcCacheTab extends RpcMixin(LitElement) {
   }
 
   _onFilesChanged() {
-    if (this._isVisible()) {
+    if (this._isTabActive()) {
       this._refresh();
     } else {
       this._stale = true;
     }
   }
 
-  _isVisible() {
+  _isTabActive() {
+    // Check if our parent tab-panel has the 'active' class
+    const panel = this.parentElement;
+    if (panel && panel.classList.contains('tab-panel')) {
+      return panel.classList.contains('active');
+    }
     return this.offsetParent !== null;
   }
 
-  updated() {
-    if (this._stale && this._isVisible()) {
+  /** Called by dialog when this tab becomes visible. */
+  onTabVisible() {
+    if (this._stale) {
       this._stale = false;
       this._refresh();
     }
@@ -464,7 +470,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
 
     // Filter contents
     const contents = (block.contents || []).filter(item => {
-      const name = item.name || item.path || '';
+      const name = item.name || item.path || item.type || '';
       return this._fuzzyMatch(name, this._filter);
     });
 

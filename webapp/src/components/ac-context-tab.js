@@ -1,7 +1,9 @@
 /**
- * Context Viewer tab — token budget bar, category breakdown, expandable details.
+ * Context Viewer tab — token budget bar, stacked category bar,
+ * expandable per-item details, session totals.
  *
- * Shows: system prompt, symbol map, files, URLs, history token usage.
+ * Shows: system prompt, symbol map (per-chunk), files (per-file),
+ * URLs (per-URL), history token usage.
  * Calls LLM.get_context_breakdown for data.
  */
 
@@ -14,6 +16,17 @@ function formatTokens(n) {
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return String(n);
 }
+
+/** Category color palette */
+const CAT_COLORS = {
+  system:     { bar: '#50c878', text: '#50c878', label: 'System' },
+  symbol_map: { bar: '#60a5fa', text: '#60a5fa', label: 'Symbols' },
+  files:      { bar: '#f59e0b', text: '#f59e0b', label: 'Files' },
+  urls:       { bar: '#a78bfa', text: '#a78bfa', label: 'URLs' },
+  history:    { bar: '#f97316', text: '#f97316', label: 'History' },
+};
+
+export { formatTokens };
 
 export class AcContextTab extends RpcMixin(LitElement) {
   static properties = {
@@ -31,7 +44,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
       overflow-y: auto;
     }
 
-    /* Budget bar */
+    /* Budget section */
     .budget-section {
       padding: 12px 16px;
       background: var(--bg-tertiary);
@@ -80,6 +93,54 @@ export class AcContextTab extends RpcMixin(LitElement) {
       text-align: right;
     }
 
+    /* Stacked category bar */
+    .stacked-section {
+      padding: 8px 16px 4px;
+      border-bottom: 1px solid var(--border-primary);
+    }
+
+    .stacked-bar {
+      display: flex;
+      height: 12px;
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--bg-primary);
+      margin-bottom: 6px;
+    }
+
+    .stacked-segment {
+      height: 100%;
+      transition: width 0.3s;
+      min-width: 0;
+    }
+
+    .stacked-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      padding-bottom: 4px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .legend-label {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+    }
+
     /* Model info */
     .model-info {
       padding: 8px 16px;
@@ -120,12 +181,25 @@ export class AcContextTab extends RpcMixin(LitElement) {
     .category-header:hover {
       background: var(--bg-tertiary);
     }
+    .category-header.no-expand {
+      cursor: default;
+    }
+    .category-header.no-expand:hover {
+      background: transparent;
+    }
 
     .category-toggle {
       font-size: 0.6rem;
       color: var(--text-muted);
       width: 12px;
       flex-shrink: 0;
+    }
+
+    .category-icon {
+      flex-shrink: 0;
+      width: 16px;
+      text-align: center;
+      font-size: 0.75rem;
     }
 
     .category-name {
@@ -144,7 +218,6 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     .category-bar-fill {
       height: 100%;
-      background: var(--accent-primary);
       border-radius: 2px;
     }
 
@@ -157,10 +230,10 @@ export class AcContextTab extends RpcMixin(LitElement) {
       flex-shrink: 0;
     }
 
-    /* Category detail */
+    /* Category detail items */
     .category-detail {
       display: none;
-      padding: 4px 16px 8px 36px;
+      padding: 2px 16px 8px 52px;
     }
     .category-detail.expanded {
       display: block;
@@ -171,7 +244,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
       align-items: center;
       gap: 8px;
       padding: 3px 0;
-      font-size: 0.75rem;
+      font-size: 0.73rem;
       color: var(--text-muted);
     }
 
@@ -183,9 +256,27 @@ export class AcContextTab extends RpcMixin(LitElement) {
       white-space: nowrap;
     }
 
+    .detail-bar {
+      width: 50px;
+      height: 3px;
+      background: var(--bg-primary);
+      border-radius: 2px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .detail-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--text-muted);
+      opacity: 0.4;
+    }
+
     .detail-tokens {
       font-family: var(--font-mono);
       color: var(--accent-green);
+      min-width: 5ch;
+      text-align: right;
       flex-shrink: 0;
     }
 
@@ -289,8 +380,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
   }
 
   _onStreamComplete() {
-    // Mark stale; auto-refresh if visible
-    if (this._isVisible()) {
+    if (this._isTabActive()) {
       this._refresh();
     } else {
       this._stale = true;
@@ -298,21 +388,25 @@ export class AcContextTab extends RpcMixin(LitElement) {
   }
 
   _onFilesChanged() {
-    if (this._isVisible()) {
+    if (this._isTabActive()) {
       this._refresh();
     } else {
       this._stale = true;
     }
   }
 
-  _isVisible() {
-    // Check if we're in the active tab
+  _isTabActive() {
+    // Check if our parent tab-panel has the 'active' class
+    const panel = this.parentElement;
+    if (panel && panel.classList.contains('tab-panel')) {
+      return panel.classList.contains('active');
+    }
     return this.offsetParent !== null;
   }
 
-  updated(changed) {
-    // Refresh when becoming visible and stale
-    if (this._stale && this._isVisible()) {
+  /** Called by dialog when this tab becomes visible. */
+  onTabVisible() {
+    if (this._stale) {
       this._stale = false;
       this._refresh();
     }
@@ -343,6 +437,50 @@ export class AcContextTab extends RpcMixin(LitElement) {
       next.add(name);
     }
     this._expandedSections = next;
+  }
+
+  /** Build category data from breakdown */
+  _getCategories() {
+    const b = this._data?.breakdown;
+    if (!b) return [];
+
+    return [
+      {
+        key: 'system',
+        icon: '⚙️',
+        name: 'System Prompt',
+        tokens: (b.system || 0) + (b.legend || 0),
+        details: null,
+      },
+      {
+        key: 'symbol_map',
+        icon: '📦',
+        name: `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
+        tokens: b.symbol_map || 0,
+        details: b.symbol_map_chunks || null,
+      },
+      {
+        key: 'files',
+        icon: '📄',
+        name: `Files${b.file_count ? ` (${b.file_count})` : ''}`,
+        tokens: b.files || 0,
+        details: b.file_details || null,
+      },
+      {
+        key: 'urls',
+        icon: '🔗',
+        name: `URLs${b.url_details?.length ? ` (${b.url_details.length})` : ''}`,
+        tokens: b.urls || 0,
+        details: b.url_details || null,
+      },
+      {
+        key: 'history',
+        icon: '💬',
+        name: `History${b.history_messages ? ` (${b.history_messages} msgs)` : ''}`,
+        tokens: b.history || 0,
+        details: null,
+      },
+    ];
   }
 
   // === Render ===
@@ -376,42 +514,47 @@ export class AcContextTab extends RpcMixin(LitElement) {
     `;
   }
 
+  _renderStackedBar() {
+    const categories = this._getCategories();
+    const total = this._data?.total_tokens || 1;
+    if (!categories.length || total <= 0) return nothing;
+
+    const segments = categories
+      .filter(c => c.tokens > 0)
+      .map(c => ({
+        key: c.key,
+        pct: (c.tokens / total) * 100,
+        color: CAT_COLORS[c.key]?.bar || '#666',
+        label: CAT_COLORS[c.key]?.label || c.key,
+        tokens: c.tokens,
+      }));
+
+    return html`
+      <div class="stacked-section">
+        <div class="stacked-bar">
+          ${segments.map(s => html`
+            <div class="stacked-segment"
+              style="width: ${s.pct}%; background: ${s.color}"
+              title="${s.label}: ${formatTokens(s.tokens)}">
+            </div>
+          `)}
+        </div>
+        <div class="stacked-legend">
+          ${segments.map(s => html`
+            <span class="legend-item">
+              <span class="legend-dot" style="background: ${s.color}"></span>
+              <span class="legend-label">${s.label}: ${formatTokens(s.tokens)}</span>
+            </span>
+          `)}
+        </div>
+      </div>
+    `;
+  }
+
   _renderCategories() {
-    const d = this._data;
-    if (!d?.breakdown) return nothing;
-
-    const b = d.breakdown;
-    const total = d.total_tokens || 1;
-
-    const categories = [
-      { name: 'System Prompt', key: 'system', tokens: b.system || 0, details: null },
-      {
-        name: `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
-        key: 'symbol_map',
-        tokens: b.symbol_map || 0,
-        details: d.blocks?.filter(bl => bl.name?.includes('symbol'))?.map(bl => ({
-          name: bl.name, tokens: bl.tokens,
-        })),
-      },
-      {
-        name: `Files${b.file_count ? ` (${b.file_count})` : ''}`,
-        key: 'files',
-        tokens: b.files || 0,
-        details: b.file_details,
-      },
-      {
-        name: 'URLs',
-        key: 'urls',
-        tokens: b.urls || 0,
-        details: b.url_details,
-      },
-      {
-        name: 'History',
-        key: 'history',
-        tokens: b.history || 0,
-        details: null,
-      },
-    ];
+    const categories = this._getCategories();
+    const total = this._data?.total_tokens || 1;
+    if (!categories.length) return nothing;
 
     return html`
       <div class="categories">
@@ -419,26 +562,39 @@ export class AcContextTab extends RpcMixin(LitElement) {
           const pct = total > 0 ? (cat.tokens / total) * 100 : 0;
           const expanded = this._expandedSections.has(cat.key);
           const hasDetails = cat.details && cat.details.length > 0;
+          const color = CAT_COLORS[cat.key]?.bar || 'var(--accent-primary)';
+          const maxDetail = hasDetails
+            ? Math.max(1, ...cat.details.map(d => d.tokens || 0))
+            : 1;
 
           return html`
             <div class="category">
-              <div class="category-header"
+              <div class="category-header ${hasDetails ? '' : 'no-expand'}"
                 @click=${() => hasDetails && this._toggleSection(cat.key)}>
                 <span class="category-toggle">${hasDetails ? (expanded ? '▼' : '▶') : ' '}</span>
+                <span class="category-icon">${cat.icon}</span>
                 <span class="category-name">${cat.name}</span>
                 <div class="category-bar">
-                  <div class="category-bar-fill" style="width: ${pct}%"></div>
+                  <div class="category-bar-fill" style="width: ${pct}%; background: ${color}"></div>
                 </div>
                 <span class="category-tokens">${formatTokens(cat.tokens)}</span>
               </div>
               ${hasDetails ? html`
                 <div class="category-detail ${expanded ? 'expanded' : ''}">
-                  ${cat.details.map(item => html`
-                    <div class="detail-item">
-                      <span class="detail-name">${item.name || item.path || item.url || '—'}</span>
-                      <span class="detail-tokens">${formatTokens(item.tokens)}</span>
-                    </div>
-                  `)}
+                  ${cat.details.map(item => {
+                    const itemPct = maxDetail > 0 ? ((item.tokens || 0) / maxDetail) * 100 : 0;
+                    return html`
+                      <div class="detail-item">
+                        <span class="detail-name"
+                          title="${item.name || item.path || item.url || '—'}"
+                        >${item.name || item.path || item.url || '—'}</span>
+                        <div class="detail-bar">
+                          <div class="detail-bar-fill" style="width: ${itemPct}%; background: ${color}"></div>
+                        </div>
+                        <span class="detail-tokens">${formatTokens(item.tokens)}</span>
+                      </div>
+                    `;
+                  })}
                 </div>
               ` : nothing}
             </div>
@@ -500,6 +656,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
             ` : nothing}
           </div>
         ` : nothing}
+        ${this._renderStackedBar()}
         ${this._renderCategories()}
         ${this._renderSessionTotals()}
       `}

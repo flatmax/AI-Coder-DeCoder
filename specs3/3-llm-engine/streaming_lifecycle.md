@@ -148,30 +148,36 @@ The extraction uses a dual-mode getter (attribute + key access) with fallback ch
 
 ## Terminal HUD
 
-Two reports printed after each response:
+Three reports printed after each response. See [Viewers and HUD](../5-webapp/viewers_and_hud.md#terminal-hud) for full format details.
 
-### Cache Blocks
+### Cache Blocks (Boxed)
 ```
-╭─ Cache Blocks ───────────────────────╮
-│ L0 (12+)    1,622 tokens [cached]    │
-│ L1 (9+)    11,137 tokens [cached]    │
-│ active     19,643 tokens             │
-├──────────────────────────────────────┤
-│ Total: 55,448 | Cache hit: 23%      │
-╰──────────────────────────────────────╯
+╭─ Cache Blocks ────────────────────────────╮
+│ L0         (12+)    1,622 tokens [cached] │
+│ L1          (9+)   11,137 tokens [cached] │
+│ active             19,643 tokens          │
+├───────────────────────────────────────────┤
+│ Total: 32,402 | Cache hit: 39%           │
+╰───────────────────────────────────────────╯
 ```
 
 ### Token Usage
 ```
-Model: model-name
+Model: bedrock/anthropic.claude-sonnet-4-20250514
 System:         1,622
 Symbol Map:    34,355
 Files:              0
 History:       21,532
-Total:         57,347 / 1,000,000
+Total:         57,509 / 1,000,000
 Last request:  74,708 in, 34 out
-Cache:         write: 48,070
+Cache:         read: 21,640, write: 48,070
 Session total: 182,756
+```
+
+### Tier Changes
+```
+📈 L3 → L2: symbol:src/ac_dc/context.py
+📉 L2 → active: symbol:src/ac_dc/repo.py
 ```
 
 ## Error Handling

@@ -132,7 +132,7 @@ Recommended implementation sequence, with dependencies noted:
   - Scroll-to-edit-anchor with progressive prefix search and 3s highlight
   - App shell wiring: route navigate-file, file-save events
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
-- [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
+- [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 - [ ] **Speech to text** — Auto-transcribe toggle using Web Speech API
 
 ### Phase 9: Polish (partial)

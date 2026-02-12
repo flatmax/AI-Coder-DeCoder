@@ -26,7 +26,7 @@ from .edit_parser import (
     parse_edit_blocks,
 )
 from .history_store import HistoryStore
-from .stability_tracker import TIER_CONFIG, Tier
+from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier
 from .token_counter import TokenCounter
 from .url_cache import URLCache
 from .url_handler import URLService
@@ -156,6 +156,13 @@ class LLMService:
         self._session_id = self._new_session_id()
         self._executor = ThreadPoolExecutor(max_workers=2)
 
+        # Stability tracker
+        self._stability_tracker = StabilityTracker(
+            cache_target_tokens=config_manager.cache_target_tokens,
+        )
+        self._context.set_stability_tracker(self._stability_tracker)
+        self._stability_initialized = False
+
         # URL service
         self._url_service = self._init_url_service()
 
@@ -195,6 +202,8 @@ class LLMService:
         """Start a new session — clears history and generates new session ID."""
         self._context.clear_history()
         self._session_id = self._new_session_id()
+        # Don't reset stability_initialized — symbol tiers persist across sessions
+        # Only history items are purged (done by clear_history -> purge_history_items)
         return {"session_id": self._session_id}
 
     # === Streaming Chat (RPC) ===
@@ -261,6 +270,21 @@ class LLMService:
                 self._symbol_index.index_repo(
                     self._repo.get_flat_file_list() if self._repo else None
                 )
+
+                # Initialize stability tracker from reference graph on first request
+                if not self._stability_initialized:
+                    try:
+                        ref_index = self._symbol_index.reference_index
+                        all_files = list(self._symbol_index._all_symbols.keys())
+                        self._stability_tracker.initialize_from_reference_graph(
+                            ref_index, all_files, counter=self._context.counter,
+                        )
+                        self._stability_initialized = True
+                        logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize stability tracker: {e}")
+                        self._stability_initialized = True  # don't retry
+
                 symbol_map = self._symbol_index.get_symbol_map(
                     exclude_files=set(self._selected_files)
                 )
@@ -394,6 +418,12 @@ class LLMService:
                 except Exception as e:
                     logger.warning(f"Failed to persist assistant message: {e}")
 
+            # Update cache stability
+            try:
+                self._update_stability()
+            except Exception as e:
+                logger.warning(f"Stability update failed: {e}")
+
             # Detect shell commands
             shell_cmds = detect_shell_commands(full_content)
             if shell_cmds:
@@ -503,6 +533,71 @@ class LLMService:
             return {"success": True}
         return {"error": f"No active stream with request_id {request_id}"}
 
+    # === Stability Update ===
+
+    def _update_stability(self):
+        """Run the per-request stability update cycle.
+
+        Builds the active items list and calls tracker.update() to drive
+        N-value progression, graduation, and cascade.
+        """
+        if not self._stability_tracker:
+            return
+
+        counter = self._context.counter
+        active_items = []
+
+        # File entries for selected files
+        for path in self._selected_files:
+            content = self._context.file_context.get_content(path)
+            if content is not None:
+                active_items.append({
+                    "key": f"file:{path}",
+                    "content_hash": StabilityTracker.hash_content(content),
+                    "tokens": counter.count(content),
+                })
+
+        # Symbol entries for selected files
+        if self._symbol_index:
+            for path in self._selected_files:
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    active_items.append({
+                        "key": f"symbol:{path}",
+                        "content_hash": StabilityTracker.hash_content(block),
+                        "tokens": counter.count(block),
+                    })
+
+        # History entries
+        history = self._context.get_history()
+        for i, msg in enumerate(history):
+            content_str = f"{msg['role']}:{msg.get('content', '')}"
+            active_items.append({
+                "key": f"history:{i}",
+                "content_hash": StabilityTracker.hash_content(content_str),
+                "tokens": counter.count_message(msg),
+            })
+
+        # Existing files for stale removal
+        existing_files = None
+        if self._repo:
+            try:
+                existing_files = set(self._repo.get_flat_file_list())
+            except Exception:
+                pass
+
+        # Run update cycle
+        result = self._stability_tracker.update(active_items, existing_files)
+
+        # Log tier changes
+        for change in result.get("changes", []):
+            action = change.get("action", "")
+            key = change.get("key", "")
+            if action in ("promoted", "graduated"):
+                logger.info(f"📈 {change.get('from', '?')} → {change.get('to', '?')}: {key}")
+            elif action in ("demoted", "demoted_underfilled"):
+                logger.info(f"📉 {change.get('from', '?')} → {change.get('to', '?')}: {key}")
+
     # === Commit Message Generation (RPC) ===
 
     def generate_commit_message(self, diff_text):
@@ -534,34 +629,261 @@ class LLMService:
 
     # === Context Breakdown (RPC) ===
 
+    @staticmethod
+    def _tier_content_breakdown(tier_items):
+        """Break down tier items into individual entries with N values and thresholds.
+
+        Returns list of per-item dicts with {type, name, path, tokens, n, threshold}.
+        """
+        contents = []
+        for key, item in tier_items.items():
+            if key.startswith("file:"):
+                item_type = "files"
+                path = key.split(":", 1)[1]
+                name = path
+            elif key.startswith("symbol:"):
+                item_type = "symbols"
+                path = key.split(":", 1)[1]
+                name = path
+            elif key.startswith("history:"):
+                item_type = "history"
+                path = None
+                name = f"Message {key.split(':', 1)[1]}"
+            else:
+                item_type = "other"
+                path = None
+                name = key
+
+            # Get promotion threshold for this item's tier
+            tier_config = TIER_CONFIG.get(item.tier)
+            threshold = tier_config["promotion_n"] if tier_config else None
+
+            contents.append({
+                "type": item_type,
+                "name": name,
+                "path": path,
+                "tokens": item.tokens,
+                "n": item.n,
+                "threshold": threshold,
+            })
+
+        # Sort: symbols first, then files, then history, then other; within each by name
+        type_order = {"symbols": 0, "files": 1, "history": 2, "other": 3}
+        contents.sort(key=lambda c: (type_order.get(c["type"], 99), c["name"] or ""))
+        return contents
+
     def get_context_breakdown(self):
-        """Return token breakdown for current context."""
+        """Return token breakdown for current context.
+
+        Returns detailed per-item data for each category:
+        - Per-file paths and token counts
+        - Per-URL title and token counts
+        - Symbol map chunk details
+        - History message count and tokens
+        """
         counter = self._context.counter
 
         system_tokens = counter.count(self._config.get_system_prompt())
+        legend_tokens = 0
+        if self._symbol_index:
+            legend = self._symbol_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
 
         symbol_map_tokens = 0
+        symbol_map_chunks = []
         if self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
+            # Get chunked symbol map for per-chunk detail breakdown
+            try:
+                sm_chunks_raw = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files),
+                    chunks=4,
+                )
+                if sm_chunks_raw and isinstance(sm_chunks_raw, list):
+                    for i, chunk in enumerate(sm_chunks_raw):
+                        if not chunk:
+                            continue
+                        chunk_tokens = counter.count(chunk)
+                        # Estimate file count from path-like lines
+                        lines = chunk.strip().split('\n')
+                        file_count = sum(
+                            1 for line in lines
+                            if line and not line.startswith(' ') and not line.startswith('#')
+                            and ':' in line
+                        )
+                        symbol_map_chunks.append({
+                            "name": f"Chunk {i + 1} ({file_count} files)",
+                            "tokens": chunk_tokens,
+                        })
+            except Exception as e:
+                logger.debug(f"Symbol map chunking failed: {e}")
 
+        # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
-        history_tokens = self._context.history_token_count()
+        file_details = []
+        tokens_by_file = self._context.file_context.get_tokens_by_file(counter)
+        for path in sorted(tokens_by_file.keys()):
+            file_details.append({
+                "name": path,
+                "path": path,
+                "tokens": tokens_by_file[path],
+            })
 
-        total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
+        # Per-URL token counts
+        url_tokens = 0
+        url_details = []
+        if self._url_service:
+            for url_content in self._url_service.get_fetched_urls():
+                if url_content.error:
+                    continue
+                formatted = url_content.format_for_prompt(max_length=50000)
+                tok = counter.count(formatted) if formatted else 0
+                url_tokens += tok
+                url_details.append({
+                    "name": url_content.title or url_content.url,
+                    "url": url_content.url,
+                    "tokens": tok,
+                })
+
+        # History details
+        history_tokens = self._context.history_token_count()
+        history = self._context.get_history()
+        history_msg_count = len(history)
+
+        total = system_tokens + symbol_map_tokens + file_tokens + url_tokens + history_tokens
+
+        # Cache tier blocks for HUD visualization
+        blocks = []
+        cached_tokens = 0
+        tracker = self._context._stability_tracker
+        if tracker:
+            for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                tier_items = tracker.get_tier_items(tier)
+                if tier_items:
+                    tier_tokens = sum(i.tokens for i in tier_items.values())
+                    contents = self._tier_content_breakdown(tier_items)
+                    blocks.append({
+                        "name": tier.name,
+                        "tier": tier.name,
+                        "tokens": tier_tokens,
+                        "count": len(tier_items),
+                        "cached": True,
+                        "contents": contents,
+                    })
+                    cached_tokens += tier_tokens
+            active_items = tracker.get_tier_items(Tier.ACTIVE)
+            if active_items:
+                active_tokens = sum(i.tokens for i in active_items.values())
+                contents = self._tier_content_breakdown(active_items)
+                blocks.append({
+                    "name": "active",
+                    "tier": "active",
+                    "tokens": active_tokens,
+                    "count": len(active_items),
+                    "cached": False,
+                    "contents": contents,
+                })
+
+        # If no tracker, build a simple active block from known data
+        if not blocks:
+            contents = []
+            if system_tokens:
+                contents.append({"type": "system", "name": "System + Legend",
+                                 "path": None,
+                                 "tokens": system_tokens + legend_tokens,
+                                 "n": None, "threshold": None})
+            if symbol_map_tokens:
+                contents.append({"type": "symbols", "name": "Symbol Map",
+                                 "path": None,
+                                 "tokens": symbol_map_tokens,
+                                 "n": None, "threshold": None})
+            if file_tokens:
+                for fd in file_details:
+                    contents.append({"type": "files", "name": fd["name"],
+                                     "path": fd.get("path"),
+                                     "tokens": fd["tokens"],
+                                     "n": None, "threshold": None})
+            if url_tokens:
+                for ud in url_details:
+                    contents.append({"type": "urls", "name": ud["name"],
+                                     "path": ud.get("url"),
+                                     "tokens": ud["tokens"],
+                                     "n": None, "threshold": None})
+            if history_tokens:
+                contents.append({"type": "history", "name": f"History ({history_msg_count} msgs)",
+                                 "path": None,
+                                 "tokens": history_tokens,
+                                 "n": None, "threshold": None})
+            blocks.append({
+                "name": "active",
+                "tier": "active",
+                "tokens": total,
+                "count": 0,
+                "cached": False,
+                "contents": contents,
+            })
+
+        cache_hit_rate = cached_tokens / total if total > 0 else 0
+
+        # Tier changes — group by direction
+        promotions = []
+        demotions = []
+        if tracker:
+            # Group changes by (action, from, to)
+            grouped = {}
+            for c in tracker.changes:
+                action = c.get("action", "")
+                direction = "promotion" if action in ("promoted", "graduated") else "demotion"
+                group_key = (direction, c.get("from", "?"), c.get("to", "?"))
+                if group_key not in grouped:
+                    grouped[group_key] = []
+                grouped[group_key].append(c["key"])
+
+            for (direction, from_tier, to_tier), keys in grouped.items():
+                desc = f"{from_tier} → {to_tier}: {len(keys)} items — {', '.join(keys)}"
+                if direction == "promotion":
+                    promotions.append(desc)
+                else:
+                    demotions.append(desc)
+
+        # Session totals in HUD-friendly format
+        st = self._session_totals
+        session_totals = {
+            "prompt": st["input_tokens"],
+            "completion": st["output_tokens"],
+            "total": sum(st.values()),
+            "cache_hit": st["cache_read_tokens"],
+            "cache_write": st["cache_write_tokens"],
+        }
 
         return {
-            "system": system_tokens,
-            "symbol_map": symbol_map_tokens,
-            "files": file_tokens,
-            "history": history_tokens,
+            "model": counter.model_name,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
-            "model": counter.model_name,
-            "session_totals": dict(self._session_totals),
+            "cache_hit_rate": cache_hit_rate,
+            "blocks": blocks,
+            "breakdown": {
+                "system": system_tokens,
+                "legend": legend_tokens,
+                "symbol_map": symbol_map_tokens,
+                "symbol_map_chunks": symbol_map_chunks,
+                "symbol_map_files": len(tokens_by_file),
+                "files": file_tokens,
+                "file_count": len(file_details),
+                "file_details": file_details,
+                "urls": url_tokens,
+                "url_details": url_details,
+                "history": history_tokens,
+                "history_messages": history_msg_count,
+            },
+            "session_totals": session_totals,
+            "promotions": promotions,
+            "demotions": demotions,
         }
 
     # === Terminal HUD ===
@@ -569,99 +891,177 @@ class LLMService:
     def _print_hud(self, usage):
         """Print terminal HUD after response.
 
-        Two reports: Cache Blocks (boxed) and Token Usage.
+        Three reports: Cache Blocks (boxed with sub-items), Token Usage, Tier Changes.
+        Uses logger.info for structured output.
         """
         counter = self._context.counter
+        tracker = self._context._stability_tracker
 
-        # Gather token counts
-        system_tokens = counter.count(self._config.get_system_prompt())
-        symbol_map_tokens = 0
-        if self._symbol_index:
-            sm = self._symbol_index.get_symbol_map(
-                exclude_files=set(self._selected_files)
-            )
-            if sm:
-                symbol_map_tokens = counter.count(sm)
-
-        file_tokens = self._context.file_context.count_tokens(counter)
-        history_tokens = self._context.history_token_count()
-        total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
-
+        # Gather provider-reported usage
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         cache_read = usage.get("cache_read_tokens", 0)
         cache_write = usage.get("cache_write_tokens", 0)
 
-        # --- Cache Blocks Report (boxed) ---
-        tracker = self._context._stability_tracker
-        cache_lines = []
+        # Gather per-tier data
+        system_tokens = counter.count(self._config.get_system_prompt())
+        legend_tokens = 0
+        if self._symbol_index:
+            legend = self._symbol_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+
+        tier_data = []  # list of (name, tokens, is_cached, contents)
         cached_tokens = 0
+        total = 0
+
         if tracker:
             for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
                 tier_items = tracker.get_tier_items(tier)
                 if tier_items:
                     tier_tokens = sum(i.tokens for i in tier_items.values())
-                    entry_n = TIER_CONFIG[tier]["entry_n"]
-                    cache_lines.append(
-                        f"│ {tier.name:<10} ({entry_n}+) {tier_tokens:>8,} tokens [cached]"
-                    )
+                    contents = self._tier_content_breakdown(tier_items)
+                    # For L0, add system + legend as a special sub-item
+                    if tier == Tier.L0:
+                        contents.insert(0, {
+                            "type": "system",
+                            "name": "System + Legend",
+                            "path": None,
+                            "tokens": system_tokens + legend_tokens,
+                            "n": None,
+                            "threshold": None,
+                        })
+                        tier_tokens += system_tokens + legend_tokens
+                    tier_data.append((tier.name, tier_tokens, True, contents))
                     cached_tokens += tier_tokens
+                    total += tier_tokens
+                elif tier == Tier.L0:
+                    # L0 always has system prompt even without tracked items
+                    sys_tok = system_tokens + legend_tokens
+                    if sys_tok > 0:
+                        contents = [{"type": "system", "name": "System + Legend",
+                                     "path": None, "tokens": sys_tok,
+                                     "n": None, "threshold": None}]
+                        tier_data.append((tier.name, sys_tok, True, contents))
+                        cached_tokens += sys_tok
+                        total += sys_tok
+
             active_items = tracker.get_tier_items(Tier.ACTIVE)
             if active_items:
                 active_tokens = sum(i.tokens for i in active_items.values())
-                cache_lines.append(
-                    f"│ active     {active_tokens:>14,} tokens"
+                contents = self._tier_content_breakdown(active_items)
+                tier_data.append(("active", active_tokens, False, contents))
+                total += active_tokens
+        else:
+            # No tracker — show everything as active
+            symbol_map_tokens = 0
+            if self._symbol_index:
+                sm = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
                 )
+                if sm:
+                    symbol_map_tokens = counter.count(sm)
+            file_tokens = self._context.file_context.count_tokens(counter)
+            history_tokens = self._context.history_token_count()
+            total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
+            contents = []
+            if system_tokens:
+                contents.append({"type": "system", "name": "System + Legend",
+                                 "path": None,
+                                 "tokens": system_tokens + legend_tokens,
+                                 "n": None, "threshold": None})
+            if symbol_map_tokens:
+                contents.append({"type": "symbols", "name": "Symbol Map",
+                                 "path": None,
+                                 "tokens": symbol_map_tokens,
+                                 "n": None, "threshold": None})
+            if file_tokens:
+                contents.append({"type": "files", "name": "Files",
+                                 "path": None,
+                                 "tokens": file_tokens,
+                                 "n": None, "threshold": None})
+            if history_tokens:
+                contents.append({"type": "history", "name": "History",
+                                 "path": None,
+                                 "tokens": history_tokens,
+                                 "n": None, "threshold": None})
+            tier_data.append(("active", total, False, contents))
 
-        if cache_lines:
-            cache_hit = round(cached_tokens / total * 100) if total > 0 else 0
-            # Compute box width
-            content_width = max(len(line) for line in cache_lines)
-            footer = f"│ Total: {total:,} | Cache hit: {cache_hit}%"
-            content_width = max(content_width, len(footer))
-            box_width = content_width + 2  # padding
+        # --- Cache Blocks Report (boxed with sub-items) ---
+        cache_hit = round(cached_tokens / total * 100) if total > 0 else 0
 
-            print()
-            print(f"╭─ Cache Blocks {'─' * (box_width - 15)}╮")
-            for line in cache_lines:
-                print(f"{line:<{box_width}}│")
-            print(f"├{'─' * box_width}┤")
-            print(f"{footer:<{box_width}}│")
-            print(f"╰{'─' * box_width}╯")
+        # Build lines
+        box_lines = []
+        for name, tokens, is_cached, contents in tier_data:
+            cached_tag = " [cached]" if is_cached else ""
+            box_lines.append(f"│ {name:<6} {tokens:>8,} tokens{cached_tag}")
+            # Group sub-items by type for compact terminal display
+            type_groups = {}
+            for c in contents:
+                ctype = c["type"]
+                if ctype not in type_groups:
+                    type_groups[ctype] = {"count": 0, "tokens": 0}
+                type_groups[ctype]["count"] += 1
+                type_groups[ctype]["tokens"] += c["tokens"]
+            for ctype, info in type_groups.items():
+                ctokens = info["tokens"]
+                ccount = info["count"]
+                if ctype == "system":
+                    box_lines.append(f"│   └─ system + legend ({ctokens:,} tok)")
+                elif ctype == "symbols":
+                    box_lines.append(f"│   └─ {ccount} symbols ({ctokens:,} tok)")
+                elif ctype == "files":
+                    box_lines.append(f"│   └─ {ccount} files ({ctokens:,} tok)")
+                elif ctype == "history":
+                    box_lines.append(f"│   └─ {ccount} history msgs ({ctokens:,} tok)")
+                else:
+                    box_lines.append(f"│   └─ {ccount} {ctype} ({ctokens:,} tok)")
 
-        # --- Token Usage Report ---
-        print(f"\nModel: {counter.model_name}")
-        print(f"System:     {system_tokens:>8,}")
-        print(f"Symbol Map: {symbol_map_tokens:>8,}")
-        print(f"Files:      {file_tokens:>8,}")
-        print(f"History:    {history_tokens:>8,}")
-        print(f"Total:      {total:>8,} / {counter.max_input_tokens:,}")
+        footer = f"│ Total: {total:,} | Cache hit: {cache_hit}%"
+        content_width = max((len(line) for line in box_lines + [footer]), default=40)
+        box_width = content_width + 2
+
+        hud_lines = [f"╭─ Cache Blocks {'─' * max(1, box_width - 15)}╮"]
+        for line in box_lines:
+            hud_lines.append(f"{line:<{box_width}}│")
+        hud_lines.append(f"├{'─' * box_width}┤")
+        hud_lines.append(f"{footer:<{box_width}}│")
+        hud_lines.append(f"╰{'─' * box_width}╯")
+
+        for line in hud_lines:
+            logger.info(line)
+
+        # --- Token Usage (compact) ---
+        logger.info(f"Model: {counter.model_name}")
         if input_tokens or output_tokens:
-            print(f"Last request: {input_tokens:,} in, {output_tokens:,} out")
+            logger.info(f"Last request: {input_tokens:,} in, {output_tokens:,} out")
         if cache_read or cache_write:
             parts = []
             if cache_read:
                 parts.append(f"read: {cache_read:,}")
             if cache_write:
                 parts.append(f"write: {cache_write:,}")
-            print(f"Cache:      {', '.join(parts)}")
+            logger.info(f"Cache: {', '.join(parts)}")
         session_total = sum(self._session_totals.values())
         if session_total:
-            print(f"Session total: {session_total:,}")
+            logger.info(f"Session total: {session_total:,}")
 
-        # --- Tier Changes ---
+        # --- Tier Changes (grouped) ---
         if tracker:
             changes = tracker.changes
-            promotions = [c for c in changes if c["action"] == "promoted"]
-            demotions = [c for c in changes if c["action"] in ("demoted", "demoted_underfilled")]
-            if promotions:
-                for p in promotions:
-                    print(f"📈 {p.get('from', '?')} → {p.get('to', '?')}: {p['key']}")
-            if demotions:
-                for d in demotions:
-                    print(f"📉 {d.get('from', '?')} → {d.get('to', '?')}: {d['key']}")
+            # Group by (action_type, from, to)
+            grouped = {}
+            for c in changes:
+                action = c.get("action", "")
+                direction = "📈" if action in ("promoted", "graduated") else "📉"
+                group_key = (direction, c.get("from", "?"), c.get("to", "?"))
+                if group_key not in grouped:
+                    grouped[group_key] = []
+                grouped[group_key].append(c["key"])
 
-        print()
+            # Print promotions first, then demotions
+            for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
+                logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
 
     # === History RPC Methods ===
 

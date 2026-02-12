@@ -9,6 +9,7 @@ import pytest
 from ac_dc.config import ConfigManager
 from ac_dc.llm_service import LLMService, _extract_token_usage
 from ac_dc.repo import Repo
+from ac_dc.stability_tracker import Tier
 
 
 @pytest.fixture
@@ -116,6 +117,92 @@ class TestHistory:
         assert len(service.get_current_state()["messages"]) == 0
 
 
+# === Stability Tracker Integration ===
+
+
+class TestStabilityIntegration:
+    def test_tracker_created_on_init(self, service):
+        """Stability tracker is created and attached to context manager."""
+        assert service._stability_tracker is not None
+        assert service._context._stability_tracker is service._stability_tracker
+
+    def test_tracker_not_initialized_before_first_request(self, service):
+        """Tracker is not initialized until first streaming request."""
+        assert service._stability_initialized is False
+        assert len(service._stability_tracker.items) == 0
+
+    def test_update_stability_with_files(self, service):
+        """_update_stability processes selected files and history."""
+        # Add a file to context
+        service.set_selected_files(["README.md"])
+        service._context.file_context.add_file("README.md", "# Test\n")
+        service._context.add_message("user", "hello")
+        service._context.add_message("assistant", "hi")
+
+        service._update_stability()
+
+        # Should have file and history entries
+        items = service._stability_tracker.items
+        assert "file:README.md" in items
+        assert "history:0" in items
+        assert "history:1" in items
+
+    def test_update_stability_n_increments(self, service):
+        """Repeated stability updates increment N for unchanged items."""
+        service.set_selected_files(["README.md"])
+        service._context.file_context.add_file("README.md", "# Test\n")
+
+        service._update_stability()
+        assert service._stability_tracker.get_item("file:README.md").n == 0
+
+        service._update_stability()
+        assert service._stability_tracker.get_item("file:README.md").n == 1
+
+        service._update_stability()
+        assert service._stability_tracker.get_item("file:README.md").n == 2
+
+    def test_update_stability_graduation(self, service):
+        """Items graduate to L3 after N >= 3."""
+        service.set_selected_files(["README.md"])
+        service._context.file_context.add_file("README.md", "# Test\n")
+
+        # Run 5 updates: N goes 0, 1, 2, 3 (graduates), then entry_n for L3
+        for _ in range(5):
+            service._update_stability()
+
+        item = service._stability_tracker.get_item("file:README.md")
+        assert item.tier == Tier.L3
+
+    def test_update_stability_stale_removal(self, service, temp_repo):
+        """Stale files are removed from tracker."""
+        from ac_dc.stability_tracker import TrackedItem
+        # Manually add a tracked item for a non-existent file
+        service._stability_tracker._items["file:gone.py"] = TrackedItem(
+            key="file:gone.py", tier=Tier.L3, n=5,
+            content_hash="x", tokens=100,
+        )
+        service._update_stability()
+        assert service._stability_tracker.get_item("file:gone.py") is None
+
+    def test_new_session_preserves_symbol_tiers(self, service):
+        """New session purges history but preserves symbol tier assignments."""
+        from ac_dc.stability_tracker import TrackedItem
+        service._stability_tracker._items["symbol:src/main.py"] = TrackedItem(
+            key="symbol:src/main.py", tier=Tier.L2, n=7,
+            content_hash="s", tokens=100,
+        )
+        service._stability_tracker._items["history:0"] = TrackedItem(
+            key="history:0", tier=Tier.L3, n=3,
+            content_hash="h", tokens=50,
+        )
+
+        service.new_session()
+
+        # Symbol entry preserved, history purged
+        assert service._stability_tracker.get_item("symbol:src/main.py") is not None
+        assert service._stability_tracker.get_item("history:0") is None
+
+
 # === Context Breakdown ===
 
 
@@ -142,6 +229,18 @@ class TestContextBreakdown:
         totals = breakdown["session_totals"]
         assert totals["input_tokens"] == 0
         assert totals["output_tokens"] == 0
+
+    def test_breakdown_shows_tier_data(self, service):
+        """Breakdown includes tier blocks when tracker has items."""
+        from ac_dc.stability_tracker import TrackedItem
+        service._stability_tracker._items["symbol:src/main.py"] = TrackedItem(
+            key="symbol:src/main.py", tier=Tier.L2, n=7,
+            content_hash="s", tokens=500,
+        )
+        breakdown = service.get_context_breakdown()
+        blocks = breakdown.get("blocks", [])
+        tier_names = [b["tier"] for b in blocks]
+        assert "L2" in tier_names
 
 
 # === Shell Command Detection ===

@@ -13,20 +13,48 @@ Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
 - Deduplication of concurrent requests (one in-flight at a time)
 - Auto-refresh when selected files or URLs change while visible; mark stale when hidden
 
-`LLM.get_context_breakdown(selected_files, included_urls)` returns:
+`LLMService.get_context_breakdown()` returns:
 
 ```pseudo
 {
-    blocks: [{tier, name, tokens, cached, threshold, contents}],
-    breakdown: {system, symbol_map, files, urls, history},
-    total_tokens, cached_tokens, cache_hit_rate,
-    max_input_tokens, model,
-    promotions, demotions,
-    session_totals: {prompt, completion, total, cache_hit, cache_write}
+    model: string,
+    total_tokens: integer,
+    max_input_tokens: integer,
+    cache_hit_rate: float,           // cached_tokens / total_tokens
+    blocks: [{
+        name: string,                // "L0", "L1", "L2", "L3", "active"
+        tier: string,
+        tokens: integer,
+        count: integer,              // number of items in tier
+        cached: boolean,
+        contents: [{                 // optional, per-item details
+            type: string,            // "system"|"legend"|"symbols"|"files"|"urls"|"history"
+            name: string,
+            path: string?,
+            tokens: integer,
+            n: integer?,             // stability N value
+            threshold: integer?,
+        }]
+    }],
+    breakdown: {
+        system: integer,
+        symbol_map: integer,
+        files: integer,
+        history: integer,
+    },
+    promotions: [string],            // "L3 → L2: symbol:path/to/file"
+    demotions: [string],             // "L2 → active: symbol:path/to/file"
+    session_totals: {
+        prompt: integer,
+        completion: integer,
+        total: integer,
+        cache_hit: integer,
+        cache_write: integer,
+    },
 }
 ```
 
-Cache hit rate uses **real provider-reported usage data**, not estimates from tier placement.
+Cache hit rate is computed locally as `cached_tokens / total_tokens` from tier data. **Real provider-reported usage** (cache read/write tokens) is available in the per-request `token_usage` object delivered via `streamComplete`, and in `session_totals`.
 
 ---
 
@@ -35,32 +63,49 @@ Cache hit rate uses **real provider-reported usage data**, not estimates from ti
 ### Layout
 
 ```
-Symbol Map button
-Token Budget: 45.2K / 200.0K  [█████░░░░░░] 23% used
-  System Prompt          1.6K  ██
-  Symbol Map (N files)  34.4K  ████████████
-  Files (N)             15.6K  ██████
-  URLs                     0
-  History                4.1K  ██
-Model: name | Session Totals: In/Out/Total/Cache
+Context Budget                              [↻ Refresh]
+──────────────────────────────────────────────────────
+Token Budget          45.2K / 200.0K
+[████████░░░░░░░░░░░░░░░░░░░░░░░░] 22.6% used
+
+Model: provider/model-name    Cache: 23% hit
+──────────────────────────────────────────────────────
+  ▶ System Prompt        1.6K  ██
+  ▶ Symbol Map (42)     34.4K  ████████████████████
+  ▶ Files (3)           15.6K  ██████████
+    URLs                   0
+    History              4.1K  ███
+──────────────────────────────────────────────────────
+Session Totals
+  Prompt In      182.8K    Completion Out    12.4K
+  Total          195.2K    Cache Hit         48.1K
 ```
 
 ### Budget Bar Colors
 
 ≤ 75% Green, 75–90% Yellow, > 90% Red.
 
+### Model Info
+
+Below the budget bar: model name and cache hit rate percentage. Displayed as a compact info row.
+
+### Categories
+
+Each category shows a name, proportional bar, and token count. Expandable categories (with ▶/▼ toggle) show per-item details when clicked:
+
+| Category | Expandable | Detail Items |
+|----------|------------|-------------|
+| System Prompt | No | — |
+| Symbol Map | Yes | Per-chunk name and tokens |
+| Files | Yes | Per-file path and tokens |
+| URLs | Yes | Per-URL with tokens |
+| History | No | — |
+
+Categories with zero tokens or no detail items show no toggle.
+
 ### Session Totals
 
-Below the category breakdown: cumulative session totals (prompt in, completion out, total, cache reads, cache writes).
-
-### Expandable Categories
-
-| Category | Shows |
-|----------|-------|
-| Symbol Map | Cache chunks with file lists |
-| Files | Per-file token counts |
-| URLs | Include/exclude toggles, view/remove |
-| History | Tier distribution |
+Fixed footer below categories: 2×2 grid showing cumulative session totals (prompt in, completion out, total, cache hit).
 
 ---
 
@@ -69,23 +114,27 @@ Below the category breakdown: cumulative session totals (prompt in, completion o
 ### Layout
 
 ```
-Cache Performance: N% hit rate
-[████████░░░] cached / total
-
-Filter items... (fuzzy)
-
+Cache Performance                     23% hit rate
+[████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
+──────────────────────────────────────────────
+Filter items...                    ● stale  [↻]
+──────────────────────────────────────────────
 RECENT CHANGES
-📈 L3 → L2: file_a
-📉 L2 → active: file_b
-
+📈 L3 → L2: symbol:src/ac_dc/context.py
+📉 L2 → active: symbol:src/ac_dc/repo.py
+──────────────────────────────────────────────
 ▼ L0 · Most Stable     1.6K  🔒
-    ⚙️ System Prompt    1.4K
+    ⚙️ System Prompt            1.4K
+    📖 Legend                      0.2K
 ► L1 · Very Stable    11.1K  🔒
+► L2 · Stable          5.9K  🔒
+► L3 · Entry           0.4K  🔒
 ▼ active              19.7K
-    📄 Files (4)       15.6K
-    💬 History (14)     4.1K
-
-Model / Symbol Map / Refresh | Session Totals
+    📄 src/context.py   ▓▓░░  9.3K
+    📄 src/repo.py      ▓░░░  6.2K
+    💬 History (8)             4.1K
+──────────────────────────────────────────────
+Model: provider/model    Total: 38.7K
 ```
 
 ### Content Groups
@@ -94,33 +143,41 @@ Model / Symbol Map / Refresh | Session Totals
 |------|------|--------|
 | system | ⚙️ | Token count |
 | legend | 📖 | Token count |
-| symbols | 📦 | File path + stability bar |
-| files | 📄 | File path + tokens + stability bar |
-| urls | 🔗 | Checkbox + title + tokens |
+| symbols | 📦 | File path + stability bar (N/threshold) + tokens |
+| files | 📄 | File path + stability bar (N/threshold) + tokens |
+| urls | 🔗 | Title + tokens |
 | history | 💬 | Message count + tokens |
 
 ### Stability Bars
 
-Per-item: `N/threshold` fill with tier color.
+Per-item: `N/threshold` fill with tier color. Tooltip shows `N={n}/{threshold}`. Only shown for items that have an N value (symbols, files).
 
 ### Fuzzy Search
 
-Character-by-character matching. Hides non-matching items and empty tiers.
+Character-by-character matching against item names. Hides non-matching items and tiers with no matching items.
 
 ### Defaults
 
 L0 and active tiers expanded by default; L1/L2/L3 collapsed.
 
+### Stale Indicator
+
+When the tab is hidden during a stream-complete or files-changed event, a `● stale` badge appears. Auto-refreshes when the tab becomes visible.
+
 ### Color Palette
 
 Tiers use a warm-to-cool spectrum:
-- L0: Green (most stable)
-- L1: Teal
-- L2: Blue
-- L3: Amber
-- Active: Orange
+- L0: Green `#50c878` (most stable)
+- L1: Teal `#2dd4bf`
+- L2: Blue `#60a5fa`
+- L3: Amber `#f59e0b`
+- Active: Orange `#f97316`
 
 Token values in monospace green. Cache writes in yellow. Errors in red.
+
+### Footer
+
+Compact footer showing model name and total token count.
 
 ### Relationship to Tabs
 
@@ -138,60 +195,80 @@ Floating overlay on the diff viewer background, appearing after each LLM respons
 
 ### Placement
 
-- Top-level sibling in app-shell shadow DOM
+- Top-level `<ac-token-hud>` element in app-shell shadow DOM (sibling of dialog/diff containers)
 - `position: fixed; top: 16px; right: 16px; z-index: 10000`
 - Uses `RpcMixin` to fetch breakdown independently
-- Triggered by `app-shell._onStreamCompleteForDiff`
+- Triggered by `stream-complete` window event (filters out error responses)
 
-### Sections (all collapsible)
+### Data Flow
+
+1. `streamComplete` fires → HUD extracts `token_usage` from result for immediate display
+2. HUD makes async `LLMService.get_context_breakdown()` call for full data
+3. Once full data arrives, all sections render with complete information
+
+### Sections (all collapsible via ▼/▶ toggle)
 
 | Section | Content |
 |---------|---------|
-| Header | Model name, cache hit % badge, dismiss |
-| Cache Tiers | Per-tier bar chart with content details |
-| This Request | Prompt, completion, cache read/write |
-| History Budget | Usage bar with compact warning |
-| Tier Changes | 📈 promotions, 📉 demotions |
-| Session Totals | Cumulative tokens and cache saved |
+| **Header** | Model name, cache hit % badge (color-coded: ≥50% green, ≥20% amber, <20% red), ✕ dismiss button |
+| **Cache Tiers** | Per-tier horizontal bar chart. Each tier shows: name, proportional bar (colored by tier), token count, 🔒 if cached. Bar width relative to largest tier |
+| **This Request** | Prompt tokens, completion tokens. Cache read (green, shown if >0) and cache write (yellow, shown if >0) |
+| **History Budget** | Total tokens vs max input tokens with usage bar. Bar colored green/yellow/red by percentage. History token count shown separately |
+| **Tier Changes** | 📈 promotions and 📉 demotions as individual items with description text (e.g., "L3 → L2: symbol:src/file.py") |
+| **Session Totals** | Prompt in, completion out, total. Cache saved (green, if >0) and cache written (yellow, if >0) |
 
 ### Behavior
 
-- Auto-hide: 8 seconds → 800ms fade
-- Hover pauses auto-hide
-- Click ✕ to dismiss
-- Shows basic data immediately from streamComplete; fetches full breakdown async
+- **Auto-hide**: 8 seconds → 800ms CSS opacity fade → hidden
+- **Hover pauses**: mouse enter cancels timers and removes fade; mouse leave restarts auto-hide
+- **Dismiss**: click ✕ to immediately hide
+- **Width**: 320px fixed, max-height 80vh with overflow scroll
+- **Error filtering**: HUD does not appear for error responses or empty results
 
 ---
 
 ## Terminal HUD
 
-Printed after each response (not a UI component):
+Printed to the terminal after each LLM response (not a UI component). Three sections:
 
-### Cache Blocks
+### Cache Blocks (Boxed)
+
 ```
-╭─ Cache Blocks ────────────────────╮
-│ L0 (12+)    1,622 tokens [cached] │
-│ active     19,643 tokens          │
-├───────────────────────────────────┤
-│ Total: 55,448 | Cache hit: 23%   │
-╰───────────────────────────────────╯
+╭─ Cache Blocks ────────────────────────────╮
+│ L0         (12+)    1,622 tokens [cached] │
+│ L1          (9+)   11,137 tokens [cached] │
+│ L2          (6+)    8,462 tokens [cached] │
+│ L3          (3+)      388 tokens [cached] │
+│ active             19,643 tokens          │
+├───────────────────────────────────────────┤
+│ Total: 41,252 | Cache hit: 52%           │
+╰───────────────────────────────────────────╯
 ```
+
+Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by the token count and `[cached]`. Active tier shows token count only. Only non-empty tiers are listed. The box width auto-sizes to the widest line. Cache hit percentage is computed as `cached_tokens / total_tokens`.
 
 ### Token Usage
+
 ```
-Model: model-name
+Model: bedrock/anthropic.claude-sonnet-4-20250514
 System:         1,622
 Symbol Map:    34,355
 Files:              0
 History:       21,532
-Total:         57,347 / 1,000,000
+Total:         57,509 / 1,000,000
 Last request:  74,708 in, 34 out
-Cache:         write: 48,070
+Cache:         read: 21,640, write: 48,070
 Session total: 182,756
 ```
 
+Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields.
+
 ### Tier Changes
+
 ```
-📈 L3 → L2: 1 item — 📦 some/file
-📉 L2 → active: 1 item — 📦 other/file
+📈 L3 → L2: symbol:src/ac_dc/context.py
+📈 L3 → L2: history:0
+📉 L2 → active: symbol:src/ac_dc/repo.py
 ```
+
+One line per change from the stability tracker's change log. Promotions (📈) listed first, then demotions (📉). Each line shows `{from} → {to}: {item_key}`. Item keys use the tracker's key format: `symbol:{path}`, `file:{path}`, or `history:{index}`.

@@ -13,6 +13,7 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 // Import child components so custom elements are registered
 import './components/ac-dialog.js';
 import './components/diff-viewer.js';
+import './components/token-hud.js';
 
 /**
  * Extract WebSocket port from URL query parameter ?port=N
@@ -310,6 +311,8 @@ class AcApp extends JRPCClient {
           <ac-dialog></ac-dialog>
         </div>
       </div>
+
+      <ac-token-hud></ac-token-hud>
 
       <div class="status-bar hidden"></div>
       <div class="reconnect-banner">Reconnecting...</div>

@@ -265,13 +265,20 @@ export class AcDialog extends RpcMixin(LitElement) {
     if (lazyImports[tabId]) {
       lazyImports[tabId]();
     }
-    // Focus search input when switching to search
-    if (tabId === 'search') {
-      this.updateComplete.then(() => {
+    // Notify newly visible tab and handle focus
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector(`.tab-panel.active`);
+      if (panel) {
+        const child = panel.firstElementChild;
+        if (child && typeof child.onTabVisible === 'function') {
+          child.onTabVisible();
+        }
+      }
+      if (tabId === 'search') {
         const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
         if (searchTab) searchTab.focus();
-      });
-    }
+      }
+    });
   }
 
   _toggleMinimize() {
