@@ -51,8 +51,8 @@ class CompactFormatter:
             legend = self._format_legend()
             return legend + "\n\n" + "\n\n".join(all_blocks)
 
-        # Split into chunks
-        chunk_size = max(1, len(all_blocks) // chunks)
+        # Split into chunks (ceiling division to never exceed requested count)
+        chunk_size = max(1, -(-len(all_blocks) // chunks))
         result = []
         for i in range(0, len(all_blocks), chunk_size):
             chunk_blocks = all_blocks[i:i + chunk_size]

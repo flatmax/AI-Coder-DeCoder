@@ -32,5 +32,8 @@ ac-dc = "ac_dc.main:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:litellm",
+]
 testpaths = ["tests"]
 asyncio_mode = "auto"
