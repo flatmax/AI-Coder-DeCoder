@@ -44,9 +44,7 @@ function applyFileMentions(html, repoFiles, selectedFiles, editFilePaths = []) {
   // Split HTML into segments: inside tags/pre/code vs plain text
   // We'll walk through and only replace in "safe" text segments
   const result = [];
-  let lastIndex = 0;
   let inPre = false;
-  let inCode = false;
 
   // Regex to find HTML tags
   const tagRe = /<\/?[a-zA-Z][^>]*>/g;
@@ -66,8 +64,8 @@ function applyFileMentions(html, repoFiles, selectedFiles, editFilePaths = []) {
     const nextTag = tagIdx < tags.length ? tags[tagIdx] : null;
     const textEnd = nextTag ? nextTag.index : html.length;
 
-    if (pos < textEnd && !inPre && !inCode) {
-      // Process this text segment for file mentions
+    if (pos < textEnd && !inPre) {
+      // Process this text segment for file mentions (allowed inside inline <code>)
       const textSegment = html.slice(pos, textEnd);
       const replaced = textSegment.replace(combined, (match) => {
         referencedSet.add(match);
@@ -76,7 +74,7 @@ function applyFileMentions(html, repoFiles, selectedFiles, editFilePaths = []) {
       });
       result.push(replaced);
     } else if (pos < textEnd) {
-      // Inside pre/code — don't replace
+      // Inside pre block — don't replace
       result.push(html.slice(pos, textEnd));
     }
 
@@ -85,8 +83,6 @@ function applyFileMentions(html, repoFiles, selectedFiles, editFilePaths = []) {
       const lower = nextTag.tag.toLowerCase();
       if (lower.startsWith('<pre')) inPre = true;
       else if (lower.startsWith('</pre')) inPre = false;
-      else if (lower.startsWith('<code')) inCode = true;
-      else if (lower.startsWith('</code')) inCode = false;
       pos = nextTag.end;
     } else {
       pos = textEnd;
@@ -264,7 +260,7 @@ function renderMarkdown(text) {
     .replace(/>/g, '&gt;')
     // Code blocks (``` ... ```)
     .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      return `<pre class="code-block"><code>${code}</code></pre>`;
+      return `<pre class="code-block"><button class="copy-btn">📋</button><code>${code}</code></pre>`;
     })
     // Inline code
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -349,6 +345,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _toast: { type: Object, state: true },
     _committing: { type: Boolean, state: true },
     _repoFiles: { type: Array, state: true },
+    _chatSearchQuery: { type: String, state: true },
+    _chatSearchMatches: { type: Array, state: true },
+    _chatSearchCurrent: { type: Number, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -978,6 +977,84 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: rgba(79, 195, 247, 0.2);
     }
 
+    /* Message action buttons (top-right and bottom-right) */
+    .msg-actions {
+      position: absolute;
+      right: 8px;
+      display: flex;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .msg-actions.top { top: 8px; }
+    .msg-actions.bottom { bottom: 8px; }
+    .message-card:hover .msg-actions { opacity: 1; }
+
+    .msg-action-btn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .msg-action-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+
+    /* Chat search */
+    .chat-search {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex: 1;
+      min-width: 0;
+    }
+    .chat-search-input {
+      flex: 1;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 0.8rem;
+      padding: 4px 8px;
+      outline: none;
+      min-width: 60px;
+    }
+    .chat-search-input:focus {
+      border-color: var(--accent-primary);
+    }
+    .chat-search-input::placeholder {
+      color: var(--text-muted);
+    }
+    .chat-search-counter {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .chat-search-nav {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 2px 4px;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+    }
+    .chat-search-nav:hover {
+      color: var(--text-primary);
+      background: var(--bg-secondary);
+    }
+
+    /* Search highlight on message cards */
+    .message-card.search-highlight {
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 1px var(--accent-primary), 0 0 12px rgba(79, 195, 247, 0.15);
+    }
+
   `];
 
   constructor() {
@@ -1000,6 +1077,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._toast = null;
     this._committing = false;
     this._repoFiles = [];
+    this._chatSearchQuery = '';
+    this._chatSearchMatches = [];
+    this._chatSearchCurrent = -1;
+    this._atFilterActive = false;
 
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -1163,6 +1244,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._inputValue = e.target.value;
     this._autoResize(e.target);
     this._onInputForUrlDetection();
+    this._checkAtFilter(this._inputValue);
   }
 
   _autoResize(textarea) {
@@ -1199,7 +1281,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     // Escape priority chain
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (this._snippetDrawerOpen) {
+      if (this._atFilterActive) {
+        this._clearAtFilter();
+      } else if (this._snippetDrawerOpen) {
         this._snippetDrawerOpen = false;
       } else if (this._inputValue) {
         this._inputValue = '';
@@ -1535,6 +1619,190 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }, 3000);
   }
 
+  // === Chat Search ===
+
+  _onChatSearchInput(e) {
+    this._chatSearchQuery = e.target.value;
+    this._updateChatSearchMatches();
+  }
+
+  _onChatSearchKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        this._chatSearchPrev();
+      } else {
+        this._chatSearchNext();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this._clearChatSearch();
+      e.target.blur();
+    }
+  }
+
+  _updateChatSearchMatches() {
+    const query = this._chatSearchQuery.trim().toLowerCase();
+    if (!query) {
+      this._chatSearchMatches = [];
+      this._chatSearchCurrent = -1;
+      this._clearSearchHighlights();
+      return;
+    }
+    const matches = [];
+    for (let i = 0; i < this.messages.length; i++) {
+      const content = (this.messages[i].content || '').toLowerCase();
+      if (content.includes(query)) {
+        matches.push(i);
+      }
+    }
+    this._chatSearchMatches = matches;
+    if (matches.length > 0) {
+      this._chatSearchCurrent = 0;
+      this._scrollToSearchMatch(matches[0]);
+    } else {
+      this._chatSearchCurrent = -1;
+      this._clearSearchHighlights();
+    }
+  }
+
+  _chatSearchNext() {
+    if (this._chatSearchMatches.length === 0) return;
+    this._chatSearchCurrent = (this._chatSearchCurrent + 1) % this._chatSearchMatches.length;
+    this._scrollToSearchMatch(this._chatSearchMatches[this._chatSearchCurrent]);
+  }
+
+  _chatSearchPrev() {
+    if (this._chatSearchMatches.length === 0) return;
+    this._chatSearchCurrent = (this._chatSearchCurrent - 1 + this._chatSearchMatches.length) % this._chatSearchMatches.length;
+    this._scrollToSearchMatch(this._chatSearchMatches[this._chatSearchCurrent]);
+  }
+
+  _scrollToSearchMatch(msgIndex) {
+    this._clearSearchHighlights();
+    this.updateComplete.then(() => {
+      const card = this.shadowRoot?.querySelector(`.message-card[data-msg-index="${msgIndex}"]`);
+      if (card) {
+        card.classList.add('search-highlight');
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    });
+  }
+
+  _clearSearchHighlights() {
+    const cards = this.shadowRoot?.querySelectorAll('.message-card.search-highlight');
+    if (cards) {
+      for (const c of cards) c.classList.remove('search-highlight');
+    }
+  }
+
+  _clearChatSearch() {
+    this._chatSearchQuery = '';
+    this._chatSearchMatches = [];
+    this._chatSearchCurrent = -1;
+    this._clearSearchHighlights();
+  }
+
+  // === @-Filter ===
+
+  _checkAtFilter(value) {
+    // Detect @text pattern at end of input
+    const match = value.match(/@(\S*)$/);
+    if (match) {
+      this._atFilterActive = true;
+      this.dispatchEvent(new CustomEvent('filter-from-chat', {
+        detail: { filter: match[1] },
+        bubbles: true, composed: true,
+      }));
+    } else if (this._atFilterActive) {
+      this._atFilterActive = false;
+      this.dispatchEvent(new CustomEvent('filter-from-chat', {
+        detail: { filter: '' },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
+  _clearAtFilter() {
+    if (!this._atFilterActive) return false;
+    // Remove @query from input
+    const match = this._inputValue.match(/@\S*$/);
+    if (match) {
+      this._inputValue = this._inputValue.slice(0, match.index).trimEnd();
+      const textarea = this.shadowRoot?.querySelector('.input-textarea');
+      if (textarea) {
+        textarea.value = this._inputValue;
+        this._autoResize(textarea);
+      }
+    }
+    this._atFilterActive = false;
+    this.dispatchEvent(new CustomEvent('filter-from-chat', {
+      detail: { filter: '' },
+      bubbles: true, composed: true,
+    }));
+    return true;
+  }
+
+  // === File Mention Input Accumulation ===
+
+  /**
+   * Add text to the input when a file mention is clicked.
+   * Accumulates filenames if the pattern matches.
+   */
+  accumulateFileInInput(filename) {
+    const basename = filename.split('/').pop();
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    const current = this._inputValue.trim();
+
+    if (!current) {
+      // Empty input
+      this._inputValue = `The file ${basename} added. Do you want to see more files before you continue?`;
+    } else if (/^The file .+ added\./.test(current) || /\(added .+\)$/.test(current)) {
+      // Existing accumulation pattern — append filename
+      if (current.includes('Do you want to see more files')) {
+        // Replace the single file mention with a list
+        const existingMatch = current.match(/^The file (.+?) added\./);
+        if (existingMatch) {
+          this._inputValue = `The files ${existingMatch[1]}, ${basename} added. Do you want to see more files before you continue?`;
+        } else {
+          const filesMatch = current.match(/^The files (.+?) added\./);
+          if (filesMatch) {
+            this._inputValue = `The files ${filesMatch[1]}, ${basename} added. Do you want to see more files before you continue?`;
+          }
+        }
+      } else {
+        this._inputValue = current + ` (added ${basename})`;
+      }
+    } else {
+      // Unrelated text — append
+      this._inputValue = current + ` (added ${basename})`;
+    }
+
+    if (textarea) {
+      textarea.value = this._inputValue;
+      this._autoResize(textarea);
+    }
+  }
+
+  // === Copy / Insert Message Actions ===
+
+  _copyMessageText(msg) {
+    navigator.clipboard.writeText(msg.content || '').then(() => {
+      this._showToast('Copied to clipboard', 'success');
+    });
+  }
+
+  _insertMessageText(msg) {
+    const text = msg.content || '';
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      this._inputValue = text;
+      textarea.value = text;
+      this._autoResize(textarea);
+      textarea.focus();
+    }
+  }
+
   // === Rendering ===
 
   _renderEditSummary(msg) {
@@ -1546,6 +1814,29 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     return html`<div class="edit-summary">${parts}</div>`;
   }
 
+  _renderMsgActions(msg) {
+    if (this.streamingActive) return nothing;
+    return html`
+      <div class="msg-actions top">
+        <button class="msg-action-btn" title="Copy" @click=${() => this._copyMessageText(msg)}>📋</button>
+        <button class="msg-action-btn" title="Insert into input" @click=${() => this._insertMessageText(msg)}>↩</button>
+      </div>
+    `;
+  }
+
+  _renderMsgActionsBottom(msg) {
+    if (this.streamingActive) return nothing;
+    const content = msg.content || '';
+    // Only show bottom actions on long messages (rough heuristic: > 600 chars)
+    if (content.length < 600) return nothing;
+    return html`
+      <div class="msg-actions bottom">
+        <button class="msg-action-btn" title="Copy" @click=${() => this._copyMessageText(msg)}>📋</button>
+        <button class="msg-action-btn" title="Insert into input" @click=${() => this._insertMessageText(msg)}>↩</button>
+      </div>
+    `;
+  }
+
   _renderMessage(msg, index) {
     const isUser = msg.role === 'user';
     const content = msg.content || '';
@@ -1553,10 +1844,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (isUser) {
       return html`
         <div class="message-card user" data-msg-index="${index}">
+          ${this._renderMsgActions(msg)}
           <div class="role-label">You</div>
           <div class="md-content" @click=${this._onContentClick}>
             ${unsafeHTML(renderMarkdown(content))}
           </div>
+          ${this._renderMsgActionsBottom(msg)}
         </div>
       `;
     }
@@ -1580,6 +1873,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     return html`
       <div class="message-card assistant" data-msg-index="${index}">
+        ${this._renderMsgActions(msg)}
         <div class="role-label">Assistant</div>
         ${this._renderEditSummary(msg)}
         <div class="md-content" @click=${this._onContentClick}>
@@ -1590,6 +1884,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
             ${unsafeHTML(fileSummaryHtml)}
           </div>
         ` : nothing}
+        ${this._renderMsgActionsBottom(msg)}
       </div>
     `;
   }
@@ -1676,7 +1971,23 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       <div class="action-bar">
         <button class="action-btn" title="New session" @click=${this._newSession}>✨</button>
         <button class="action-btn" title="Browse history" @click=${this._openHistoryBrowser}>📜</button>
-        <div class="action-spacer"></div>
+
+        <div class="chat-search">
+          <input
+            class="chat-search-input"
+            type="text"
+            placeholder="Search messages..."
+            .value=${this._chatSearchQuery}
+            @input=${this._onChatSearchInput}
+            @keydown=${this._onChatSearchKeyDown}
+          >
+          ${this._chatSearchMatches.length > 0 ? html`
+            <span class="chat-search-counter">${this._chatSearchCurrent + 1}/${this._chatSearchMatches.length}</span>
+            <button class="chat-search-nav" title="Previous (Shift+Enter)" @click=${this._chatSearchPrev}>▲</button>
+            <button class="chat-search-nav" title="Next (Enter)" @click=${this._chatSearchNext}>▼</button>
+          ` : nothing}
+        </div>
+
         <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
         <button class="action-btn" title="Stage all & commit" @click=${this._commitWithMessage}

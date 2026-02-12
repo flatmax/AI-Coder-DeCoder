@@ -11,7 +11,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 
 export class AcFilePicker extends RpcMixin(LitElement) {
   static properties = {
-    selectedFiles: { type: Object },     // Set<string>
+    selectedFiles: { type: Object, hasChanged: () => true },     // Set<string> — always re-render on set
     _tree: { type: Object, state: true },
     _modified: { type: Array, state: true },
     _staged: { type: Array, state: true },

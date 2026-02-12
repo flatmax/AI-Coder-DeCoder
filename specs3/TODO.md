@@ -115,9 +115,22 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Cache viewer** — Tier blocks, stability bars, recent changes, fuzzy filter
 - [x] **Settings panel** — Config type cards, edit/reload buttons, toast feedback
 - [x] **History browser** — Modal overlay, session list, search, message preview, load into context
-- [ ] **File mentions** — Detect repo file paths in assistant responses, clickable links, summary chips ← NEXT
-- [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow
+- [x] **File mentions** — Detect repo file paths in assistant responses, clickable links, summary chips, chat search, message actions, @-filter, input accumulation, toggle selection from mentions
+- [ ] **Diff viewer** — Monaco editor, side-by-side diff, language detection, dirty tracking, save flow ← NEXT
+  - Monaco diff editor component with side-by-side view (original read-only, modified editable)
+  - File tab bar with path, status badge (NEW/MOD), save button when dirty
+  - Language detection from file extension
+  - Per-file dirty tracking (savedContent vs current)
+  - Single file save (Ctrl+S) and batch save
+  - Monaco shadow DOM style injection (clone stylesheets, MutationObserver sync)
+  - Worker-safe language handling (plaintext for built-in worker languages)
 - [ ] **Diff viewer layout** — Background placement, navigate-file routing, file-save handling, post-edit refresh
+  - Background layer (position: fixed, inset: 0, z-index: 0) with AC⚡DC watermark
+  - navigate-file event routing from file picker, search, chat edit blocks
+  - HEAD vs working copy diff for applied edits
+  - Post-edit refresh: only reload already-open files
+  - Scroll-to-edit-anchor with progressive prefix search and 3s highlight
+  - App shell wiring: route navigate-file, file-save events
 - [ ] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [ ] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 - [ ] **Speech to text** — Auto-transcribe toggle using Web Speech API

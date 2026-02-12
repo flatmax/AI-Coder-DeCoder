@@ -146,6 +146,11 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (this.rpcConnected) {
       this.rpcCall('LLMService.set_selected_files', files).catch(() => {});
     }
+    // Force chat panel to re-render file mentions with updated selection
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.requestUpdate();
+    }
   }
 
   _onFileClicked(e) {
@@ -185,6 +190,53 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (picker) {
       picker.setFilter(filter);
     }
+  }
+
+  _onFileMentionClick(e) {
+    const path = e.detail?.path;
+    if (!path) return;
+
+    let newFiles;
+    if (this._selectedFiles.includes(path)) {
+      // Already selected → remove from selection
+      newFiles = this._selectedFiles.filter(f => f !== path);
+    } else {
+      // Not selected → add to selection
+      newFiles = [...this._selectedFiles, path];
+
+      // Accumulate text in chat input (only on add)
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.accumulateFileInInput(path);
+      }
+    }
+
+    // Update selection state
+    this._selectedFiles = newFiles;
+
+    // Directly update picker's selectedFiles and force re-render
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.selectedFiles = new Set(newFiles);
+      picker.requestUpdate();
+    }
+
+    // Force chat panel to re-render file mentions with updated selection
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.requestUpdate();
+    }
+
+    // Notify server
+    if (this.rpcConnected) {
+      this.rpcCall('LLMService.set_selected_files', newFiles).catch(() => {});
+    }
+
+    // Navigate to the file in diff viewer
+    this.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path },
+      bubbles: true, composed: true,
+    }));
   }
 
   _onFilesModified() {
@@ -294,6 +346,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
           .selectedFiles=${this._selectedFiles}
           .streamingActive=${this._streamingActive}
           @files-modified=${this._onFilesModified}
+          @filter-from-chat=${this._onFilterFromChat}
+          @file-mention-click=${this._onFileMentionClick}
         ></ac-chat-panel>
       </div>
     `;

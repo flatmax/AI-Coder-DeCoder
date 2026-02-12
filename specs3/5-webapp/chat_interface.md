@@ -37,14 +37,22 @@ Below each assistant message with file references:
 
 Chips show ✓ (in context, muted) or + (not in context, accent). "Add All" button for 2+ unselected files.
 
-### Click → Input Accumulation
+### Click → Toggle Selection
 
-Clicking a file mention dispatches `file-mention-click`. The Files tab adds the file to selection and accumulates input text:
+Clicking a file mention dispatches `file-mention-click`. The Files tab **toggles** the file's selection state:
+
+- **Not selected** → add to selection, update picker checkbox, accumulate input text
+- **Already selected** → remove from selection, update picker checkbox
+
+In both cases, navigate to the file in the diff viewer.
+
+### Input Accumulation (on add)
+
+When a file is added via mention click:
 
 - Empty input: `The file helpers.js added. Do you want to see more files before you continue?`
 - Existing pattern: appends filename to list
 - Unrelated text: appends `(added helpers.js)`
-- Removing: removes filename from accumulated text
 
 ---
 

@@ -55,11 +55,10 @@ On first load, auto-select modified/staged/untracked files. Auto-expand director
 
 ## File Mention Selection
 
-Files mentioned in assistant responses can be added to the selection via `file-mention-click` events (see [Chat Interface](chat_interface.md#file-mentions)). When clicked:
-1. File added to selected files set
-2. File picker checkbox state updated
-3. Parent directory auto-expanded if collapsed
-4. Chat input text accumulated with file list prompt (see Chat Interface — Input Text Accumulation)
+Files mentioned in assistant responses toggle selection via `file-mention-click` events (see [Chat Interface](chat_interface.md#file-mentions)). When clicked:
+1. If not selected: file added to selected files set, picker checkbox checked, parent directory auto-expanded, chat input text accumulated
+2. If already selected: file removed from selected files set, picker checkbox unchecked
+3. In both cases: file opened in diff viewer
 
 ## Middle-Click Path Insertion
 
