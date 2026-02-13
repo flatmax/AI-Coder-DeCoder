@@ -123,6 +123,9 @@ class LLM:
         self._review_stats: dict = {}
         self._symbol_map_before = ""
 
+        # Detect stale review state from a previous session/crash
+        self._stale_review = self._detect_stale_review()
+
     def _new_session_id(self) -> str:
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
 
@@ -338,7 +341,13 @@ class LLM:
                         for b in blocks
                     ]
 
-                    edit_results = apply_edits_to_repo(blocks, self._repo.root)
+                    # In review mode, do not apply edits — review is read-only
+                    if self._review_active:
+                        log.info("Review mode: skipping edit application (%d blocks)", len(blocks))
+                        result["review_mode_skipped"] = True
+                        edit_results = []
+                    else:
+                        edit_results = apply_edits_to_repo(blocks, self._repo.root)
                     files_modified = []
 
                     for er in edit_results:
@@ -576,6 +585,8 @@ class LLM:
 
     def generate_commit_message(self, diff: str) -> dict:
         """Generate a commit message from a diff using a smaller/cheaper model."""
+        if self._review_active:
+            return {"error": "Cannot generate commit messages during review mode. Exit review first."}
         if not diff or not diff.strip():
             return {"error": "No diff provided"}
 
@@ -749,6 +760,9 @@ class LLM:
         self._review_changed_files = changed_files
         self._review_stats = stats
 
+        # Compute structural symbol diff
+        symbol_diff = self._compute_symbol_diff()
+
         return {
             "status": "review_active",
             "branch": branch,
@@ -756,6 +770,7 @@ class LLM:
             "commits": commits,
             "changed_files": changed_files,
             "stats": stats,
+            "symbol_diff": symbol_diff,
         }
 
     def end_review(self) -> dict:
@@ -797,7 +812,10 @@ class LLM:
     def get_review_state(self) -> dict:
         """Get current review mode state."""
         if not self._review_active:
-            return {"active": False}
+            result = {"active": False}
+            if self._stale_review:
+                result["stale_review"] = self._stale_review
+            return result
         return {
             "active": True,
             "branch": self._review_branch,
@@ -807,6 +825,73 @@ class LLM:
             "changed_files": self._review_changed_files,
             "stats": self._review_stats,
         }
+
+    def recover_from_stale_review(self) -> dict:
+        """Attempt to restore the branch from a stale review state detected on startup."""
+        if not self._stale_review:
+            return {"error": "No stale review state detected"}
+        branch = self._stale_review.get("branch", "")
+        branch_tip = self._stale_review.get("branch_tip", "")
+        if not branch or not branch_tip:
+            return {"error": "Cannot recover: missing branch or tip info"}
+        result = self._repo.exit_review_mode(branch, branch_tip)
+        if "error" not in result:
+            self._stale_review = None
+            # Rebuild symbol index after recovery
+            if self._symbol_index:
+                try:
+                    self._symbol_index.invalidate_files(
+                        list(self._symbol_index.all_symbols.keys())
+                    )
+                    self._symbol_index.index_repo()
+                    self._save_symbol_map()
+                    self._init_stability()
+                except Exception as e:
+                    log.warning("Failed to rebuild symbol index after review recovery: %s", e)
+        return result
+
+    def _detect_stale_review(self) -> Optional[dict]:
+        """Detect if the repo is in a stale review state from a previous session.
+
+        A stale review state is detected when HEAD is detached — this happens
+        during review mode's soft reset. We try to identify the branch that
+        was being reviewed so recovery is possible.
+        """
+        try:
+            info = self._repo.get_current_branch()
+            if not info.get("detached"):
+                return None
+            # HEAD is detached — likely a stale review state
+            current_sha = info.get("sha", "")
+            branches = self._repo.list_branches()
+            branch_list = branches.get("branches", [])
+
+            for b in branch_list:
+                branch_name = b.get("name", "")
+                if not branch_name or branch_name == "HEAD":
+                    continue
+                # Check if this branch has commits ahead of current HEAD
+                commits = self._repo.get_commit_log(current_sha, branch_name, limit=200)
+                if isinstance(commits, list) and len(commits) > 0:
+                    # Resolve full branch tip SHA via repo method
+                    branch_tip = self._repo.resolve_ref(branch_name)
+                    if branch_tip:
+                        log.warning(
+                            "Detected stale review state: HEAD detached at %s, "
+                            "branch '%s' at %s. Use recover_from_stale_review() to restore.",
+                            current_sha[:8], branch_name, branch_tip[:8],
+                        )
+                        return {
+                            "branch": branch_name,
+                            "branch_tip": branch_tip,
+                            "detached_at": current_sha,
+                        }
+            # Detached HEAD but no branch found ahead — could be intentional detach
+            log.info("HEAD is detached at %s but no review branch candidate found", current_sha[:8])
+            return None
+        except Exception as e:
+            log.debug("Stale review detection failed: %s", e)
+            return None
 
     def get_review_file_diff(self, path: str) -> dict:
         """Get the diff for a specific file in review mode."""

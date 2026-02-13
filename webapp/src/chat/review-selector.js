@@ -217,16 +217,29 @@ class ReviewSelector extends RpcMixin(LitElement) {
         this._error = result.error;
         return;
       }
-      // Find the commit after the merge base
+      // get_commit_log returns commits in reverse chronological order
+      // (newest first) for the range merge_base..branch (exclusive base).
+      // We need to resolve the branch to a concrete SHA for the range.
+      const branchTip = await this.rpcExtract(
+        'Repo.resolve_ref', this._selectedBranch
+      );
+      const headRef = branchTip || this._selectedBranch;
       const commits = await this.rpcExtract(
-        'Repo.get_commit_log', result.sha, this._selectedBranch, 200
+        'Repo.get_commit_log', result.sha, headRef, 200
       );
       if (Array.isArray(commits) && commits.length > 0) {
-        // The last commit in the log is the first after merge base
+        // Last entry is the oldest commit — the first after merge base
         this._selectedCommit = commits[commits.length - 1];
+        // Also refresh the commit list to show only divergent commits
+        this._commits = commits;
         this._error = '';
       } else {
-        this._error = `No commits found between merge base (${result.short_sha || result.sha?.substring(0, 8)}) and ${this._selectedBranch}`;
+        // No commits in range — branch may already be at or behind merge base
+        if (branchTip === result.sha) {
+          this._error = `Branch '${this._selectedBranch}' is at the same commit as '${this._mergeBaseTarget}' — nothing to review`;
+        } else {
+          this._error = `No commits found between merge base (${result.short_sha || result.sha?.substring(0, 8)}) and ${this._selectedBranch}. The branch may have been rebased or force-pushed.`;
+        }
       }
     } catch (e) {
       this._error = 'Merge base detection failed: ' + e;

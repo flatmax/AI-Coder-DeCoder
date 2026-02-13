@@ -76,10 +76,10 @@ The repository is exactly as it was before review mode — all commits intact, c
 ### Error Recovery
 
 If any step in the entry sequence fails (e.g., checkout conflict, invalid commit):
-1. Attempt to return to the original branch: `git checkout {branch}`
-2. If that fails, attempt: `git checkout {original_head_sha}`
-3. Report the error to the user with the current git state
-4. Do not enter review mode
+
+- **During initial checkout (steps 1-3):** The repo module attempts `git checkout {branch}` to return to the original branch. If that fails, the error is reported as-is.
+- **During setup completion (steps 5-6):** The LLM service calls the full exit sequence (`exit_review_mode`) which performs `git reset --soft {branch_tip}` followed by `git checkout {branch}`, restoring the branch to its original state.
+- The error is reported to the user and review mode is not entered.
 
 If the process crashes during review mode, the user can manually restore with:
 ```
@@ -217,22 +217,26 @@ The full current content is in the working files above.
 
 ### Context Tiering
 
+Review context is re-injected on each message (like URL context), so it is always current with the user's file selection. The stability tracker handles tiering naturally:
+
 | Content | Tier | Rationale |
 |---------|------|-----------|
-| Review summary (commits, stats) | Graduates to cached tiers | Doesn't change during review |
-| Pre-change symbol map | Graduates to cached tiers | Doesn't change during review |
-| Reverse diffs for selected files | Active tier | User toggles which files are included |
+| Review summary (commits, stats) | Re-injected each message | Part of the review context block |
+| Pre-change symbol map | Re-injected each message | Part of the review context block |
+| Reverse diffs for selected files | Re-injected each message | Changes as user toggles file selection |
 | Full file contents | Normal tiering | Selected files follow standard stability rules |
+
+Since the review context block is rebuilt each message, compaction of older history messages doesn't lose review information.
 
 ### Token Budget
 
-For large reviews, not all file diffs can fit in context. The system prioritizes:
+For large reviews, not all file diffs can fit in context. The system includes reverse diffs only for files the user has explicitly selected in the file picker. This gives the user direct control over the token budget:
 
-1. **Files selected (checked) in the picker** — their diffs are always included
-2. **High blast-radius files** — sorted by reference count from the symbol map
-3. **Largest diffs last** — small changes are cheap to include; large rewrites may need to be reviewed individually
+1. **Selected files** — their full content is in the working files context, and their reverse diff is in the review context section
+2. **Unselected files** — contribute neither content nor diffs
+3. **Incremental review** — the user can review files in batches: "Review the auth module files" → select those files → send → deselect → select the next batch
 
-The review diff chips (see UI section) show which files have their diffs included, allowing the user to manage the token budget.
+The review status bar shows "N/M diffs in context" so the user always knows how many changed files are currently included.
 
 ## Pre-Change Symbol Map
 
@@ -251,11 +255,24 @@ When a file is selected (checked in the file picker) during review mode, its ful
 
 Files that are not selected contribute neither content nor diffs — the user controls context size through file selection.
 
+### File Selection Flow
+
+The typical review workflow uses file mentions as the primary interaction:
+
+1. User sends a review prompt (e.g., "Review the auth changes")
+2. LLM responds, mentioning relevant files by name
+3. File mentions appear as clickable links in the chat message
+4. User clicks a file mention → file is toggled in the picker → its full content and reverse diff are included in subsequent messages
+5. The review status bar updates to show "N/M diffs in context"
+6. User can also directly check/uncheck files in the file picker
+
+This leverages the existing file mention detection and click-to-select infrastructure — no review-specific file UI is needed.
+
 ## UI Components
 
 ### Review Mode Banner
 
-Displayed at the top of the file picker when review mode is active:
+Displayed at the top of the file picker when review mode is active. Shows the branch name, commit range, and an exit button:
 
 ```
 ┌──────────────────────────────────┐
@@ -265,6 +282,8 @@ Displayed at the top of the file picker when review mode is active:
 │                      [Exit ✕]   │
 └──────────────────────────────────┘
 ```
+
+The banner is rendered by the file picker component and synchronized with the review state from `get_review_state()`.
 
 ### Commit Selector
 
@@ -295,30 +314,34 @@ Entering review mode...
 
 The file picker operates unchanged — staged files appear with **S** badges, diff stats show additions/deletions. The filter, selection, context menu, and keyboard navigation all work as normal.
 
-**Optional toggle**: "Show: Changed / All" to filter the tree to only files that changed in the review. Default: Changed only.
+### Review Status Bar
 
-### Review Diff Chips
-
-A chip bar displayed above the chat input (similar to URL chips), showing the active review and which file diffs are included in context:
+A slim status bar displayed above the chat input showing the active review summary and diff inclusion count:
 
 ```
-┌───────────────────────────────────────────────────┐
-│ 📋 Review: abc1234→HEAD · 12 commits · 34 files  │
-│ [📄 handler.py ✓] [📄 models.py ✓]               │
-│ [📄 connection.py ○]  +31 more                    │
-│                                    [Clear Review] │
-└───────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ 📋  feature-auth  12 commits · 34 files · +1847 −423          │
+│                              3/34 diffs in context [Exit Review]│
+└────────────────────────────────────────────────────────────────┘
 ```
 
 | Element | Behavior |
 |---------|----------|
-| Summary line | Shows branch, commit range, totals |
-| File chip (✓) | Diff included in LLM context; click to open in diff viewer |
-| File chip (○) | Diff excluded; click to toggle inclusion |
-| "+N more" | Expand to show all files |
-| "Clear Review" | Exit review mode (with confirmation) |
+| Branch name | Shows which branch is under review |
+| Stats | Commit count, files changed, additions/deletions |
+| Diff count | "N/M diffs in context" — how many selected files overlap with changed files |
+| Prompt text | When no files selected: "Select files to include diffs" |
+| "Exit Review" | Exit review mode and restore branch |
 
-Chips are synchronized with the file picker selection — checking a file in the picker also includes its diff in the review chips, and vice versa.
+### File Selection for Review Diffs
+
+Review mode does **not** use a separate chip-per-file UI for toggling diffs. Instead, it uses the standard file selection mechanisms:
+
+1. **File picker** — User checks files in the tree as usual. Staged review files appear with **S** badges.
+2. **File mentions** — The LLM mentions files in its responses; clicking a mention toggles the file's selection in the picker.
+3. **Automatic diff inclusion** — Any selected file that is also in the review's changed file list automatically has its reverse diff included in the review context sent to the LLM.
+
+This approach avoids duplicating the file picker's functionality and scales naturally to large reviews — the user selects only the files they want the LLM to focus on, and the review status bar shows the count of diffs currently in context.
 
 ### Diff Viewer in Review Mode
 
@@ -392,7 +415,8 @@ start_review(branch, base_commit) -> {
     status, branch, base_commit,
     commits: [{sha, message, author, date}],
     changed_files: [{path, status, additions, deletions}],
-    stats: {commit_count, files_changed, additions, deletions}
+    stats: {commit_count, files_changed, additions, deletions},
+    symbol_diff: {added, removed, modified, text}
 } | {error}
 
 end_review() -> {status: "restored"} | {error}
@@ -400,8 +424,13 @@ end_review() -> {status: "restored"} | {error}
 get_review_state() -> {
     active: boolean,
     branch?, base_commit?, commits?, changed_files?,
-    stats?
+    stats?,
+    stale_review?: {branch, branch_tip, detached_at}
 }
+
+recover_from_stale_review() -> {status: "restored"} | {error}
+
+get_review_file_diff(path) -> {path, diff}
 ```
 
 ### Review State
@@ -417,9 +446,17 @@ The LLM service holds review state in memory:
 | `_review_parent` | str | Parent of base commit (current git HEAD) |
 | `_review_commits` | list | Commit log |
 | `_review_changed_files` | list | Changed file paths with status |
+| `_review_stats` | dict | Aggregate stats (commit count, files, additions, deletions) |
 | `_symbol_map_before` | str | Symbol map from pre-review state |
+| `_stale_review` | dict or None | Detected stale review state from previous session (branch, branch_tip, detached_at) |
 
-State is not persisted across server restarts. On restart, the server detects the soft-reset state and prompts the user to either re-enter review mode or exit cleanly.
+State is not persisted across server restarts. On restart, the server detects the soft-reset state (HEAD detached) and identifies the review branch by finding a local branch with commits ahead of the current HEAD. The frontend auto-recovers by calling `recover_from_stale_review()`, which restores the branch via the standard exit sequence. If recovery fails, the user is shown an error toast.
+
+```pseudo
+_detect_stale_review() -> {branch, branch_tip, detached_at} | null
+
+recover_from_stale_review() -> {status: "restored"} | {error}
+```
 
 ## Integration with Existing Systems
 
@@ -447,7 +484,24 @@ Review conversations use the standard history and compaction system. The review 
 
 The chat operates normally during review. The review context is additional content in the prompt assembly — no changes to the streaming, edit parsing, or completion flow.
 
-Edit blocks proposed by the AI during review mode are **not applied** by default — review mode is for reading, not writing. A future enhancement could support suggested fixes that are applied on user confirmation.
+Edit blocks proposed by the AI during review mode are **not applied** — review mode is read-only. The edit blocks still appear in the response for reference, but `apply_edits_to_repo` is skipped. Commit generation is also blocked during review mode.
+
+A future enhancement could support suggested fixes that are applied on user confirmation.
+
+### Symbol Diff
+
+On review entry, `start_review` computes a structural symbol diff by comparing `symbol_map_before` against the current symbol index. The result is returned to the frontend as `symbol_diff`:
+
+```pseudo
+symbol_diff: {
+    added: [{path, status: "added", symbols: [{name, kind, signature, action}]}],
+    removed: [{path, status: "deleted", ref_count}],
+    modified: [{path, status: "modified", changes: [{signature, action}]}],
+    text: string  // human-readable summary for display
+}
+```
+
+This gives the UI a structured overview of what changed architecturally, while the LLM gets both full symbol maps to reason about changes in context.
 
 ## Limitations
 

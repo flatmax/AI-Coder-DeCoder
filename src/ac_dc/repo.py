@@ -376,6 +376,13 @@ class Repo:
         r = _run_git(["status", "--porcelain"], self.root)
         return r.returncode == 0 and not r.stdout.strip()
 
+    def resolve_ref(self, ref: str) -> Optional[str]:
+        """Resolve a git ref (branch name, tag, SHA prefix) to a full SHA."""
+        r = _run_git(["rev-parse", ref], self.root)
+        if r.returncode != 0:
+            return None
+        return r.stdout.strip()
+
     def search_commits(self, query: str = "", branch: str = "",
                        limit: int = 50) -> list[dict]:
         """Search commits by message, SHA prefix, or author."""

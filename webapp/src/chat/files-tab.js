@@ -370,6 +370,28 @@ class FilesTab extends RpcMixin(LitElement) {
       const state = await this.rpcExtract('LLM.get_review_state');
       this._reviewState = state || { active: false };
       this._updateSnippets();
+
+      // Detect stale review state from a previous session/crash
+      if (!state?.active && state?.stale_review) {
+        const stale = state.stale_review;
+        this._toast(
+          `Detected stale review state: branch '${stale.branch}' was being reviewed. ` +
+          `Use the review selector to recover or click the notification to restore.`,
+          'warning',
+        );
+        // Auto-recover: attempt to restore the branch
+        try {
+          const result = await this.rpcExtract('LLM.recover_from_stale_review');
+          if (result?.error) {
+            this._toast('Review recovery failed: ' + result.error, 'error');
+          } else {
+            this._toast(`Branch '${stale.branch}' restored from stale review state`, 'success');
+            await this._loadFileTree();
+          }
+        } catch (e) {
+          this._toast('Review recovery failed: ' + e, 'error');
+        }
+      }
     } catch (e) {
       this._reviewState = { active: false };
     }
@@ -1223,7 +1245,7 @@ class FilesTab extends RpcMixin(LitElement) {
         ${this._reviewState?.active ? html`
           <review-chips
             .reviewState=${this._reviewState}
-            .selectedFiles=${new Set(this.selectedFiles)}
+            .selectedFiles=${this.selectedFiles}
             @review-end-requested=${this._onEndReview}
           ></review-chips>
         ` : nothing}
