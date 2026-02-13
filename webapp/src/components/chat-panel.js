@@ -964,17 +964,53 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (sentinel && container) {
       this._observer = new IntersectionObserver(
         ([entry]) => {
-          this._autoScroll = entry.isIntersecting;
+          // Don't disable auto-scroll during active streaming — content reflows
+          // can briefly push the sentinel out of view
+          if (entry.isIntersecting) {
+            this._autoScroll = true;
+          } else if (!this.streamingActive) {
+            this._autoScroll = false;
+          }
         },
-        { root: container, threshold: 0.1 }
+        { root: container, threshold: 0.01 }
       );
       this._observer.observe(sentinel);
+
+      // Track manual scroll-up during streaming to let the user break out
+      this._lastScrollTop = 0;
+      container.addEventListener('scroll', () => {
+        if (this.streamingActive) {
+          // If user scrolled UP, they want to disengage
+          if (container.scrollTop < this._lastScrollTop - 30) {
+            this._autoScroll = false;
+          }
+        }
+        this._lastScrollTop = container.scrollTop;
+      }, { passive: true });
+    }
+
+    // Scroll to bottom on initial load (browser refresh with restored messages)
+    if (this.messages.length > 0) {
+      requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
     }
   }
 
   onRpcReady() {
     this._loadSnippets();
     this._loadRepoFiles();
+  }
+
+  updated(changedProps) {
+    super.updated(changedProps);
+    // When messages are bulk-loaded (e.g. state restore, session load), scroll to bottom
+    if (changedProps.has('messages') && !this.streamingActive) {
+      const oldMessages = changedProps.get('messages');
+      // Detect bulk load: went from empty/undefined to having messages
+      if ((!oldMessages || oldMessages.length === 0) && this.messages.length > 0) {
+        this._autoScroll = true;
+        requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+      }
+    }
   }
 
   async _loadRepoFiles() {
@@ -1017,8 +1053,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           this._streamingContent = this._pendingChunk;
           this._pendingChunk = null;
           if (this._autoScroll) {
+            // Use updateComplete then double-rAF to ensure DOM has reflowed
             this.updateComplete.then(() => {
-              this._scrollToBottom();
+              requestAnimationFrame(() => this._scrollToBottom());
             });
           }
         }
@@ -1068,7 +1105,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._pendingChunk = null;
 
     if (this._autoScroll) {
-      requestAnimationFrame(() => this._scrollToBottom());
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+      });
     }
 
     // Refresh file tree if edits were applied
@@ -1087,7 +1126,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   _scrollToBottom() {
     const container = this.shadowRoot?.querySelector('.messages');
     if (container) {
-      container.scrollTop = container.scrollHeight;
+      // Force layout before setting scrollTop to avoid stale scrollHeight
+      container.scrollTop = container.scrollHeight + 1000;
     }
   }
 
