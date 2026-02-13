@@ -91,11 +91,12 @@ Since disk files already match the branch tip, this just reattaches HEAD.
 
 ### Clean Working Tree
 
-Review mode requires a clean working tree — no staged, unstaged, or untracked changes. If the tree is dirty, the user is shown an error:
+Review mode requires a clean working tree — no staged or unstaged changes to tracked files. Untracked files are ignored since they won't conflict with checkout/reset operations and are common in any repo (`.ac-dc/`, editor configs, etc.). If the tree is dirty, the user is shown an error:
 
 ```
 Cannot enter review mode: working tree has uncommitted changes.
-Please commit, stash, or discard changes before starting a review.
+Please commit, stash, or discard changes first
+(git stash, git commit, or git checkout -- <file>).
 ```
 
 ### Dedicated Review Clone
@@ -106,11 +107,11 @@ The recommended workflow is to use a separate clone for reviews. This avoids dis
 
 ### Branch Selection
 
-A dropdown or searchable list of local branches. Remote branches that aren't checked out locally are shown but require a fetch + checkout first.
+A dropdown or searchable list of local branches.
 
 ```pseudo
 list_branches() -> {
-    branches: [{name, sha, message, is_current, is_remote}],
+    branches: [{name, sha, message, is_current}],
     current: string
 }
 ```
@@ -138,9 +139,9 @@ Two input methods:
 └──────────────────────────────────────┘
 ```
 
-**Direct SHA input** — A text field accepting a commit SHA (full or short). Validated before proceeding.
+**Direct SHA input** — The commit search input also accepts SHA prefixes. The `search_commits` backend method first tries `--grep` matching, then falls back to SHA prefix matching against the commit log.
 
-**Merge base shortcut** — A button or option to auto-detect the merge base with a target branch (typically `main`):
+**Merge base shortcut** — A button to auto-detect the merge base with a target branch (defaults to `main` or `master` if available, otherwise the first other branch):
 ```
 Review all commits since divergence from: [main ▾]
 ```
@@ -150,7 +151,7 @@ This calls `git merge-base main {branch}` and uses the result as the parent comm
 
 ```pseudo
 search_commits(query, branch?, limit?) -> [
-    {sha, short_sha, message, author, date, files_changed?}
+    {sha, short_sha, message, author, date}
 ]
 ```
 
@@ -183,7 +184,7 @@ Review context is inserted as a dedicated section in the message array, between 
 ```
 # Code Review Context
 
-## Review: {branch} ({base_commit_short} → {head_short})
+## Review: {branch} ({parent_short} → {tip_short})
 {commit_count} commits, {files_changed} files changed, +{additions} -{deletions}
 
 ## Commits
@@ -305,9 +306,7 @@ Appears when entering review mode. Located in the file picker panel area or as a
 ```
 Entering review mode...
   ✓ Verified clean working tree
-  ✓ Checked out pre-review state
-  ⟳ Building symbol map...
-  ○ Setting up review state
+  ⟳ Building symbol maps & setting up review
 ```
 
 ### File Picker in Review Mode
@@ -354,19 +353,26 @@ File tabs show review status badges: **NEW** for added files, **MOD** for modifi
 
 ### Review Snippets
 
-When review mode is active, additional snippet buttons appear in the snippet drawer:
+When review mode is active, additional snippet buttons can appear in the snippet drawer. These are loaded from the `review_snippets` array in the snippets configuration file (repo-local `.ac-dc/snippets.json` or the global `snippets.json`). No default review snippets are included — users configure them for their workflow.
 
-| Icon | Tooltip | Message |
-|------|---------|---------|
-| 🔍 | Full review | Review all changes in the review diff. Provide a structured summary with issues categorized by severity (critical, warning, suggestion, question). |
-| 🔒 | Security review | Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting. |
-| 🚶 | Commit walkthrough | Walk through each commit in order, explaining the author's intent for each change and flagging any issues. |
-| 🏗️ | Architecture review | Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture. |
-| ✅ | Test coverage | Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful? |
-| 📝 | PR description | Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes. |
-| 🧹 | Code quality | Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns. |
+Example `snippets.json` with review snippets:
 
-These snippets supplement (not replace) the standard snippets. They are loaded when `get_review_state().active` is true.
+```json
+{
+  "snippets": [ ... ],
+  "review_snippets": [
+    {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes in the review diff. Provide a structured summary with issues categorized by severity (critical, warning, suggestion, question)."},
+    {"icon": "🔒", "tooltip": "Security review", "message": "Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting."},
+    {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the author's intent for each change and flagging any issues."},
+    {"icon": "🏗️", "tooltip": "Architecture review", "message": "Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture."},
+    {"icon": "✅", "tooltip": "Test coverage", "message": "Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful?"},
+    {"icon": "📝", "tooltip": "PR description", "message": "Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes."},
+    {"icon": "🧹", "tooltip": "Code quality", "message": "Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns."}
+  ]
+}
+```
+
+These snippets supplement (not replace) the standard snippets. They are merged into the snippet drawer when `get_review_state().active` is true.
 
 ## Backend
 
@@ -423,7 +429,7 @@ end_review() -> {status: "restored"} | {error}
 
 get_review_state() -> {
     active: boolean,
-    branch?, base_commit?, commits?, changed_files?,
+    branch?, base_commit?, branch_tip?, commits?, changed_files?,
     stats?,
     stale_review?: {branch, branch_tip, detached_at}
 }
@@ -431,6 +437,10 @@ get_review_state() -> {
 recover_from_stale_review() -> {status: "restored"} | {error}
 
 get_review_file_diff(path) -> {path, diff}
+
+get_reverse_review_file_diff(path) -> string
+    # Used internally by _format_review_context for reverse diffs
+    # (git diff --cached -R -- path)
 ```
 
 ### Review State
@@ -450,7 +460,7 @@ The LLM service holds review state in memory:
 | `_symbol_map_before` | str | Symbol map from pre-review state |
 | `_stale_review` | dict or None | Detected stale review state from previous session (branch, branch_tip, detached_at) |
 
-State is not persisted across server restarts. On restart, the server detects the soft-reset state (HEAD detached) and identifies the review branch by finding a local branch with commits ahead of the current HEAD. The frontend auto-recovers by calling `recover_from_stale_review()`, which restores the branch via the standard exit sequence. If recovery fails, the user is shown an error toast.
+State is not persisted across server restarts. On restart, the server detects the soft-reset state (HEAD detached) and identifies the review branch by iterating local branches and finding one with commits ahead of the current HEAD via `get_commit_log(current_sha, branch_name)`. The frontend auto-recovers on load by calling `recover_from_stale_review()`, which restores the branch via the standard exit sequence and rebuilds the symbol index. If recovery fails, the user is shown an error toast. If HEAD is detached but no candidate branch is found (e.g. intentional detach), no stale review is reported.
 
 ```pseudo
 _detect_stale_review() -> {branch, branch_tip, detached_at} | null
