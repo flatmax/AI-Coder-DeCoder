@@ -178,6 +178,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _chatSearchQuery: { type: String, state: true },
     _chatSearchMatches: { type: Array, state: true },
     _chatSearchCurrent: { type: Number, state: true },
+    _lightboxSrc: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -540,6 +541,47 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .send-btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
+    }
+
+    /* User image thumbnails in messages */
+    .user-images {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .user-image-thumb {
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-primary);
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .user-image-thumb:hover {
+      border-color: var(--accent-primary);
+      transform: scale(1.03);
+    }
+
+    /* Image lightbox */
+    .image-lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 10002;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .image-lightbox img {
+      max-width: 90vw;
+      max-height: 90vh;
+      object-fit: contain;
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
     }
 
     /* Image previews */
@@ -1259,7 +1301,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     urlChips?.onSend();
 
     // Add user message to display immediately
-    this.messages = [...this.messages, { role: 'user', content: message }];
+    const userMsg = { role: 'user', content: message };
+    if (images && images.length > 0) {
+      userMsg.images = [...images];  // data URIs for display
+    }
+    this.messages = [...this.messages, userMsg];
 
     // Clear input
     this._inputValue = '';
@@ -1750,14 +1796,26 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   // === Copy / Insert Message Actions ===
 
+  _getMessageText(msg) {
+    const content = msg.content;
+    if (Array.isArray(content)) {
+      // Multimodal array — extract text blocks
+      return content
+        .filter(b => b.type === 'text' && b.text)
+        .map(b => b.text)
+        .join('\n');
+    }
+    return content || '';
+  }
+
   _copyMessageText(msg) {
-    navigator.clipboard.writeText(msg.content || '').then(() => {
+    navigator.clipboard.writeText(this._getMessageText(msg)).then(() => {
       this._showToast('Copied to clipboard', 'success');
     });
   }
 
   _insertMessageText(msg) {
-    const text = msg.content || '';
+    const text = this._getMessageText(msg);
     const textarea = this.shadowRoot?.querySelector('.input-textarea');
     if (textarea) {
       this._inputValue = text;
@@ -1886,6 +1944,78 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * Render user message content, handling both plain text and multimodal
+   * content arrays (from loaded history sessions with images).
+   */
+  _renderUserContent(msg) {
+    const content = msg.content;
+
+    // Case 1: Multimodal array content (loaded from history)
+    // [{type: "text", text: "..."}, {type: "image_url", image_url: {url: "data:..."}}]
+    if (Array.isArray(content)) {
+      const parts = [];
+      const imageSrcs = [];
+      for (const block of content) {
+        if (block.type === 'text' && block.text) {
+          parts.push(html`<div class="md-content" @click=${this._onContentClick}>
+            ${unsafeHTML(renderMarkdown(block.text))}
+          </div>`);
+        } else if (block.type === 'image_url' && block.image_url?.url) {
+          imageSrcs.push(block.image_url.url);
+        }
+      }
+      if (imageSrcs.length > 0) {
+        parts.push(html`
+          <div class="user-images">
+            ${imageSrcs.map(src => html`
+              <img class="user-image-thumb" src="${src}" alt="User image"
+                   @click=${() => this._openLightbox(src)}>
+            `)}
+          </div>
+        `);
+      }
+      return parts;
+    }
+
+    // Case 2: Plain text content (current session)
+    const textContent = content || '';
+    const textPart = html`<div class="md-content" @click=${this._onContentClick}>
+      ${unsafeHTML(renderMarkdown(textContent))}
+    </div>`;
+
+    // Check for attached images (data URIs from current session)
+    if (msg.images && msg.images.length > 0) {
+      return html`
+        ${textPart}
+        <div class="user-images">
+          ${msg.images.map(src => html`
+            <img class="user-image-thumb" src="${src}" alt="User image"
+                 @click=${() => this._openLightbox(src)}>
+          `)}
+        </div>
+      `;
+    }
+
+    return textPart;
+  }
+
+  _openLightbox(src) {
+    this._lightboxSrc = src;
+  }
+
+  _closeLightbox(e) {
+    // Close on click anywhere or Escape
+    this._lightboxSrc = null;
+  }
+
+  _onLightboxKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this._lightboxSrc = null;
+    }
+  }
+
   _renderMessage(msg, index) {
     const isUser = msg.role === 'user';
     const content = msg.content || '';
@@ -1895,9 +2025,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         <div class="message-card user" data-msg-index="${index}">
           ${this._renderMsgActions(msg)}
           <div class="role-label">You</div>
-          <div class="md-content" @click=${this._onContentClick}>
-            ${unsafeHTML(renderMarkdown(content))}
-          </div>
+          ${this._renderUserContent(msg)}
           ${this._renderMsgActionsBottom(msg)}
         </div>
       `;
@@ -2163,6 +2291,17 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       <!-- Toast -->
       ${this._toast ? html`
         <div class="toast ${this._toast.type}">${this._toast.message}</div>
+      ` : nothing}
+
+      <!-- Image Lightbox -->
+      ${this._lightboxSrc ? html`
+        <div class="image-lightbox"
+             @click=${this._closeLightbox}
+             @keydown=${this._onLightboxKeyDown}
+             tabindex="0">
+          <img src="${this._lightboxSrc}" alt="Full size image"
+               @click=${(e) => e.stopPropagation()}>
+        </div>
       ` : nothing}
     `;
   }

@@ -1123,11 +1123,19 @@ class LLMService:
         for msg in msgs:
             self._context.add_message(msg["role"], msg["content"])
 
+        # Build frontend messages with reconstructed images
+        frontend_messages = []
+        for msg in msgs:
+            entry = {"role": msg["role"], "content": msg["content"]}
+            if msg.get("_images"):
+                entry["images"] = msg["_images"]
+            frontend_messages.append(entry)
+
         self._session_id = session_id
         return {
             "session_id": session_id,
             "message_count": len(msgs),
-            "messages": self._context.get_history(),
+            "messages": frontend_messages,
         }
 
     def get_history_status(self):
