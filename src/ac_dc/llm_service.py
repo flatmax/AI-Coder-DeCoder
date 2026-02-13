@@ -687,6 +687,34 @@ class LLM:
     # Code review
     # ------------------------------------------------------------------
 
+    def get_commit_graph(self, limit: int = 100, offset: int = 0,
+                         include_remote: bool = False) -> dict:
+        """Get commit graph data for the review selector UI.
+
+        Delegates to repo.get_commit_graph(). Called by the review selector
+        to populate the git graph UI. Pagination via offset for lazy loading.
+        """
+        return self._repo.get_commit_graph(limit, offset, include_remote)
+
+    def check_review_ready(self) -> dict:
+        """Check if the working tree is clean enough for review mode.
+
+        Called when the review selector opens, before rendering the graph.
+        Returns {clean: true} or {clean: false, message: string}.
+        """
+        if self._repo.is_clean():
+            return {"clean": True}
+        return {
+            "clean": False,
+            "message": (
+                "Cannot start a review with pending changes.\n"
+                "Please commit, stash, or discard changes first:\n\n"
+                "  git stash\n"
+                "  git commit -am \"wip\"\n"
+                "  git checkout -- <file>"
+            ),
+        }
+
     def start_review(self, branch: str, base_commit: str) -> dict:
         """Enter code review mode.
 
@@ -716,13 +744,13 @@ class LLM:
             except Exception as e:
                 log.warning("Failed to build pre-review symbol map: %s", e)
 
-        # Step 5-6: Complete setup (checkout branch, soft reset)
+        # Step 5-6: Complete setup (checkout branch tip, soft reset)
         setup = self._repo.complete_review_setup(
-            entry["branch"], entry["parent_commit"],
+            entry["branch"], entry["branch_tip"], entry["parent_commit"],
         )
         if "error" in setup:
             # Try to recover
-            self._repo.exit_review_mode(branch, entry["branch_tip"])
+            self._repo.exit_review_mode(entry["branch_tip"])
             return setup
 
         # Rebuild symbol index from reviewed code (disk = branch tip)
@@ -774,13 +802,11 @@ class LLM:
         }
 
     def end_review(self) -> dict:
-        """Exit code review mode and restore the branch."""
+        """Exit code review mode."""
         if not self._review_active:
             return {"error": "No review is active"}
 
-        result = self._repo.exit_review_mode(
-            self._review_branch, self._review_branch_tip,
-        )
+        result = self._repo.exit_review_mode(self._review_branch_tip)
 
         # Clear review state regardless of result
         self._review_active = False
@@ -830,11 +856,10 @@ class LLM:
         """Attempt to restore the branch from a stale review state detected on startup."""
         if not self._stale_review:
             return {"error": "No stale review state detected"}
-        branch = self._stale_review.get("branch", "")
         branch_tip = self._stale_review.get("branch_tip", "")
-        if not branch or not branch_tip:
-            return {"error": "Cannot recover: missing branch or tip info"}
-        result = self._repo.exit_review_mode(branch, branch_tip)
+        if not branch_tip:
+            return {"error": "Cannot recover: missing branch tip info"}
+        result = self._repo.exit_review_mode(branch_tip)
         if "error" not in result:
             self._stale_review = None
             # Rebuild symbol index after recovery
@@ -855,7 +880,9 @@ class LLM:
 
         A stale review state is detected when HEAD is detached — this happens
         during review mode's soft reset. We try to identify the branch that
-        was being reviewed so recovery is possible.
+        was being reviewed so recovery is possible. The original branch is
+        unknown after a crash, so exit_review_mode will fall back to
+        main/master.
         """
         try:
             info = self._repo.get_current_branch()

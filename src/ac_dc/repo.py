@@ -387,6 +387,91 @@ class Repo:
             return None
         return r.stdout.strip()
 
+    def get_commit_graph(self, limit: int = 100, offset: int = 0,
+                         include_remote: bool = False) -> dict:
+        """Get commit graph data for the git graph UI.
+
+        Returns commits with parent relationships and branch info,
+        ordered topologically for graph rendering.
+        """
+        # Get branch data, sorted by most recent commit
+        branch_args = ["branch", "--sort=-committerdate",
+                       "--format=%(refname:short)\t%(objectname)\t%(if)%(HEAD)%(then)1%(else)0%(end)"]
+        if include_remote:
+            branch_args.insert(1, "-a")
+        r = _run_git(branch_args, self.root)
+        branches_raw = []
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.strip().splitlines():
+                parts = line.split("\t", 2)
+                if len(parts) >= 3:
+                    name = parts[0].strip()
+                    sha = parts[1].strip()
+                    is_current = parts[2].strip() == "1"
+                    is_remote = "/" in name
+                    # Skip symbolic refs and pointer entries:
+                    #  - "HEAD" (detached HEAD)
+                    #  - anything ending in "/HEAD" (e.g. origin/HEAD)
+                    #  - lines containing " -> " (symbolic ref pointers)
+                    if name == "HEAD" or name.endswith("/HEAD") or " -> " in line:
+                        continue
+                    branches_raw.append({
+                        "name": name,
+                        "sha": sha,
+                        "is_current": is_current,
+                        "is_remote": is_remote,
+                    })
+
+        # Post-filter: remove bare remote aliases (e.g. "origin") that git
+        # includes when listing branches with -a. A bare name that is a prefix
+        # of other branch names (e.g. "origin" when "origin/master" exists)
+        # is a remote alias, not a real branch.
+        all_names = {b["name"] for b in branches_raw}
+        branches = []
+        for b in branches_raw:
+            if "/" not in b["name"] and not b["is_current"]:
+                if any(n.startswith(b["name"] + "/") for n in all_names):
+                    continue
+            branches.append(b)
+
+        # Get commits with parents in topological order
+        log_args = ["log", "--all", "--topo-order",
+                    "--format=%H\t%h\t%s\t%an\t%aI\t%ar\t%P",
+                    f"--max-count={limit}"]
+        if offset > 0:
+            log_args.append(f"--skip={offset}")
+        r = _run_git(log_args, self.root)
+        commits = []
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.strip().splitlines():
+                parts = line.split("\t", 6)
+                if len(parts) >= 7:
+                    parent_str = parts[6].strip()
+                    parents = parent_str.split() if parent_str else []
+                    commits.append({
+                        "sha": parts[0],
+                        "short_sha": parts[1],
+                        "message": parts[2],
+                        "author": parts[3],
+                        "date": parts[4],
+                        "relative_date": parts[5],
+                        "parents": parents,
+                    })
+
+        # Check if there are more commits beyond this batch
+        has_more = False
+        if len(commits) == limit:
+            check_args = ["log", "--all", "--topo-order", "--format=%H",
+                          "--max-count=1", f"--skip={offset + limit}"]
+            r2 = _run_git(check_args, self.root)
+            has_more = r2.returncode == 0 and bool(r2.stdout.strip())
+
+        return {
+            "commits": commits,
+            "branches": branches,
+            "has_more": has_more,
+        }
+
     def search_commits(self, query: str = "", branch: str = "",
                        limit: int = 50) -> list[dict]:
         """Search commits by message, SHA prefix, or author."""
@@ -473,6 +558,10 @@ class Repo:
         Steps 1-3 of the entry sequence. Returns phase="at_parent" when
         the repo is at the parent commit (pre-review state) and symbol map
         should be built from disk files.
+
+        The branch may be a local branch (e.g. 'feature-auth') or a remote
+        tracking ref (e.g. 'origin/feature-auth'). Both work — remote refs
+        already have commits locally from fetch.
         """
         # Step 1: Verify clean working tree
         if not self.is_clean():
@@ -492,7 +581,8 @@ class Repo:
             return parent_result
         parent_sha = parent_result["sha"]
 
-        # Step 2: Checkout branch (ensure we're on it)
+        # Step 2: Checkout branch (ensure we have the right files on disk)
+        # This may result in detached HEAD if branch is a remote ref — that's fine
         r = _run_git(["checkout", branch], self.root)
         if r.returncode != 0:
             return {"error": f"Cannot checkout branch '{branch}': {r.stderr.strip()}"}
@@ -500,7 +590,6 @@ class Repo:
         # Step 3: Checkout parent (detached HEAD at pre-review state)
         r = _run_git(["checkout", parent_sha], self.root)
         if r.returncode != 0:
-            # Try to recover
             _run_git(["checkout", branch], self.root)
             return {"error": f"Cannot checkout parent commit: {r.stderr.strip()}"}
 
@@ -512,15 +601,19 @@ class Repo:
             "phase": "at_parent",
         }
 
-    def complete_review_setup(self, branch: str, parent_commit: str) -> dict:
+    def complete_review_setup(self, branch: str, branch_tip: str,
+                              parent_commit: str) -> dict:
         """Complete review mode setup after symbol map is captured.
 
-        Steps 5-6: checkout branch, then soft reset to parent.
+        Steps 5-6: checkout branch tip (by SHA to handle remote refs),
+        then soft reset to parent.
         """
-        # Step 5: Checkout branch (disk files = branch tip)
-        r = _run_git(["checkout", branch], self.root)
+        # Step 5: Checkout branch tip by SHA (works for both local and remote refs)
+        # Using the SHA avoids issues with remote refs like 'origin/foo'
+        # which would leave HEAD detached at the ref rather than at the tip
+        r = _run_git(["checkout", branch_tip], self.root)
         if r.returncode != 0:
-            return {"error": f"Cannot checkout branch: {r.stderr.strip()}"}
+            return {"error": f"Cannot checkout branch tip: {r.stderr.strip()}"}
 
         # Step 6: Soft reset to parent (all review changes become staged)
         r = _run_git(["reset", "--soft", parent_commit], self.root)
@@ -529,21 +622,15 @@ class Repo:
 
         return {"status": "review_ready"}
 
-    def exit_review_mode(self, branch: str, branch_tip: str) -> dict:
-        """Exit review mode and restore the branch.
+    def exit_review_mode(self, branch_tip: str) -> dict:
+        """Exit review mode: soft reset to branch tip to unstage everything.
 
-        Steps: soft reset to tip, checkout branch to reattach HEAD.
+        Leaves HEAD detached at the branch tip. The user can checkout
+        whichever branch they want after the review.
         """
-        # Step 1: Reset to original branch tip
         r = _run_git(["reset", "--soft", branch_tip], self.root)
         if r.returncode != 0:
             return {"error": f"Reset to branch tip failed: {r.stderr.strip()}"}
-
-        # Step 2: Checkout branch (reattach HEAD)
-        r = _run_git(["checkout", branch], self.root)
-        if r.returncode != 0:
-            return {"error": f"Cannot reattach to branch: {r.stderr.strip()}"}
-
         return {"status": "restored"}
 
     def get_review_diff(self, path: str) -> dict:
