@@ -77,30 +77,63 @@ Coalesced per animation frame. Each chunk carries full accumulated content. Firs
 
 ### Edit Block Rendering
 
-During streaming: in-progress indicator. On completion:
+During streaming: edit blocks detected mid-stream render as `edit-pending` with a pending badge and partial diff. On completion:
 - File path (clickable → navigates to diff viewer with `searchText` from the edit block's old/new lines)
-- Status badge: ✓ Applied (green), ✗ Failed: reason (red), ⊘ Skipped (grey)
+- Status badge: ✅ Applied (green), ❌ Failed: reason (red), ⚠️ Skipped (orange), ☑ Validated (blue), 🆕 New (green, for file creates), ⏳ Pending (grey)
 - Two-level diff highlighting (see below)
+- Error message below header (for failed edits only)
+
+#### Edit Block Segmentation (`edit-blocks.js`)
+
+`segmentResponse(text)` splits raw LLM text into an array of segments using the same markers as the backend parser (`««« EDIT` / `═══════ REPL` / `»»» EDIT END`):
+
+| Segment Type | Description |
+|-------------|-------------|
+| `text` | Markdown prose between edit blocks |
+| `edit` | Complete edit block with `filePath`, `oldLines`, `newLines`, `isCreate` |
+| `edit-pending` | Incomplete edit block (stream ended mid-block) |
+
+The file path line preceding `««« EDIT` is stripped from the text segment and attached to the edit segment. Consecutive file-path-like lines are handled by treating only the last one before `««« EDIT` as the actual path.
 
 #### Two-Level Diff Highlighting
 
-**Stage 1: Line-level diff** — `computeDiff(oldLines, newLines)` produces `equal`, `delete`, `insert`, and `modify` operations. Adjacent delete+insert pairs that share enough common tokens are reclassified as `modify` (enabling character-level highlighting).
+Uses the `diff` npm package (Myers diff algorithm).
 
-**Stage 2: Character-level diff** — For each `modify` pair, `computeCharDiff(oldStr, newStr)` tokenizes on word boundaries and diffs tokens via LCS, producing `equal`/`delete`/`insert` segments.
+**Stage 1: Line-level diff** — `computeDiff(oldLines, newLines)` calls `diffLines()` to produce flat line objects typed as `context`, `remove`, or `add`.
 
-**Stage 3: Render** — Each line gets a class (`context`, `remove`, `add`). For modified lines, changed segments are wrapped in `<span class="diff-change">`:
+**Stage 2: Pairing** — Adjacent runs of consecutive `remove` lines followed by consecutive `add` lines are paired 1:1 for character-level diffing. Unpaired lines (more removes than adds or vice versa) get whole-line highlighting only.
+
+**Stage 3: Character-level diff** — For each paired remove/add line, `computeCharDiff(oldStr, newStr)` calls `diffWords()` to find word-level differences. Returns two segment arrays (`old` and `new`), each containing `equal`/`delete`/`insert` typed segments. Consecutive segments of the same type are merged via `_mergeSegments()`.
+
+**Stage 4: Render** — `_renderDiffLineHtml(line)` renders each line as a `<span class="diff-line {type}">` with a non-selectable prefix (`+`/`-`/` `). Lines with `charDiff` data wrap changed segments in `<span class="diff-change">`:
 
 ```css
-.diff-line.remove  { background: #3d1f1f; color: #ffa198; }
-.diff-line.add     { background: #1f3d1f; color: #7ee787; }
-.diff-line.context { background: #0d1117; color: #8b949e; }
-.diff-line.remove .diff-change { background: #8b3d3d; }
-.diff-line.add .diff-change    { background: #2d6b2d; }
+.diff-line.remove  { background: #2d1215; color: var(--accent-red); }
+.diff-line.add     { background: #122117; color: var(--accent-green); }
+.diff-line.context { background: var(--bg-primary); color: var(--text-primary); }
+.diff-line.remove .diff-change { background: #6d3038; }
+.diff-line.add .diff-change    { background: #2b6331; }
 ```
+
+#### Instance Methods
+
+Edit block rendering uses instance methods on `AcChatPanel` (not standalone functions) to access component state:
+
+| Method | Purpose |
+|--------|---------|
+| `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render |
+| `_renderEditBlockHtml(seg, result)` | Renders a single edit block card: header with file path and status badge, optional error, diff lines |
+| `_renderDiffLineHtml(line)` | Renders one diff line with optional character-level `<span class="diff-change">` highlights |
 
 ### Edit Summary
 
-Banner after all edits: counts of applied/failed/skipped, clickable modified files, failed edit details.
+Banner after all edits: counts of applied/failed/skipped with color-coded stat badges (green/red/orange). Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
+
+### Dependencies
+
+| Package | Import | Used In |
+|---------|--------|---------|
+| `diff` (npm) | `diffLines`, `diffWords` | `webapp/src/utils/edit-blocks.js` — line-level and word-level Myers diff |
 
 ---
 

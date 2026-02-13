@@ -13,7 +13,9 @@ import './url-chips.js';
 import './ac-history-browser.js';
 import './speech-to-text.js';
 
-// Simple markdown → HTML (basic: headers, code blocks, bold, italic, links)
+// Edit block segmentation and diffing
+import { segmentResponse, computeDiff } from '../utils/edit-blocks.js';
+
 // Edit block markers (from edit_parser.py)
 const EDIT_START = '««« EDIT';
 const EDIT_SEP = '═══════ REPL';
@@ -121,129 +123,6 @@ function renderFileSummary(referencedFiles, selectedFiles) {
   return `<div class="file-summary"><span class="file-summary-label">📁 Files Referenced</span>${addAllBtn}<div class="file-chips">${chips.join('')}</div></div>`;
 }
 
-/**
- * Parse edit blocks out of raw LLM text, returning an array of
- * { type: 'text'|'edit', content, filePath, oldLines, newLines }
- */
-function parseEditSegments(text) {
-  const lines = text.split('\n');
-  const segments = [];
-  let textBuf = [];
-  let state = 'text'; // text | expect_edit | old | new
-  let filePath = '';
-  let oldLines = [];
-  let newLines = [];
-
-  function flushText() {
-    if (textBuf.length > 0) {
-      segments.push({ type: 'text', content: textBuf.join('\n') });
-      textBuf = [];
-    }
-  }
-
-  function isFilePath(line) {
-    const s = line.trim();
-    if (!s || s.length > 200) return false;
-    if (/^[#\/*\->]|^```/.test(s)) return false;
-    if (s.includes('/') || s.includes('\\')) return true;
-    if (/^[\w\-.]+\.\w+$/.test(s)) return true;
-    return false;
-  }
-
-  for (const line of lines) {
-    const stripped = line.trim();
-
-    if (state === 'text') {
-      if (isFilePath(stripped) && stripped !== EDIT_START) {
-        filePath = stripped;
-        state = 'expect_edit';
-      } else {
-        textBuf.push(line);
-      }
-    } else if (state === 'expect_edit') {
-      if (stripped === EDIT_START) {
-        flushText();
-        oldLines = [];
-        newLines = [];
-        state = 'old';
-      } else if (isFilePath(stripped) && stripped !== EDIT_START) {
-        textBuf.push(filePath); // previous path was just text
-        filePath = stripped;
-      } else {
-        textBuf.push(filePath);
-        textBuf.push(line);
-        filePath = '';
-        state = 'text';
-      }
-    } else if (state === 'old') {
-      if (stripped === EDIT_SEP || stripped.startsWith('═══════')) {
-        state = 'new';
-      } else {
-        oldLines.push(line);
-      }
-    } else if (state === 'new') {
-      if (stripped === EDIT_END) {
-        segments.push({
-          type: 'edit',
-          filePath,
-          oldLines: [...oldLines],
-          newLines: [...newLines],
-        });
-        filePath = '';
-        oldLines = [];
-        newLines = [];
-        state = 'text';
-      } else {
-        newLines.push(line);
-      }
-    }
-  }
-
-  // Flush remaining text (including any incomplete edit block)
-  if (state === 'expect_edit') {
-    textBuf.push(filePath);
-  } else if (state === 'old' || state === 'new') {
-    textBuf.push(filePath);
-    textBuf.push(EDIT_START);
-    textBuf.push(...oldLines);
-    if (state === 'new') {
-      textBuf.push(EDIT_SEP);
-      textBuf.push(...newLines);
-    }
-  }
-  flushText();
-
-  return segments;
-}
-
-/**
- * Compute a simple line diff between old and new, returning
- * arrays of {text, type} where type is 'context'|'remove'|'add'.
- */
-function computeLineDiff(oldLines, newLines) {
-  // Find common prefix (anchor lines)
-  let prefixLen = 0;
-  const minLen = Math.min(oldLines.length, newLines.length);
-  for (let i = 0; i < minLen; i++) {
-    if (oldLines[i] === newLines[i]) prefixLen++;
-    else break;
-  }
-
-  const result = [];
-  // Context (anchor) lines
-  for (let i = 0; i < prefixLen; i++) {
-    result.push({ text: oldLines[i], type: 'context' });
-  }
-  // Removed lines
-  for (let i = prefixLen; i < oldLines.length; i++) {
-    result.push({ text: oldLines[i], type: 'remove' });
-  }
-  // Added lines
-  for (let i = prefixLen; i < newLines.length; i++) {
-    result.push({ text: newLines[i], type: 'add' });
-  }
-  return result;
-}
 
 function escapeHtml(text) {
   return text
@@ -279,56 +158,6 @@ function renderMarkdown(text) {
   return result;
 }
 
-/**
- * Render a full assistant message with edit blocks rendered inline.
- * editResultsMap: { filePath -> { status, message } }
- */
-function renderAssistantContent(text, editResultsMap = {}) {
-  const segments = parseEditSegments(text);
-  const parts = [];
-
-  for (const seg of segments) {
-    if (seg.type === 'text') {
-      parts.push(renderMarkdown(seg.content));
-    } else {
-      const info = editResultsMap[seg.filePath] || {};
-      const status = info.status || 'unknown';
-      const statusMsg = info.message || '';
-
-      // Status badge
-      let badge = '';
-      if (status === 'applied') badge = '<span class="edit-badge applied">✅ applied</span>';
-      else if (status === 'failed') badge = `<span class="edit-badge failed">❌ failed</span>`;
-      else if (status === 'skipped') badge = '<span class="edit-badge skipped">⚠️ skipped</span>';
-      else if (status === 'validated') badge = '<span class="edit-badge validated">☑ validated</span>';
-      else badge = '<span class="edit-badge pending">⏳ pending</span>';
-
-      // Diff lines
-      const diffLines = computeLineDiff(seg.oldLines, seg.newLines);
-      const diffHtml = diffLines.map(d => {
-        const prefix = d.type === 'remove' ? '-' : d.type === 'add' ? '+' : ' ';
-        return `<div class="diff-line ${d.type}"><span class="diff-prefix">${prefix}</span>${escapeHtml(d.text)}</div>`;
-      }).join('');
-
-      const failMsg = (status === 'failed' && statusMsg)
-        ? `<div class="edit-error">${escapeHtml(statusMsg)}</div>`
-        : '';
-
-      parts.push(`
-        <div class="edit-block-card">
-          <div class="edit-block-header">
-            <span class="edit-file-path" data-path="${escapeHtml(seg.filePath)}">${escapeHtml(seg.filePath)}</span>
-            ${badge}
-          </div>
-          ${failMsg}
-          <pre class="edit-diff">${diffHtml}</pre>
-        </div>
-      `);
-    }
-  }
-
-  return parts.join('');
-}
 
 export class AcChatPanel extends RpcMixin(LitElement) {
   static properties = {
@@ -884,23 +713,32 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .diff-line {
       padding: 0 12px;
       white-space: pre;
+      display: block;
     }
     .diff-line.remove {
-      background: rgba(255, 80, 80, 0.12);
+      background: #2d1215;
       color: var(--accent-red);
     }
     .diff-line.add {
-      background: rgba(80, 200, 120, 0.12);
+      background: #122117;
       color: var(--accent-green);
     }
     .diff-line.context {
-      color: var(--text-muted);
+      background: var(--bg-primary);
+      color: var(--text-primary);
     }
-    .diff-prefix {
+    .diff-line.remove .diff-change {
+      background: #6d3038;
+      border-radius: 2px;
+    }
+    .diff-line.add .diff-change {
+      background: #2b6331;
+      border-radius: 2px;
+    }
+    .diff-line-prefix {
       display: inline-block;
-      width: 1.5ch;
+      width: 1.2em;
       user-select: none;
-      color: inherit;
       opacity: 0.6;
     }
 
@@ -1884,6 +1722,91 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   // === Rendering ===
 
+  /**
+   * Render assistant content with edit blocks rendered inline.
+   * @param {string} content - Raw assistant text
+   * @param {boolean} showEditResults - Whether to show edit result badges
+   * @param {boolean} isFinal - Whether this is the final (non-streaming) render
+   * @returns Lit template
+   */
+  _renderAssistantContent(content, showEditResults, isFinal) {
+    const editResultsMap = showEditResults || {};
+    const segments = segmentResponse(content);
+    const parts = [];
+
+    for (const seg of segments) {
+      if (seg.type === 'text') {
+        let rendered = renderMarkdown(seg.content);
+        if (isFinal && this._repoFiles.length > 0) {
+          const { html: mentionHtml } = applyFileMentions(
+            rendered, this._repoFiles, this.selectedFiles, []
+          );
+          rendered = mentionHtml;
+        }
+        parts.push(rendered);
+      } else if (seg.type === 'edit' || seg.type === 'edit-pending') {
+        const result = editResultsMap[seg.filePath] || {};
+        parts.push(this._renderEditBlockHtml(seg, result));
+      }
+    }
+
+    return parts.join('');
+  }
+
+  /**
+   * Render a single edit block card as HTML string.
+   */
+  _renderEditBlockHtml(seg, result) {
+    const status = result.status || (seg.type === 'edit-pending' ? 'pending' : 'unknown');
+    const statusMsg = result.message || '';
+
+    // Status badge
+    let badge = '';
+    if (status === 'applied') badge = '<span class="edit-badge applied">✅ applied</span>';
+    else if (status === 'failed') badge = '<span class="edit-badge failed">❌ failed</span>';
+    else if (status === 'skipped') badge = '<span class="edit-badge skipped">⚠️ skipped</span>';
+    else if (status === 'validated') badge = '<span class="edit-badge validated">☑ validated</span>';
+    else if (seg.isCreate) badge = '<span class="edit-badge applied">🆕 new</span>';
+    else badge = '<span class="edit-badge pending">⏳ pending</span>';
+
+    // Compute diff with character-level highlighting
+    const diff = computeDiff(seg.oldLines || [], seg.newLines || []);
+    const diffHtml = diff.map(line => this._renderDiffLineHtml(line)).join('');
+
+    const failMsg = (status === 'failed' && statusMsg)
+      ? `<div class="edit-error">${escapeHtml(statusMsg)}</div>`
+      : '';
+
+    return `
+      <div class="edit-block-card">
+        <div class="edit-block-header">
+          <span class="edit-file-path" data-path="${escapeHtml(seg.filePath)}">${escapeHtml(seg.filePath)}</span>
+          ${badge}
+        </div>
+        ${failMsg}
+        <pre class="edit-diff">${diffHtml}</pre>
+      </div>
+    `;
+  }
+
+  /**
+   * Render a single diff line with optional character-level highlighting.
+   */
+  _renderDiffLineHtml(line) {
+    const prefix = line.type === 'remove' ? '-' : line.type === 'add' ? '+' : ' ';
+
+    if (line.charDiff && line.charDiff.length > 0) {
+      const inner = line.charDiff.map(seg =>
+        seg.type === 'equal'
+          ? escapeHtml(seg.text)
+          : `<span class="diff-change">${escapeHtml(seg.text)}</span>`
+      ).join('');
+      return `<span class="diff-line ${line.type}"><span class="diff-line-prefix">${prefix}</span>${inner}</span>`;
+    }
+
+    return `<span class="diff-line ${line.type}"><span class="diff-line-prefix">${prefix}</span>${escapeHtml(line.text)}</span>`;
+  }
+
   _renderEditSummary(msg) {
     if (!msg.passed && !msg.failed && !msg.skipped) return nothing;
     const parts = [];
@@ -1933,17 +1856,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       `;
     }
 
-    // Assistant message — apply edit block rendering if applicable
-    let renderedHtml;
+    // Assistant message — render with edit blocks and file mentions
     const editFilePaths = msg.editResults ? Object.keys(msg.editResults) : [];
+    const renderedHtml = this._renderAssistantContent(content, msg.editResults, true);
 
-    if (msg.editResults) {
-      renderedHtml = renderAssistantContent(content, msg.editResults);
-    } else {
-      renderedHtml = renderMarkdown(content);
-    }
-
-    // Apply file mentions (on final render, not streaming)
+    // Apply file mentions on the full rendered output
     const { html: mentionHtml, referencedFiles } = applyFileMentions(
       renderedHtml, this._repoFiles, this.selectedFiles, editFilePaths
     );
@@ -2093,8 +2010,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
               <div class="role-label">
                 Assistant <span class="streaming-indicator"></span>
               </div>
-              <div class="md-content">
-                ${unsafeHTML(renderMarkdown(this._streamingContent))}
+              <div class="md-content" @click=${this._onContentClick}>
+                ${unsafeHTML(this._renderAssistantContent(this._streamingContent, {}, false))}
               </div>
             </div>
           ` : nothing}

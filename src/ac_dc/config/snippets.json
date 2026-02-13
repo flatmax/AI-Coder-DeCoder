@@ -1,39 +1,39 @@
 {
-    "snippets": [
-        {
-            "icon": "✂️",
-            "tooltip": "Continue truncated edit",
-            "message": "Your last edit was truncated, please continue from where you left off."
-        },
-        {
-            "icon": "🔍",
-            "tooltip": "Check context",
-            "message": "Please check the current context and tell me what files you can see."
-        },
-        {
-            "icon": "✏️",
-            "tooltip": "Fix malformed edits",
-            "message": "Your last edit block was malformed. Please try again with the correct format."
-        },
-        {
-            "icon": "⏸️",
-            "tooltip": "Pause before implementing",
-            "message": "Before implementing, please outline your plan and wait for my approval."
-        },
-        {
-            "icon": "✅",
-            "tooltip": "Verify tests",
-            "message": "Please verify that all relevant tests pass after your changes."
-        },
-        {
-            "icon": "📦",
-            "tooltip": "Pre-commit checklist",
-            "message": "Please review all changes, ensure tests pass, and prepare a commit message."
-        },
-        {
-            "icon": "🏁",
-            "tooltip": "Pre-commit with plan completion",
-            "message": "Please verify the implementation is complete per the plan, run tests, and prepare a commit."
-        }
-    ]
+  "snippets": [
+    {
+      "icon": "✂️",
+      "tooltip": "Your last edit was truncated",
+      "message": "Your last edit was truncated, please continue."
+    },
+    {
+      "icon": "🔍",
+      "tooltip": "Check in your context for that content",
+      "message": "You are asking for some content which I believe is already in your context, please check there."
+    },
+    {
+      "icon": "✏️",
+      "tooltip": "Tell AI to honor edit blocks.",
+      "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."
+    },
+    {
+      "icon": "⏸️",
+      "tooltip": "Before you start implementing the plan...",
+      "message": "Before you start implementing the plan, is there anything you would like to change ?"
+    },
+    {
+      "icon": "✅",
+      "tooltip": "Confirm tests are testing what was intended",
+      "message": "All tests passed, can you confirm the tests are testing what you intended to test?"
+    },
+    {
+      "icon": "📦",
+      "tooltip": "Check if ready to commit and update plan",
+      "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? What will be next?"
+    },
+    {
+      "icon": "🏁",
+      "tooltip": "Check if ready to commit, update plan and git mv",
+      "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? Please give me the git mv command to mark the plan as done."
+    }
+  ]
 }
