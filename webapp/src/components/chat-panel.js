@@ -11,6 +11,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 import './input-history.js';
 import './url-chips.js';
 import './ac-history-browser.js';
+import './speech-to-text.js';
 
 // Simple markdown → HTML (basic: headers, code blocks, bold, italic, links)
 // Edit block markers (from edit_parser.py)
@@ -792,6 +793,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       color: var(--accent-primary);
     }
 
+    /* Stacked left buttons (mic + snippets) */
+    .input-left-buttons {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      flex-shrink: 0;
+    }
+
     /* Edit block cards */
     .edit-block-card {
       border: 1px solid var(--border-primary);
@@ -1458,6 +1468,28 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  // === Speech to Text ===
+
+  _onTranscript(e) {
+    const text = e.detail?.text;
+    if (!text) return;
+
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    // Append space-separated
+    if (this._inputValue && !this._inputValue.endsWith(' ')) {
+      this._inputValue += ' ';
+    }
+    this._inputValue += text;
+
+    if (textarea) {
+      textarea.value = this._inputValue;
+      this._autoResize(textarea);
+    }
+
+    // Run URL detection on new text
+    this._onInputForUrlDetection();
+  }
+
   // === Actions ===
 
   async _newSession() {
@@ -2108,11 +2140,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         ` : nothing}
 
         <div class="input-row">
-          <button
-            class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
-            @click=${this._toggleSnippets}
-            title="Quick snippets"
-          >📌</button>
+          <div class="input-left-buttons">
+            <ac-speech-to-text
+              @transcript=${this._onTranscript}
+            ></ac-speech-to-text>
+            <button
+              class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
+              @click=${this._toggleSnippets}
+              title="Quick snippets"
+            >📌</button>
+          </div>
 
           <textarea
             class="input-textarea"

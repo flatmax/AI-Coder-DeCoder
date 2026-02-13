@@ -133,7 +133,7 @@ Recommended implementation sequence, with dependencies noted:
   - App shell wiring: route navigate-file, file-save events
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
-- [ ] **Speech to text** — Auto-transcribe toggle using Web Speech API
+- [x] **Speech to text** — Auto-transcribe toggle using Web Speech API
 
 ### Phase 9: Polish (partial)
 - [x] **Bedrock token usage** — Streaming usage capture for all providers
