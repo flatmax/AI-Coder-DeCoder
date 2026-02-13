@@ -153,7 +153,7 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`
 - [ ] **Review mode state** — LLM service review state fields, `start_review`/`end_review`/`get_review_state`/`check_review_ready`, symbol_map_before capture
 - [ ] **Review context assembly** — Review context block in prompt assembly (commits, pre-change symbol map, reverse diffs for selected files), `get_review_file_diff`
-- [ ] **Git graph selector UI** — SVG commit graph with stable lane columns, frozen branch legend, lazy loading, commit click selection, branch disambiguation popover, clean tree check
+- [ ] **Git graph selector UI** — Floating resizable dialog with SVG commit graph, stable lane columns, frozen branch legend, lazy loading, commit click selection, branch disambiguation popover, clean tree check
 - [ ] **Git graph lane algorithm** — Client-side lane assignment from parent relationships, fork edges, merge lines, lane dedup for shared tips
 - [ ] **Review banner** — File picker header showing branch, commit range, stats, exit button
 - [ ] **Review status bar** — Slim bar above chat input with diff inclusion count, exit button, disabled commit button

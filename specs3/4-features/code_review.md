@@ -402,7 +402,7 @@ The banner is rendered by the file picker component and synchronized with the re
 
 ### Git Graph Selector
 
-Appears when entering review mode. Replaces the file picker panel content (or renders as a modal overlay).
+Appears when entering review mode. Renders as a **floating resizable dialog** overlaying the main UI — the file picker and chat panel remain visible underneath. The dialog can be repositioned by dragging its header and resized from edges/corners (min 400×300px). A close button dismisses it without starting a review.
 
 The component has three visual zones stacked vertically:
 
@@ -447,6 +447,18 @@ The graph is rendered as an inline SVG within a LitElement component. Layout is 
 - **Scroll loading**: An IntersectionObserver on a sentinel element near the bottom triggers fetching the next batch of commits.
 
 No external graph rendering libraries are used — the layout and SVG generation are implemented directly in the component.
+
+#### Dialog Behavior
+
+The review selector renders as a floating dialog with:
+
+- **Draggable header**: "📋 Code Review" title with close (✕) button. Drag to reposition.
+- **Resizable**: All edges and corners. Minimum size 400×300px. No maximum — can fill the viewport.
+- **Default position**: Centered in the viewport, 60% width, 70% height.
+- **Z-index**: Above the dialog and diff viewer (z-index: 500) so it floats over the main UI.
+- **Backdrop**: Semi-transparent overlay behind the dialog. Clicking the backdrop closes the dialog.
+- **Close behavior**: Close button or backdrop click hides the dialog without starting a review. Escape key also closes.
+- **Persistence**: Position and size are NOT persisted — dialog resets to default centered position each time it opens.
 
 ### File Picker in Review Mode
 

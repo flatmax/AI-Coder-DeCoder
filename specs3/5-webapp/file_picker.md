@@ -79,6 +79,8 @@ A vertical resizer separates the file picker from the chat panel:
 
 When review mode is active, a banner displays at the top of the file picker showing the branch name, commit range, file/line stats, and an exit button. The banner is synchronized with review state from `get_review_state()`. See [Code Review — UI Components](../4-features/code_review.md#review-mode-banner).
 
+The review selector (git graph) opens in a separate floating dialog — the file picker remains visible and usable underneath. See [Code Review — Git Graph Selector](../4-features/code_review.md#git-graph-selector).
+
 ## Data Flow
 
 1. On startup: load file tree from Repo via RPC
