@@ -5,13 +5,14 @@
  * Separated by a draggable resizer.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 
 // Import child components
 import './chat-panel.js';
 import './file-picker.js';
+// review-selector.js imported lazily on first open
 
 const DEFAULT_PICKER_WIDTH = 280;
 const MIN_PICKER_WIDTH = 150;
@@ -26,6 +27,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     _selectedFiles: { type: Array, state: true },
     _messages: { type: Array, state: true },
     _streamingActive: { type: Boolean, state: true },
+    _reviewState: { type: Object, state: true },
+    _showReviewSelector: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -34,6 +37,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       flex-direction: row;
       height: 100%;
       overflow: hidden;
+      position: relative;
     }
 
     /* File picker panel */
@@ -109,6 +113,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       flex: 1;
       min-height: 0;
     }
+
   `];
 
   constructor() {
@@ -119,6 +124,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._messages = [];
     this._streamingActive = false;
     this._isDragging = false;
+    this._reviewState = { active: false };
+    this._showReviewSelector = false;
   }
 
   connectedCallback() {
@@ -130,6 +137,76 @@ export class AcFilesTab extends RpcMixin(LitElement) {
   onRpcReady() {
     // State will be loaded via state-loaded event from app-shell
     // File picker loads its own tree via onRpcReady
+    this._loadReviewState();
+  }
+
+  async _loadReviewState() {
+    try {
+      const state = await this.rpcExtract('LLMService.get_review_state');
+      if (state) {
+        this._reviewState = state;
+      }
+    } catch (e) {
+      // Review state not critical
+    }
+  }
+
+  async _openReviewSelector() {
+    await import('./review-selector.js');
+    this._showReviewSelector = true;
+    await this.updateComplete;
+    const selector = this.shadowRoot?.querySelector('ac-review-selector');
+    if (selector) selector.show();
+  }
+
+  _onReviewSelectorClose() {
+    this._showReviewSelector = false;
+  }
+
+  async _onReviewStarted(e) {
+    this._reviewState = { active: true, ...e.detail };
+
+    // Clear file selection — review starts with no files selected so the user
+    // controls which reverse diffs are included via explicit file selection
+    this._selectedFiles = [];
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.selectedFiles = new Set();
+      picker.requestUpdate();
+    }
+
+    // Refresh file tree to show staged changes
+    if (picker) await picker.loadTree();
+
+    // Update chat panel
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.selectedFiles = [];
+      chatPanel.reviewState = this._reviewState;
+      chatPanel.requestUpdate();
+    }
+  }
+
+  async _exitReview() {
+    try {
+      const result = await this.rpcExtract('LLMService.end_review');
+      if (result?.error) {
+        console.error('Exit review failed:', result.error);
+        return;
+      }
+      this._reviewState = { active: false };
+      // Refresh file tree
+      const picker = this.shadowRoot?.querySelector('ac-file-picker');
+      if (picker) await picker.loadTree();
+      // Update chat panel
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.reviewState = this._reviewState;
+        chatPanel.requestUpdate();
+      }
+    } catch (e) {
+      console.error('Exit review failed:', e);
+    }
   }
 
   _onFilesChanged(e) {
@@ -355,9 +432,12 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       >
         <ac-file-picker
           .selectedFiles=${new Set(this._selectedFiles)}
+          .reviewState=${this._reviewState}
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}
           @insert-path=${this._onInsertPath}
+          @open-review=${this._openReviewSelector}
+          @exit-review=${this._exitReview}
         ></ac-file-picker>
       </div>
 
@@ -376,11 +456,21 @@ export class AcFilesTab extends RpcMixin(LitElement) {
           .messages=${this._messages}
           .selectedFiles=${this._selectedFiles}
           .streamingActive=${this._streamingActive}
+          .reviewState=${this._reviewState}
           @files-modified=${this._onFilesModified}
           @filter-from-chat=${this._onFilterFromChat}
           @file-mention-click=${this._onFileMentionClick}
+          @open-review=${this._openReviewSelector}
+          @exit-review=${this._exitReview}
         ></ac-chat-panel>
       </div>
+
+      ${this._showReviewSelector ? html`
+        <ac-review-selector
+          @review-started=${this._onReviewStarted}
+          @review-selector-close=${this._onReviewSelectorClose}
+        ></ac-review-selector>
+      ` : nothing}
     `;
   }
 }

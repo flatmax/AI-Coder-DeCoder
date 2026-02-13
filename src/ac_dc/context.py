@@ -50,6 +50,7 @@ FILES_L3_HEADER = (
     "These files are included for reference:\n\n"
 )
 TIER_SYMBOLS_HEADER = "# Repository Structure (continued)\n\n"
+REVIEW_CONTEXT_HEADER = "# Code Review Context\n\n"
 
 
 class FileContext:
@@ -175,6 +176,12 @@ class ContextManager:
         # URL context
         self._url_context = []  # list of formatted URL strings
 
+        # Review context
+        self._review_context = None  # string or None
+
+        # Review context
+        self._review_context = None  # string or None
+
     # === Conversation History ===
 
     def add_message(self, role, content):
@@ -288,6 +295,26 @@ class ContextManager:
         """Clear URL context."""
         self._url_context.clear()
 
+    # === Review Context ===
+
+    def set_review_context(self, review_text):
+        """Set review context string for prompt assembly."""
+        self._review_context = review_text if review_text else None
+
+    def clear_review_context(self):
+        """Clear review context."""
+        self._review_context = None
+
+    # === Review Context ===
+
+    def set_review_context(self, review_text):
+        """Set review context string for prompt assembly."""
+        self._review_context = review_text if review_text else None
+
+    def clear_review_context(self):
+        """Clear review context."""
+        self._review_context = None
+
     # === Budget Enforcement ===
 
     def shed_files_if_needed(self):
@@ -392,6 +419,11 @@ class ContextManager:
             url_text = "\n---\n".join(self._url_context)
             messages.append({"role": "user", "content": URL_CONTEXT_HEADER + url_text})
             messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
+
+        # Review context as user/assistant pair
+        if self._review_context:
+            messages.append({"role": "user", "content": REVIEW_CONTEXT_HEADER + self._review_context})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the code changes."})
 
         # Active files as user/assistant pair
         active_files = self._file_context.get_files()

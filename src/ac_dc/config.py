@@ -227,6 +227,22 @@ class ConfigManager:
         data = self._load_json("snippets.json")
         return data.get("snippets", [])
 
+    def get_review_snippets(self):
+        """Load review-specific snippets with two-location fallback."""
+        # Try repo-local first
+        if self._repo_root:
+            local_path = self._repo_root / ".ac-dc" / "snippets.json"
+            if local_path.exists():
+                try:
+                    data = json.loads(local_path.read_text())
+                    return data.get("review_snippets", [])
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # Fall back to config directory
+        data = self._load_json("snippets.json")
+        return data.get("review_snippets", [])
+
     def get_config_content(self, config_type):
         """Read a config file by type."""
         if config_type not in self.CONFIG_TYPES:

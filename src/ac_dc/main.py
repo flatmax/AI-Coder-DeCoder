@@ -218,15 +218,21 @@ def _start_vite_dev_server(webapp_port):
         logger.info(f"Vite dev server port {webapp_port} already in use, skipping")
         return None
 
+    # Resolve AC⚡DC project root (where package.json and webapp/ live)
+    # __file__ = src/ac_dc/main.py → project root is two levels up
+    project_root = Path(__file__).resolve().parent.parent.parent
+    node_modules = project_root / "node_modules"
+
     # Check prerequisites
-    if not Path("node_modules").exists():
-        print("node_modules/ not found. Run: npm install")
+    if not node_modules.exists():
+        print(f"node_modules/ not found in {project_root}. Run: cd {project_root} && npm install")
         sys.exit(1)
 
-    logger.info(f"Starting Vite dev server on port {webapp_port}")
+    logger.info(f"Starting Vite dev server on port {webapp_port} (project: {project_root})")
     try:
         proc = subprocess.Popen(
             ["npm", "run", "dev", "--", "--port", str(webapp_port)],
+            cwd=str(project_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

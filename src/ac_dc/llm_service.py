@@ -174,6 +174,18 @@ class LLMService:
             "cache_write_tokens": 0,
         }
 
+        # Review mode state
+        self._review_active = False
+        self._review_branch = None
+        self._review_branch_tip = None
+        self._review_base_commit = None
+        self._review_parent = None
+        self._review_original_branch = None
+        self._review_commits = []
+        self._review_changed_files = []
+        self._review_stats = {}
+        self._symbol_map_before = None
+
     @staticmethod
     def _new_session_id():
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -328,6 +340,15 @@ class LLMService:
                 except Exception as e:
                     logger.warning(f"Failed to persist user message: {e}")
 
+            # Build and inject review context if review mode is active
+            if self._review_active:
+                try:
+                    review_context = self._build_review_context()
+                    if review_context:
+                        self._context.set_review_context(review_context)
+                except Exception as e:
+                    logger.warning(f"Failed to build review context: {e}")
+
             # Budget enforcement
             shed = self._context.shed_files_if_needed()
             if shed:
@@ -373,8 +394,8 @@ class LLMService:
                     for b in blocks
                 ]
 
-                # Apply edits
-                if self._repo and not was_cancelled:
+                # Apply edits (skipped in review mode — read-only)
+                if self._repo and not was_cancelled and not self._review_active:
                     edit_results = apply_edits_to_repo(blocks, str(self._repo.root))
 
                     # Stage modified files
@@ -1062,6 +1083,267 @@ class LLMService:
             # Print promotions first, then demotions
             for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
+
+    # === Review Mode (RPC) ===
+
+    def check_review_ready(self):
+        """Check if working tree is clean for review."""
+        if not self._repo:
+            return {"clean": False, "message": "No repository available"}
+        if self._repo.is_clean():
+            return {"clean": True}
+        return {
+            "clean": False,
+            "message": (
+                "Cannot enter review mode: working tree has uncommitted changes.\n"
+                "Please commit, stash, or discard changes first:\n"
+                "  git stash\n"
+                "  git commit -am \"wip\"\n"
+                "  git checkout -- <file>"
+            ),
+        }
+
+    def get_commit_graph(self, limit=100, offset=0, include_remote=False):
+        """Get commit graph for the review selector. Delegates to repo."""
+        if not self._repo:
+            return {"error": "No repository available"}
+        return self._repo.get_commit_graph(limit=limit, offset=offset,
+                                           include_remote=include_remote)
+
+    async def start_review(self, branch, base_commit):
+        """Enter review mode.
+
+        Full entry sequence:
+        1. checkout_review_parent → build symbol_map_before
+        2. setup_review_soft_reset → rebuild symbol index
+        """
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        if self._review_active:
+            return {"error": "Review already active. End current review first."}
+
+        # Phase 1: Checkout parent
+        checkout_result = self._repo.checkout_review_parent(branch, base_commit)
+        if "error" in checkout_result:
+            return checkout_result
+
+        branch_tip = checkout_result["branch_tip"]
+        parent_commit = checkout_result["parent_commit"]
+        original_branch = checkout_result["original_branch"]
+
+        # Phase 2: Build symbol_map_before (at parent commit state)
+        symbol_map_before = ""
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+                symbol_map_before = self._symbol_index.get_symbol_map() or ""
+            except Exception as e:
+                logger.warning(f"Failed to build symbol_map_before: {e}")
+
+        # Phase 3: Setup soft reset
+        setup_result = self._repo.setup_review_soft_reset(branch_tip, parent_commit)
+        if "error" in setup_result:
+            # Recovery: try to exit
+            try:
+                self._repo.exit_review_mode(branch_tip, original_branch)
+            except Exception:
+                pass
+            return setup_result
+
+        # Phase 4: Rebuild symbol index for branch tip state
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+            except Exception as e:
+                logger.warning(f"Failed to rebuild symbol index: {e}")
+
+        # Get review metadata
+        commits = self._repo.get_commit_log(base_commit, branch_tip)
+        changed_files = self._repo.get_review_changed_files()
+        total_additions = sum(f.get("additions", 0) for f in changed_files)
+        total_deletions = sum(f.get("deletions", 0) for f in changed_files)
+
+        # Store review state
+        self._review_active = True
+        self._review_branch = branch
+        self._review_branch_tip = branch_tip
+        self._review_base_commit = base_commit
+        self._review_parent = parent_commit
+        self._review_original_branch = original_branch
+        self._review_commits = commits if isinstance(commits, list) else []
+        self._review_changed_files = changed_files
+        self._review_stats = {
+            "commit_count": len(self._review_commits),
+            "files_changed": len(changed_files),
+            "additions": total_additions,
+            "deletions": total_deletions,
+        }
+        self._symbol_map_before = symbol_map_before
+
+        # Clear file selection so review starts with a clean slate —
+        # prevents stale selections from before review including all diffs
+        self._selected_files = []
+
+        logger.info(f"Review mode entered: {branch} ({base_commit[:7]} → {branch_tip[:7]})")
+
+        return {
+            "status": "review_active",
+            "branch": branch,
+            "base_commit": base_commit,
+            "commits": self._review_commits,
+            "changed_files": self._review_changed_files,
+            "stats": self._review_stats,
+        }
+
+    async def end_review(self):
+        """Exit review mode and restore repository."""
+        if not self._review_active:
+            return {"error": "No active review"}
+
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        branch_tip = self._review_branch_tip
+        original_branch = self._review_original_branch
+
+        # Exit review mode in git
+        result = self._repo.exit_review_mode(branch_tip, original_branch)
+
+        # Clear review state regardless
+        self._review_active = False
+        self._review_branch = None
+        self._review_branch_tip = None
+        self._review_base_commit = None
+        self._review_parent = None
+        self._review_original_branch = None
+        self._review_commits = []
+        self._review_changed_files = []
+        self._review_stats = {}
+        self._symbol_map_before = None
+        self._context.clear_review_context()
+
+        # Rebuild symbol index
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+            except Exception as e:
+                logger.warning(f"Failed to rebuild symbol index after review: {e}")
+
+        # Re-initialize stability tracker
+        if self._symbol_index and self._stability_tracker:
+            try:
+                ref_index = self._symbol_index.reference_index
+                all_files = list(self._symbol_index._all_symbols.keys())
+                self._stability_tracker.initialize_from_reference_graph(
+                    ref_index, all_files, counter=self._context.counter,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to reinitialize stability tracker: {e}")
+
+        logger.info("Review mode exited")
+        return result
+
+    def get_review_state(self):
+        """Get current review state."""
+        if not self._review_active:
+            return {"active": False}
+        return {
+            "active": True,
+            "branch": self._review_branch,
+            "base_commit": self._review_base_commit,
+            "branch_tip": self._review_branch_tip,
+            "commits": self._review_commits,
+            "changed_files": self._review_changed_files,
+            "stats": self._review_stats,
+        }
+
+    def get_review_file_diff(self, path):
+        """Get reverse diff for a file during review."""
+        if not self._review_active:
+            return {"error": "No active review"}
+        if not self._repo:
+            return {"error": "No repository available"}
+        return self._repo.get_review_file_diff(path)
+
+    def _build_review_context(self):
+        """Build review context string for prompt injection.
+
+        Includes: review summary, commit log, pre-change symbol map,
+        and reverse diffs for selected files.
+        """
+        if not self._review_active:
+            return None
+
+        parts = []
+
+        # Review summary
+        parent_short = self._review_parent[:7] if self._review_parent else "?"
+        tip_short = self._review_branch_tip[:7] if self._review_branch_tip else "?"
+        stats = self._review_stats
+        parts.append(
+            f"## Review: {self._review_branch} ({parent_short} → {tip_short})\n"
+            f"{stats.get('commit_count', 0)} commits, "
+            f"{stats.get('files_changed', 0)} files changed, "
+            f"+{stats.get('additions', 0)} -{stats.get('deletions', 0)}\n"
+        )
+
+        # Commit log
+        if self._review_commits:
+            parts.append("## Commits")
+            for i, c in enumerate(self._review_commits, 1):
+                date = c.get("date", "")
+                parts.append(
+                    f"{i}. {c.get('short_sha', '?')} {c.get('message', '')} "
+                    f"({c.get('author', '?')}, {date})"
+                )
+            parts.append("")
+
+        # Pre-change symbol map
+        if self._symbol_map_before:
+            parts.append(
+                "## Pre-Change Symbol Map\n"
+                "Symbol map from the parent commit (before the reviewed changes).\n"
+                "Compare against the current symbol map in the repository structure above.\n"
+            )
+            parts.append(self._symbol_map_before)
+            parts.append("")
+
+        # Reverse diffs for selected files that exist on disk
+        # (excludes deleted files — they have no current content to review)
+        changed_paths = {f["path"] for f in self._review_changed_files}
+        selected_and_changed = [
+            p for p in self._selected_files
+            if p in changed_paths and self._repo and self._repo.file_exists(p)
+        ]
+
+        if selected_and_changed and self._repo:
+            parts.append(
+                "## Reverse Diffs (selected files)\n"
+                "These diffs show what would revert each file to the pre-review state.\n"
+                "The full current content is in the working files above.\n"
+            )
+            for path in selected_and_changed:
+                diff_result = self._repo.get_review_file_diff(path)
+                diff_text = diff_result.get("diff", "")
+                # Get stats for this file
+                file_info = next(
+                    (f for f in self._review_changed_files if f["path"] == path),
+                    {}
+                )
+                adds = file_info.get("additions", 0)
+                dels = file_info.get("deletions", 0)
+                parts.append(f"### {path} (+{adds} -{dels})")
+                if diff_text:
+                    parts.append(f"```diff\n{diff_text}```")
+                else:
+                    parts.append("*(no diff available)*")
+                parts.append("")
+
+        return "\n".join(parts)
 
     # === History RPC Methods ===
 

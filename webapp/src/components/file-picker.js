@@ -12,6 +12,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 export class AcFilePicker extends RpcMixin(LitElement) {
   static properties = {
     selectedFiles: { type: Object, hasChanged: () => true },     // Set<string> — always re-render on set
+    reviewState: { type: Object },
     _tree: { type: Object, state: true },
     _modified: { type: Array, state: true },
     _staged: { type: Array, state: true },
@@ -249,6 +250,55 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       outline: none;
       width: 100%;
       margin: 2px 0;
+    }
+
+    /* Review banner */
+    .review-banner {
+      padding: 8px 10px;
+      background: rgba(79, 195, 247, 0.08);
+      border-bottom: 1px solid var(--accent-primary);
+      font-size: 0.75rem;
+    }
+    .review-banner-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .review-banner-title strong {
+      color: var(--accent-primary);
+    }
+    .review-banner .review-stats {
+      color: var(--text-muted);
+      margin-top: 2px;
+      font-size: 0.7rem;
+    }
+    .review-exit-btn {
+      background: none;
+      border: 1px solid var(--accent-red);
+      color: var(--accent-red);
+      font-size: 0.65rem;
+      padding: 1px 8px;
+      border-radius: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .review-exit-btn:hover {
+      background: rgba(255, 80, 80, 0.15);
+    }
+    .review-open-btn {
+      background: none;
+      border: 1px solid var(--accent-primary);
+      color: var(--accent-primary);
+      font-size: 0.65rem;
+      padding: 1px 8px;
+      border-radius: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      margin-left: auto;
+    }
+    .review-open-btn:hover {
+      background: rgba(79, 195, 247, 0.15);
     }
 
     /* Empty state */
@@ -830,7 +880,26 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     const items = this._flattenTree(this._tree);
     this._flatVisible = items;
 
+    const reviewActive = this.reviewState?.active;
+
     return html`
+      ${reviewActive ? html`
+        <div class="review-banner">
+          <div class="review-banner-title">
+            <span>📋 Reviewing: <strong>${this.reviewState.branch}</strong></span>
+            <button class="review-exit-btn" @click=${() => this.dispatchEvent(new CustomEvent('exit-review', { bubbles: true, composed: true }))}>
+              Exit ✕
+            </button>
+          </div>
+          <div class="review-stats">
+            ${this.reviewState.stats?.commit_count || 0} commits ·
+            ${this.reviewState.stats?.files_changed || 0} files ·
+            +${this.reviewState.stats?.additions || 0}
+            -${this.reviewState.stats?.deletions || 0}
+          </div>
+        </div>
+      ` : nothing}
+
       <div class="filter-bar">
         <input
           class="filter-input"
@@ -840,6 +909,12 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           @input=${this._onFilterInput}
         />
         <button class="clear-selection-btn" title="Clear selection" @click=${this._clearSelection}>☐</button>
+        ${!reviewActive ? html`
+          <button class="review-open-btn" title="Code Review"
+            @click=${() => this.dispatchEvent(new CustomEvent('open-review', { bubbles: true, composed: true }))}>
+            📋
+          </button>
+        ` : nothing}
       </div>
 
       <div

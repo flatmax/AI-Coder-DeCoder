@@ -11,6 +11,7 @@ from ac_dc.context import (
     FILES_ACTIVE_HEADER,
     FILE_TREE_HEADER,
     REPO_MAP_HEADER,
+    REVIEW_CONTEXT_HEADER,
     URL_CONTEXT_HEADER,
 )
 from ac_dc.token_counter import TokenCounter
@@ -449,3 +450,96 @@ class TestTieredAssembly:
         )
         # Messages with L2 content should have more messages
         assert len(messages_with) > len(messages_without)
+
+
+
+
+class TestReviewContext:
+    def test_set_and_clear_review_context(self):
+        """set_review_context and clear_review_context work correctly."""
+        ctx = ContextManager()
+        assert ctx._review_context is None
+        ctx.set_review_context("Review content")
+        assert ctx._review_context == "Review content"
+        ctx.clear_review_context()
+        assert ctx._review_context is None
+
+    def test_set_review_context_empty_string_clears(self):
+        """Setting empty/None review context clears it."""
+        ctx = ContextManager()
+        ctx.set_review_context("content")
+        ctx.set_review_context("")
+        assert ctx._review_context is None
+        ctx.set_review_context("content")
+        ctx.set_review_context(None)
+        assert ctx._review_context is None
+
+    def test_review_context_in_assemble_messages(self):
+        """Review context appears as user/assistant pair in assembled messages."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_review_context("## Review: feature-branch\n2 commits")
+        messages = ctx.assemble_messages("Hello")
+        # Find review context
+        review_msg = None
+        review_ack = None
+        for i, msg in enumerate(messages):
+            if msg["role"] == "user" and "Code Review Context" in msg.get("content", ""):
+                review_msg = msg
+                if i + 1 < len(messages):
+                    review_ack = messages[i + 1]
+                break
+        assert review_msg is not None
+        assert "feature-branch" in review_msg["content"]
+        assert review_ack is not None
+        assert "reviewed the code changes" in review_ack["content"].lower()
+
+    def test_review_context_not_present_when_none(self):
+        """No review context block when review_context is None."""
+        ctx = ContextManager(system_prompt="System")
+        messages = ctx.assemble_messages("Hello")
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "Code Review Context" not in content
+
+    def test_review_context_between_url_and_files(self):
+        """Review context appears after URL context and before active files."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_url_context(["URL content"])
+        ctx.set_review_context("Review content")
+        ctx.file_context.add_file("test.py", "code")
+        messages = ctx.assemble_messages("Hello")
+
+        url_idx = None
+        review_idx = None
+        files_idx = None
+        for i, msg in enumerate(messages):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                if "URL Context" in content:
+                    url_idx = i
+                if "Code Review Context" in content:
+                    review_idx = i
+                if "Working Files" in content:
+                    files_idx = i
+
+        assert url_idx is not None
+        assert review_idx is not None
+        assert files_idx is not None
+        assert url_idx < review_idx < files_idx
+
+    def test_review_context_in_tiered_assembly(self):
+        """Review context appears in tiered assembly between URL and active files."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_review_context("## Review: test-branch")
+        messages = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={},
+        )
+        review_found = False
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str) and "Code Review Context" in content:
+                review_found = True
+                assert "test-branch" in content
+        assert review_found

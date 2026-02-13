@@ -450,7 +450,36 @@ class Repo:
 
         return [{"file": f, "matches": m} for f, m in results.items()]
 
-    # === Review mode support (Phase 10) ===
+    # === Review mode support ===
+
+    def get_current_branch(self):
+        """Get current branch name and SHA."""
+        try:
+            try:
+                branch = self._run_git("symbolic-ref", "--short", "HEAD").strip()
+                sha = self._run_git("rev-parse", "HEAD").strip()
+                return {"branch": branch, "sha": sha, "detached": False}
+            except subprocess.CalledProcessError:
+                sha = self._run_git("rev-parse", "HEAD").strip()
+                return {"branch": None, "sha": sha, "detached": True}
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
+    def resolve_ref(self, ref):
+        """Resolve a git ref to a full SHA. Returns None if not found."""
+        try:
+            return self._run_git("rev-parse", "--verify", ref).strip()
+        except subprocess.CalledProcessError:
+            return None
+
+    def get_commit_parent(self, commit):
+        """Get parent of a commit."""
+        try:
+            sha = self._run_git("rev-parse", f"{commit}^").strip()
+            short = sha[:7]
+            return {"sha": sha, "short_sha": short}
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
 
     def list_branches(self):
         """List local branches."""
@@ -498,7 +527,7 @@ class Repo:
         except subprocess.CalledProcessError:
             return []
 
-    def get_commit_log(self, base, head=None):
+    def get_commit_log(self, base, head=None, limit=500):
         """Get commit range log."""
         range_spec = f"{base}..{head}" if head else base
         try:
@@ -533,3 +562,209 @@ class Repo:
                 return {"sha": output.strip()}
             except subprocess.CalledProcessError as e:
                 return {"error": str(e)}
+
+    def get_commit_graph(self, limit=100, offset=0, include_remote=False):
+        """Get commit graph data for the review selector.
+
+        Returns commits with parent relationships and branch info.
+        """
+        try:
+            # Get commits with parents
+            # Use %P for parent SHAs in format string (--parents flag doesn't
+            # inject into --format output)
+            fmt = "%H|%P|%h|%s|%an|%ai|%ar"
+            args = ["log", "--all", "--topo-order",
+                    f"--format={fmt}",
+                    f"--skip={offset}", f"--max-count={limit + 1}"]
+            output = self._run_git(*args)
+
+            commits = []
+            for line in output.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split("|", 6)
+                if len(parts) < 6:
+                    continue
+                sha = parts[0]
+                parents = parts[1].split() if parts[1].strip() else []
+                commits.append({
+                    "sha": sha,
+                    "short_sha": parts[2],
+                    "message": parts[3],
+                    "author": parts[4],
+                    "date": parts[5],
+                    "relative_date": parts[6] if len(parts) > 6 else "",
+                    "parents": parents,
+                })
+
+            has_more = len(commits) > limit
+            commits = commits[:limit]
+
+            # Get branches
+            branch_args = ["branch", "--sort=-committerdate",
+                           "--format=%(refname:short)|%(objectname)|%(HEAD)|%(symref)"]
+            if include_remote:
+                branch_args.insert(1, "-a")
+            branch_output = self._run_git(*branch_args)
+
+            branches = []
+            for bline in branch_output.strip().splitlines():
+                if not bline:
+                    continue
+                bparts = bline.split("|", 3)
+                if len(bparts) < 3:
+                    continue
+                name = bparts[0].strip()
+                bsha = bparts[1].strip()
+                is_current = bparts[2].strip() == "*"
+                symref = bparts[3].strip() if len(bparts) > 3 else ""
+
+                # Filter symbolic refs
+                if name in ("HEAD", "origin/HEAD"):
+                    continue
+                if " -> " in name or " -> " in symref:
+                    continue
+                if symref:
+                    continue
+
+                is_remote = "/" in name and name.split("/")[0] not in (".", "..")
+
+                # Filter bare remote aliases
+                if is_remote:
+                    prefix = name + "/"
+                    is_bare = any(
+                        ol.split("|", 1)[0].strip() != name
+                        and ol.split("|", 1)[0].strip().startswith(prefix)
+                        for ol in branch_output.strip().splitlines()
+                    )
+                    if is_bare:
+                        continue
+
+                branches.append({
+                    "name": name,
+                    "sha": bsha,
+                    "is_current": is_current,
+                    "is_remote": is_remote,
+                })
+
+            return {
+                "commits": commits,
+                "branches": branches,
+                "has_more": has_more,
+            }
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
+    def checkout_review_parent(self, branch, base_commit):
+        """Check out the parent of the base commit for review setup.
+
+        Steps: record original branch, checkout branch, checkout parent.
+        """
+        try:
+            current = self.get_current_branch()
+            original_branch = current.get("branch") or current.get("sha", "")
+
+            branch_tip = self.resolve_ref(branch)
+            if not branch_tip:
+                return {"error": f"Cannot resolve ref: {branch}"}
+
+            parent_result = self.get_commit_parent(base_commit)
+            if "error" in parent_result:
+                return {"error": f"Cannot get parent of {base_commit}: {parent_result['error']}"}
+            parent_commit = parent_result["sha"]
+
+            try:
+                self._run_git("checkout", branch)
+            except subprocess.CalledProcessError as e:
+                return {"error": f"Cannot checkout {branch}: {e.stderr}"}
+
+            try:
+                self._run_git("checkout", parent_commit)
+            except subprocess.CalledProcessError as e:
+                try:
+                    self._run_git("checkout", original_branch)
+                except subprocess.CalledProcessError:
+                    pass
+                return {"error": f"Cannot checkout parent {parent_commit}: {e.stderr}"}
+
+            return {
+                "branch": branch,
+                "branch_tip": branch_tip,
+                "base_commit": base_commit,
+                "parent_commit": parent_commit,
+                "original_branch": original_branch,
+                "phase": "at_parent",
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def setup_review_soft_reset(self, branch_tip, parent_commit):
+        """Complete review setup: checkout branch tip by SHA, then soft reset to parent."""
+        try:
+            self._run_git("checkout", branch_tip)
+            self._run_git("reset", "--soft", parent_commit)
+            return {"status": "review_ready"}
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
+    def exit_review_mode(self, branch_tip, original_branch):
+        """Restore repository after review."""
+        try:
+            self._run_git("reset", "--soft", branch_tip)
+            try:
+                self._run_git("checkout", original_branch)
+            except subprocess.CalledProcessError as e:
+                return {
+                    "status": "partial_restore",
+                    "warning": f"HEAD detached at {branch_tip[:7]}. "
+                               f"Failed to checkout {original_branch}: {e.stderr}. "
+                               f"Run: git checkout {original_branch}",
+                }
+            return {"status": "restored"}
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
+    def get_review_file_diff(self, path):
+        """Get reverse diff for a file (staged changes, reversed)."""
+        try:
+            diff = self._run_git("diff", "--cached", "-R", "--", path)
+            return {"path": path, "diff": diff}
+        except subprocess.CalledProcessError:
+            return {"path": path, "diff": ""}
+
+    def get_review_changed_files(self):
+        """Get list of files changed in the review (staged changes)."""
+        try:
+            status_output = self._run_git("diff", "--cached", "--name-status").strip()
+            files = []
+            for line in status_output.splitlines():
+                if not line:
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) < 2:
+                    continue
+                status_code = parts[0].strip()
+                filepath = parts[1].strip()
+                status_map = {"A": "added", "M": "modified", "D": "deleted",
+                              "R": "renamed", "C": "copied"}
+                status = status_map.get(status_code[0], "modified")
+                files.append({"path": filepath, "status": status})
+
+            numstat = self._run_git("diff", "--cached", "--numstat").strip()
+            stat_map = {}
+            for line in numstat.splitlines():
+                nparts = line.split("\t")
+                if len(nparts) >= 3:
+                    adds = int(nparts[0]) if nparts[0] != "-" else 0
+                    dels = int(nparts[1]) if nparts[1] != "-" else 0
+                    stat_map[nparts[2]] = {"additions": adds, "deletions": dels}
+
+            for f in files:
+                stats = stat_map.get(f["path"], {})
+                f["additions"] = stats.get("additions", 0)
+                f["deletions"] = stats.get("deletions", 0)
+
+            return files
+        except subprocess.CalledProcessError:
+            return []
+

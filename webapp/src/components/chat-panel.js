@@ -164,6 +164,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     messages: { type: Array },
     selectedFiles: { type: Array },
     streamingActive: { type: Boolean },
+    reviewState: { type: Object },
     _streamingContent: { type: String, state: true },
     _inputValue: { type: String, state: true },
     _images: { type: Array, state: true },
@@ -947,6 +948,36 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
     }
 
+    /* Review status bar */
+    .review-status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: rgba(79, 195, 247, 0.06);
+      border-top: 1px solid var(--accent-primary);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    .review-status-bar strong {
+      color: var(--accent-primary);
+    }
+    .review-status-bar .review-diff-count {
+      margin-left: auto;
+      color: var(--text-muted);
+    }
+    .review-status-bar .review-exit-link {
+      color: var(--accent-red);
+      cursor: pointer;
+      font-size: 0.7rem;
+      border: none;
+      background: none;
+      padding: 0;
+    }
+    .review-status-bar .review-exit-link:hover {
+      text-decoration: underline;
+    }
+
     /* Search highlight on message cards */
     .message-card.search-highlight {
       border-color: var(--accent-primary);
@@ -960,6 +991,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.messages = [];
     this.selectedFiles = [];
     this.streamingActive = false;
+    this.reviewState = { active: false };
     this._streamingContent = '';
     this._inputValue = '';
     this._images = [];
@@ -1076,6 +1108,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       }
     } catch (e) {
       console.warn('Failed to load snippets:', e);
+    }
+    try {
+      const reviewSnippets = await this.rpcExtract('Settings.get_review_snippets');
+      if (Array.isArray(reviewSnippets)) {
+        this._reviewSnippets = reviewSnippets;
+      }
+    } catch (e) {
+      // Review snippets optional
     }
   }
 
@@ -1713,6 +1753,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._clearSearchHighlights();
   }
 
+  // === Review Helpers ===
+
+  _getReviewDiffCount() {
+    if (!this.reviewState?.active || !this.reviewState.changed_files) return 0;
+    const changedPaths = new Set(this.reviewState.changed_files.map(f => f.path));
+    return (this.selectedFiles || []).filter(f => changedPaths.has(f)).length;
+  }
+
   // === @-Filter ===
 
   _checkAtFilter(value) {
@@ -2162,8 +2210,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
         <button class="action-btn ${this._committing ? 'committing' : ''}"
-          title="Stage all & commit" @click=${this._commitWithMessage}
-          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive}>
+          title="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all & commit'}"
+          @click=${this._commitWithMessage}
+          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive || this.reviewState?.active}>
           ${this._committing ? '⏳' : '💾'}
         </button>
         <button class="action-btn danger" title="Reset to HEAD" @click=${this._confirmReset}
@@ -2201,6 +2250,22 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         @click=${this._onScrollBtnClick}
       >↓</button>
 
+      <!-- Review Status Bar -->
+      ${this.reviewState?.active ? html`
+        <div class="review-status-bar">
+          📋 <strong>${this.reviewState.branch}</strong>
+          ${this.reviewState.stats?.commit_count || 0} commits ·
+          ${this.reviewState.stats?.files_changed || 0} files ·
+          +${this.reviewState.stats?.additions || 0} −${this.reviewState.stats?.deletions || 0}
+          <span class="review-diff-count">
+            ${this._getReviewDiffCount()}/${this.reviewState.stats?.files_changed || 0} diffs in context
+          </span>
+          <button class="review-exit-link" @click=${() => this.dispatchEvent(new CustomEvent('exit-review', { bubbles: true, composed: true }))}>
+            Exit Review
+          </button>
+        </div>
+      ` : nothing}
+
       <!-- Input Area -->
       <div class="input-area">
         <ac-input-history
@@ -2221,13 +2286,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : nothing}
 
-        ${this._snippetDrawerOpen && this._snippets.length > 0 ? html`
+        ${this._snippetDrawerOpen && (this._snippets.length > 0 || (this.reviewState?.active && this._reviewSnippets.length > 0)) ? html`
           <div class="snippet-drawer">
             ${this._snippets.map(s => html`
               <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
                 ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
               </button>
             `)}
+            ${this.reviewState?.active ? this._reviewSnippets.map(s => html`
+              <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
+                ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
+              </button>
+            `) : nothing}
           </div>
         ` : nothing}
 
