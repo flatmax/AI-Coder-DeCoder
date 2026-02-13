@@ -372,8 +372,12 @@ class Repo:
         return {"branch": branch, "sha": sha, "detached": detached}
 
     def is_clean(self) -> bool:
-        """Check if working tree is clean (no staged, unstaged, or untracked changes)."""
-        r = _run_git(["status", "--porcelain"], self.root)
+        """Check if working tree is clean (no staged or unstaged changes to tracked files).
+
+        Untracked files are ignored — they won't conflict with checkout/reset
+        operations and are common in any repo (.ac-dc/, editor configs, etc.).
+        """
+        r = _run_git(["status", "--porcelain", "-uno"], self.root)
         return r.returncode == 0 and not r.stdout.strip()
 
     def resolve_ref(self, ref: str) -> Optional[str]:
@@ -473,7 +477,8 @@ class Repo:
         # Step 1: Verify clean working tree
         if not self.is_clean():
             return {"error": "Cannot enter review mode: working tree has uncommitted changes. "
-                    "Please commit, stash, or discard changes before starting a review."}
+                    "Please commit, stash, or discard changes first "
+                    "(git stash, git commit, or git checkout -- <file>)."}
 
         # Get branch tip SHA for later restoration
         r = _run_git(["rev-parse", branch], self.root)
