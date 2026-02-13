@@ -62,7 +62,7 @@ Files mentioned in assistant responses toggle selection via `file-mention-click`
 
 ## Middle-Click Path Insertion
 
-Middle-click on any row inserts the path into chat input at cursor position (space-padded). Default paste/autoscroll suppressed.
+Middle-click on any row inserts the path into chat input at cursor position (space-padded before and after). The browser's selection-buffer paste is suppressed via a flag on the chat panel to prevent duplicate content.
 
 ## Active File Highlight
 
