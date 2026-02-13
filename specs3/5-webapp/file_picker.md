@@ -75,6 +75,10 @@ A vertical resizer separates the file picker from the chat panel:
 - Width constrained 150px–500px
 - Width and collapsed state persisted to local storage
 
+## Review Mode Banner
+
+When review mode is active, a banner displays at the top of the file picker showing the branch name, commit range, file/line stats, and an exit button. The banner is synchronized with review state from `get_review_state()`. See [Code Review — UI Components](../4-features/code_review.md#review-mode-banner).
+
 ## Data Flow
 
 1. On startup: load file tree from Repo via RPC

@@ -135,3 +135,4 @@ See [Diff Viewer](diff_viewer.md) for full editor details.
 | Symbol cache corrupt | Clear in-memory cache, rebuild from source |
 | Compaction LLM failure | Safe defaults (no boundary, 0 confidence). History unchanged. Retry next trigger |
 | Emergency token overflow | Oldest messages truncated without summarization if > 2× compaction trigger |
+| Review mode crash | Manual recovery via `git checkout {original_branch}`. Detached HEAD state is safe — disk files match branch tip |

@@ -471,9 +471,9 @@ class Repo:
             return {"error": str(e)}
 
     def is_clean(self):
-        """Check if working tree is clean."""
+        """Check if working tree is clean (ignores untracked files)."""
         try:
-            output = self._run_git("status", "--porcelain").strip()
+            output = self._run_git("status", "--porcelain", "-uno").strip()
             return len(output) == 0
         except subprocess.CalledProcessError:
             return False

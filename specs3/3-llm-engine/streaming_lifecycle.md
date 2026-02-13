@@ -36,7 +36,7 @@ Background task: _stream_chat
     ├─ Add exchange to context manager
     ├─ Save symbol map to .ac-dc/
     ├─ Print terminal HUD
-    ├─ Parse & apply edit blocks (→ edit_protocol.md)
+    ├─ Parse & apply edit blocks (→ edit_protocol.md; skipped in review mode)
     ├─ Persist assistant message
     ├─ Update cache stability (→ cache_tiering.md)
     │

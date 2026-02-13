@@ -50,13 +50,32 @@ Content is organized into 5 stability tiers (see [Cache Tiering](cache_tiering.m
 [M+1] assistant "Ok."
 [M+2] user     URL context
 [M+3] assistant "Ok, I've reviewed the URL content."
-[M+4] user     Active files ("Working Files")
-[M+5] assistant "Ok."
+[M+4] user     Review context (if review mode active)
+[M+5] assistant "Ok, I've reviewed the code changes."
+[M+6] user     Active files ("Working Files")
+[M+7] assistant "Ok."
 [M+] Active history (native pairs)
 [last] user    Current prompt (with optional images)
 ```
 
 Empty tiers are skipped entirely.
+
+### Review Context (Conditional)
+
+When review mode is active (see [Code Review](../4-features/code_review.md)), a review context block is inserted between URL context and active files:
+
+```pseudo
+{"role": "user", "content": REVIEW_CONTEXT_HEADER + review_content}
+{"role": "assistant", "content": "Ok, I've reviewed the code changes."}
+```
+
+Header:
+```
+# Code Review Context
+
+```
+
+The review content includes: review summary (branch, commits, stats), commit log, pre-change symbol map, and reverse diffs for selected files. Re-injected on each message. See [Code Review — Review Context](../4-features/code_review.md#review-context-in-llm-messages) for full format.
 
 ## Header Constants
 
@@ -73,6 +92,7 @@ The following named constants are used when building the message array:
 | `FILES_L2_HEADER` | `# Reference Files (L2)\n\n...` |
 | `FILES_L3_HEADER` | `# Reference Files (L3)\n\n...` |
 | `TIER_SYMBOLS_HEADER` | `# Repository Structure (continued)\n\n` |
+| `REVIEW_CONTEXT_HEADER` | `# Code Review Context\n\n` |
 
 ## Block Details
 

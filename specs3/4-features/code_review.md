@@ -2,7 +2,7 @@
 
 ## Overview
 
-A review mode that leverages git's staging mechanism to present branch changes for AI-assisted code review. By performing a soft reset, all review changes appear as staged modifications — allowing the existing file picker, diff viewer, and context engine to work unchanged.
+A review mode that leverages git's staging mechanism to present branch changes for AI-assisted code review. By performing a soft reset, all review changes appear as staged modifications — allowing the existing file picker, diff viewer, and context engine to work unchanged. The AI reviews code with full symbol map context, structural change analysis, and interactive conversation.
 
 ## Architecture
 
@@ -21,8 +21,11 @@ Review Mode Active
     ├─ Files on disk = branch tip (reviewed code)
     ├─ Git HEAD = parent commit (pre-review)
     ├─ Staged changes = all review modifications
-    ├─ File picker shows staged files with S badges (unchanged)
-    ├─ Diff viewer shows base vs reviewed (unchanged)
+    ├─ Symbol map (current) = branch tip structure
+    ├─ Symbol map (before) = pre-review structure
+    │
+    ├─ File picker shows staged files with S badges
+    ├─ Diff viewer shows base vs reviewed (unchanged behavior)
     ├─ AI gets review context + symbol structural diff
     │
     ▼
@@ -37,194 +40,675 @@ User clicks Exit Review
 
 ### Entry Sequence
 
-| Step | Command | Git HEAD | Index | Disk |
-|------|---------|----------|-------|------|
-| 0 | — | Z (branch tip) | clean | branch tip |
-| 1 | `git status --porcelain` | Z | must be clean | branch tip |
-| 2 | `git checkout {branch}` | Z | clean | branch tip |
-| 3 | `git checkout {base}^` | base^ (detached) | clean | pre-review |
-| 4 | *Build symbol_map_before* | base^ | clean | pre-review |
-| 5 | `git checkout {branch}` | Z | clean | branch tip |
-| 6 | `git reset --soft {base}^` | base^ | **all changes staged** | branch tip |
+Six operations transform the repository into review state. The branch may be a local branch (e.g. `feature-auth`) or a remote tracking ref (e.g. `origin/feature-auth`). Both work — remote refs already have commits locally from fetch.
+
+| Step | Command | Git HEAD | Index (Staged) | Disk Files |
+|------|---------|----------|----------------|------------|
+| 0. Start | — | branch tip (Z) | clean | branch tip |
+| 1. Verify | `git status --porcelain -uno` | Z | must be clean | branch tip |
+| 2. Checkout branch | `git checkout {branch}` | Z | clean | branch tip |
+| 3. Checkout parent | `git checkout {base}^` | base^ (detached) | clean | pre-review |
+| 4. **Build symbol_map_before** | *(symbol index runs on disk)* | base^ | clean | pre-review |
+| 5. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
+| 6. Soft reset | `git reset --soft {base}^` | base^ (detached) | **all review changes staged** | branch tip |
+
+Step 5 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
+
+After step 6, the repository is in the perfect review state:
+
+| Aspect | State | Effect |
+|--------|-------|--------|
+| **Files on disk** | Branch tip content | User sees final reviewed code; symbol map reflects it |
+| **Git HEAD** | Parent of base commit (detached) | `git diff --cached` shows ALL review changes |
+| **Staged changes** | Everything being reviewed | File picker shows M/A/D badges naturally |
+| **Working tree** | Clean (matches disk) | No unstaged changes to confuse the UI |
 
 ### Exit Sequence
 
+Three operations restore the repository, followed by an internal rebuild:
+
 | Step | Command | Result |
 |------|---------|--------|
-| 1 | `git reset --soft {branch_tip}` | HEAD to original tip |
-| 2 | `git checkout {branch}` | Reattach HEAD |
-| 3 | Rebuild symbol index | Restore symbol map |
+| 1. Reset to tip | `git reset --soft {branch_tip_sha}` | HEAD moves to original tip SHA, staging clears |
+| 2. Checkout original branch | `git checkout {original_branch}` | HEAD reattaches to the branch the user was on before review |
+| 3. Rebuild symbol index | *(internal)* | Symbol map reflects restored state |
+
+The original branch (the branch HEAD was on when review started) is recorded on entry. On exit, the system checks out that branch to restore the user's pre-review state. If the checkout fails (e.g., the branch was deleted), HEAD remains detached at the branch tip SHA and the user is informed.
 
 ### Error Recovery
 
-If entry fails: attempt `git checkout {branch}`, then `git checkout {original_sha}`. If process crashes during review: `git checkout {branch}` restores everything (disk already matches tip).
+If any step in the entry sequence fails (e.g., checkout conflict, invalid commit):
+
+- **During initial checkout (steps 1-3):** The repo module attempts `git checkout {original_branch}` to return to the branch the user was on before review. If that fails, the error is reported as-is.
+- **During setup completion (steps 5-6):** The LLM service calls the exit sequence (`exit_review_mode`) which performs `git reset --soft {branch_tip_sha}` and `git checkout {original_branch}`, restoring the repository state.
+- The error is reported to the user and review mode is not entered.
+
+If the process crashes during review mode, the user can manually restore with:
+```
+git checkout {original_branch}
+```
+Or if that fails:
+```
+git reset --soft {branch_tip_sha}
+git checkout {original_branch}
+```
+Since disk files already match the branch tip, `reset --soft` just moves HEAD and clears staging, then checkout reattaches HEAD to the original branch.
 
 ## Prerequisites
 
-Clean working tree required. Recommended: use a dedicated clone for reviews.
+### Clean Working Tree
 
-## Commit Selection
+Review mode requires a clean working tree — no staged or unstaged changes to tracked files. The check uses `git status --porcelain -uno` (the `-uno` flag ignores untracked files). Untracked files are ignored since they won't conflict with checkout/reset operations and are common in any repo (`.ac-dc/`, editor configs, etc.). If the tree is dirty, the user is shown an error:
 
-### Branch Selection
+```
+Cannot enter review mode: working tree has uncommitted changes.
+Please commit, stash, or discard changes first
+(git stash, git commit, or git checkout -- <file>).
+```
 
-Searchable list of local branches. Remote branches shown but require fetch + checkout.
+### Dedicated Review Clone
 
-### Base Commit Selection
+The recommended workflow is to use a separate clone for reviews. This avoids disrupting active development work. The soft reset changes the git state in ways that would be confusing if the user also has uncommitted work.
 
-Two methods:
-- **Fuzzy search** — commits in reverse chronological order, filterable by message/SHA/author
-- **Direct SHA input** — text field with validation
+## Commit Selection via Git Graph
 
-**Merge base shortcut** — auto-detect divergence point: `git merge-base main {branch}`
+### Overview
+
+The review selector presents an interactive git graph showing all branches and their commits. The user clicks a commit node to select it as the base commit for review. The system infers which branch the commit belongs to and presents the review summary. A single **Start Review** button initiates the review.
+
+This replaces the previous two-step flow (branch dropdown → commit search) with a single visual interaction.
+
+### Git Graph Display
+
+The graph renders as an SVG within a scrollable container. Each branch occupies a stable vertical lane (column) throughout the graph — branches do not shift lanes as the user scrolls. This keeps the visual layout cognitively simple: a branch is always in the same column.
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ● main  ● feature-auth  ● fix-parsing  [⊙ remotes] │  ← frozen branch legend
+├─────────────────────────────────────────────────────┤
+│  ●─────── abc123  Fix validation (matt, 2h ago)     │
+│  │  ●──── def456  Add rate limiting (matt, 1d ago)  │
+│  │  │                                               │
+│  │  ●──── ghi789  Auth middleware (matt, 2d ago)    │
+│  │ /                                                │
+│  ●─────── jkl012  Merge main (alex, 3d ago)         │  ← scrollable graph area
+│  │  ●──── mno345  Refactor pool (alex, 4d ago)      │
+│  │  │                                               │
+│  ●─────── pqr678  Release 2.1 (alex, 5d ago)        │
+│  │                                                  │
+│  ...                                    [loading]   │
+└─────────────────────────────────────────────────────┘
+```
+
+#### Lane Assignment
+
+Each branch tip is assigned a lane (column index). Commits follow their first parent downward in the same lane. Second parents (merge commits) are drawn as connecting arcs/lines to the source lane. This keeps the common case — linear feature branches with occasional merges — clean and readable.
+
+Lane assignment rules:
+1. Each branch tip starts a lane, ordered by most recent commit date (leftmost = most recently active)
+2. A commit stays in the lane of the branch tip it is reachable from via first-parent traversal
+3. Merge commits show a connecting line from the second parent's lane to the merge point
+4. When a branch's history joins another branch (the fork point), the lane ends
+
+#### Commit Nodes
+
+Each commit node shows:
+- **Colored circle** matching its branch color
+- **Short SHA** (7 characters)
+- **Commit message** (first line, truncated to fit)
+- **Author and relative date** (e.g., "matt · 2 days ago")
+
+Branch tip commits additionally show the branch name as a label badge next to the node.
+
+#### Lazy Loading
+
+The graph loads an initial batch of commits (default: 100) and fetches more as the user scrolls toward the bottom. A loading indicator appears during fetch. The backend supports offset-based pagination via `get_commit_graph(limit, offset)`.
+
+### Branch Legend (Frozen Header)
+
+A fixed header above the scrollable graph area shows all branches as colored chips. The legend does not scroll — it remains visible regardless of graph scroll position.
+
+```
+● main  ● feature-auth  ● fix-parsing  [⊙ remotes]
+```
+
+Legend features:
+- **Branch chips** are colored to match their lane in the graph
+- **Ordered by most recent commit** — actively worked branches appear first
+- **Toggleable for filtering** — clicking a branch chip toggles its visibility in the graph. Dimmed chips are hidden branches. This helps with noisy repos that have many branches.
+- **Remote toggle** — a button to include/exclude remote tracking branches (default: local only). When enabled, remote branches appear in the legend and graph with a distinct visual style (e.g., dashed lane lines).
+
+### Disambiguation
+
+A commit can be reachable from multiple branches (e.g., a commit on `main` before a feature branch forked). When the user clicks such a commit:
+
+1. The system identifies all branches whose tips are descendants of the selected commit
+2. If only one branch → no ambiguity, proceed directly
+3. If multiple branches:
+   - A small dropdown/popover appears at the selected commit node listing the candidate branches
+   - The branch whose tip is closest to the selected commit (fewest commits between selection and tip) is pre-selected
+   - The user selects a branch from the dropdown to confirm
+   - Clicking outside the dropdown cancels the selection
+
+This is usually resolved instantly — the closest-tip heuristic is correct in the vast majority of cases, and the user just confirms with a click.
+
+### Clean Working Tree Check
+
+When the review selector opens, it immediately checks `is_clean()` before rendering the graph. If the working tree has uncommitted changes, the graph is not shown. Instead, an inline message is displayed:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ⚠ Working tree has uncommitted changes              │
+│                                                     │
+│ Cannot start a review with pending changes.         │
+│ Please commit, stash, or discard changes first:     │
+│                                                     │
+│   git stash                                         │
+│   git commit -am "wip"                              │
+│   git checkout -- <file>                            │
+│                                                     │
+│                                           [Close]   │
+└─────────────────────────────────────────────────────┘
+```
+
+This prevents the user from making selections that will fail at `start_review` time.
+
+### Selection and Review Summary
+
+When a commit is selected (and branch disambiguated if needed), the area below the graph shows the review summary:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ 📋 Review: feature-auth                             │
+│ abc1234 → def5678 (HEAD) · 12 commits               │
+│                                                     │
+│                                    [Start Review]   │
+└─────────────────────────────────────────────────────┘
+```
+
+The **Start Review** button calls `start_review(branch, base_commit)` — the same API as before.
+
+### Backend: Commit Graph Data
+
+```pseudo
+get_commit_graph(limit?, offset?) -> {
+    commits: [
+        {
+            sha: string,
+            short_sha: string,
+            message: string,
+            author: string,
+            date: string,          # ISO timestamp
+            relative_date: string, # "2 days ago"
+            parents: [string],     # parent SHA(s)
+        }
+    ],
+    branches: [
+        {
+            name: string,
+            sha: string,           # tip commit SHA
+            is_current: boolean,
+            is_remote: boolean,
+        }
+    ],
+    has_more: boolean              # whether more commits exist beyond this batch
+}
+```
+
+Implementation: runs `git log --all --topo-order --parents --format=...` with pagination via `--skip` and `--max-count`. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
+
+The backend post-filters branch results to remove:
+- Symbolic refs: `HEAD`, `origin/HEAD`, entries containing ` -> `
+- Bare remote aliases: a name like `origin` that is a prefix of other branch names (e.g. `origin/master`) is a remote alias, not a real branch. Filtered by checking if any other branch name starts with `name + "/"`, excluding the current branch.
+
+The frontend computes lane assignment entirely client-side from the parent relationships and branch tip positions. No layout computation happens on the backend.
+
+#### Lane Assignment Algorithm
+
+Lane assignment follows these rules:
+
+1. **Branch sorting**: Current branch first, then local branches, then remote branches. Within each group, committer-date order from the backend (most recent first) is preserved.
+2. **Lane dedup**: Branches sharing the same tip SHA share a lane. Remote branches whose local counterpart exists (e.g. `origin/master` when `master` exists) share the local branch's lane.
+3. **First-parent walk**: Starting from each branch tip in sorted order, follow first-parent links. Each commit is assigned to the branch's lane until a commit already claimed by another branch is reached — this is the fork point.
+4. **Fork edges**: At each fork point, a diagonal/curved SVG path connects the child branch's lane to the parent branch's lane.
+5. **Merge lines**: Merge commits (with multiple parents) draw dashed lines from the merge node to the second parent's lane.
+6. **Lane ranges**: Each lane draws a continuous vertical line from its tip row to its fork row. Merge parents extend the target lane's range upward so the merge line connects visually.
+
+This ensures the current/main branch claims the deepest history before feature branches, producing correct fork points.
 
 ## Review Context in LLM Messages
 
-Inserted between URL context and active files in the message array (see [Prompt Assembly](../3-llm-engine/prompt_assembly.md)):
+### Prompt Assembly
+
+Review context is inserted as a dedicated section in the message array, between URL context and active files:
 
 ```
-## Review: {branch} ({base_short} → {head_short})
-{N} commits, {M} files changed, +{add} -{del}
+[L0: system prompt + legend + L0 symbols/files]
+[L1, L2, L3 cached tiers]
+[file tree]
+[URL context]
+[Review context]          ← NEW
+[active files (Working Files)]
+[active history]
+[user prompt]
+```
+
+### Review Context Format
+
+```
+# Code Review Context
+
+## Review: {branch} ({parent_short} → {tip_short})
+{commit_count} commits, {files_changed} files changed, +{additions} -{deletions}
 
 ## Commits
-1. {sha} {message} ({author}, {date})
+1. {sha_short} {message} ({author}, {relative_date})
+2. {sha_short} {message} ({author}, {relative_date})
 ...
 
-## Structural Changes (Symbol Diff)
-+ path/new.py (new file)
-    + class NewClass
-~ path/changed.py (modified)
-    + f added_function()
-    ~ f changed_function()       ← signature changed
-    - f removed_function()       ← removed (was ←5 refs!)
-- path/deleted.py               ← deleted (was ←3 refs)
+## Pre-Change Symbol Map
+Symbol map from the parent commit (before the reviewed changes).
+Compare against the current symbol map in the repository structure above.
 
-## Selected File Diffs
-### path/file.py (+120 -30)
-<diff content>
+<full symbol map from parent commit>
+
+## Reverse Diffs (selected files)
+These diffs show what would revert each file to the pre-review state.
+The full current content is in the working files above.
+
+### path/to/file.py (+120 -30)
+```diff
+@@ -10,6 +10,15 @@
+ def existing_function():
++    old_code()
+-    new_code()
+```​
+
+### path/to/other.py (+85 -0)
+```diff
+...
+```​
 ```
 
 ### Context Tiering
 
-| Content | Tier |
-|---------|------|
-| Review summary, structural diff | Graduates to cached tiers |
-| Individual file diffs | Active tier (user toggles inclusion) |
-| Full file contents | Normal tiering |
+Review context is re-injected on each message (like URL context), so it is always current with the user's file selection. The stability tracker handles tiering naturally:
 
-## Symbol Map Structural Diff
+| Content | Tier | Rationale |
+|---------|------|-----------|
+| Review summary (commits, stats) | Re-injected each message | Part of the review context block |
+| Pre-change symbol map | Re-injected each message | Part of the review context block |
+| Reverse diffs for selected files | Re-injected each message | Changes as user toggles file selection |
+| Full file contents | Normal tiering | Selected files follow standard stability rules |
 
-Compares `symbol_map_before` against current symbol map:
-1. Classify files as added/removed/modified
-2. For modified files: diff symbol lists (added/removed/changed)
-3. Annotate removed symbols with reference count from `symbol_map_before`
+Since the review context block is rebuilt each message, compaction of older history messages doesn't lose review information.
 
-## Backend Methods
+### Token Budget
 
-### Repo
+For large reviews, not all file diffs can fit in context. The system includes reverse diffs only for files the user has explicitly selected in the file picker. This gives the user direct control over the token budget:
 
-| Method | Description |
-|--------|-------------|
-| `Repo.list_branches()` | Local branches with SHA, message, current flag |
-| `Repo.is_clean()` | Clean working tree check |
-| `Repo.search_commits(query, branch?, limit?)` | Search by message, SHA, author |
-| `Repo.get_commit_log(base, head?)` | Commit range |
-| `Repo.get_merge_base(ref1, ref2?)` | Merge base SHA |
-| `Repo.enter_review_mode(branch, base)` | Steps 1-4 of entry |
-| `Repo.complete_review_setup(branch, parent)` | Steps 5-6 |
-| `Repo.exit_review_mode(branch, tip)` | Exit sequence |
+1. **Selected files** — their full content is in the working files context, and their reverse diff is in the review context section
+2. **Unselected files** — contribute neither content nor diffs
+3. **Incremental review** — the user can review files in batches: "Review the auth module files" → select those files → send → deselect → select the next batch
 
-### LLM
+The review status bar shows "N/M diffs in context" so the user always knows how many changed files are currently included.
 
-| Method | Description |
-|--------|-------------|
-| `LLM.start_review(branch, base)` | Full entry + context setup |
-| `LLM.end_review()` | Exit + cleanup |
-| `LLM.get_review_state()` | Current review state |
+## Pre-Change Symbol Map
+
+On review entry the service captures `symbol_map_before` (the full symbol map built from the parent commit). This is injected into the review context so the LLM can compare the pre-change codebase topology against the current (post-change) symbol map that is already part of every request.
+
+Having both maps lets the LLM assess blast radius, trace removed dependencies, and understand the structural evolution — much richer than a flat symbol diff summary.
+
+### Storage
+
+- `symbol_map_before` is held in memory on the LLM service during the review session
+- Not persisted to disk — rebuilt if needed by re-running the entry sequence
+
+## Reverse Diffs for Selected Files
+
+When a file is selected (checked in the file picker) during review mode, its full current content is included in the working files context as usual. Additionally, a **reverse diff** (`git diff --cached -R`) is included in the review context section. This gives the LLM complete information: the current code plus exactly what it replaced.
+
+Files that are not selected contribute neither content nor diffs — the user controls context size through file selection.
+
+### File Selection Flow
+
+The typical review workflow uses file mentions as the primary interaction:
+
+1. User sends a review prompt (e.g., "Review the auth changes")
+2. LLM responds, mentioning relevant files by name
+3. File mentions appear as clickable links in the chat message
+4. User clicks a file mention → file is toggled in the picker → its full content and reverse diff are included in subsequent messages
+5. The review status bar updates to show "N/M diffs in context"
+6. User can also directly check/uncheck files in the file picker
+
+This leverages the existing file mention detection and click-to-select infrastructure — no review-specific file UI is needed.
 
 ## UI Components
 
-### Review Diff Chips
+### Review Mode Banner
 
-A chip bar displayed above the chat input (similar to URL chips), showing the active review and which file diffs are included in context:
+Displayed at the top of the file picker when review mode is active. Shows the branch name, commit range, and an exit button:
 
 ```
-📋 Review: abc1234→HEAD · 12 commits · 34 files
-[📄 handler.py ✓] [📄 models.py ✓] [📄 connection.py ○]  +31 more
-                                                    [Clear Review]
+┌──────────────────────────────────┐
+│ 📋 Reviewing: feature-auth      │
+│ abc1234 → HEAD · 12 commits     │
+│ 34 files · +1847 -423           │
+│                      [Exit ✕]   │
+└──────────────────────────────────┘
+```
+
+The banner is rendered by the file picker component and synchronized with the review state from `get_review_state()`.
+
+### Git Graph Selector
+
+Appears when entering review mode. Replaces the file picker panel content (or renders as a modal overlay).
+
+The component has three visual zones stacked vertically:
+
+**1. Frozen branch legend** — A fixed header bar showing colored branch chips. Stays visible during graph scrolling. Chips are toggleable to filter branches. Includes a remote branches toggle button. Used for disambiguation when a selected commit belongs to multiple branches.
+
+**2. Scrollable git graph** — An SVG-rendered commit graph with stable lane columns. Each branch keeps its lane throughout the visible history. Commit nodes are clickable — clicking selects that commit as the review base. The selected commit gets a highlight ring. Lazy-loads more commits on scroll-to-bottom.
+
+**3. Review info / action bar** — A fixed footer area showing:
+- Before selection: "Click a commit to select the review starting point"
+- After selection: branch name, commit range, commit count, and a **Start Review** button
+- During review entry: progress indicator ("Entering review mode... ⟳ Building symbol maps & setting up review")
+- If working tree is dirty: warning message with remediation commands (graph is not rendered)
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ● main  ● feature-auth  ● fix-parsing  [⊙ remotes] │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ●─── abc123  Fix validation (matt, 2h ago)         │
+│  │ ●─ def456  Add rate limiting (matt, 1d ago)      │
+│  │ │                                                │
+│  │ ●─ [ghi789] Auth middleware (matt, 2d ago)  ← ●  │
+│  │/                                                 │
+│  ●─── jkl012  Merge main (alex, 3d ago)             │
+│  ...                                                │
+│                                                     │
+├─────────────────────────────────────────────────────┤
+│ 📋 Review: feature-auth                             │
+│ ghi789 → def456 (HEAD) · 2 commits                  │
+│                                    [Start Review]   │
+└─────────────────────────────────────────────────────┘
+```
+
+#### Graph Rendering Details
+
+The graph is rendered as an inline SVG within a LitElement component. Layout is computed client-side from the commit parent relationships:
+
+- **Lanes**: Each branch tip is assigned a column index, ordered by most recent commit date. Commits follow first-parent links downward within the same lane.
+- **Merge lines**: Second-parent edges are drawn as curved or angled SVG paths connecting to the source lane.
+- **Colors**: Each lane gets a color from a predefined palette. The same color is used for the lane's line, commit nodes, and the corresponding legend chip.
+- **Interaction**: Commit nodes have hover states (enlarged, tooltip with full message) and click handlers for selection.
+- **Scroll loading**: An IntersectionObserver on a sentinel element near the bottom triggers fetching the next batch of commits.
+
+No external graph rendering libraries are used — the layout and SVG generation are implemented directly in the component.
+
+### File Picker in Review Mode
+
+The file picker operates unchanged — staged files appear with **S** badges, diff stats show additions/deletions. The filter, selection, context menu, and keyboard navigation all work as normal.
+
+### Review Status Bar
+
+A slim status bar displayed above the chat input showing the active review summary and diff inclusion count:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ 📋  feature-auth  12 commits · 34 files · +1847 −423          │
+│                              3/34 diffs in context [Exit Review]│
+└────────────────────────────────────────────────────────────────┘
 ```
 
 | Element | Behavior |
 |---------|----------|
-| Summary line | Branch, commit range, totals |
-| File chip (✓) | Diff included in context; click to open in diff viewer |
-| File chip (○) | Diff excluded; click to toggle inclusion |
-| "+N more" | Expand to show all files |
-| "Clear Review" | Exit review mode (with confirmation) |
+| Branch name | Shows which branch is under review |
+| Stats | Commit count, files changed, additions/deletions |
+| Diff count | "N/M diffs in context" — how many selected files overlap with changed files |
+| Prompt text | When no files selected: "Select files to include diffs" |
+| "Exit Review" | Exit review mode and restore branch |
 
-Chips are synchronized with the file picker selection — checking a file in the picker also includes its diff.
+### File Selection for Review Diffs
 
-### Review Banner
+Review mode does **not** use a separate chip-per-file UI for toggling diffs. Instead, it uses the standard file selection mechanisms:
 
-Displayed at the top of the file picker when review mode is active:
+1. **File picker** — User checks files in the tree as usual. Staged review files appear with **S** badges.
+2. **File mentions** — The LLM mentions files in its responses; clicking a mention toggles the file's selection in the picker.
+3. **Automatic diff inclusion** — Any selected file that is also in the review's changed file list automatically has its reverse diff included in the review context sent to the LLM.
 
+This approach avoids duplicating the file picker's functionality and scales naturally to large reviews — the user selects only the files they want the LLM to focus on, and the review status bar shows the count of diffs currently in context.
+
+### Diff Viewer in Review Mode
+
+The diff viewer operates unchanged. Since git HEAD is at the pre-review commit and disk files are at the branch tip:
+- **Left side (original)**: file content from HEAD (pre-review state)
+- **Right side (modified)**: file content from disk (reviewed code)
+- This is the standard `git diff --cached` view
+
+File tabs show review status badges: **NEW** for added files, **MOD** for modified, **DEL** for deleted.
+
+### Review Snippets
+
+When review mode is active, additional snippet buttons can appear in the snippet drawer. These are loaded from the `review_snippets` array in the snippets configuration file (repo-local `.ac-dc/snippets.json` or the global `snippets.json`). No default review snippets are included — users configure them for their workflow.
+
+Example `snippets.json` with review snippets:
+
+```json
+{
+  "snippets": [ ... ],
+  "review_snippets": [
+    {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes in the review diff. Provide a structured summary with issues categorized by severity (critical, warning, suggestion, question)."},
+    {"icon": "🔒", "tooltip": "Security review", "message": "Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting."},
+    {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the author's intent for each change and flagging any issues."},
+    {"icon": "🏗️", "tooltip": "Architecture review", "message": "Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture."},
+    {"icon": "✅", "tooltip": "Test coverage", "message": "Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful?"},
+    {"icon": "📝", "tooltip": "PR description", "message": "Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes."},
+    {"icon": "🧹", "tooltip": "Code quality", "message": "Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns."}
+  ]
+}
 ```
-📋 Reviewing: feature-auth
-abc1234 → HEAD · 12 commits
-34 files · +1847 -423           [Exit ✕]
+
+These snippets supplement (not replace) the standard snippets. They are merged into the snippet drawer when `get_review_state().active` is true.
+
+## Backend
+
+### Repo Methods
+
+```pseudo
+list_branches() -> {
+    branches: [{name, sha, message, is_current}],
+    current: string
+}
+
+get_current_branch() -> {
+    branch: string,
+    sha: string,
+    detached: boolean
+}
+
+is_clean() -> boolean
+    # Uses git status --porcelain -uno (ignores untracked files)
+
+resolve_ref(ref) -> string | null
+    # Resolve a git ref (branch name, tag, SHA prefix) to a full SHA
+
+get_commit_graph(limit?, offset?, include_remote?) -> {
+    commits: [
+        {sha, short_sha, message, author, date, relative_date, parents: [sha]}
+    ],
+    branches: [
+        {name, sha, is_current, is_remote}
+    ],
+    has_more: boolean
+}
+    # Branches are post-filtered to remove symbolic refs (HEAD, origin/HEAD),
+    # pointer entries (->), and bare remote aliases (e.g. "origin")
+
+get_commit_log(base, head?, limit?) -> [
+    {sha, short_sha, message, author, date}
+]
+
+get_commit_parent(commit) -> {sha, short_sha} | {error}
+
+get_merge_base(ref1, ref2?) -> {sha, short_sha} | {error}
+
+checkout_review_parent(branch, base_commit) -> {
+    branch, branch_tip, base_commit, parent_commit,
+    original_branch,
+    phase: "at_parent"
+} | {error}
+    # branch can be local ("feature-auth") or remote ("origin/feature-auth")
+    # original_branch is the branch HEAD was on before review (for restoration)
+
+setup_review_soft_reset(branch_tip, parent_commit) -> {status: "review_ready"}
+    # Checks out branch_tip by SHA (not name) for remote ref compatibility
+    # Then soft resets to parent_commit
+
+exit_review_mode(branch_tip, original_branch) -> {status: "restored"} | {error}
+    # Resets to branch_tip SHA, then checks out original_branch
+    # If checkout fails, HEAD remains detached and error is reported
 ```
 
-### Token Budget for Large Reviews
+### LLM Service Methods
 
-Not all file diffs can fit in context. The system prioritizes:
+```pseudo
+get_commit_graph(limit?, offset?, include_remote?) -> {
+    commits: [{sha, short_sha, message, author, date, relative_date, parents}],
+    branches: [{name, sha, is_current, is_remote}],
+    has_more: boolean
+}
+    # Delegates to repo.get_commit_graph(). Called by the review selector
+    # to populate the git graph UI. Pagination via offset for lazy loading.
 
-1. **Files selected (checked) in the picker** — diffs always included
-2. **High blast-radius files** — sorted by reference count from symbol map
-3. **Largest diffs last** — small changes are cheap; large rewrites may need individual review
+check_review_ready() -> {clean: true} | {clean: false, message: string}
+    # Checks is_clean() and returns a user-friendly message if the working
+    # tree has uncommitted changes. Called when the review selector opens,
+    # before rendering the graph.
 
-## Review Snippets
+start_review(branch, base_commit) -> {
+    status: "review_active", branch, base_commit,
+    commits: [{sha, short_sha, message, author, date}],
+    changed_files: [{path, status, additions, deletions}],
+    stats: {commit_count, files_changed, additions, deletions}
+} | {error}
+    # Full entry sequence: checkout_review_parent → build symbol_map_before →
+    # setup_review_soft_reset → rebuild symbol index
 
-When review mode is active, additional snippet buttons appear:
+end_review() -> {status: "restored"} | {error}
+    # Calls exit_review_mode(branch_tip, original_branch), clears review state,
+    # rebuilds symbol index and stability tracker
 
-| Icon | Purpose |
-|------|---------|
-| 🔍 | Full review — structured summary with severity categories |
-| 🔒 | Security review — input validation, auth, injection, secrets |
-| 🚶 | Commit walkthrough — per-commit intent and issues |
-| 🏗️ | Architecture review — modularity, coupling, design patterns |
-| ✅ | Test coverage — coverage gaps, edge cases, assertion quality |
-| 📝 | PR description — summary, motivation, testing notes |
-| 🧹 | Code quality — naming, duplication, complexity, patterns |
+get_review_state() -> {
+    active: boolean,
+    branch?, base_commit?, branch_tip?, commits?, changed_files?,
+    stats?
+}
 
-These supplement (not replace) standard snippets. Loaded when `get_review_state().active` is true.
+get_review_file_diff(path) -> {path, diff}
+    # Delegates to repo.get_review_file_diff (git diff --cached -- path)
+```
+
+### Review State
+
+The LLM service holds review state in memory:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_review_active` | bool | Whether review mode is on |
+| `_review_branch` | str | Branch being reviewed |
+| `_review_branch_tip` | str | Original branch HEAD SHA (for restoration) |
+| `_review_base_commit` | str | First commit in the review |
+| `_review_parent` | str | Parent of base commit (current git HEAD) |
+| `_review_original_branch` | str | Branch HEAD was on before review (for restoration on exit) |
+| `_review_commits` | list | Commit log |
+| `_review_changed_files` | list | Changed file paths with status |
+| `_review_stats` | dict | Aggregate stats (commit count, files, additions, deletions) |
+| `_symbol_map_before` | str | Symbol map from pre-review state |
+
+State is not persisted across server restarts. If the server crashes during a review, the user must manually restore with `git checkout {original_branch}`. This is documented in the error recovery section.
 
 ## Integration with Existing Systems
 
-| System | Impact |
-|--------|--------|
-| **File Picker** | No changes — staged files from soft reset appear naturally with S badges |
-| **Diff Viewer** | No changes — HEAD (pre-review) vs disk (reviewed code) is standard cached diff |
-| **Symbol Map** | Current map reflects reviewed codebase; AI navigates normally |
-| **Cache Tiering** | Review context graduates to cached tiers; file diffs stay active |
-| **History / Compaction** | Standard system; review context re-injected each message |
-| **Streaming Chat** | No changes; review context is additional prompt content |
+### File Picker
 
-## Notes
+No changes needed. Staged files from the soft reset appear naturally with S badges and diff stats.
 
-- Edit blocks proposed during review are **not applied** by default — review mode is for reading
-- On restart, detect soft-reset state and prompt user to re-enter or exit review mode
+### Diff Viewer
 
-## Future Enhancements
+No changes needed. HEAD (pre-review) vs disk (reviewed code) is the standard diff view for staged changes.
 
-- **Review Annotations** — structured annotations exportable as GitHub PR comments or markdown reports
-- **Suggested Fixes** — AI proposes edit blocks during review, optionally applied
-- **Review Checklists** — configurable checklists (security, performance, style) with pass/fail per criterion
-- **Incremental Review** — track reviewed vs pending files, focus AI on remaining files
-- **Cross-Branch Comparison** — compare two branches side by side
+### Symbol Map
+
+The current symbol map (built from disk files) reflects the reviewed codebase. The AI navigates it normally — tracing dependencies, assessing blast radius, finding related code.
+
+### Cache Tiering
+
+Review context (commit log, structural diff) can graduate to cached tiers since it doesn't change during the review. File diffs stay in the active tier as the user toggles them.
+
+### History / Compaction
+
+Review conversations use the standard history and compaction system. The review context is re-injected on each message (like URL context), so compaction of older messages doesn't lose it.
+
+### Streaming Chat
+
+The chat operates normally during review. The review context is additional content in the prompt assembly — no changes to the streaming, edit parsing, or completion flow.
+
+**Review mode is read-only.** The `_stream_chat` method explicitly checks `_review_active` and:
+- Skips `apply_edits_to_repo` — edit blocks still appear in the response for reference but are not applied to disk
+- Skips commit message generation — the commit button is disabled in the UI
+
+A future enhancement could support suggested fixes that are applied on user confirmation.
+
+### Symbol Maps
+
+The LLM receives both the current symbol map (standard in every request) and the pre-change symbol map (in the review context block). Having both full maps lets the LLM directly compare the codebase topology before and after the reviewed changes — tracing removed dependencies, assessing blast radius, and understanding structural evolution. No computed symbol diff is needed; the LLM performs this analysis itself.
 
 ## Limitations
 
-- Single review session at a time
-- No concurrent editing during review
-- Root commits: empty pre-review state
-- Large reviews: chip system controls included diffs
-- No branch switching during review
+### Single Review Session
+
+Only one review can be active at a time. Starting a new review exits the current one first.
+
+### No Concurrent Editing
+
+Since git HEAD is at a different commit during review, committing new changes is not supported. The user should exit review mode before making commits.
+
+### Root Commits
+
+If the base commit is the first commit in the repository (has no parent), the pre-review state is an empty tree. The symbol_map_before will be empty, and all files appear as new additions.
+
+### Large Reviews
+
+Reviews with hundreds of changed files may exceed token budgets. The chip system allows the user to control which diffs are included. The AI can review files incrementally: "Review the next 5 files" or "Focus on the auth module changes."
+
+### Branch Switching During Review
+
+Not supported. The user must exit review mode before switching branches.
+
+## Future Enhancements
+
+### Review Annotations
+
+The AI could produce structured annotations that map to specific files and line ranges, exportable as:
+- GitHub PR review comments
+- Markdown review report
+- Inline code comments
+
+### Suggested Fixes
+
+Allow the AI to propose edit blocks during review that can be optionally applied — turning review feedback into actionable fixes.
+
+### Review Checklists
+
+Configurable review checklists (security, performance, style) that the AI evaluates systematically, producing a pass/fail report per criterion.
+
+### Incremental Review
+
+For ongoing reviews, track which files have been reviewed and which are pending. Allow the user to mark files as "reviewed" and focus the AI on remaining files.
+
+### Cross-Branch Comparison
+
+Compare two branches side by side — useful for evaluating alternative implementations.

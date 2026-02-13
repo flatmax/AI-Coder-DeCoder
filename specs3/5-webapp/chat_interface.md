@@ -264,6 +264,14 @@ Files-tab reaches into chat-panel's shadow DOM to add/remove the class on `.mess
 | Right | 💾 | Stage all → generate message → commit |
 | Right | ⚠️ | Reset to HEAD (with confirmation) |
 
+### Review Status Bar
+
+When review mode is active, a slim status bar appears above the chat input showing review summary and diff inclusion count. See [Code Review — Review Status Bar](../4-features/code_review.md#review-status-bar). The commit button is disabled during review.
+
+### Review Snippets
+
+When `get_review_state().active` is true, review-specific snippets from the `review_snippets` config array are merged into the snippet drawer alongside standard snippets. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+
 ---
 
 ## History Browser

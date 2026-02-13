@@ -150,12 +150,12 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
 ### Phase 10: Code Review
-- [ ] **Repo review methods** — Branch listing, commit search, review mode entry/exit
-- [ ] **Review mode state** — LLM service review state, symbol map before capture, structural diff
-- [ ] **Review context assembly** — Commit log, symbol diff, selected file diffs in prompt
-- [ ] **Commit selector UI** — Branch dropdown, fuzzy commit search, merge base shortcut
-- [ ] **Review diff chips** — Chip bar showing review state and per-file diff toggles
-- [ ] **Review banner** — File picker header showing active review info
-- [ ] **Review snippets** — Review-specific quick-insert buttons
-- [ ] **Symbol map diff** — Compare pre/post symbol maps, annotate removed symbols with reference counts
-- [ ] **Review mode detection on restart** — Detect soft-reset state on server start, prompt user to re-enter or exit
+- [ ] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`
+- [ ] **Review mode state** — LLM service review state fields, `start_review`/`end_review`/`get_review_state`/`check_review_ready`, symbol_map_before capture
+- [ ] **Review context assembly** — Review context block in prompt assembly (commits, pre-change symbol map, reverse diffs for selected files), `get_review_file_diff`
+- [ ] **Git graph selector UI** — SVG commit graph with stable lane columns, frozen branch legend, lazy loading, commit click selection, branch disambiguation popover, clean tree check
+- [ ] **Git graph lane algorithm** — Client-side lane assignment from parent relationships, fork edges, merge lines, lane dedup for shared tips
+- [ ] **Review banner** — File picker header showing branch, commit range, stats, exit button
+- [ ] **Review status bar** — Slim bar above chat input with diff inclusion count, exit button, disabled commit button
+- [ ] **Review snippets** — Optional `review_snippets` array in snippets config, merged into drawer when review active
+- [ ] **Read-only edit mode** — Skip `apply_edits_to_repo` during review, disable commit button
