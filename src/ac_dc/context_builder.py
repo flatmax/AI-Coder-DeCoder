@@ -136,6 +136,7 @@ class TieredContextBuilder:
         history_tier_map: dict[int, Tier],
         file_tree: str = "",
         url_context: str = "",
+        review_context: str = "",
         active_file_contents: dict[str, str] | None = None,
         user_prompt: str = "",
         images: list[str] | None = None,
@@ -201,6 +202,14 @@ class TieredContextBuilder:
             messages.append({
                 "role": "assistant",
                 "content": "Ok, I've reviewed the URL content.",
+            })
+
+        # ── Review context (uncached) ──
+        if review_context:
+            messages.append({"role": "user", "content": review_context})
+            messages.append({
+                "role": "assistant",
+                "content": "Ok, I've reviewed the code changes.",
             })
 
         # ── Active files (uncached) ──

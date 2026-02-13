@@ -5,6 +5,8 @@ import './chat-input.js';
 import './url-chips.js';
 import './file-picker.js';
 import './history-browser.js';
+import './review-selector.js';
+import './review-chips.js';
 
 /**
  * Files & Chat tab — left panel (file picker) + right panel (chat).
@@ -33,6 +35,9 @@ class FilesTab extends RpcMixin(LitElement) {
     _chatSearch: { type: String, state: true },
     _chatSearchIndex: { type: Number, state: true },
     _chatSearchMatches: { type: Array, state: true },
+    /** Review mode state */
+    _reviewState: { type: Object, state: true },
+    _reviewSelectorOpen: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -289,6 +294,8 @@ class FilesTab extends RpcMixin(LitElement) {
     this._chatSearch = '';
     this._chatSearchIndex = -1;
     this._chatSearchMatches = [];
+    this._reviewState = null;
+    this._reviewSelectorOpen = false;
 
     // Picker panel state — restore from localStorage
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
@@ -331,14 +338,40 @@ class FilesTab extends RpcMixin(LitElement) {
   onRpcReady() {
     this._loadSnippets();
     this._loadFileTree();
+    this._loadReviewState();
   }
 
   async _loadSnippets() {
     try {
       const result = await this.rpcExtract('Settings.get_snippets');
-      this.snippets = result?.snippets || [];
+      const base = result?.snippets || [];
+      const review = result?.review_snippets || [];
+      // Store both; we'll merge based on review state
+      this._baseSnippets = base;
+      this._reviewSnippets = review;
+      this._updateSnippets();
     } catch (e) {
       console.warn('Failed to load snippets:', e);
+      this._baseSnippets = [];
+      this._reviewSnippets = [];
+    }
+  }
+
+  _updateSnippets() {
+    if (this._reviewState?.active && this._reviewSnippets?.length) {
+      this.snippets = [...(this._baseSnippets || []), ...(this._reviewSnippets || [])];
+    } else {
+      this.snippets = [...(this._baseSnippets || [])];
+    }
+  }
+
+  async _loadReviewState() {
+    try {
+      const state = await this.rpcExtract('LLM.get_review_state');
+      this._reviewState = state || { active: false };
+      this._updateSnippets();
+    } catch (e) {
+      this._reviewState = { active: false };
     }
   }
 
@@ -456,6 +489,53 @@ class FilesTab extends RpcMixin(LitElement) {
     const picker = this.shadowRoot.querySelector('file-picker');
     if (picker) {
       picker.setFilter(e.detail?.query || '');
+    }
+  }
+
+  // ── Review mode ──
+
+  _openReviewSelector() {
+    this._reviewSelectorOpen = true;
+  }
+
+  async _onReviewStarted(e) {
+    this._reviewSelectorOpen = false;
+    const { result } = e.detail;
+    this._reviewState = {
+      active: true,
+      branch: result.branch,
+      base_commit: result.base_commit,
+      commits: result.commits,
+      changed_files: result.changed_files,
+      symbol_diff: result.symbol_diff,
+      stats: result.stats,
+    };
+    this._updateSnippets();
+
+    // Refresh file tree (now shows staged review files)
+    await this._loadFileTree();
+
+    this._toast(`Review mode active: ${result.branch}`, 'success');
+  }
+
+  _onReviewSelectorClosed() {
+    this._reviewSelectorOpen = false;
+  }
+
+  async _onEndReview() {
+    try {
+      this._toast('Exiting review mode...', 'info');
+      const result = await this.rpcExtract('LLM.end_review');
+      if (result?.error) {
+        this._toast('Failed to exit review: ' + result.error, 'error');
+        return;
+      }
+      this._reviewState = { active: false };
+      this._updateSnippets();
+      await this._loadFileTree();
+      this._toast('Review mode ended', 'success');
+    } catch (e) {
+      this._toast('Failed to exit review: ' + e, 'error');
     }
   }
 
@@ -1072,10 +1152,12 @@ class FilesTab extends RpcMixin(LitElement) {
         style=${pickerStyle}>
         <file-picker
           .viewerActiveFile=${this._viewerActiveFile}
+          .reviewState=${this._reviewState}
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}
           @git-operation=${this._onGitOperation}
           @path-to-input=${this._onPathToInput}
+          @review-end-requested=${this._onEndReview}
         ></file-picker>
       </div>
 
@@ -1113,13 +1195,19 @@ class FilesTab extends RpcMixin(LitElement) {
               <span class="chat-search-count">0</span>
             ` : nothing}
           </div>
+          <button class="git-btn" @click=${this._openReviewSelector}
+            ?disabled=${this.streaming || this._reviewState?.active}
+            title="Start code review"
+            aria-label="Start code review">📋</button>
           <button class="git-btn" @click=${this._copyDiff} title="Copy diff to clipboard"
-            aria-label="Copy diff to clipboard">📋</button>
+            aria-label="Copy diff to clipboard">📄</button>
           <button class="git-btn" @click=${this._commitWithMessage}
-            ?disabled=${this.streaming} title="Stage all, generate message, commit"
+            ?disabled=${this.streaming || this._reviewState?.active}
+            title="Stage all, generate message, commit"
             aria-label="Auto-commit with generated message">💾</button>
           <button class="git-btn danger" @click=${this._requestReset}
-            ?disabled=${this.streaming} title="Reset to HEAD"
+            ?disabled=${this.streaming || this._reviewState?.active}
+            title="Reset to HEAD"
             aria-label="Reset repository to HEAD">⚠️</button>
         </div>
 
@@ -1131,6 +1219,14 @@ class FilesTab extends RpcMixin(LitElement) {
           @file-mention-click=${this._onFileMentionClick}
           @copy-to-prompt=${this._onCopyToPrompt}
         ></chat-panel>
+
+        ${this._reviewState?.active ? html`
+          <review-chips
+            .reviewState=${this._reviewState}
+            .selectedFiles=${new Set(this.selectedFiles)}
+            @review-end-requested=${this._onEndReview}
+          ></review-chips>
+        ` : nothing}
 
         <url-chips
           .detected=${this._detectedUrls}
@@ -1160,6 +1256,12 @@ class FilesTab extends RpcMixin(LitElement) {
         @session-loaded=${this._onSessionLoaded}
         @insert-to-prompt=${this._onInsertToPrompt}
       ></history-browser>
+
+      <review-selector
+        .open=${this._reviewSelectorOpen}
+        @review-started=${this._onReviewStarted}
+        @review-closed=${this._onReviewSelectorClosed}
+      ></review-selector>
 
       ${this._confirmAction ? html`
         <div class="confirm-backdrop" @click=${this._cancelConfirm} role="presentation">

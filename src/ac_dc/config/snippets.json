@@ -7,5 +7,14 @@
         {"icon": "✅", "tooltip": "Verify tests", "message": "Please verify that existing tests still pass with these changes."},
         {"icon": "📦", "tooltip": "Pre-commit checklist", "message": "Review all changes, ensure nothing is broken, and prepare a commit."},
         {"icon": "🏁", "tooltip": "Complete plan", "message": "Complete the remaining items from the plan, then prepare a commit."}
+    ],
+    "review_snippets": [
+        {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes in the review diff. Provide a structured summary with issues categorized by severity (critical, warning, suggestion, question)."},
+        {"icon": "🔒", "tooltip": "Security review", "message": "Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting."},
+        {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the author's intent for each change and flagging any issues."},
+        {"icon": "🏗️", "tooltip": "Architecture review", "message": "Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture."},
+        {"icon": "✅", "tooltip": "Test coverage", "message": "Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful?"},
+        {"icon": "📝", "tooltip": "PR description", "message": "Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes."},
+        {"icon": "🧹", "tooltip": "Code quality", "message": "Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns."}
     ]
 }

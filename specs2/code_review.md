@@ -191,23 +191,22 @@ Review context is inserted as a dedicated section in the message array, between 
 2. {sha_short} {message} ({author}, {relative_date})
 ...
 
-## Structural Changes (Symbol Diff)
-+ path/to/new_file.py (new file)
-    + class NewClass
-    + f new_function() →calls_to
-~ path/to/changed_file.py (modified)
-    + f added_function()         ← new
-    ~ f changed_function()       ← signature changed
-    - f removed_function()       ← removed (was ←5 refs — check callers!)
-- path/to/deleted_file.py       ← deleted (was ←3 refs)
+## Pre-Change Symbol Map
+Symbol map from the parent commit (before the reviewed changes).
+Compare against the current symbol map in the repository structure above.
 
-## Selected File Diffs
+<full symbol map from parent commit>
+
+## Reverse Diffs (selected files)
+These diffs show what would revert each file to the pre-review state.
+The full current content is in the working files above.
+
 ### path/to/file.py (+120 -30)
 ```diff
 @@ -10,6 +10,15 @@
  def existing_function():
--    old_code()
-+    new_code()
++    old_code()
+-    new_code()
 ```​
 
 ### path/to/other.py (+85 -0)
@@ -221,8 +220,8 @@ Review context is inserted as a dedicated section in the message array, between 
 | Content | Tier | Rationale |
 |---------|------|-----------|
 | Review summary (commits, stats) | Graduates to cached tiers | Doesn't change during review |
-| Structural symbol diff | Graduates to cached tiers | Doesn't change during review |
-| Individual file diffs | Active tier | User toggles which files are included |
+| Pre-change symbol map | Graduates to cached tiers | Doesn't change during review |
+| Reverse diffs for selected files | Active tier | User toggles which files are included |
 | Full file contents | Normal tiering | Selected files follow standard stability rules |
 
 ### Token Budget
@@ -235,48 +234,22 @@ For large reviews, not all file diffs can fit in context. The system prioritizes
 
 The review diff chips (see UI section) show which files have their diffs included, allowing the user to manage the token budget.
 
-## Symbol Map Structural Diff
+## Pre-Change Symbol Map
 
-### Generation
+On review entry the service captures `symbol_map_before` (the full symbol map built from the parent commit). This is injected into the review context so the LLM can compare the pre-change codebase topology against the current (post-change) symbol map that is already part of every request.
 
-The structural diff compares `symbol_map_before` (captured at step 4) against the current symbol map (built from disk at step 7):
-
-1. Parse both symbol maps into per-file symbol sets
-2. Classify files as added, removed, or modified
-3. For modified files, diff the symbol lists:
-   - Added symbols (present in current, absent in before)
-   - Removed symbols (absent in current, present in before)  
-   - Changed symbols (same name, different signature/parameters/return type)
-4. Annotate removed symbols with their reference count from `symbol_map_before` — high ref counts indicate potential breakage
-
-### Output Format
-
-```
-+ path/to/new_file.py (new file)
-    + class NewValidator
-    + f validate_email(email) ->bool
-    + f validate_password(password) ->bool
-
-~ path/to/handler.py (modified)
-    + f validate_input(user, password) ->bool    ← new function
-    ~ f authenticate(user, password, rate_limit?) ← added param
-    - f _legacy_check(user) ->bool               ← removed (was ←3 refs)
-
-~ path/to/connection.py (modified)
-    - f retry_with_backoff(fn, max_retries) ->T  ← removed (was ←7 refs!)
-
-- path/to/deprecated.py                          ← file deleted (was ←5 refs)
-    - class OldHandler                            ← removed (was ←12 refs!)
-    - f legacy_process(data) ->dict               ← removed (was ←3 refs)
-```
-
-Reference counts on removed symbols alert the reviewer to potentially breaking changes.
+Having both maps lets the LLM assess blast radius, trace removed dependencies, and understand the structural evolution — much richer than a flat symbol diff summary.
 
 ### Storage
 
 - `symbol_map_before` is held in memory on the LLM service during the review session
 - Not persisted to disk — rebuilt if needed by re-running the entry sequence
-- The structural diff is computed once on review entry and cached
+
+## Reverse Diffs for Selected Files
+
+When a file is selected (checked in the file picker) during review mode, its full current content is included in the working files context as usual. Additionally, a **reverse diff** (`git diff --cached -R`) is included in the review context section. This gives the LLM complete information: the current code plus exactly what it replaced.
+
+Files that are not selected contribute neither content nor diffs — the user controls context size through file selection.
 
 ## UI Components
 
@@ -419,7 +392,6 @@ start_review(branch, base_commit) -> {
     status, branch, base_commit,
     commits: [{sha, message, author, date}],
     changed_files: [{path, status, additions, deletions}],
-    symbol_diff: {added: [], removed: [], modified: []},
     stats: {commit_count, files_changed, additions, deletions}
 } | {error}
 
@@ -428,7 +400,7 @@ end_review() -> {status: "restored"} | {error}
 get_review_state() -> {
     active: boolean,
     branch?, base_commit?, commits?, changed_files?,
-    symbol_diff?, stats?
+    stats?
 }
 ```
 
@@ -445,7 +417,6 @@ The LLM service holds review state in memory:
 | `_review_parent` | str | Parent of base commit (current git HEAD) |
 | `_review_commits` | list | Commit log |
 | `_review_changed_files` | list | Changed file paths with status |
-| `_review_symbol_diff` | dict | Structural symbol changes |
 | `_symbol_map_before` | str | Symbol map from pre-review state |
 
 State is not persisted across server restarts. On restart, the server detects the soft-reset state and prompts the user to either re-enter review mode or exit cleanly.

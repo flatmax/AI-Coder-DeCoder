@@ -33,6 +33,8 @@ class FilePicker extends RpcMixin(LitElement) {
     _autoSelected: { type: Boolean, state: true },
     /** Path of the file currently open in the diff viewer */
     viewerActiveFile: { type: String },
+    /** Review state for the banner */
+    reviewState: { type: Object },
   };
 
   static styles = css`
@@ -291,6 +293,40 @@ class FilePicker extends RpcMixin(LitElement) {
       text-align: center;
       font-size: 13px;
     }
+
+    /* Review banner */
+    .review-banner {
+      padding: 8px 10px;
+      background: rgba(79, 195, 247, 0.08);
+      border-bottom: 1px solid rgba(79, 195, 247, 0.2);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    .review-banner .title {
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 2px;
+    }
+    .review-banner .meta {
+      color: var(--text-muted);
+    }
+    .review-exit-btn {
+      background: none;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 1px 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 10px;
+      float: right;
+    }
+    .review-exit-btn:hover {
+      color: var(--accent-error);
+      border-color: var(--accent-error);
+    }
   `;
 
   constructor() {
@@ -308,6 +344,7 @@ class FilePicker extends RpcMixin(LitElement) {
     this._autoSelected = false;
     this._overlayState = null; // {type:'confirm'|'prompt', ...}
     this.viewerActiveFile = '';
+    this.reviewState = null;
     this._flatVisibleCache = null;
 
     this._onDocClick = this._onDocClick.bind(this);
@@ -737,6 +774,12 @@ class FilePicker extends RpcMixin(LitElement) {
     });
   }
 
+  _onExitReview() {
+    this.dispatchEvent(new CustomEvent('review-end-requested', {
+      bubbles: true, composed: true,
+    }));
+  }
+
   // ── Public API ──
 
   setTree(data) {
@@ -771,6 +814,20 @@ class FilePicker extends RpcMixin(LitElement) {
           aria-label="Clear all selected files"
           @click=${this._clearSelection}>☐</button>
       </div>
+
+      ${this.reviewState?.active ? html`
+        <div class="review-banner">
+          <button class="review-exit-btn" @click=${this._onExitReview}
+            title="Exit review mode">Exit ✕</button>
+          <div class="title">📋 Reviewing: ${this.reviewState.branch || '?'}</div>
+          <div class="meta">
+            ${this.reviewState.stats?.commit_count || 0} commits ·
+            ${this.reviewState.stats?.files_changed || 0} files ·
+            +${this.reviewState.stats?.additions || 0}
+            -${this.reviewState.stats?.deletions || 0}
+          </div>
+        </div>
+      ` : nothing}
 
       <div class="tree-container"
         role="tree"

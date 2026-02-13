@@ -337,6 +337,258 @@ class Repo:
     # Search
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Review mode (code review)
+    # ------------------------------------------------------------------
+
+    def list_branches(self) -> dict:
+        """List local branches with current branch info."""
+        r = _run_git(["branch", "--format=%(refname:short)\t%(objectname:short)\t%(subject)"], self.root)
+        if r.returncode != 0:
+            return {"error": r.stderr.strip()}
+        branches = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) >= 2:
+                branches.append({
+                    "name": parts[0],
+                    "sha": parts[1],
+                    "message": parts[2] if len(parts) > 2 else "",
+                })
+        # Current branch
+        r2 = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.root)
+        current = r2.stdout.strip() if r2.returncode == 0 else ""
+        for b in branches:
+            b["is_current"] = b["name"] == current
+        return {"branches": branches, "current": current}
+
+    def get_current_branch(self) -> dict:
+        """Get current branch name and SHA."""
+        r = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.root)
+        branch = r.stdout.strip() if r.returncode == 0 else ""
+        detached = branch == "HEAD"
+        r2 = _run_git(["rev-parse", "HEAD"], self.root)
+        sha = r2.stdout.strip() if r2.returncode == 0 else ""
+        return {"branch": branch, "sha": sha, "detached": detached}
+
+    def is_clean(self) -> bool:
+        """Check if working tree is clean (no staged, unstaged, or untracked changes)."""
+        r = _run_git(["status", "--porcelain"], self.root)
+        return r.returncode == 0 and not r.stdout.strip()
+
+    def search_commits(self, query: str = "", branch: str = "",
+                       limit: int = 50) -> list[dict]:
+        """Search commits by message, SHA prefix, or author."""
+        args = ["log", f"--max-count={limit}",
+                "--format=%H\t%h\t%s\t%an\t%aI"]
+        if branch:
+            args.append(branch)
+        if query:
+            args.extend(["--grep=" + query, "--regexp-ignore-case"])
+        r = _run_git(args, self.root)
+        if r.returncode != 0:
+            # Try SHA prefix match
+            if query:
+                r2 = _run_git(["log", f"--max-count={limit}",
+                               "--format=%H\t%h\t%s\t%an\t%aI",
+                               branch or "HEAD"], self.root)
+                if r2.returncode == 0:
+                    results = []
+                    for line in r2.stdout.strip().splitlines():
+                        parts = line.split("\t", 4)
+                        if len(parts) >= 5 and (
+                            parts[0].startswith(query) or parts[1].startswith(query)
+                        ):
+                            results.append({
+                                "sha": parts[0], "short_sha": parts[1],
+                                "message": parts[2], "author": parts[3],
+                                "date": parts[4],
+                            })
+                    return results
+            return []
+        results = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("\t", 4)
+            if len(parts) >= 5:
+                results.append({
+                    "sha": parts[0], "short_sha": parts[1],
+                    "message": parts[2], "author": parts[3],
+                    "date": parts[4],
+                })
+        return results
+
+    def get_commit_log(self, base: str, head: str = "HEAD",
+                       limit: int = 200) -> list[dict]:
+        """Get commits from base (exclusive) to head (inclusive)."""
+        r = _run_git(["log", f"--max-count={limit}",
+                       "--format=%H\t%h\t%s\t%an\t%aI",
+                       f"{base}..{head}"], self.root)
+        if r.returncode != 0:
+            return []
+        results = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("\t", 4)
+            if len(parts) >= 5:
+                results.append({
+                    "sha": parts[0], "short_sha": parts[1],
+                    "message": parts[2], "author": parts[3],
+                    "date": parts[4],
+                })
+        return results
+
+    def get_commit_parent(self, commit: str) -> dict:
+        """Get parent of a commit."""
+        r = _run_git(["rev-parse", f"{commit}^"], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot find parent of {commit}: {r.stderr.strip()}"}
+        sha = r.stdout.strip()
+        r2 = _run_git(["rev-parse", "--short", sha], self.root)
+        short = r2.stdout.strip() if r2.returncode == 0 else sha[:8]
+        return {"sha": sha, "short_sha": short}
+
+    def get_merge_base(self, ref1: str, ref2: str = "HEAD") -> dict:
+        """Find merge base between two refs."""
+        r = _run_git(["merge-base", ref1, ref2], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot find merge base: {r.stderr.strip()}"}
+        sha = r.stdout.strip()
+        r2 = _run_git(["rev-parse", "--short", sha], self.root)
+        short = r2.stdout.strip() if r2.returncode == 0 else sha[:8]
+        return {"sha": sha, "short_sha": short}
+
+    def enter_review_mode(self, branch: str, base_commit: str) -> dict:
+        """Enter code review mode: checkout parent, prepare for symbol map capture.
+
+        Steps 1-3 of the entry sequence. Returns phase="at_parent" when
+        the repo is at the parent commit (pre-review state) and symbol map
+        should be built from disk files.
+        """
+        # Step 1: Verify clean working tree
+        if not self.is_clean():
+            return {"error": "Cannot enter review mode: working tree has uncommitted changes. "
+                    "Please commit, stash, or discard changes before starting a review."}
+
+        # Get branch tip SHA for later restoration
+        r = _run_git(["rev-parse", branch], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot resolve branch '{branch}': {r.stderr.strip()}"}
+        branch_tip = r.stdout.strip()
+
+        # Get parent of base commit
+        parent_result = self.get_commit_parent(base_commit)
+        if "error" in parent_result:
+            return parent_result
+        parent_sha = parent_result["sha"]
+
+        # Step 2: Checkout branch (ensure we're on it)
+        r = _run_git(["checkout", branch], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot checkout branch '{branch}': {r.stderr.strip()}"}
+
+        # Step 3: Checkout parent (detached HEAD at pre-review state)
+        r = _run_git(["checkout", parent_sha], self.root)
+        if r.returncode != 0:
+            # Try to recover
+            _run_git(["checkout", branch], self.root)
+            return {"error": f"Cannot checkout parent commit: {r.stderr.strip()}"}
+
+        return {
+            "branch": branch,
+            "branch_tip": branch_tip,
+            "base_commit": base_commit,
+            "parent_commit": parent_sha,
+            "phase": "at_parent",
+        }
+
+    def complete_review_setup(self, branch: str, parent_commit: str) -> dict:
+        """Complete review mode setup after symbol map is captured.
+
+        Steps 5-6: checkout branch, then soft reset to parent.
+        """
+        # Step 5: Checkout branch (disk files = branch tip)
+        r = _run_git(["checkout", branch], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot checkout branch: {r.stderr.strip()}"}
+
+        # Step 6: Soft reset to parent (all review changes become staged)
+        r = _run_git(["reset", "--soft", parent_commit], self.root)
+        if r.returncode != 0:
+            return {"error": f"Soft reset failed: {r.stderr.strip()}"}
+
+        return {"status": "review_ready"}
+
+    def exit_review_mode(self, branch: str, branch_tip: str) -> dict:
+        """Exit review mode and restore the branch.
+
+        Steps: soft reset to tip, checkout branch to reattach HEAD.
+        """
+        # Step 1: Reset to original branch tip
+        r = _run_git(["reset", "--soft", branch_tip], self.root)
+        if r.returncode != 0:
+            return {"error": f"Reset to branch tip failed: {r.stderr.strip()}"}
+
+        # Step 2: Checkout branch (reattach HEAD)
+        r = _run_git(["checkout", branch], self.root)
+        if r.returncode != 0:
+            return {"error": f"Cannot reattach to branch: {r.stderr.strip()}"}
+
+        return {"status": "restored"}
+
+    def get_review_diff(self, path: str) -> dict:
+        """Get staged diff for a single file (review mode)."""
+        r = _run_git(["diff", "--cached", "--", path], self.root)
+        return {"diff": r.stdout, "path": path}
+
+    def get_review_changed_files(self) -> list[dict]:
+        """Get list of changed files in review mode (staged changes)."""
+        r = _run_git(["diff", "--cached", "--numstat"], self.root)
+        if r.returncode != 0:
+            return []
+        files = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                adds, dels, fpath = parts
+                try:
+                    additions = int(adds)
+                except ValueError:
+                    additions = 0
+                try:
+                    deletions = int(dels)
+                except ValueError:
+                    deletions = 0
+                # Determine status
+                r2 = _run_git(["diff", "--cached", "--diff-filter=A", "--name-only", "--", fpath], self.root)
+                if fpath in (r2.stdout or ""):
+                    status = "added"
+                else:
+                    r3 = _run_git(["diff", "--cached", "--diff-filter=D", "--name-only", "--", fpath], self.root)
+                    if fpath in (r3.stdout or ""):
+                        status = "deleted"
+                    else:
+                        status = "modified"
+                files.append({
+                    "path": fpath,
+                    "status": status,
+                    "additions": additions,
+                    "deletions": deletions,
+                })
+        return files
+
+    def get_review_file_diff(self, path: str) -> str:
+        """Get the unified diff for a single file in review mode."""
+        r = _run_git(["diff", "--cached", "--", path], self.root)
+        return r.stdout if r.returncode == 0 else ""
+
+    def get_reverse_review_file_diff(self, path: str) -> str:
+        """Get the reverse diff for a file in review mode (current → parent)."""
+        r = _run_git(["diff", "--cached", "-R", "--", path], self.root)
+        return r.stdout if r.returncode == 0 else ""
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
     def search_files(
         self,
         query: str,

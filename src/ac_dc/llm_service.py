@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 # Thread pool for blocking LLM calls
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm")
 
+# Review context header
+REVIEW_CONTEXT_HEADER = "# Code Review Context\n\n"
+
 
 def _init_symbol_index(repo_root: Path):
     """Initialize symbol index, returning None if tree-sitter unavailable."""
@@ -108,6 +111,17 @@ class LLM:
             "prompt": 0, "completion": 0, "total": 0,
             "cache_hit": 0, "cache_write": 0,
         }
+
+        # Review mode state
+        self._review_active = False
+        self._review_branch = ""
+        self._review_branch_tip = ""
+        self._review_base_commit = ""
+        self._review_parent = ""
+        self._review_commits: list[dict] = []
+        self._review_changed_files: list[dict] = []
+        self._review_stats: dict = {}
+        self._symbol_map_before = ""
 
     def _new_session_id(self) -> str:
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -236,6 +250,11 @@ class LLM:
                 ]
                 url_context = self._url_service.format_url_context(active_urls)
 
+            # Build review context if in review mode
+            review_context = ""
+            if self._review_active:
+                review_context = self._format_review_context()
+
             # Pre-request shedding (Layer 3 defense)
             symbol_map = ""
             if self._symbol_index:
@@ -264,6 +283,7 @@ class LLM:
                     file_contents=file_contents,
                     file_tree=file_tree,
                     url_context=url_context,
+                    review_context=review_context,
                     images=images or None,
                 )
             else:
@@ -273,6 +293,7 @@ class LLM:
                     symbol_map=symbol_map,
                     file_tree=file_tree,
                     url_context=url_context,
+                    review_context=review_context,
                     images=images or None,
                 )
 
@@ -650,6 +671,348 @@ class LLM:
     def get_history_status(self) -> dict:
         """Return history token usage for the history bar."""
         return self._context.get_compaction_status()
+
+    # ------------------------------------------------------------------
+    # Code review
+    # ------------------------------------------------------------------
+
+    def start_review(self, branch: str, base_commit: str) -> dict:
+        """Enter code review mode.
+
+        Performs the full entry sequence:
+        1. Verify clean tree, checkout parent
+        2. Build symbol_map_before from pre-review state
+        3. Checkout branch, soft reset to parent
+        4. Compute structural symbol diff
+        """
+        if self._review_active:
+            return {"error": "A review is already active. End it first."}
+
+        # Step 1-3: Enter review mode (checkout parent for symbol map capture)
+        entry = self._repo.enter_review_mode(branch, base_commit)
+        if "error" in entry:
+            return entry
+
+        # Step 4: Build symbol map from pre-review state (disk = parent commit)
+        self._symbol_map_before = ""
+        if self._symbol_index:
+            try:
+                self._symbol_index.invalidate_files(
+                    list(self._symbol_index.all_symbols.keys())
+                )
+                self._symbol_index.index_repo()
+                self._symbol_map_before = self._symbol_index.get_symbol_map()
+            except Exception as e:
+                log.warning("Failed to build pre-review symbol map: %s", e)
+
+        # Step 5-6: Complete setup (checkout branch, soft reset)
+        setup = self._repo.complete_review_setup(
+            entry["branch"], entry["parent_commit"],
+        )
+        if "error" in setup:
+            # Try to recover
+            self._repo.exit_review_mode(branch, entry["branch_tip"])
+            return setup
+
+        # Rebuild symbol index from reviewed code (disk = branch tip)
+        if self._symbol_index:
+            try:
+                self._symbol_index.invalidate_files(
+                    list(self._symbol_index.all_symbols.keys())
+                )
+                self._symbol_index.index_repo()
+                self._save_symbol_map()
+            except Exception as e:
+                log.warning("Failed to rebuild symbol index for review: %s", e)
+
+        # Get commit log and changed files
+        commits = self._repo.get_commit_log(entry["parent_commit"], entry["branch_tip"])
+        changed_files = self._repo.get_review_changed_files()
+
+        # Compute stats
+        total_additions = sum(f.get("additions", 0) for f in changed_files)
+        total_deletions = sum(f.get("deletions", 0) for f in changed_files)
+        stats = {
+            "commit_count": len(commits),
+            "files_changed": len(changed_files),
+            "additions": total_additions,
+            "deletions": total_deletions,
+        }
+
+        # Store review state
+        self._review_active = True
+        self._review_branch = branch
+        self._review_branch_tip = entry["branch_tip"]
+        self._review_base_commit = base_commit
+        self._review_parent = entry["parent_commit"]
+        self._review_commits = commits
+        self._review_changed_files = changed_files
+        self._review_stats = stats
+
+        return {
+            "status": "review_active",
+            "branch": branch,
+            "base_commit": base_commit,
+            "commits": commits,
+            "changed_files": changed_files,
+            "stats": stats,
+        }
+
+    def end_review(self) -> dict:
+        """Exit code review mode and restore the branch."""
+        if not self._review_active:
+            return {"error": "No review is active"}
+
+        result = self._repo.exit_review_mode(
+            self._review_branch, self._review_branch_tip,
+        )
+
+        # Clear review state regardless of result
+        self._review_active = False
+        self._review_branch = ""
+        self._review_branch_tip = ""
+        self._review_base_commit = ""
+        self._review_parent = ""
+        self._review_commits = []
+        self._review_changed_files = []
+        self._review_stats = {}
+        self._symbol_map_before = ""
+
+        # Rebuild symbol index
+        if self._symbol_index:
+            try:
+                self._symbol_index.invalidate_files(
+                    list(self._symbol_index.all_symbols.keys())
+                )
+                self._symbol_index.index_repo()
+                self._save_symbol_map()
+                self._init_stability()
+            except Exception as e:
+                log.warning("Failed to rebuild symbol index after review: %s", e)
+
+        if "error" in result:
+            return result
+        return {"status": "restored"}
+
+    def get_review_state(self) -> dict:
+        """Get current review mode state."""
+        if not self._review_active:
+            return {"active": False}
+        return {
+            "active": True,
+            "branch": self._review_branch,
+            "base_commit": self._review_base_commit,
+            "branch_tip": self._review_branch_tip,
+            "commits": self._review_commits,
+            "changed_files": self._review_changed_files,
+            "stats": self._review_stats,
+        }
+
+    def get_review_file_diff(self, path: str) -> dict:
+        """Get the diff for a specific file in review mode."""
+        if not self._review_active:
+            return {"error": "No review is active"}
+        diff_text = self._repo.get_review_file_diff(path)
+        return {"path": path, "diff": diff_text}
+
+    def _compute_symbol_diff(self) -> dict:
+        """Compare symbol_map_before against current symbol map.
+
+        Returns structured diff: {added: [], removed: [], modified: []}
+        """
+        if not self._symbol_map_before or not self._symbol_index:
+            return {"added": [], "removed": [], "modified": [], "text": ""}
+
+        before_files = self._parse_symbol_map_files(self._symbol_map_before)
+        after_files = {}
+        for fpath, fsyms in self._symbol_index.all_symbols.items():
+            symbols = set()
+            for sym in fsyms.all_symbols_flat:
+                symbols.add(sym.signature)
+            after_files[fpath] = symbols
+
+        added = []
+        removed = []
+        modified = []
+
+        # Files only in after (new files)
+        for fpath in sorted(set(after_files.keys()) - set(before_files.keys())):
+            file_entry = {"path": fpath, "status": "added", "symbols": []}
+            fsyms = self._symbol_index.all_symbols.get(fpath)
+            if fsyms:
+                for sym in fsyms.symbols:
+                    file_entry["symbols"].append({
+                        "name": sym.name,
+                        "kind": sym.kind.value,
+                        "signature": sym.signature,
+                        "action": "added",
+                    })
+            added.append(file_entry)
+
+        # Files only in before (deleted files)
+        for fpath in sorted(set(before_files.keys()) - set(after_files.keys())):
+            ref_count = 0
+            if self._symbol_index and self._symbol_index.reference_index:
+                ref_count = self._symbol_index.reference_index.file_ref_count(fpath)
+            removed.append({
+                "path": fpath,
+                "status": "deleted",
+                "ref_count": ref_count,
+            })
+
+        # Files in both — check for symbol changes
+        for fpath in sorted(set(before_files.keys()) & set(after_files.keys())):
+            before_sigs = before_files[fpath]
+            after_sigs = after_files[fpath]
+            if before_sigs == after_sigs:
+                continue
+            added_sigs = after_sigs - before_sigs
+            removed_sigs = before_sigs - after_sigs
+            if added_sigs or removed_sigs:
+                file_entry = {"path": fpath, "status": "modified", "changes": []}
+                for sig in sorted(added_sigs):
+                    file_entry["changes"].append({"signature": sig, "action": "added"})
+                for sig in sorted(removed_sigs):
+                    file_entry["changes"].append({"signature": sig, "action": "removed"})
+                modified.append(file_entry)
+
+        # Build text representation
+        text = self._format_symbol_diff_text(added, removed, modified)
+
+        return {
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+            "text": text,
+        }
+
+    @staticmethod
+    def _parse_symbol_map_files(symbol_map_text: str) -> dict[str, set[str]]:
+        """Parse a symbol map text into {file_path: set_of_signatures}.
+
+        Simple parser that identifies file blocks by the header pattern
+        (path ending with :) and collects symbol lines within.
+        """
+        files: dict[str, set[str]] = {}
+        current_file = None
+        for line in symbol_map_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            # File header: ends with : or : ←N
+            if (not line.startswith(" ") and not line.startswith("\t")
+                    and ":" in stripped and not stripped.startswith("i ")
+                    and not stripped.startswith("i→")):
+                # Extract path (before the colon, excluding ←refs)
+                path = stripped.split(":")[0].strip()
+                # Skip alias definitions
+                if path.startswith("@") and "=" in path:
+                    continue
+                if "/" in path or "." in path:
+                    current_file = path
+                    files[current_file] = set()
+            elif current_file and stripped:
+                # Symbol line — add the whole trimmed line as a signature
+                if any(stripped.startswith(p) for p in
+                       ("c ", "m ", "f ", "af ", "am ", "v ", "p ")):
+                    files[current_file].add(stripped)
+        return files
+
+    @staticmethod
+    def _format_symbol_diff_text(added: list, removed: list, modified: list) -> str:
+        """Format symbol diff as human-readable text for the LLM."""
+        lines = []
+
+        for file_entry in added:
+            lines.append(f"+ {file_entry['path']} (new file)")
+            for sym in file_entry.get("symbols", []):
+                lines.append(f"    + {sym.get('signature', sym.get('name', '?'))}")
+
+        for file_entry in modified:
+            lines.append(f"~ {file_entry['path']} (modified)")
+            for change in file_entry.get("changes", []):
+                prefix = "+" if change["action"] == "added" else "-"
+                lines.append(f"    {prefix} {change['signature']}")
+
+        for file_entry in removed:
+            ref_info = ""
+            if file_entry.get("ref_count", 0) > 0:
+                ref_info = f" (was ←{file_entry['ref_count']} refs)"
+            lines.append(f"- {file_entry['path']} ← deleted{ref_info}")
+
+        return "\n".join(lines)
+
+    def _format_review_context(self, included_files: list[str] = None) -> str:
+        """Build the review context text for prompt injection."""
+        if not self._review_active:
+            return ""
+
+        parts = [REVIEW_CONTEXT_HEADER]
+
+        # Review summary
+        stats = self._review_stats
+        parent_short = self._review_parent[:8] if self._review_parent else "?"
+        tip_short = self._review_branch_tip[:8] if self._review_branch_tip else "HEAD"
+        parts.append(
+            f"## Review: {self._review_branch} ({parent_short} → {tip_short})\n"
+            f"{stats.get('commit_count', 0)} commits, "
+            f"{stats.get('files_changed', 0)} files changed, "
+            f"+{stats.get('additions', 0)} -{stats.get('deletions', 0)}\n"
+        )
+
+        # Commits
+        if self._review_commits:
+            parts.append("## Commits")
+            for i, c in enumerate(self._review_commits, 1):
+                parts.append(
+                    f"{i}. {c.get('short_sha', '?')} {c.get('message', '')} "
+                    f"({c.get('author', '?')}, {c.get('date', '?')})"
+                )
+            parts.append("")
+
+        # Pre-change symbol map
+        if self._symbol_map_before:
+            parts.append("## Pre-Change Symbol Map")
+            parts.append(
+                "Symbol map from the parent commit (before the reviewed changes).\n"
+                "Compare against the current symbol map in the repository structure above.\n"
+            )
+            parts.append(self._symbol_map_before)
+            parts.append("")
+
+        # Reverse diffs for selected files
+        files_to_include = included_files or [
+            f["path"] for f in self._review_changed_files
+            if f["path"] in set(self._selected_files)
+        ]
+        if files_to_include:
+            parts.append("## Reverse Diffs (selected files)")
+            parts.append(
+                "These diffs show what would revert each file to the pre-review state.\n"
+                "The full current content is in the working files above.\n"
+            )
+            for fpath in files_to_include:
+                diff = self._get_reverse_diff(fpath)
+                if diff:
+                    # Get stats for this file
+                    finfo = next(
+                        (f for f in self._review_changed_files if f["path"] == fpath),
+                        None,
+                    )
+                    stat_str = ""
+                    if finfo:
+                        stat_str = f" (+{finfo.get('additions', 0)} -{finfo.get('deletions', 0)})"
+                    parts.append(f"### {fpath}{stat_str}")
+                    parts.append(f"```diff\n{diff}\n```")
+                    parts.append("")
+
+        return "\n".join(parts)
+
+    def _get_reverse_diff(self, path: str) -> str:
+        """Get the reverse diff for a file: current → parent commit state."""
+        if not self._review_active:
+            return ""
+        return self._repo.get_reverse_review_file_diff(path)
 
     # ------------------------------------------------------------------
     # Post-response compaction

@@ -89,34 +89,50 @@ Inserted between URL context and active files in the message array (see [Prompt 
 1. {sha} {message} ({author}, {date})
 ...
 
-## Structural Changes (Symbol Diff)
-+ path/new.py (new file)
-    + class NewClass
-~ path/changed.py (modified)
-    + f added_function()
-    ~ f changed_function()       ← signature changed
-    - f removed_function()       ← removed (was ←5 refs!)
-- path/deleted.py               ← deleted (was ←3 refs)
+## Pre-Change Symbol Map
+Symbol map from the parent commit (before the reviewed changes).
+Compare against the current symbol map in the repository structure above.
 
-## Selected File Diffs
+<full symbol map from parent commit>
+
+## Reverse Diffs (selected files)
+These diffs show what would revert each file to the pre-review state.
+The full current content is in the working files above.
+
 ### path/file.py (+120 -30)
-<diff content>
+<reverse diff content>
 ```
 
 ### Context Tiering
 
 | Content | Tier |
 |---------|------|
-| Review summary, structural diff | Graduates to cached tiers |
-| Individual file diffs | Active tier (user toggles inclusion) |
+| Review summary, pre-change symbol map | Graduates to cached tiers |
+| Reverse diffs for selected files | Active tier (user toggles inclusion) |
 | Full file contents | Normal tiering |
 
-## Symbol Map Structural Diff
+## Pre-Change Symbol Map
 
-Compares `symbol_map_before` against current symbol map:
-1. Classify files as added/removed/modified
-2. For modified files: diff symbol lists (added/removed/changed)
-3. Annotate removed symbols with reference count from `symbol_map_before`
+On review entry the service captures `symbol_map_before` (the full symbol
+map built from the parent commit). This is injected into the review
+context so the LLM can compare the pre-change codebase topology against
+the current (post-change) symbol map that is already part of every request.
+
+Having both maps lets the LLM assess blast radius, trace removed
+dependencies, and understand the structural evolution — much richer than
+a flat symbol diff summary.
+
+## Reverse Diffs for Selected Files
+
+When a file is selected (checked in the file picker) during review mode,
+its full current content is included in the working files context as
+usual. Additionally, a **reverse diff** (the diff that would revert the
+file to the parent commit state) is included in the review context
+section. This gives the LLM complete information: the current code plus
+exactly what it replaced.
+
+Files that are not selected contribute neither content nor diffs —
+the user controls context size through file selection.
 
 ## Backend Methods
 
@@ -140,6 +156,7 @@ Compares `symbol_map_before` against current symbol map:
 | `LLM.start_review(branch, base)` | Full entry + context setup |
 | `LLM.end_review()` | Exit + cleanup |
 | `LLM.get_review_state()` | Current review state |
+| `Repo.get_reverse_review_file_diff(path)` | Reverse diff for a file (`git diff --cached -R`) |
 
 ## UI Components
 

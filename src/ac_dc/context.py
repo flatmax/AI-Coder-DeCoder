@@ -332,6 +332,7 @@ class ContextManager:
         symbol_map: str = "",
         file_tree: str = "",
         url_context: str = "",
+        review_context: str = "",
         images: Optional[list[str]] = None,
     ) -> list[dict]:
         """Assemble the full message array for an LLM request.
@@ -360,7 +361,15 @@ class ContextManager:
                 "content": "Ok, I've reviewed the URL content.",
             })
 
-        # 4. Active files
+        # 4. Review context (between URL context and active files)
+        if review_context:
+            messages.append({"role": "user", "content": review_context})
+            messages.append({
+                "role": "assistant",
+                "content": "Ok, I've reviewed the code changes.",
+            })
+
+        # 5. Active files
         file_prompt = self.file_context.format_for_prompt()
         if file_prompt:
             messages.append({
@@ -369,10 +378,10 @@ class ContextManager:
             })
             messages.append({"role": "assistant", "content": "Ok."})
 
-        # 5. History
+        # 6. History
         messages.extend(self._messages)
 
-        # 6. Current user message
+        # 7. Current user message
         if images:
             content_blocks: list[dict] = [{"type": "text", "text": user_prompt}]
             for img in images:
@@ -395,6 +404,7 @@ class ContextManager:
         file_contents: Optional[dict[str, str]] = None,
         file_tree: str = "",
         url_context: str = "",
+        review_context: str = "",
         images: Optional[list[str]] = None,
     ) -> list[dict]:
         """Assemble messages with cache tiering.
@@ -427,6 +437,7 @@ class ContextManager:
             history_tier_map=history_tier_map,
             file_tree=file_tree,
             url_context=url_context,
+            review_context=review_context,
             active_file_contents=active_files,
             user_prompt=user_prompt,
             images=images,
