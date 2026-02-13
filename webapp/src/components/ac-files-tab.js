@@ -188,12 +188,14 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         const start = textarea.selectionStart;
         const before = textarea.value.slice(0, start);
         const after = textarea.value.slice(textarea.selectionEnd);
-        const pad = before.length > 0 && !before.endsWith(' ') ? ' ' : '';
-        const padAfter = after.length > 0 && !after.startsWith(' ') ? ' ' : '';
+        const pad = !before.endsWith(' ') && before.length > 0 ? ' ' : '';
+        const padAfter = !after.startsWith(' ') ? ' ' : '';
         textarea.value = before + pad + path + padAfter + after;
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
         const newPos = start + pad.length + path.length + padAfter.length;
         textarea.setSelectionRange(newPos, newPos);
+        // Suppress the selection-buffer paste that middle-click triggers
+        chatPanel._suppressNextPaste = true;
         textarea.focus();
       }
     }

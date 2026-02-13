@@ -1195,6 +1195,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onPaste(e) {
+    // Suppress paste triggered by middle-click selection buffer
+    if (this._suppressNextPaste) {
+      this._suppressNextPaste = false;
+      e.preventDefault();
+      return;
+    }
+
     const items = e.clipboardData?.items;
     if (!items) return;
 
