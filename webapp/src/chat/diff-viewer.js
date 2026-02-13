@@ -529,28 +529,54 @@ class DiffViewer extends RpcMixin(LitElement) {
       // calls inside the editor worker, which crash on FileAccess.toUrl in Vite.
       // We provide our own LSP features via the backend symbol index.
 
-      // Disable TypeScript/JavaScript
+      // Disable TypeScript/JavaScript language services completely.
+      // setDiagnosticsOptions alone doesn't prevent $loadForeignModule
+      // calls in the worker; we must also disable modeConfiguration so
+      // Monaco never tries to spin up the TS/JS language service worker.
+      // Monarch tokenization (syntax highlighting) remains active.
+      const noServices = {
+        completionItems: false,
+        hovers: false,
+        documentSymbols: false,
+        definitions: false,
+        references: false,
+        documentHighlights: false,
+        rename: false,
+        diagnostics: false,
+        documentRangeFormattingEdits: false,
+        signatureHelp: false,
+        onTypeFormattingEdits: false,
+        codeActions: false,
+        inlayHints: false,
+      };
       monaco.languages.typescript?.typescriptDefaults?.setDiagnosticsOptions({
         noSemanticValidation: true,
         noSyntaxValidation: true,
       });
+      monaco.languages.typescript?.typescriptDefaults?.setModeConfiguration?.(noServices);
       monaco.languages.typescript?.javascriptDefaults?.setDiagnosticsOptions({
         noSemanticValidation: true,
         noSyntaxValidation: true,
       });
+      monaco.languages.typescript?.javascriptDefaults?.setModeConfiguration?.(noServices);
 
-      // Disable JSON validation
+      // Disable JSON validation and language services
       monaco.languages.json?.jsonDefaults?.setDiagnosticsOptions?.({
         validate: false,
       });
+      monaco.languages.json?.jsonDefaults?.setModeConfiguration?.(noServices);
 
-      // Disable CSS/SCSS/LESS validation
+      // Disable CSS/SCSS/LESS validation and language services
       monaco.languages.css?.cssDefaults?.setOptions?.({ validate: false });
+      monaco.languages.css?.cssDefaults?.setModeConfiguration?.(noServices);
       monaco.languages.css?.scssDefaults?.setOptions?.({ validate: false });
+      monaco.languages.css?.scssDefaults?.setModeConfiguration?.(noServices);
       monaco.languages.css?.lessDefaults?.setOptions?.({ validate: false });
+      monaco.languages.css?.lessDefaults?.setModeConfiguration?.(noServices);
 
-      // Disable HTML validation
+      // Disable HTML validation and language services
       monaco.languages.html?.htmlDefaults?.setOptions?.({ validate: false });
+      monaco.languages.html?.htmlDefaults?.setModeConfiguration?.(noServices);
 
       this._monacoReady = true;
       this._tryRegisterLsp();
@@ -697,16 +723,8 @@ class DiffViewer extends RpcMixin(LitElement) {
 
     if (!this._editor) return;
 
-    // Languages with built-in rich services (JS, TS, JSON, CSS, HTML)
-    // trigger $loadForeignModule in the worker, which crashes in Vite.
-    // Use plaintext for those; our own LSP providers cover the features.
-    // Other languages (python, c, cpp, etc.) only use monarch tokenizers.
-    const WORKER_LANGUAGES = new Set([
-      'javascript', 'typescript', 'json', 'css', 'scss', 'less', 'html',
-    ]);
-    const safeLang = WORKER_LANGUAGES.has(lang) ? 'plaintext' : lang;
-    const originalModel = this._monaco.editor.createModel(file.original, safeLang);
-    const modifiedModel = this._monaco.editor.createModel(file.modified, safeLang);
+    const originalModel = this._monaco.editor.createModel(file.original, lang);
+    const modifiedModel = this._monaco.editor.createModel(file.modified, lang);
 
     // Capture old models before replacing
     const oldModel = this._editor.getModel();
