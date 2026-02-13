@@ -150,7 +150,7 @@ Model: provider/model    Total: 38.7K
 
 ### Stability Bars
 
-Per-item: `N/threshold` fill with tier color. Tooltip shows `N={n}/{threshold}`. Only shown for items that have an N value (symbols, files).
+Per-item: numeric `N/threshold` label displayed inline, plus a proportional fill bar with tier color. Tooltip shows `N={n}/{threshold}`. Only shown for items that have an N value (symbols, files). The numeric value gives precise progress toward promotion; the bar gives a visual summary.
 
 ### Fuzzy Search
 
@@ -211,7 +211,7 @@ Floating overlay on the diff viewer background, appearing after each LLM respons
 | Section | Content |
 |---------|---------|
 | **Header** | Model name, cache hit % badge (color-coded: ≥50% green, ≥20% amber, <20% red), ✕ dismiss button |
-| **Cache Tiers** | Per-tier horizontal bar chart. Each tier shows: name, proportional bar (colored by tier), token count, 🔒 if cached. Bar width relative to largest tier |
+| **Cache Tiers** | Per-tier horizontal bar chart. Each tier shows: name, proportional bar (colored by tier), token count, 🔒 if cached. Bar width relative to largest tier. Sub-items show icon, name, numeric `N/threshold` label, small stability bar (colored by tier), and token count. N value and bar only shown for items that have an N value |
 | **This Request** | Prompt tokens, completion tokens. Cache read (green, shown if >0) and cache write (yellow, shown if >0) |
 | **History Budget** | Total tokens vs max input tokens with usage bar. Bar colored green/yellow/red by percentage. History token count shown separately |
 | **Tier Changes** | 📈 promotions and 📉 demotions as individual items with description text (e.g., "L3 → L2: symbol:src/file.py") |

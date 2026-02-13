@@ -212,6 +212,26 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       text-align: center;
     }
     .tier-sub-label { flex: 1; }
+    .tier-sub-n {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      min-width: 4ch;
+      text-align: right;
+    }
+    .tier-sub-bar {
+      width: 28px;
+      height: 3px;
+      background: var(--bg-primary);
+      border-radius: 2px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .tier-sub-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
     .tier-sub-tokens {
       font-family: var(--font-mono);
       font-size: 0.68rem;
@@ -460,13 +480,24 @@ export class AcTokenHud extends RpcMixin(LitElement) {
                 <span class="tier-tokens">${formatTokens(block.tokens)}</span>
                 ${block.cached ? html`<span class="tier-cached">🔒</span>` : nothing}
               </div>
-              ${contents.map(c => html`
+              ${contents.map(c => {
+                const n = c.n != null ? c.n : null;
+                const threshold = c.threshold;
+                const barPct = (n != null && threshold) ? Math.min(100, (n / threshold) * 100) : 0;
+                const tierColor = {L0:'var(--accent-green)',L1:'#26a69a',L2:'var(--accent-primary)',L3:'var(--accent-yellow)',active:'var(--accent-orange)'}[block.tier || block.name] || 'var(--text-muted)';
+                return html`
                 <div class="tier-sub">
                   <span class="tier-sub-icon">${this._getSubIcon(c.type)}</span>
                   <span class="tier-sub-label">${this._getSubLabel(c)}</span>
+                  ${n != null ? html`
+                    <span class="tier-sub-n" title="N=${n}/${threshold || '?'}">${n}/${threshold || '?'}</span>
+                    <div class="tier-sub-bar" title="N=${n}/${threshold || '?'}">
+                      <div class="tier-sub-bar-fill" style="width: ${barPct}%; background: ${tierColor}"></div>
+                    </div>
+                  ` : nothing}
                   <span class="tier-sub-tokens">${formatTokens(c.tokens)}</span>
                 </div>
-              `)}
+              `;})}
             `;
           })}
         </div>

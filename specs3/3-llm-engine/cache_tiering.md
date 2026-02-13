@@ -126,6 +126,10 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 See [Prompt Assembly](prompt_assembly.md) for the complete message ordering. Each non-empty tier uses one cache breakpoint. Providers typically allow 4 breakpoints per request. Blocks under the provider minimum (e.g., 1024 tokens for Anthropic) won't actually be cached.
 
+## N Value Display
+
+Each tracked item's N value and promotion threshold are exposed to the frontend via the context breakdown API. The Cache Viewer tab and Token HUD both display **numeric `N/threshold`** labels alongside proportional stability bars, giving visibility into how close each item is to promotion. Items without an N value (e.g., system prompt, legend) show neither the label nor the bar.
+
 ## Cache Hit Reporting
 
 Cache hit statistics are **read directly from the LLM provider's usage response**, not estimated locally. The provider reports cache read tokens and cache write tokens. The application requests usage reporting via `stream_options: {"include_usage": true}`.

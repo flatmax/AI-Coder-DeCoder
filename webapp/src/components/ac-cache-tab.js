@@ -281,6 +281,15 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       border-radius: 2px;
     }
 
+    .item-n {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      min-width: 5ch;
+      text-align: right;
+    }
+
     /* Footer */
     .footer {
       padding: 8px 16px;
@@ -500,6 +509,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
                 <span class="item-icon">${icon}</span>
                 <span class="item-name" title="${name}">${name}</span>
                 ${n != null ? html`
+                  <span class="item-n" title="N=${n}/${threshold || '?'}">${n}/${threshold || '?'}</span>
                   <div class="stability-bar" title="N=${n}/${threshold || '?'}">
                     <div class="stability-bar-fill" style="width: ${barPct}%; background: ${color}"></div>
                   </div>
