@@ -87,6 +87,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     .tab-bar {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       background: var(--bg-tertiary);
       border-bottom: 1px solid var(--border-primary);
       min-height: 34px;
