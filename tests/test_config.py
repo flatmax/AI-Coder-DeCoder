@@ -65,6 +65,8 @@ def test_cache_target_tokens():
 def test_save_and_read_round_trip(temp_repo):
     """Save and read-back round-trip for config content."""
     config = ConfigManager(repo_root=temp_repo)
+    # Use a temp config dir so we don't overwrite the real llm.json
+    config._config_dir = temp_repo / ".ac-dc"
     test_content = '{"test": "value"}'
     config.save_config_content("litellm", test_content)
     result = config.get_config_content("litellm")
