@@ -71,21 +71,21 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     }
 
     .perf-label {
-      font-size: 0.8rem;
+      font-size: 0.85rem;
       color: var(--text-secondary);
       font-weight: 600;
     }
 
     .perf-value {
       font-family: var(--font-mono);
-      font-size: 0.85rem;
+      font-size: 0.9rem;
       color: var(--accent-green);
     }
 
     .perf-bar {
-      height: 6px;
+      height: 8px;
       background: var(--bg-primary);
-      border-radius: 3px;
+      border-radius: 4px;
       overflow: hidden;
     }
 
@@ -113,8 +113,8 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       border-radius: var(--radius-sm);
       color: var(--text-primary);
       font-family: var(--font-mono);
-      font-size: 0.8rem;
-      padding: 4px 8px;
+      font-size: 0.85rem;
+      padding: 5px 10px;
       outline: none;
     }
     .filter-input:focus {
@@ -139,28 +139,28 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     }
 
     .stale-badge {
-      font-size: 0.65rem;
+      font-size: 0.75rem;
       color: var(--accent-orange);
     }
 
     /* Recent changes */
     .changes-section {
-      padding: 8px 16px;
+      padding: 10px 16px;
       border-bottom: 1px solid var(--border-primary);
-      font-size: 0.75rem;
+      font-size: 0.82rem;
     }
 
     .changes-label {
       color: var(--text-muted);
       font-weight: 600;
       text-transform: uppercase;
-      font-size: 0.65rem;
+      font-size: 0.72rem;
       letter-spacing: 0.05em;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
     }
 
     .change-item {
-      padding: 2px 0;
+      padding: 3px 0;
       color: var(--text-secondary);
     }
 
@@ -204,21 +204,21 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     }
 
     .tier-name {
-      font-size: 0.82rem;
+      font-size: 0.85rem;
       color: var(--text-secondary);
       flex: 1;
     }
 
     .tier-tokens {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.82rem;
       color: var(--accent-green);
       flex-shrink: 0;
     }
 
     .tier-cached-badge {
-      font-size: 0.6rem;
-      padding: 1px 6px;
+      font-size: 0.7rem;
+      padding: 2px 8px;
       border-radius: 8px;
       background: rgba(80, 200, 120, 0.15);
       color: var(--accent-green);
@@ -228,7 +228,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     /* Tier contents */
     .tier-contents {
       display: none;
-      padding: 4px 16px 8px 36px;
+      padding: 4px 16px 10px 36px;
     }
     .tier-contents.expanded {
       display: block;
@@ -238,13 +238,13 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 4px 0;
-      font-size: 0.75rem;
+      padding: 5px 0;
+      font-size: 0.82rem;
     }
 
     .item-icon {
       flex-shrink: 0;
-      width: 16px;
+      width: 18px;
       text-align: center;
     }
 
@@ -260,31 +260,31 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     .item-tokens {
       font-family: var(--font-mono);
       color: var(--accent-green);
-      font-size: 0.7rem;
+      font-size: 0.8rem;
       flex-shrink: 0;
-      min-width: 4ch;
+      min-width: 5ch;
       text-align: right;
     }
 
     /* Stability bar */
     .stability-bar {
-      width: 40px;
-      height: 4px;
+      width: 48px;
+      height: 6px;
       background: var(--bg-primary);
-      border-radius: 2px;
+      border-radius: 3px;
       overflow: hidden;
       flex-shrink: 0;
     }
 
     .stability-bar-fill {
       height: 100%;
-      border-radius: 2px;
+      border-radius: 3px;
     }
 
     .item-n {
       font-family: var(--font-mono);
-      font-size: 0.65rem;
-      color: var(--text-muted);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
       flex-shrink: 0;
       min-width: 5ch;
       text-align: right;
@@ -292,11 +292,11 @@ export class AcCacheTab extends RpcMixin(LitElement) {
 
     /* Footer */
     .footer {
-      padding: 8px 16px;
+      padding: 10px 16px;
       border-top: 1px solid var(--border-primary);
       background: var(--bg-tertiary);
-      font-size: 0.72rem;
-      color: var(--text-muted);
+      font-size: 0.8rem;
+      color: var(--text-secondary);
       display: flex;
       justify-content: space-between;
       flex-wrap: wrap;

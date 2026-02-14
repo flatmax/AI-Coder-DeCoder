@@ -13,7 +13,7 @@ export const theme = css`
 
     --text-primary: #c9d1d9;
     --text-secondary: #8b949e;
-    --text-muted: #484f58;
+    --text-muted: #6e7681;
 
     --border-primary: #30363d;
     --border-secondary: #21262d;

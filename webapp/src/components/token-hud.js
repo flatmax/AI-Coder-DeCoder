@@ -40,10 +40,10 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       border: 1px solid var(--border-primary);
       border-radius: var(--radius-md);
       box-shadow: var(--shadow-lg);
-      width: 320px;
+      width: 340px;
       max-height: 80vh;
       overflow-y: auto;
-      font-size: 0.78rem;
+      font-size: 0.82rem;
       color: var(--text-secondary);
       opacity: 1;
       transition: opacity 0.8s ease;
@@ -157,17 +157,17 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     .tier-label {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
-      color: var(--text-muted);
+      font-size: 0.8rem;
+      color: var(--text-secondary);
       min-width: 7ch;
       flex-shrink: 0;
     }
 
     .tier-bar {
       flex: 1;
-      height: 6px;
+      height: 8px;
       background: var(--bg-primary);
-      border-radius: 3px;
+      border-radius: 4px;
       overflow: hidden;
     }
 
@@ -184,7 +184,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     .tier-tokens {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.8rem;
       color: var(--accent-green);
       min-width: 5ch;
       text-align: right;
@@ -192,7 +192,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
     }
 
     .tier-cached {
-      font-size: 0.65rem;
+      font-size: 0.72rem;
       color: var(--text-muted);
       flex-shrink: 0;
     }
@@ -202,27 +202,27 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 1px 0 1px 20px;
-      font-size: 0.68rem;
-      color: var(--text-muted);
+      padding: 2px 0 2px 20px;
+      font-size: 0.76rem;
+      color: var(--text-secondary);
     }
     .tier-sub-icon {
       flex-shrink: 0;
-      width: 14px;
+      width: 16px;
       text-align: center;
     }
     .tier-sub-label { flex: 1; }
     .tier-sub-n {
       font-family: var(--font-mono);
-      font-size: 0.65rem;
-      color: var(--text-muted);
+      font-size: 0.73rem;
+      color: var(--text-secondary);
       flex-shrink: 0;
       min-width: 4ch;
       text-align: right;
     }
     .tier-sub-bar {
-      width: 28px;
-      height: 3px;
+      width: 36px;
+      height: 4px;
       background: var(--bg-primary);
       border-radius: 2px;
       overflow: hidden;
@@ -234,8 +234,8 @@ export class AcTokenHud extends RpcMixin(LitElement) {
     }
     .tier-sub-tokens {
       font-family: var(--font-mono);
-      font-size: 0.68rem;
-      color: var(--text-muted);
+      font-size: 0.76rem;
+      color: var(--text-secondary);
       flex-shrink: 0;
     }
 
@@ -243,7 +243,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
     .stat-row {
       display: flex;
       justify-content: space-between;
-      padding: 2px 0;
+      padding: 3px 0;
     }
 
     .stat-label {
@@ -282,8 +282,8 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 2px 0;
-      font-size: 0.72rem;
+      padding: 3px 0;
+      font-size: 0.78rem;
     }
     .change-icon { flex-shrink: 0; }
     .change-text {

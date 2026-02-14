@@ -59,14 +59,14 @@ export class AcContextTab extends RpcMixin(LitElement) {
     }
 
     .budget-label {
-      font-size: 0.8rem;
+      font-size: 0.85rem;
       color: var(--text-secondary);
       font-weight: 600;
     }
 
     .budget-values {
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.85rem;
       color: var(--text-primary);
     }
 
@@ -88,7 +88,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     .budget-bar-fill.red { background: var(--accent-red); }
 
     .budget-percent {
-      font-size: 0.7rem;
+      font-size: 0.78rem;
       color: var(--text-muted);
       text-align: right;
     }
@@ -101,11 +101,11 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     .stacked-bar {
       display: flex;
-      height: 12px;
-      border-radius: 6px;
+      height: 14px;
+      border-radius: 7px;
       overflow: hidden;
       background: var(--bg-primary);
-      margin-bottom: 6px;
+      margin-bottom: 8px;
     }
 
     .stacked-segment {
@@ -117,35 +117,35 @@ export class AcContextTab extends RpcMixin(LitElement) {
     .stacked-legend {
       display: flex;
       flex-wrap: wrap;
-      gap: 4px 12px;
-      font-size: 0.7rem;
-      color: var(--text-muted);
+      gap: 6px 14px;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
       padding-bottom: 4px;
     }
 
     .legend-item {
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
     }
 
     .legend-dot {
-      width: 8px;
-      height: 8px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
       flex-shrink: 0;
     }
 
     .legend-label {
       font-family: var(--font-mono);
-      font-size: 0.68rem;
+      font-size: 0.78rem;
     }
 
     /* Model info */
     .model-info {
       padding: 8px 16px;
-      font-size: 0.75rem;
-      color: var(--text-muted);
+      font-size: 0.82rem;
+      color: var(--text-secondary);
       border-bottom: 1px solid var(--border-primary);
       display: flex;
       justify-content: space-between;
@@ -171,11 +171,11 @@ export class AcContextTab extends RpcMixin(LitElement) {
     .category-header {
       display: flex;
       align-items: center;
-      padding: 8px 16px;
+      padding: 9px 16px;
       cursor: pointer;
       user-select: none;
       gap: 8px;
-      font-size: 0.82rem;
+      font-size: 0.85rem;
       transition: background 0.15s;
     }
     .category-header:hover {
@@ -189,7 +189,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     }
 
     .category-toggle {
-      font-size: 0.6rem;
+      font-size: 0.65rem;
       color: var(--text-muted);
       width: 12px;
       flex-shrink: 0;
@@ -197,9 +197,9 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     .category-icon {
       flex-shrink: 0;
-      width: 16px;
+      width: 18px;
       text-align: center;
-      font-size: 0.75rem;
+      font-size: 0.82rem;
     }
 
     .category-name {
@@ -223,7 +223,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     .category-tokens {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.82rem;
       color: var(--accent-green);
       min-width: 5ch;
       text-align: right;
@@ -233,7 +233,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     /* Category detail items */
     .category-detail {
       display: none;
-      padding: 2px 16px 8px 52px;
+      padding: 4px 16px 10px 52px;
     }
     .category-detail.expanded {
       display: block;
@@ -243,9 +243,9 @@ export class AcContextTab extends RpcMixin(LitElement) {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 3px 0;
-      font-size: 0.73rem;
-      color: var(--text-muted);
+      padding: 4px 0;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
     }
 
     .detail-name {
@@ -257,23 +257,24 @@ export class AcContextTab extends RpcMixin(LitElement) {
     }
 
     .detail-bar {
-      width: 50px;
-      height: 3px;
+      width: 56px;
+      height: 5px;
       background: var(--bg-primary);
-      border-radius: 2px;
+      border-radius: 3px;
       overflow: hidden;
       flex-shrink: 0;
     }
 
     .detail-bar-fill {
       height: 100%;
-      border-radius: 2px;
+      border-radius: 3px;
       background: var(--text-muted);
-      opacity: 0.4;
+      opacity: 0.5;
     }
 
     .detail-tokens {
       font-family: var(--font-mono);
+      font-size: 0.8rem;
       color: var(--accent-green);
       min-width: 5ch;
       text-align: right;
@@ -282,11 +283,11 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     /* Session totals */
     .session-section {
-      padding: 8px 16px;
+      padding: 10px 16px;
       border-top: 1px solid var(--border-primary);
       background: var(--bg-tertiary);
-      font-size: 0.75rem;
-      color: var(--text-muted);
+      font-size: 0.82rem;
+      color: var(--text-secondary);
     }
 
     .session-section .label {
@@ -346,7 +347,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     }
 
     .stale-badge {
-      font-size: 0.65rem;
+      font-size: 0.75rem;
       color: var(--accent-orange);
       margin-left: 4px;
     }
