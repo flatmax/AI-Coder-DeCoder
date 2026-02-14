@@ -18,10 +18,16 @@ import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import * as monaco from 'monaco-editor';
 
-// Configure Monaco workers — use CDN workers via workerless mode
+// Configure Monaco workers — use no-op workers to avoid $loadForeignModule
+// crashes while still enabling syntax highlighting via monarch tokenizers.
 self.MonacoEnvironment = {
   getWorker() {
-    return null;
+    // Return a minimal no-op worker so Monaco doesn't throw
+    const blob = new Blob(
+      ['self.onmessage = function() {}'],
+      { type: 'application/javascript' }
+    );
+    return new Worker(URL.createObjectURL(blob));
   },
 };
 
@@ -50,21 +56,12 @@ const LANG_MAP = {
   '.cfg': 'ini',
 };
 
-// Languages with built-in Monaco worker services — use plaintext to avoid
-// $loadForeignModule crashes under Vite dev server
-const WORKER_LANGUAGES = new Set([
-  'javascript', 'typescript', 'json', 'css', 'scss', 'less', 'html',
-]);
-
 function detectLanguage(filePath) {
   if (!filePath) return 'plaintext';
   const lastDot = filePath.lastIndexOf('.');
   if (lastDot === -1) return 'plaintext';
   const ext = filePath.slice(lastDot).toLowerCase();
-  const lang = LANG_MAP[ext] || 'plaintext';
-  // Use plaintext for worker-safe languages to avoid worker crashes
-  if (WORKER_LANGUAGES.has(lang)) return 'plaintext';
-  return lang;
+  return LANG_MAP[ext] || 'plaintext';
 }
 
 export class AcDiffViewer extends RpcMixin(LitElement) {
@@ -83,104 +80,71 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       overflow: hidden;
     }
 
-    /* Tab bar */
-    .tab-bar {
+    /* File status bar */
+    .file-status-bar {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
+      gap: 8px;
+      padding: 4px 12px;
       background: var(--bg-tertiary);
       border-bottom: 1px solid var(--border-primary);
-      min-height: 34px;
-      overflow-x: auto;
+      min-height: 28px;
+      font-size: 0.78rem;
       flex-shrink: 0;
     }
-
-    .tab-bar::-webkit-scrollbar {
-      height: 3px;
-    }
-
-    .file-tab {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 12px;
-      cursor: pointer;
-      white-space: nowrap;
-      font-size: 0.8rem;
-      color: var(--text-secondary);
-      border-right: 1px solid var(--border-primary);
-      background: transparent;
-      transition: background 0.1s, color 0.1s;
-      user-select: none;
-      border: none;
-      font-family: var(--font-sans);
-    }
-    .file-tab:hover {
-      background: var(--bg-secondary);
-      color: var(--text-primary);
-    }
-    .file-tab.active {
-      background: var(--bg-primary);
-      color: var(--text-primary);
-      border-bottom: 2px solid var(--accent-primary);
-    }
-
-    .tab-name {
+    .file-status-path {
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-
-    .tab-badge {
-      font-size: 0.6rem;
+    .file-status-spacer { flex: 1; }
+    .file-status-badge {
+      font-size: 0.65rem;
       font-weight: 700;
-      padding: 0 4px;
+      padding: 1px 6px;
       border-radius: 3px;
       line-height: 1.5;
     }
-    .tab-badge.new {
+    .file-status-badge.new {
       color: var(--accent-green);
       background: rgba(126, 231, 135, 0.15);
     }
-    .tab-badge.mod {
-      color: var(--accent-orange);
+    .file-status-badge.mod {
+      color: var(--accent-orange, #f0883e);
       background: rgba(240, 136, 62, 0.15);
     }
-
-    .tab-save-btn {
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      font-size: 0.75rem;
-      padding: 0 2px;
-      cursor: pointer;
-      opacity: 0.6;
+    .dirty-indicator {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--accent-orange, #f0883e);
+      font-size: 0.72rem;
+      animation: dirty-pulse 2s ease-in-out infinite;
     }
-    .tab-save-btn:hover {
-      opacity: 1;
-      color: var(--accent-primary);
-    }
-
-    .tab-close-btn {
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      font-size: 0.7rem;
-      padding: 0 2px;
-      cursor: pointer;
-      line-height: 1;
-      border-radius: 3px;
-    }
-    .tab-close-btn:hover {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-    }
-
-    .tab-dirty-dot {
-      width: 6px;
-      height: 6px;
+    .dirty-dot {
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
-      background: var(--accent-orange);
-      flex-shrink: 0;
+      background: var(--accent-orange, #f0883e);
+      box-shadow: 0 0 6px rgba(240, 136, 62, 0.5);
+    }
+    @keyframes dirty-pulse {
+      0%, 100% { opacity: 0.7; }
+      50% { opacity: 1; }
+    }
+    .file-status-save {
+      background: none;
+      border: 1px solid var(--accent-primary);
+      color: var(--accent-primary);
+      font-size: 0.7rem;
+      padding: 1px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .file-status-save:hover {
+      background: rgba(79, 195, 247, 0.15);
     }
 
     /* Editor container */
@@ -746,29 +710,6 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     }));
   }
 
-  // === Tab Actions ===
-
-  _onTabClick(index) {
-    if (index === this._activeIndex) return;
-    this._activeIndex = index;
-    this._showEditor();
-    this._dispatchActiveFileChanged(this._files[index].path);
-  }
-
-  _onTabClose(index, e) {
-    e.stopPropagation();
-    const file = this._files[index];
-    if (this._dirtySet.has(file.path)) {
-      if (!confirm(`${file.path} has unsaved changes. Close anyway?`)) return;
-    }
-    this.closeFile(file.path);
-  }
-
-  _onTabSave(index, e) {
-    e.stopPropagation();
-    this._saveFile(this._files[index].path);
-  }
-
   // === LSP Providers ===
 
   _registerLspProviders() {
@@ -920,40 +861,26 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
 
   // === Rendering ===
 
-  _renderTab(file, index) {
-    const isActive = index === this._activeIndex;
-    const isDirty = this._dirtySet.has(file.path);
-    const filename = file.path.split('/').pop();
-    const hasDiff = file.is_new || file.original !== file.savedContent;
-    const badgeType = file.is_new ? 'new' : 'mod';
-    const badgeText = file.is_new ? 'NEW' : 'MOD';
-
-    return html`
-      <button
-        class="file-tab ${isActive ? 'active' : ''}"
-        @click=${() => this._onTabClick(index)}
-        title="${file.path}"
-      >
-        <span class="tab-name">${filename}</span>
-        ${hasDiff ? html`
-          <span class="tab-badge ${badgeType}">${badgeText}</span>
-        ` : nothing}
-        ${isDirty ? html`
-          <span class="tab-dirty-dot" title="Unsaved changes"></span>
-          <span class="tab-save-btn" title="Save" @click=${(e) => this._onTabSave(index, e)}>💾</span>
-        ` : nothing}
-        <span class="tab-close-btn" title="Close" @click=${(e) => this._onTabClose(index, e)}>✕</span>
-      </button>
-    `;
-  }
-
   render() {
     const hasFiles = this._files.length > 0;
+    const file = hasFiles && this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    const isDirty = file ? this._dirtySet.has(file.path) : false;
+    const hasDiff = file ? (file.is_new || file.original !== file.savedContent) : false;
 
     return html`
-      ${hasFiles ? html`
-        <div class="tab-bar">
-          ${this._files.map((f, i) => this._renderTab(f, i))}
+      ${file ? html`
+        <div class="file-status-bar">
+          <span class="file-status-path" title="${file.path}">${file.path}</span>
+          ${file.is_new ? html`<span class="file-status-badge new">NEW</span>` : nothing}
+          ${hasDiff && !file.is_new ? html`<span class="file-status-badge mod">MOD</span>` : nothing}
+          <span class="file-status-spacer"></span>
+          ${isDirty ? html`
+            <span class="dirty-indicator">
+              <span class="dirty-dot"></span>
+              unsaved
+            </span>
+            <button class="file-status-save" @click=${() => this._saveActiveFile()} title="Save (Ctrl+S)">💾 Save</button>
+          ` : nothing}
         </div>
       ` : nothing}
 

@@ -4,9 +4,9 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { Marked } from 'marked';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
+import { renderMarkdown } from '../utils/markdown.js';
 
 // Import child components
 import './input-history.js';
@@ -125,31 +125,6 @@ function escapeHtml(text) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-}
-
-/**
- * Configured Marked instance with custom code block renderer.
- * Injects copy button into <pre> blocks and applies our CSS classes.
- */
-const _marked = new Marked({
-  renderer: {
-    code({ text, lang }) {
-      const escaped = escapeHtml(text);
-      return `<pre class="code-block"><button class="copy-btn">📋</button><code>${escaped}</code></pre>`;
-    },
-  },
-  breaks: true,   // Convert single \n to <br> (GFM-style)
-  gfm: true,      // Enable GitHub Flavored Markdown (tables, strikethrough, etc.)
-});
-
-function renderMarkdown(text) {
-  if (!text) return '';
-  try {
-    return _marked.parse(text);
-  } catch (e) {
-    console.warn('Markdown parse error, falling back to escaped text:', e);
-    return `<p>${escapeHtml(text)}</p>`;
-  }
 }
 
 
@@ -331,6 +306,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       font-size: 0.9rem;
       position: relative;
       transition: border-color 0.2s, box-shadow 0.2s;
+      content-visibility: auto;
+      contain-intrinsic-size: auto 120px;
+    }
+
+    .message-card.force-visible {
+      content-visibility: visible;
     }
 
     .message-card.user {
@@ -386,7 +367,61 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .md-content pre.code-block code {
       background: none;
       padding: 0;
+      color: var(--text-primary);
+      line-height: 1.5;
     }
+
+    .md-content pre .code-lang {
+      position: absolute;
+      top: 4px;
+      right: 36px;
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      font-family: var(--font-sans);
+      pointer-events: none;
+    }
+
+    .md-content pre .code-copy-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s;
+      font-family: var(--font-sans);
+      line-height: 1;
+      z-index: 1;
+    }
+    .md-content pre:hover .code-copy-btn {
+      opacity: 1;
+    }
+    .md-content pre .code-copy-btn:hover {
+      color: var(--text-primary);
+      background: var(--bg-secondary);
+    }
+    .md-content pre .code-copy-btn.copied {
+      opacity: 1;
+      color: var(--accent-green);
+    }
+
+    /* highlight.js syntax theme */
+    .md-content .hljs-keyword { color: #c792ea; }
+    .md-content .hljs-string { color: #c3e88d; }
+    .md-content .hljs-number { color: #f78c6c; }
+    .md-content .hljs-comment { color: #546e7a; font-style: italic; }
+    .md-content .hljs-function { color: #82aaff; }
+    .md-content .hljs-built_in { color: #ffcb6b; }
+    .md-content .hljs-title { color: #82aaff; }
+    .md-content .hljs-params { color: var(--text-primary); }
+    .md-content .hljs-attr { color: #ffcb6b; }
+    .md-content .hljs-literal { color: #f78c6c; }
+    .md-content .hljs-type { color: #ffcb6b; }
 
     /* Tables (from marked GFM) */
     .md-content table {
@@ -447,28 +482,6 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       margin: 8px 0;
       padding: 4px 12px;
       color: var(--text-secondary);
-    }
-
-    /* Copy button on code blocks */
-    .md-content pre.code-block .copy-btn {
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border-primary);
-      color: var(--text-muted);
-      font-size: 0.75rem;
-      padding: 2px 6px;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      opacity: 0;
-      transition: opacity 0.15s;
-    }
-    .md-content pre.code-block:hover .copy-btn {
-      opacity: 1;
-    }
-    .md-content pre.code-block .copy-btn:hover {
-      color: var(--text-primary);
     }
 
     /* Streaming indicator */
@@ -2146,10 +2159,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   _renderMessage(msg, index) {
     const isUser = msg.role === 'user';
     const content = msg.content || '';
+    const forceVisible = this.messages.length - index <= 15;
+    const fvClass = forceVisible ? ' force-visible' : '';
 
     if (isUser) {
       return html`
-        <div class="message-card user" data-msg-index="${index}">
+        <div class="message-card user${fvClass}" data-msg-index="${index}">
           ${this._renderMsgActions(msg)}
           <div class="role-label">You</div>
           ${this._renderUserContent(msg)}
@@ -2222,18 +2237,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
 
     // Handle copy button clicks on code blocks
-    const btn = e.target.closest('.copy-btn');
-    if (btn) {
-      const pre = btn.closest('pre');
+    const copyBtn = e.target.closest('.code-copy-btn');
+    if (copyBtn) {
+      const pre = copyBtn.closest('pre');
       if (pre) {
         const code = pre.querySelector('code');
-        if (code) {
-          navigator.clipboard.writeText(code.textContent).then(() => {
-            btn.textContent = '✓ Copied';
-            setTimeout(() => { btn.textContent = '📋'; }, 1500);
-          });
-        }
+        const text = code ? code.textContent : pre.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+          copyBtn.textContent = '✓ Copied';
+          copyBtn.classList.add('copied');
+          setTimeout(() => {
+            copyBtn.textContent = '📋';
+            copyBtn.classList.remove('copied');
+          }, 1500);
+        }).catch(() => {
+          copyBtn.textContent = '✗ Failed';
+          setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
+        });
       }
+      return;
     }
   }
 
