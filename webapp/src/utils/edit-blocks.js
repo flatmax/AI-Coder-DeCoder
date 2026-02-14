@@ -51,7 +51,8 @@ export function segmentResponse(text) {
     }
   }
 
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
     const stripped = line.trim();
 
     if (state === 'text') {
@@ -63,7 +64,10 @@ export function segmentResponse(text) {
       }
     } else if (state === 'expect_edit') {
       if (stripped === EDIT_START) {
-        // Strip the file-path line from the preceding text buffer
+        // Strip wrapping code fence if the LLM wrapped the edit block in ```
+        if (textBuf.length > 0 && /^`{3,}\s*\w*$/.test(textBuf[textBuf.length - 1].trim())) {
+          textBuf.pop();
+        }
         flushText();
         oldLines = [];
         newLines = [];
@@ -97,6 +101,10 @@ export function segmentResponse(text) {
         oldLines = [];
         newLines = [];
         state = 'text';
+        // Skip trailing code fence if LLM wrapped the edit block in ```
+        if (li + 1 < lines.length && /^`{3,}\s*$/.test(lines[li + 1].trim())) {
+          li++;
+        }
       } else {
         newLines.push(line);
       }

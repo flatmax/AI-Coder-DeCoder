@@ -4,6 +4,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
+import { Marked } from 'marked';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 
@@ -15,11 +16,6 @@ import './speech-to-text.js';
 
 // Edit block segmentation and diffing
 import { segmentResponse, computeDiff } from '../utils/edit-blocks.js';
-
-// Edit block markers (from edit_parser.py)
-const EDIT_START = '««« EDIT';
-const EDIT_SEP = '═══════ REPL';
-const EDIT_END = '»»» EDIT END';
 
 /**
  * Detect repo file paths in rendered HTML and wrap them with clickable spans.
@@ -131,31 +127,29 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;');
 }
 
+/**
+ * Configured Marked instance with custom code block renderer.
+ * Injects copy button into <pre> blocks and applies our CSS classes.
+ */
+const _marked = new Marked({
+  renderer: {
+    code({ text, lang }) {
+      const escaped = escapeHtml(text);
+      return `<pre class="code-block"><button class="copy-btn">📋</button><code>${escaped}</code></pre>`;
+    },
+  },
+  breaks: true,   // Convert single \n to <br> (GFM-style)
+  gfm: true,      // Enable GitHub Flavored Markdown (tables, strikethrough, etc.)
+});
+
 function renderMarkdown(text) {
   if (!text) return '';
-  let result = text
-    // Escape HTML
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    // Code blocks (``` ... ```)
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      return `<pre class="code-block"><button class="copy-btn">📋</button><code>${code}</code></pre>`;
-    })
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    // Bold
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    // Italic
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Headers
-    .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-    // Line breaks (but not inside pre blocks)
-    .replace(/\n/g, '<br>');
-
-  return result;
+  try {
+    return _marked.parse(text);
+  } catch (e) {
+    console.warn('Markdown parse error, falling back to escaped text:', e);
+    return `<p>${escapeHtml(text)}</p>`;
+  }
 }
 
 
@@ -392,6 +386,67 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .md-content pre.code-block code {
       background: none;
       padding: 0;
+    }
+
+    /* Tables (from marked GFM) */
+    .md-content table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 8px 0;
+      font-size: 0.85rem;
+    }
+    .md-content th,
+    .md-content td {
+      border: 1px solid var(--border-primary);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .md-content th {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+    .md-content tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    /* Lists */
+    .md-content ul,
+    .md-content ol {
+      margin: 6px 0;
+      padding-left: 24px;
+    }
+    .md-content li {
+      margin: 3px 0;
+    }
+
+    /* Paragraphs — tighten spacing for chat */
+    .md-content p {
+      margin: 4px 0;
+    }
+
+    /* Horizontal rules */
+    .md-content hr {
+      border: none;
+      border-top: 1px solid var(--border-primary);
+      margin: 12px 0;
+    }
+
+    /* Links */
+    .md-content a {
+      color: var(--accent-primary);
+      text-decoration: none;
+    }
+    .md-content a:hover {
+      text-decoration: underline;
+    }
+
+    /* Blockquotes */
+    .md-content blockquote {
+      border-left: 3px solid var(--border-primary);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--text-secondary);
     }
 
     /* Copy button on code blocks */
