@@ -27,7 +27,7 @@ Background task: _stream_chat
     ├─ Remove deselected files from context
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
-    ├─ Detect & fetch URLs from prompt
+    ├─ Detect & fetch URLs from prompt (up to 3 per message)
     ├─ Assemble tiered message array (→ prompt_assembly.md)
     ├─ Run LLM completion (threaded, streaming)
     │       │

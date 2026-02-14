@@ -16,7 +16,7 @@ Interactive chips below the chat input showing detected and fetched URLs. Backen
 ### Lifecycle
 
 1. **Detection** — debounced as user types, excludes already-fetched
-2. **Fetch** — on user click, with cache and summarization
+2. **Fetch** — on user click, with cache and summarization. Backend provides a `detect_and_fetch` convenience method that detects all URLs in a text block and fetches them sequentially
 3. **Toggle** — excluded URLs visible but not sent as context
 4. **Removal** — removes from fetched; may reappear as detected
 5. **Dismissal** — removes unfetched from chips
@@ -41,6 +41,7 @@ Interactive chips below the chat input showing detected and fetched URLs. Backen
 
 - GitHub with path: `{owner}/{repo}/{filename}`
 - GitHub without path: `{owner}/{repo}`
+- `raw.githubusercontent.com`: treated as GitHub file type
 - Web: `{hostname}/{path}` (truncated)
 
 ## Message Integration

@@ -130,7 +130,7 @@ See [Diff Viewer](diff_viewer.md) for full editor details.
 | LLM provider down/timeout | streamComplete with error in chat. User can retry |
 | Git operation fails | Return `{error}` from RPC. Error toast. File tree doesn't update |
 | Commit fails | Error shown in chat. Files remain staged |
-| URL fetch fails | Chip shows error state. Content not included. User can retry |
+| URL fetch fails | Chip shows error state. Error results not cached. Content not included. User can retry |
 | WebSocket disconnect | Reconnecting banner with attempt count, auto-retry with exponential backoff (1s, 2s, 4s, 8s, max 15s). On disconnect: reset `SharedRpc`, show banner, dispatch error toast. On reconnect: re-publish call proxy, fetch state, rebuild UI, dispatch success toast |
 | Config file corrupt/missing | Use built-in defaults. Log warning. Settings panel displays the error |
 | Symbol cache corrupt | Clear in-memory cache, rebuild from source |
