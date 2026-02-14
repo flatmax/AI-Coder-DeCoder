@@ -450,13 +450,16 @@ export class AcSettingsTab extends RpcMixin(LitElement) {
           ${card?.reloadable ? html`
             <button class="toolbar-btn" @click=${this._reload}
               ?disabled=${!this.rpcConnected}
-              title="Reload config">↻ Reload</button>
+              title="Reload config"
+              aria-label="Reload ${card?.label || 'config'}">↻ Reload</button>
           ` : nothing}
           <button class="toolbar-btn primary" @click=${this._save}
             ?disabled=${this._saving || !this.rpcConnected}
-            title="Save (Ctrl+S)">💾 Save</button>
+            title="Save (Ctrl+S)"
+            aria-label="Save ${card?.label || 'config'}">💾 Save</button>
           <button class="toolbar-btn" @click=${this._closeEditor}
-            title="Close editor">✕</button>
+            title="Close editor"
+            aria-label="Close editor">✕</button>
         </div>
         ${this._loading ? html`
           <div class="editor-loading">Loading...</div>
@@ -467,6 +470,7 @@ export class AcSettingsTab extends RpcMixin(LitElement) {
             @input=${this._onEditorInput}
             placeholder="Config content..."
             spellcheck="false"
+            aria-label="Configuration editor"
           ></textarea>
         `}
       </div>
@@ -481,7 +485,12 @@ export class AcSettingsTab extends RpcMixin(LitElement) {
         ${CONFIG_CARDS.map(card => html`
           <div
             class="config-card ${this._activeCard === card.type ? 'active' : ''}"
+            role="button"
+            tabindex="0"
+            aria-pressed="${this._activeCard === card.type}"
+            aria-label="${card.label} — ${card.format}"
             @click=${() => this._openCard(card.type)}
+            @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._openCard(card.type); }}}
           >
             <div class="card-icon">${card.icon}</div>
             <div class="card-label">${card.label}</div>
@@ -493,7 +502,7 @@ export class AcSettingsTab extends RpcMixin(LitElement) {
       ${this._renderEditor()}
 
       ${this._toast ? html`
-        <div class="toast ${this._toast.type}">${this._toast.message}</div>
+        <div class="toast ${this._toast.type}" role="alert">${this._toast.message}</div>
       ` : nothing}
     `;
   }

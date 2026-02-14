@@ -272,12 +272,13 @@ export class AcInputHistory extends LitElement {
             class="filter-input"
             type="text"
             placeholder="Filter..."
+            aria-label="Filter input history"
             .value=${this._filter}
             @input=${this._onFilterInput}
             @keydown=${this._onFilterKeyDown}
           >
         </div>
-        <div class="items">
+        <div class="items" role="listbox" aria-label="Input history">
           ${filtered.length === 0 ? html`
             <div class="empty">${this._filter ? 'No matches' : 'No history'}</div>
           ` : filtered.map((item, i) => {
@@ -286,6 +287,8 @@ export class AcInputHistory extends LitElement {
             return html`
               <div
                 class="item ${isSelected ? 'selected' : ''}"
+                role="option"
+                aria-selected="${isSelected}"
                 @click=${() => this._onItemClick(i)}
                 title="${item}"
               >${item}</div>

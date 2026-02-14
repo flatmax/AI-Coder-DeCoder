@@ -105,6 +105,10 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       padding: 2px 4px;
       border-radius: var(--radius-sm);
     }
+    .section-header:focus-visible {
+      outline: 1px solid var(--accent-primary);
+      outline-offset: -1px;
+    }
     .dismiss-btn:hover {
       color: var(--text-primary);
       background: var(--bg-secondary);
@@ -129,7 +133,8 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       color: var(--text-secondary);
       font-size: 0.75rem;
     }
-    .section-header:hover {
+    .section-header:hover,
+    .section-header:focus-visible {
       background: var(--bg-tertiary);
     }
 
@@ -434,7 +439,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
           ${model}
           ${this._getCacheBadge(cacheRate)}
         </span>
-        <button class="dismiss-btn" @click=${this._dismiss} title="Dismiss">✕</button>
+        <button class="dismiss-btn" @click=${this._dismiss} title="Dismiss" aria-label="Dismiss token usage overlay">✕</button>
       </div>
     `;
   }
@@ -462,8 +467,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     return html`
       <div class="section">
-        <div class="section-header" @click=${() => this._toggleSection('tiers')}>
-          <span class="section-toggle">${this._isExpanded('tiers') ? '▼' : '▶'}</span>
+        <div class="section-header" tabindex="0" role="button"
+             aria-expanded="${this._isExpanded('tiers')}"
+             @click=${() => this._toggleSection('tiers')}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleSection('tiers'); }}}>
+          <span class="section-toggle" aria-hidden="true">${this._isExpanded('tiers') ? '▼' : '▶'}</span>
           Cache Tiers
         </div>
         <div class="section-body ${this._isExpanded('tiers') ? '' : 'collapsed'}">
@@ -516,8 +524,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     return html`
       <div class="section">
-        <div class="section-header" @click=${() => this._toggleSection('request')}>
-          <span class="section-toggle">${this._isExpanded('request') ? '▼' : '▶'}</span>
+        <div class="section-header" tabindex="0" role="button"
+             aria-expanded="${this._isExpanded('request')}"
+             @click=${() => this._toggleSection('request')}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleSection('request'); }}}>
+          <span class="section-toggle" aria-hidden="true">${this._isExpanded('request') ? '▼' : '▶'}</span>
           This Request
         </div>
         <div class="section-body ${this._isExpanded('request') ? '' : 'collapsed'}">
@@ -561,8 +572,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     return html`
       <div class="section">
-        <div class="section-header" @click=${() => this._toggleSection('budget')}>
-          <span class="section-toggle">${this._isExpanded('budget') ? '▼' : '▶'}</span>
+        <div class="section-header" tabindex="0" role="button"
+             aria-expanded="${this._isExpanded('budget')}"
+             @click=${() => this._toggleSection('budget')}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleSection('budget'); }}}>
+          <span class="section-toggle" aria-hidden="true">${this._isExpanded('budget') ? '▼' : '▶'}</span>
           History Budget
         </div>
         <div class="section-body ${this._isExpanded('budget') ? '' : 'collapsed'}">
@@ -590,8 +604,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     return html`
       <div class="section">
-        <div class="section-header" @click=${() => this._toggleSection('changes')}>
-          <span class="section-toggle">${this._isExpanded('changes') ? '▼' : '▶'}</span>
+        <div class="section-header" tabindex="0" role="button"
+             aria-expanded="${this._isExpanded('changes')}"
+             @click=${() => this._toggleSection('changes')}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleSection('changes'); }}}>
+          <span class="section-toggle" aria-hidden="true">${this._isExpanded('changes') ? '▼' : '▶'}</span>
           Tier Changes
         </div>
         <div class="section-body ${this._isExpanded('changes') ? '' : 'collapsed'}">
@@ -618,8 +635,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
     return html`
       <div class="section">
-        <div class="section-header" @click=${() => this._toggleSection('session')}>
-          <span class="section-toggle">${this._isExpanded('session') ? '▼' : '▶'}</span>
+        <div class="section-header" tabindex="0" role="button"
+             aria-expanded="${this._isExpanded('session')}"
+             @click=${() => this._toggleSection('session')}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleSection('session'); }}}>
+          <span class="section-toggle" aria-hidden="true">${this._isExpanded('session') ? '▼' : '▶'}</span>
           Session Totals
         </div>
         <div class="section-body ${this._isExpanded('session') ? '' : 'collapsed'}">

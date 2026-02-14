@@ -1725,6 +1725,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       message: 'This will discard ALL uncommitted changes (staged and unstaged). This cannot be undone.',
       action: () => this._resetHard(),
     };
+    // Focus cancel button for keyboard accessibility
+    this.updateComplete.then(() => {
+      const cancelBtn = this.shadowRoot?.querySelector('.confirm-cancel');
+      if (cancelBtn) cancelBtn.focus();
+    });
   }
 
   async _resetHard() {
@@ -2151,6 +2156,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _openLightbox(src) {
     this._lightboxSrc = src;
+    // Focus the lightbox overlay for keyboard handling
+    this.updateComplete.then(() => {
+      const lb = this.shadowRoot?.querySelector('.image-lightbox');
+      if (lb) lb.focus();
+    });
   }
 
   _closeLightbox(e) {
@@ -2307,40 +2317,43 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     return html`
       <!-- Action Bar -->
-      <div class="action-bar">
-        <button class="action-btn" title="New session" @click=${this._newSession}>✨</button>
-        <button class="action-btn" title="Browse history" @click=${this._openHistoryBrowser}>📜</button>
+      <div class="action-bar" role="toolbar" aria-label="Chat actions">
+        <button class="action-btn" title="New session" aria-label="New session" @click=${this._newSession}>✨</button>
+        <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
 
         <div class="chat-search">
           <input
             class="chat-search-input"
             type="text"
             placeholder="Search messages..."
+            aria-label="Search messages"
             .value=${this._chatSearchQuery}
             @input=${this._onChatSearchInput}
             @keydown=${this._onChatSearchKeyDown}
           >
           ${this._chatSearchMatches.length > 0 ? html`
-            <span class="chat-search-counter">${this._chatSearchCurrent + 1}/${this._chatSearchMatches.length}</span>
-            <button class="chat-search-nav" title="Previous (Shift+Enter)" @click=${this._chatSearchPrev}>▲</button>
-            <button class="chat-search-nav" title="Next (Enter)" @click=${this._chatSearchNext}>▼</button>
+            <span class="chat-search-counter" aria-live="polite">${this._chatSearchCurrent + 1}/${this._chatSearchMatches.length}</span>
+            <button class="chat-search-nav" title="Previous (Shift+Enter)" aria-label="Previous search result" @click=${this._chatSearchPrev}>▲</button>
+            <button class="chat-search-nav" title="Next (Enter)" aria-label="Next search result" @click=${this._chatSearchNext}>▼</button>
           ` : nothing}
         </div>
 
-        <button class="action-btn" title="Copy diff" @click=${this._copyDiff}
+        <button class="action-btn" title="Copy diff" aria-label="Copy diff to clipboard" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
         <button class="action-btn ${this._committing ? 'committing' : ''}"
           title="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all & commit'}"
+          aria-label="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all and commit'}"
           @click=${this._commitWithMessage}
           ?disabled=${!this.rpcConnected || this._committing || this.streamingActive || this.reviewState?.active}>
           ${this._committing ? '⏳' : '💾'}
         </button>
-        <button class="action-btn danger" title="Reset to HEAD" @click=${this._confirmReset}
+        <button class="action-btn danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
+          @click=${this._confirmReset}
           ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
       </div>
 
       <!-- Messages -->
-      <div class="messages">
+      <div class="messages" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions">
         ${!hasMessages ? html`
           <div class="empty-state">
             <div class="brand">AC⚡DC</div>
@@ -2425,12 +2438,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
               class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
               @click=${this._toggleSnippets}
               title="Quick snippets"
+              aria-label="Toggle quick snippets"
+              aria-expanded="${this._snippetDrawerOpen}"
             >📌</button>
           </div>
 
           <textarea
             class="input-textarea"
             placeholder="Message AC⚡DC..."
+            aria-label="Chat message input"
             rows="1"
             .value=${this._inputValue}
             @input=${this._onInput}
@@ -2439,13 +2455,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ></textarea>
 
           ${this.streamingActive ? html`
-            <button class="send-btn stop" @click=${this._stop} title="Stop">⏹</button>
+            <button class="send-btn stop" @click=${this._stop} title="Stop" aria-label="Stop generation">⏹</button>
           ` : html`
             <button
               class="send-btn"
               @click=${this._send}
               ?disabled=${!this.rpcConnected}
               title="Send (Enter)"
+              aria-label="Send message"
             >↑</button>
           `}
         </div>
@@ -2459,10 +2476,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
       <!-- Confirm Dialog -->
       ${this._confirmAction ? html`
-        <div class="confirm-overlay" @click=${this._dismissConfirm}>
-          <div class="confirm-dialog" @click=${(e) => e.stopPropagation()}>
-            <h3>${this._confirmAction.title}</h3>
-            <p>${this._confirmAction.message}</p>
+        <div class="confirm-overlay" @click=${this._dismissConfirm}
+             @keydown=${(e) => { if (e.key === 'Escape') this._dismissConfirm(); }}>
+          <div class="confirm-dialog" role="alertdialog" aria-modal="true"
+               aria-labelledby="confirm-title" aria-describedby="confirm-desc"
+               @click=${(e) => e.stopPropagation()}>
+            <h3 id="confirm-title">${this._confirmAction.title}</h3>
+            <p id="confirm-desc">${this._confirmAction.message}</p>
             <div class="confirm-actions">
               <button class="confirm-cancel" @click=${this._dismissConfirm}>Cancel</button>
               <button class="confirm-danger" @click=${this._confirmAction.action}>
@@ -2475,12 +2495,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
       <!-- Toast -->
       ${this._toast ? html`
-        <div class="toast ${this._toast.type}">${this._toast.message}</div>
+        <div class="toast ${this._toast.type}" role="alert">${this._toast.message}</div>
       ` : nothing}
 
       <!-- Image Lightbox -->
       ${this._lightboxSrc ? html`
         <div class="image-lightbox"
+             role="dialog"
+             aria-modal="true"
+             aria-label="Image preview"
              @click=${this._closeLightbox}
              @keydown=${this._onLightboxKeyDown}
              tabindex="0">

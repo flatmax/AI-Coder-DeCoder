@@ -734,18 +734,24 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     return html`
       <div
         class="tree-row ${isFocused ? 'focused' : ''} ${isActive ? 'active-in-viewer' : ''}"
+        role="treeitem"
+        aria-selected="${checkState === 'checked'}"
+        aria-expanded="${isDir ? String(isExpanded) : nothing}"
+        aria-level="${depth + 1}"
+        aria-label="${node.name}${gitStatus ? `, ${gitStatus}` : ''}"
         style="padding-left: ${depth * 16 + 4}px"
         @click=${() => this._onRowClick(node)}
         @auxclick=${(e) => this._onRowMiddleClick(node, e)}
         @contextmenu=${(e) => this._onContextMenu(node, e)}
       >
-        <span class="toggle">
+        <span class="toggle" aria-hidden="true">
           ${isDir ? (isExpanded ? '▾' : '▸') : ''}
         </span>
 
         <input
           type="checkbox"
           class="tree-checkbox"
+          aria-label="Select ${node.name}"
           .checked=${checkState === 'checked'}
           .indeterminate=${checkState === 'indeterminate'}
           @click=${(e) => this._toggleSelect(node, e)}
@@ -805,27 +811,28 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     const path = node.path;
 
     return html`
-      <div class="context-menu" style="left: ${x}px; top: ${y}px"
+      <div class="context-menu" role="menu" aria-label="File actions"
+           style="left: ${x}px; top: ${y}px"
            @click=${(e) => e.stopPropagation()}>
         ${isDir ? html`
-          <div class="context-menu-item" @click=${() => this._ctxNewFile(path)}>📄 New File</div>
-          <div class="context-menu-item" @click=${() => this._ctxNewDir(path)}>📁 New Directory</div>
-          <div class="context-menu-separator"></div>
-          <div class="context-menu-item" @click=${() => { const paths = []; this._collectPaths(node, paths); this._ctxStage(paths); }}>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxNewFile(path)}>📄 New File</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxNewDir(path)}>📁 New Directory</div>
+          <div class="context-menu-separator" role="separator"></div>
+          <div class="context-menu-item" role="menuitem" @click=${() => { const paths = []; this._collectPaths(node, paths); this._ctxStage(paths); }}>
             ➕ Stage All
           </div>
-          <div class="context-menu-item" @click=${() => { const paths = []; this._collectPaths(node, paths); this._ctxUnstage(paths); }}>
+          <div class="context-menu-item" role="menuitem" @click=${() => { const paths = []; this._collectPaths(node, paths); this._ctxUnstage(paths); }}>
             ➖ Unstage All
           </div>
-          <div class="context-menu-separator"></div>
-          <div class="context-menu-item" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
+          <div class="context-menu-separator" role="separator"></div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
         ` : html`
-          <div class="context-menu-item" @click=${() => this._ctxStage([path])}>➕ Stage</div>
-          <div class="context-menu-item" @click=${() => this._ctxUnstage([path])}>➖ Unstage</div>
-          <div class="context-menu-separator"></div>
-          <div class="context-menu-item" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
-          <div class="context-menu-item danger" @click=${() => this._ctxDiscard(path)}>↩️ Discard Changes</div>
-          <div class="context-menu-item danger" @click=${() => this._ctxDelete(path)}>🗑️ Delete</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxStage([path])}>➕ Stage</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxUnstage([path])}>➖ Unstage</div>
+          <div class="context-menu-separator" role="separator"></div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
+          <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDiscard(path)}>↩️ Discard Changes</div>
+          <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDelete(path)}>🗑️ Delete</div>
         `}
       </div>
     `;
@@ -875,6 +882,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           class="filter-input"
           type="text"
           placeholder="Filter files..."
+          aria-label="Filter files"
           .value=${this._filter}
           @input=${this._onFilterInput}
         />
@@ -882,6 +890,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
       <div
         class="tree-container"
+        role="tree"
+        aria-label="Repository files"
         tabindex="0"
         @keydown=${this._onTreeKeyDown}
       >

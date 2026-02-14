@@ -435,6 +435,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       <div
         class="picker-panel ${this._pickerCollapsed ? 'collapsed' : ''}"
         style="width: ${this._pickerCollapsed ? 0 : this._pickerWidth}px"
+        role="region"
+        aria-label="File picker"
       >
         <ac-file-picker
           .selectedFiles=${new Set(this._selectedFiles)}
@@ -452,12 +454,14 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         @mousedown=${this._onResizeStart}
       >
         <button class="collapse-btn" @click=${this._toggleCollapse}
-          title="${this._pickerCollapsed ? 'Expand' : 'Collapse'} file picker">
+          title="${this._pickerCollapsed ? 'Expand' : 'Collapse'} file picker"
+          aria-label="${this._pickerCollapsed ? 'Expand' : 'Collapse'} file picker"
+          aria-expanded="${!this._pickerCollapsed}">
           ${this._pickerCollapsed ? '▶' : '◀'}
         </button>
       </div>
 
-      <div class="chat-panel">
+      <div class="chat-panel" role="region" aria-label="Chat">
         <ac-chat-panel
           .messages=${this._messages}
           .selectedFiles=${this._selectedFiles}

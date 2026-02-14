@@ -478,23 +478,25 @@ class AcApp extends JRPCClient {
   render() {
     return html`
       <div class="viewport">
-        <div class="diff-background">
+        <div class="diff-background" role="region" aria-label="Code diff viewer">
           <ac-diff-viewer></ac-diff-viewer>
         </div>
 
-        <div class="dialog-container">
+        <div class="dialog-container" role="complementary" aria-label="Tools panel">
           <ac-dialog></ac-dialog>
         </div>
       </div>
 
       <ac-token-hud></ac-token-hud>
 
-      <div class="status-bar ${this._statusBar}"></div>
-      <div class="reconnect-banner ${this._reconnectVisible ? 'visible' : ''}">${this._reconnectMsg}</div>
+      <div class="status-bar ${this._statusBar}" role="status" aria-live="polite"
+           aria-label="${this._statusBar === 'ok' ? 'Connected' : this._statusBar === 'error' ? 'Disconnected' : ''}"></div>
+      <div class="reconnect-banner ${this._reconnectVisible ? 'visible' : ''}"
+           role="alert" aria-live="assertive">${this._reconnectMsg}</div>
 
-      <div class="toast-container">
+      <div class="toast-container" role="status" aria-live="polite" aria-relevant="additions">
         ${this._toasts.map(t => html`
-          <div class="global-toast ${t.type} ${t.fading ? 'fading' : ''}">${t.message}</div>
+          <div class="global-toast ${t.type} ${t.fading ? 'fading' : ''}" role="alert">${t.message}</div>
         `)}
       </div>
     `;

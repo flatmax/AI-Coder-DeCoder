@@ -571,8 +571,13 @@ export class AcContextTab extends RpcMixin(LitElement) {
           return html`
             <div class="category">
               <div class="category-header ${hasDetails ? '' : 'no-expand'}"
-                @click=${() => hasDetails && this._toggleSection(cat.key)}>
-                <span class="category-toggle">${hasDetails ? (expanded ? '▼' : '▶') : ' '}</span>
+                role="${hasDetails ? 'button' : nothing}"
+                tabindex="${hasDetails ? '0' : nothing}"
+                aria-expanded="${hasDetails ? String(expanded) : nothing}"
+                aria-label="${cat.name}, ${formatTokens(cat.tokens)} tokens"
+                @click=${() => hasDetails && this._toggleSection(cat.key)}
+                @keydown=${(e) => { if (hasDetails && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); this._toggleSection(cat.key); }}}>
+                <span class="category-toggle" aria-hidden="true">${hasDetails ? (expanded ? '▼' : '▶') : ' '}</span>
                 <span class="category-icon">${cat.icon}</span>
                 <span class="category-name">${cat.name}</span>
                 <div class="category-bar">
@@ -642,7 +647,8 @@ export class AcContextTab extends RpcMixin(LitElement) {
           ${this._stale ? html`<span class="stale-badge">● stale</span>` : nothing}
         </span>
         <button class="refresh-btn" @click=${() => this._refresh()}
-          ?disabled=${this._loading}>↻ Refresh</button>
+          ?disabled=${this._loading}
+          aria-label="Refresh context breakdown">↻ Refresh</button>
       </div>
 
       ${this._loading && !this._data ? html`

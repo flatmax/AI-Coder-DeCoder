@@ -488,12 +488,15 @@ export class AcCacheTab extends RpcMixin(LitElement) {
 
     return html`
       <div class="tier-block">
-        <div class="tier-header" @click=${() => this._toggleTier(tier)}>
-          <span class="tier-toggle">${expanded ? '▼' : '▶'}</span>
-          <span class="tier-dot" style="background: ${color}"></span>
+        <div class="tier-header" role="button" tabindex="0"
+             aria-expanded="${expanded}" aria-label="${label}, ${formatTokens(tokens)} tokens"
+             @click=${() => this._toggleTier(tier)}
+             @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleTier(tier); }}}>
+          <span class="tier-toggle" aria-hidden="true">${expanded ? '▼' : '▶'}</span>
+          <span class="tier-dot" style="background: ${color}" aria-hidden="true"></span>
           <span class="tier-name">${label}</span>
           <span class="tier-tokens">${formatTokens(tokens)}</span>
-          ${cached ? html`<span class="tier-cached-badge">🔒</span>` : nothing}
+          ${cached ? html`<span class="tier-cached-badge" aria-label="Cached">🔒</span>` : nothing}
         </div>
         <div class="tier-contents ${expanded ? 'expanded' : ''}">
           ${contents.map(item => {
@@ -560,12 +563,14 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           class="filter-input"
           type="text"
           placeholder="Filter items..."
+          aria-label="Filter cache items"
           .value=${this._filter}
           @input=${this._onFilterInput}
         >
-        ${this._stale ? html`<span class="stale-badge">● stale</span>` : nothing}
+        ${this._stale ? html`<span class="stale-badge" aria-label="Data is stale">● stale</span>` : nothing}
         <button class="refresh-btn" @click=${() => this._refresh()}
-          ?disabled=${this._loading}>↻</button>
+          ?disabled=${this._loading}
+          aria-label="Refresh cache data">↻</button>
       </div>
 
       ${this._renderChanges()}

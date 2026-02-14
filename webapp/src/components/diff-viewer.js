@@ -546,6 +546,33 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       this._saveActiveFile();
+      return;
+    }
+    // Ctrl+PageUp / Ctrl+PageDown to switch open files
+    if ((e.ctrlKey || e.metaKey) && e.key === 'PageDown') {
+      e.preventDefault();
+      if (this._files.length > 1) {
+        this._activeIndex = (this._activeIndex + 1) % this._files.length;
+        this._showEditor();
+        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+      }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'PageUp') {
+      e.preventDefault();
+      if (this._files.length > 1) {
+        this._activeIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
+        this._showEditor();
+        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+      }
+      return;
+    }
+    // Ctrl+W to close active file
+    if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+      e.preventDefault();
+      if (this._files.length > 0 && this._activeIndex >= 0) {
+        this.closeFile(this._files[this._activeIndex].path);
+      }
     }
   }
 
@@ -856,6 +883,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
           <button
             class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
             title="${file.path}${isDirty ? ' — unsaved (Ctrl+S to save)' : file.is_new ? ' — new file' : ''}"
+            aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
             @click=${() => isDirty ? this._saveActiveFile() : null}
           ></button>
         ` : nothing}

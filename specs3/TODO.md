@@ -147,7 +147,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Content-visibility optimization** — CSS containment for off-screen messages
 - [x] **Duplicate streamChunk cleanup** — Only one streamChunk method in app-shell.js
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
-- [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
+- [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
 ### Phase 10: Code Review ✅
 - [x] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`, `get_review_changed_files`, `get_review_file_diff`

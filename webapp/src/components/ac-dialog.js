@@ -433,10 +433,14 @@ export class AcDialog extends RpcMixin(LitElement) {
       <div class="header" @mousedown=${this._onHeaderMouseDown}>
         <span class="header-label">${currentTab?.label || 'Files'}</span>
 
-        <div class="tab-buttons">
+        <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
           ${TABS.map(tab => html`
             <button
               class="tab-btn ${tab.id === this.activeTab ? 'active' : ''}"
+              role="tab"
+              aria-selected="${tab.id === this.activeTab}"
+              aria-controls="panel-${tab.id}"
+              id="tab-${tab.id}"
               title="${tab.label} (${tab.shortcut})"
               @mousedown=${(e) => e.stopPropagation()}
               @click=${(e) => { e.stopPropagation(); this._switchTab(tab.id); }}
@@ -447,11 +451,14 @@ export class AcDialog extends RpcMixin(LitElement) {
         <div class="header-actions">
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+            aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onReviewClick()}>
             👁️
           </button>
           <button class="header-action" title="Minimize (Alt+M)"
+            aria-label="${this.minimized ? 'Expand panel' : 'Minimize panel'}"
+            aria-expanded="${!this.minimized}"
             @mousedown=${(e) => e.stopPropagation()}
             @click=${this._toggleMinimize}>
             ${this.minimized ? '▲' : '▼'}
@@ -461,31 +468,36 @@ export class AcDialog extends RpcMixin(LitElement) {
 
       <div class="content ${this.minimized ? 'minimized' : ''}">
         <!-- Files tab (always rendered) -->
-        <div class="tab-panel ${this.activeTab === 'files' ? 'active' : ''}">
+        <div class="tab-panel ${this.activeTab === 'files' ? 'active' : ''}"
+             role="tabpanel" id="panel-files" aria-labelledby="tab-files">
           <ac-files-tab></ac-files-tab>
         </div>
 
         <!-- Lazy-loaded tabs — only render once visited -->
         ${this._visitedTabs.has('search') ? html`
-          <div class="tab-panel ${this.activeTab === 'search' ? 'active' : ''}">
+          <div class="tab-panel ${this.activeTab === 'search' ? 'active' : ''}"
+               role="tabpanel" id="panel-search" aria-labelledby="tab-search">
             <ac-search-tab></ac-search-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('context') ? html`
-          <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}">
+          <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}"
+               role="tabpanel" id="panel-context" aria-labelledby="tab-context">
             <ac-context-tab></ac-context-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('cache') ? html`
-          <div class="tab-panel ${this.activeTab === 'cache' ? 'active' : ''}">
+          <div class="tab-panel ${this.activeTab === 'cache' ? 'active' : ''}"
+               role="tabpanel" id="panel-cache" aria-labelledby="tab-cache">
             <ac-cache-tab></ac-cache-tab>
           </div>
         ` : ''}
 
         ${this._visitedTabs.has('settings') ? html`
-          <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}">
+          <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}"
+               role="tabpanel" id="panel-settings" aria-labelledby="tab-settings">
             <ac-settings-tab></ac-settings-tab>
           </div>
         ` : ''}

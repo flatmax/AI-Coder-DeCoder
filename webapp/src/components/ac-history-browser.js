@@ -716,6 +716,7 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
           class="load-session-btn"
           @click=${this._loadSessionIntoContext}
           ?disabled=${!this.rpcConnected}
+          aria-label="Load this session into current context"
         >Load into context</button>
       </div>
       <div class="message-list">
@@ -732,25 +733,27 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
         @click=${this._onOverlayClick}
         @keydown=${this._onKeyDown}
       >
-        <div class="modal" @click=${(e) => e.stopPropagation()}>
+        <div class="modal" role="dialog" aria-modal="true" aria-label="History browser"
+             @click=${(e) => e.stopPropagation()}>
           <div class="modal-header">
-            <span class="modal-title">📜 History</span>
+            <span class="modal-title" id="history-dialog-title">📜 History</span>
             <input
               class="search-input"
               type="text"
               placeholder="Search conversations..."
+              aria-label="Search conversations"
               .value=${this._searchQuery}
               @input=${this._onSearchInput}
               @keydown=${this._onSearchKeyDown}
             >
-            <button class="close-btn" @click=${this.hide} title="Close (Esc)">✕</button>
+            <button class="close-btn" @click=${this.hide} title="Close (Esc)" aria-label="Close history browser">✕</button>
           </div>
 
           <div class="modal-body">
-            <div class="session-panel">
+            <div class="session-panel" role="region" aria-label="Session list">
               ${this._renderLeftPanel()}
             </div>
-            <div class="message-panel">
+            <div class="message-panel" role="region" aria-label="Session messages">
               ${this._renderRightPanel()}
             </div>
           </div>

@@ -382,7 +382,7 @@ export class AcUrlChips extends RpcMixin(LitElement) {
     if (!hasContent) return nothing;
 
     return html`
-      <div class="chips-container">
+      <div class="chips-container" role="list" aria-label="URL references">
         ${this._fetched.map(item => this._renderFetchedChip(item))}
         ${[...this._fetching].map(url => this._renderFetchingChip(url))}
         ${this._detected.map(item => this._renderDetectedChip(item))}

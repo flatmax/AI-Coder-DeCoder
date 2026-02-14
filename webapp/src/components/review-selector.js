@@ -702,11 +702,12 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
     if (this._cleanCheck && !this._cleanCheck.clean) {
       return html`
         <div class="backdrop" @click=${this._onBackdropClick}>
-          <div class="dialog" @keydown=${this._onKeyDown} tabindex="0">
+          <div class="dialog" role="dialog" aria-modal="true" aria-label="Code review — uncommitted changes warning"
+               @keydown=${this._onKeyDown} tabindex="0">
             <div class="header" @mousedown=${this._onHeaderMouseDown}>
               <span class="header-title">📋 Code Review</span>
               <span class="header-spacer"></span>
-              <button class="close-btn" @click=${() => this.hide()}>✕</button>
+              <button class="close-btn" @click=${() => this.hide()} aria-label="Close">✕</button>
             </div>
             <div class="warning-box">
               <span class="icon">⚠️</span>
@@ -770,7 +771,9 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
               </span>
             `)}
             <button class="remote-toggle ${this._showRemotes ? 'active' : ''}"
-              @click=${this._toggleRemotes} title="Toggle remote branches">
+              @click=${this._toggleRemotes} title="Toggle remote branches"
+              aria-label="Toggle remote branches"
+              aria-pressed="${this._showRemotes}">
               ⊙ remotes
             </button>
           </div>
@@ -819,7 +822,8 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
                 <span class="starting-indicator">⟳ Starting review...</span>
               ` : html`
                 <button class="start-btn" @click=${this._startReview}
-                  ?disabled=${this._starting}>Start Review</button>
+                  ?disabled=${this._starting}
+                  aria-label="Start code review of ${this._selectedBranch || 'selected branch'}">Start Review</button>
               `}
             `}
           </div>

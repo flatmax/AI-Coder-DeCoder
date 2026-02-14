@@ -72,6 +72,9 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     .search-input:focus {
       border-color: var(--accent-primary);
     }
+    .search-input:focus {
+      border-color: var(--accent-primary);
+    }
     .search-input::placeholder {
       color: var(--text-muted);
     }
@@ -561,12 +564,13 @@ export class AcSearchTab extends RpcMixin(LitElement) {
             class="search-input"
             type="text"
             placeholder="Search files..."
+            aria-label="Search repository files"
             .value=${this._query}
             @input=${this._onInput}
             @keydown=${this._onKeyDown}
           >
           ${totalMatches > 0 ? html`
-            <span class="result-count">${totalMatches} in ${totalFiles} files</span>
+            <span class="result-count" aria-live="polite">${totalMatches} in ${totalFiles} files</span>
           ` : nothing}
         </div>
         <div class="search-toggles">
@@ -574,21 +578,27 @@ export class AcSearchTab extends RpcMixin(LitElement) {
             class="toggle-btn ${this._ignoreCase ? 'active' : ''}"
             @click=${this._toggleIgnoreCase}
             title="Ignore case"
+            aria-label="Toggle ignore case"
+            aria-pressed="${this._ignoreCase}"
           >Aa</button>
           <button
             class="toggle-btn ${this._useRegex ? 'active' : ''}"
             @click=${this._toggleRegex}
             title="Use regex"
+            aria-label="Toggle regex search"
+            aria-pressed="${this._useRegex}"
           >.*</button>
           <button
             class="toggle-btn ${this._wholeWord ? 'active' : ''}"
             @click=${this._toggleWholeWord}
             title="Whole word"
+            aria-label="Toggle whole word match"
+            aria-pressed="${this._wholeWord}"
           >ab</button>
         </div>
       </div>
 
-      <div class="results" @keydown=${this._onKeyDown} tabindex="-1">
+      <div class="results" role="region" aria-label="Search results" @keydown=${this._onKeyDown} tabindex="-1">
         ${this._loading ? html`
           <div class="loading">Searching...</div>
         ` : this._results.length === 0 ? html`
