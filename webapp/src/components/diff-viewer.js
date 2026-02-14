@@ -18,11 +18,18 @@ import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import * as monaco from 'monaco-editor';
 
-// Configure Monaco workers — use no-op workers to avoid $loadForeignModule
-// crashes while still enabling syntax highlighting via monarch tokenizers.
+// Configure Monaco workers — use editor worker for diff computation,
+// no-op workers for language services to avoid $loadForeignModule crashes.
 self.MonacoEnvironment = {
-  getWorker() {
-    // Return a minimal no-op worker so Monaco doesn't throw
+  getWorker(workerId, label) {
+    // The editor worker handles diff computation — it must be real
+    if (label === 'editorWorkerService') {
+      return new Worker(
+        new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url),
+        { type: 'module' }
+      );
+    }
+    // All other workers (language services) — use no-op to avoid crashes
     const blob = new Blob(
       ['self.onmessage = function() {}'],
       { type: 'application/javascript' }
@@ -391,6 +398,14 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const language = detectLanguage(file.path);
 
     if (this._editor) {
+      // Dispose old models before creating new ones to prevent leaks
+      // that break diff computation
+      const oldModel = this._editor.getModel();
+      if (oldModel) {
+        if (oldModel.original) oldModel.original.dispose();
+        if (oldModel.modified) oldModel.modified.dispose();
+      }
+
       // Update models in existing editor
       const originalModel = monaco.editor.createModel(file.original, language);
       const modifiedModel = monaco.editor.createModel(file.modified, language);
