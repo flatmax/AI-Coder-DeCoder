@@ -52,7 +52,16 @@ const marked = new Marked({
   gfm: true,
   breaks: true,
   renderer: {
-    code({ text, lang }) {
+    code(token) {
+      // marked v12: token may be a string or an object with {text, lang}
+      let text, lang;
+      if (typeof token === 'string') {
+        text = token;
+        lang = '';
+      } else {
+        text = token.text || '';
+        lang = (token.lang || '').trim();
+      }
       const language = lang && hljs.getLanguage(lang) ? lang : null;
       let highlighted;
       if (language) {
@@ -62,7 +71,13 @@ const marked = new Marked({
           highlighted = escapeHtml(text);
         }
       } else {
-        highlighted = escapeHtml(text);
+        // No language specified — try auto-detection
+        try {
+          const autoResult = hljs.highlightAuto(text);
+          highlighted = autoResult.value;
+        } catch (_) {
+          highlighted = escapeHtml(text);
+        }
       }
       const langLabel = language ? `<span class="code-lang">${language}</span>` : '';
       const copyBtn = `<button class="code-copy-btn" title="Copy code">📋</button>`;
