@@ -32,6 +32,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     activeTab: { type: String, state: true },
     minimized: { type: Boolean, reflect: true },
     _historyPercent: { type: Number, state: true },
+    _reviewActive: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -116,6 +117,9 @@ export class AcDialog extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
       color: var(--text-primary);
     }
+    .header-action.review-active {
+      color: var(--accent-primary);
+    }
 
     /* Content area */
     .content {
@@ -189,6 +193,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     this.activeTab = 'files';
     this.minimized = false;
     this._historyPercent = 0;
+    this._reviewActive = false;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
@@ -206,10 +211,39 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._refreshHistoryBar();
-    // Listen for events that should refresh the history bar
+    this._refreshReviewState();
+    // Listen for events that should refresh the history bar and review state
     window.addEventListener('stream-complete', () => this._refreshHistoryBar());
     window.addEventListener('compaction-event', () => this._refreshHistoryBar());
     window.addEventListener('state-loaded', () => this._refreshHistoryBar());
+    window.addEventListener('review-started', () => { this._reviewActive = true; });
+    window.addEventListener('review-ended', () => { this._reviewActive = false; });
+  }
+
+  async _refreshReviewState() {
+    try {
+      const state = await this.rpcExtract('LLMService.get_review_state');
+      if (state) {
+        this._reviewActive = !!state.active;
+      }
+    } catch (e) {
+      // Ignore — RPC may not be ready
+    }
+  }
+
+  _onReviewClick() {
+    // Switch to files tab first, then open the review selector
+    this._switchTab('files');
+    this.updateComplete.then(() => {
+      const filesTab = this.shadowRoot?.querySelector('ac-files-tab');
+      if (filesTab) {
+        if (this._reviewActive) {
+          filesTab._exitReview();
+        } else {
+          filesTab._openReviewSelector();
+        }
+      }
+    });
   }
 
   async _refreshHistoryBar() {
@@ -407,6 +441,12 @@ export class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <div class="header-actions">
+          <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
+            title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onReviewClick()}>
+            📋
+          </button>
           <button class="header-action" title="Minimize (Alt+M)"
             @mousedown=${(e) => e.stopPropagation()}
             @click=${this._toggleMinimize}>

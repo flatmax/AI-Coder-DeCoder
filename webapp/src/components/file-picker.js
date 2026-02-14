@@ -272,21 +272,6 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     .review-exit-btn:hover {
       background: rgba(255, 80, 80, 0.15);
     }
-    .review-open-btn {
-      background: none;
-      border: 1px solid var(--accent-primary);
-      color: var(--accent-primary);
-      font-size: 0.65rem;
-      padding: 1px 8px;
-      border-radius: 10px;
-      cursor: pointer;
-      white-space: nowrap;
-      margin-left: auto;
-    }
-    .review-open-btn:hover {
-      background: rgba(79, 195, 247, 0.15);
-    }
-
     /* Empty state */
     .empty-state {
       display: flex;
@@ -893,12 +878,6 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           .value=${this._filter}
           @input=${this._onFilterInput}
         />
-        ${!reviewActive ? html`
-          <button class="review-open-btn" title="Code Review"
-            @click=${() => this.dispatchEvent(new CustomEvent('open-review', { bubbles: true, composed: true }))}>
-            📋
-          </button>
-        ` : nothing}
       </div>
 
       <div
