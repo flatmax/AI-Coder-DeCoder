@@ -279,6 +279,19 @@ Lane assignment follows these rules:
 
 This ensures the current/main branch claims the deepest history before feature branches, producing correct fork points.
 
+## System Prompt Swap
+
+When review mode is entered, the system prompt is swapped from the standard coding agent prompt (`system.md`) to a dedicated review system prompt (`review.md`). This gives the LLM review-specific instructions: how to read reverse diffs, severity categories, review methodology, and appropriate tone.
+
+| Mode | System Prompt |
+|------|--------------|
+| Normal | `system.md` + `system_extra.md` (coding agent) |
+| Review | `review.md` + `system_extra.md` (code reviewer) |
+
+The swap happens at `start_review` time via `ContextManager.set_system_prompt()`. On `end_review`, the original system prompt is restored. The `system_extra.md` file is always appended — it contains user customizations that apply to both modes.
+
+The original system prompt is saved on the LLM service so it can be restored on exit. If the server crashes during review, the next restart loads the standard prompt (review state is not persisted).
+
 ## Review Context in LLM Messages
 
 ### Prompt Assembly
@@ -507,26 +520,21 @@ File tabs show review status badges: **NEW** for added files, **MOD** for modifi
 
 ### Review Snippets
 
-When review mode is active, additional snippet buttons can appear in the snippet drawer. These are loaded from the `review_snippets` array in the snippets configuration file (repo-local `.ac-dc/snippets.json` or the global `snippets.json`). No default review snippets are included — users configure them for their workflow.
+When review mode is active, the snippet drawer shows **review-specific snippets** instead of the standard coding snippets. This is a full replacement, not a merge — the review workflow needs different quick actions than the coding workflow.
 
-Example `snippets.json` with review snippets:
+Review snippets are loaded from a dedicated config file (`review-snippets.json`) using the same format as the standard `snippets.json`. The two-location fallback applies: repo-local `.ac-dc/review-snippets.json` first, then the app config directory.
 
 ```json
 {
-  "snippets": [ ... ],
-  "review_snippets": [
-    {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes in the review diff. Provide a structured summary with issues categorized by severity (critical, warning, suggestion, question)."},
-    {"icon": "🔒", "tooltip": "Security review", "message": "Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting."},
-    {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the author's intent for each change and flagging any issues."},
-    {"icon": "🏗️", "tooltip": "Architecture review", "message": "Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture."},
-    {"icon": "✅", "tooltip": "Test coverage", "message": "Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful?"},
-    {"icon": "📝", "tooltip": "PR description", "message": "Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes."},
-    {"icon": "🧹", "tooltip": "Code quality", "message": "Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns."}
+  "snippets": [
+    {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes..."},
+    {"icon": "🔒", "tooltip": "Security review", "message": "Review for security issues..."},
+    {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit..."}
   ]
 }
 ```
 
-These snippets supplement (not replace) the standard snippets. They are merged into the snippet drawer when `get_review_state().active` is true.
+The `get_snippets()` RPC method checks `get_review_state().active` and returns review snippets when in review mode, standard snippets otherwise. The frontend does not need to distinguish — it always calls `get_snippets()` and renders whatever is returned.
 
 ## Backend
 

@@ -282,6 +282,16 @@ class ContextManager:
         """Attach a stability tracker instance."""
         self._stability_tracker = tracker
 
+    # === System Prompt ===
+
+    def set_system_prompt(self, prompt):
+        """Replace the system prompt (e.g., for review mode swap)."""
+        self._system_prompt = prompt
+
+    def get_system_prompt(self):
+        """Return the current system prompt."""
+        return self._system_prompt
+
     # === URL Context ===
 
     def set_url_context(self, url_parts):

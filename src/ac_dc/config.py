@@ -55,6 +55,8 @@ class ConfigManager:
         "system_extra": {"file": "system_extra.md", "format": "markdown"},
         "compaction": {"file": "compaction.md", "format": "markdown"},
         "snippets": {"file": "snippets.json", "format": "json"},
+        "review": {"file": "review.md", "format": "markdown"},
+        "review_snippets": {"file": "review-snippets.json", "format": "json"},
     }
 
     def __init__(self, repo_root=None):
@@ -160,7 +162,8 @@ class ConfigManager:
 
     @property
     def smaller_model(self):
-        return self._llm_config.get("smaller_model", "anthropic/claude-haiku-4-20250414")
+        return self._llm_config.get("smaller_model",
+               self._llm_config.get("smallerModel", "anthropic/claude-haiku-4-20250414"))
 
     @property
     def cache_min_tokens(self):
@@ -207,6 +210,14 @@ class ConfigManager:
             return main + "\n\n" + extra
         return main
 
+    def get_review_prompt(self):
+        """Assemble review system prompt from review.md + system_extra.md."""
+        main = self._load_text("review.md")
+        extra = self._load_text("system_extra.md")
+        if extra.strip():
+            return main + "\n\n" + extra
+        return main
+
     def get_compaction_prompt(self):
         """Load compaction skill prompt."""
         return self._load_text("compaction.md")
@@ -228,20 +239,24 @@ class ConfigManager:
         return data.get("snippets", [])
 
     def get_review_snippets(self):
-        """Load review-specific snippets with two-location fallback."""
+        """Load review-specific snippets with two-location fallback.
+
+        Review snippets live in a dedicated file (review-snippets.json),
+        separate from the standard snippets.json. Same format: {snippets: [...]}.
+        """
         # Try repo-local first
         if self._repo_root:
-            local_path = self._repo_root / ".ac-dc" / "snippets.json"
+            local_path = self._repo_root / ".ac-dc" / "review-snippets.json"
             if local_path.exists():
                 try:
                     data = json.loads(local_path.read_text())
-                    return data.get("review_snippets", [])
+                    return data.get("snippets", [])
                 except (json.JSONDecodeError, OSError):
                     pass
 
         # Fall back to config directory
-        data = self._load_json("snippets.json")
-        return data.get("review_snippets", [])
+        data = self._load_json("review-snippets.json")
+        return data.get("snippets", [])
 
     def get_config_content(self, config_type):
         """Read a config file by type."""

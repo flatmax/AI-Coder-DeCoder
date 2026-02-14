@@ -176,6 +176,7 @@ class LLMService:
 
         # Review mode state
         self._review_active = False
+        self._saved_system_prompt = None  # original system prompt, saved during review
         self._review_branch = None
         self._review_branch_tip = None
         self._review_base_commit = None
@@ -1208,6 +1209,12 @@ class LLMService:
         }
         self._symbol_map_before = symbol_map_before
 
+        # Swap system prompt to review-specific instructions
+        self._saved_system_prompt = self._context.get_system_prompt()
+        review_prompt = self._config.get_review_prompt()
+        if review_prompt.strip():
+            self._context.set_system_prompt(review_prompt)
+
         # Clear file selection so review starts with a clean slate —
         # prevents stale selections from before review including all diffs
         self._selected_files = []
@@ -1236,6 +1243,11 @@ class LLMService:
 
         # Exit review mode in git
         result = self._repo.exit_review_mode(branch_tip, original_branch)
+
+        # Restore original system prompt
+        if self._saved_system_prompt is not None:
+            self._context.set_system_prompt(self._saved_system_prompt)
+            self._saved_system_prompt = None
 
         # Clear review state regardless
         self._review_active = False
@@ -1293,6 +1305,16 @@ class LLMService:
         if not self._repo:
             return {"error": "No repository available"}
         return self._repo.get_review_file_diff(path)
+
+    def get_snippets(self):
+        """Return snippets appropriate for the current mode.
+
+        In review mode, returns review-specific snippets.
+        Otherwise, returns standard coding snippets.
+        """
+        if self._review_active:
+            return self._config.get_review_snippets()
+        return self._config.get_snippets()
 
     def _build_review_context(self):
         """Build review context string for prompt injection.

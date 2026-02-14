@@ -1162,6 +1162,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   updated(changedProps) {
     super.updated(changedProps);
+    // Reload snippets when review state changes (swap between standard and review snippets)
+    if (changedProps.has('reviewState')) {
+      this._loadSnippets();
+    }
     // When messages are bulk-loaded (e.g. state restore, session load), scroll to bottom
     if (changedProps.has('messages') && !this.streamingActive) {
       const oldMessages = changedProps.get('messages');
@@ -1188,20 +1192,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   async _loadSnippets() {
     try {
-      const snippets = await this.rpcExtract('Settings.get_snippets');
+      const snippets = await this.rpcExtract('LLMService.get_snippets');
       if (Array.isArray(snippets)) {
         this._snippets = snippets;
       }
     } catch (e) {
       console.warn('Failed to load snippets:', e);
-    }
-    try {
-      const reviewSnippets = await this.rpcExtract('Settings.get_review_snippets');
-      if (Array.isArray(reviewSnippets)) {
-        this._reviewSnippets = reviewSnippets;
-      }
-    } catch (e) {
-      // Review snippets optional
     }
   }
 
@@ -2397,18 +2393,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : nothing}
 
-        ${this._snippetDrawerOpen && (this._snippets.length > 0 || (this.reviewState?.active && this._reviewSnippets.length > 0)) ? html`
+        ${this._snippetDrawerOpen && this._snippets.length > 0 ? html`
           <div class="snippet-drawer">
             ${this._snippets.map(s => html`
               <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
                 ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
               </button>
             `)}
-            ${this.reviewState?.active ? this._reviewSnippets.map(s => html`
-              <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
-                ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
-              </button>
-            `) : nothing}
           </div>
         ` : nothing}
 

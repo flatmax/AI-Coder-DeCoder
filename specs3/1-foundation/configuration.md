@@ -14,6 +14,8 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 | Extra prompt | Additional instructions appended to system prompt | Markdown |
 | Prompt snippets | Quick-insert buttons for the UI | JSON |
 | Compaction skill prompt | Template for history compaction summarization | Markdown |
+| Review system prompt | System instructions for code review mode | Markdown |
+| Review snippets | Quick-insert buttons for review mode UI | JSON |
 
 ### LLM Config
 
@@ -95,6 +97,8 @@ A whitelisted set of config types can be read, written, and reloaded:
 | `system` | Main system prompt |
 | `system_extra` | Extra system prompt |
 | `compaction` | Compaction skill prompt |
+| `review` | Review system prompt |
+| `review_snippets` | Review snippet buttons |
 
 Only these types are accepted — arbitrary file paths are rejected.
 
