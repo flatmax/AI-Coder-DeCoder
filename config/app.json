@@ -1,6 +1,6 @@
 {
   "url_cache": {
-    "path": "/tmp/ac-dc_url_cache",
+    "path": "/tmp/ac-dc1",
     "ttl_hours": 24
   },
   "history_compaction": {

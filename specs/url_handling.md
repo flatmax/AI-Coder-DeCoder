@@ -177,7 +177,7 @@ If the user's question contains keywords, the type is overridden:
 
 ### Storage
 
-- **Location** — Configured via `url_cache.path` in `config/app.json` (default: `/tmp/ac-dc_url_cache`).
+- **Location** — Configured via `url_cache.path` in `config/app.json` (default: `/tmp/ac-dc1`).
 - **Key** — First 16 characters of SHA-256 hash of the URL.
 - **Format** — JSON files containing serialized `URLContent` (including any generated summary).
 - **TTL** — Configured via `url_cache.ttl_hours` (default: 24 hours). Checked against `fetched_at` timestamp on read.
@@ -199,7 +199,7 @@ Summaries are cached as part of the `URLContent` entry. When a cached entry lack
 ```json
 {
   "url_cache": {
-    "path": "/tmp/ac-dc_url_cache",
+    "path": "/tmp/ac-dc1",
     "ttl_hours": 24
   }
 }
@@ -232,12 +232,24 @@ Loaded by `URLConfig.load()` which reads from `config/app.json` via the app conf
 
 ### Message Integration
 
+#### Client Side
+
 When a message is sent (`ChatActionsMixin.sendMessage`):
 
 1. `getFetchedUrlsForMessage()` returns all fetched URLs that are not excluded and have no errors.
-2. The URL content is appended to the user's message as a `---\n**Referenced URL Content:**` section, formatted with title, source URL, and summary/content.
-3. The original user text (without URL dump) is shown in the UI.
-4. After sending, `clearState()` removes detected URLs but keeps fetched URLs for future messages.
+2. The fetched URL list is passed to the server along with the user prompt.
+3. After sending, `clearState()` removes detected URLs but keeps fetched URLs for future messages.
+
+#### Server Side (Streaming)
+
+During `_stream_chat`, URLs detected in the user prompt are fetched server-side (up to **3 URLs per message**). The content is injected as a **separate user/assistant message pair** in the active (uncached) section of the prompt — not appended to the user's message:
+
+```
+User: # URL Context\n\nThe following content was fetched from URLs...\n\n---\n[formatted content]
+Assistant: Ok, I've reviewed the URL content.
+```
+
+Each URL's content is formatted via `URLContent.format_for_prompt()`, which prefers summary → readme → content, truncates at 4000 chars, and appends the symbol map in a code block if present.
 
 ## URL Chips UI
 
@@ -335,4 +347,4 @@ Properties: `repo_url` (base URL), `clone_url` (`.git` URL).
 | `LiteLLM.fetch_urls_from_text(text, use_cache, summarize)` | Detect and fetch all URLs in text |
 | `LiteLLM.invalidate_url_cache(url)` | Remove a URL from cache |
 | `LiteLLM.clear_url_cache()` | Clear entire URL cache |
-| `LiteLLM.get_url_content(url)` | Get cached content for display in modal |
+| `LiteLLM.get_url_content(url)` | Get cached content with token counts for display in modal. Returns: `url`, `title`, `type`, `content`, `readme`, `symbol_map`, `description`, `content_tokens`, `readme_tokens`, `fetched_at`, `error`. |
