@@ -179,9 +179,6 @@ class ContextManager:
         # Review context
         self._review_context = None  # string or None
 
-        # Review context
-        self._review_context = None  # string or None
-
     # === Conversation History ===
 
     def add_message(self, role, content):
@@ -294,16 +291,6 @@ class ContextManager:
     def clear_url_context(self):
         """Clear URL context."""
         self._url_context.clear()
-
-    # === Review Context ===
-
-    def set_review_context(self, review_text):
-        """Set review context string for prompt assembly."""
-        self._review_context = review_text if review_text else None
-
-    def clear_review_context(self):
-        """Clear review context."""
-        self._review_context = None
 
     # === Review Context ===
 

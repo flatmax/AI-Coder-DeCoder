@@ -52,7 +52,3 @@ class Settings:
     def get_review_snippets(self):
         """Load review-specific prompt snippets."""
         return self._config.get_review_snippets()
-
-    def get_review_snippets(self):
-        """Load review-specific prompt snippets."""
-        return self._config.get_review_snippets()
