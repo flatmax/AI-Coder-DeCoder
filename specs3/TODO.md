@@ -149,13 +149,13 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
 - [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
-### Phase 10: Code Review
-- [ ] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`
-- [ ] **Review mode state** — LLM service review state fields, `start_review`/`end_review`/`get_review_state`/`check_review_ready`, symbol_map_before capture
-- [ ] **Review context assembly** — Review context block in prompt assembly (commits, pre-change symbol map, reverse diffs for selected files), `get_review_file_diff`
-- [ ] **Git graph selector UI** — Floating resizable dialog with SVG commit graph, stable lane columns, frozen branch legend, lazy loading, commit click selection, branch disambiguation popover, clean tree check
-- [ ] **Git graph lane algorithm** — Client-side lane assignment from parent relationships, fork edges, merge lines, lane dedup for shared tips
-- [ ] **Review banner** — File picker header showing branch, commit range, stats, exit button
-- [ ] **Review status bar** — Slim bar above chat input with diff inclusion count, exit button, disabled commit button
-- [ ] **Review snippets** — Optional `review_snippets` array in snippets config, merged into drawer when review active
-- [ ] **Read-only edit mode** — Skip `apply_edits_to_repo` during review, disable commit button
+### Phase 10: Code Review ✅
+- [x] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`, `get_review_changed_files`, `get_review_file_diff`
+- [x] **Review mode state** — LLM service review state fields, `start_review`/`end_review`/`get_review_state`/`check_review_ready`, `symbol_map_before` capture, system prompt swap (`review.md` ↔ `system.md`)
+- [x] **Review context assembly** — Review context block in prompt assembly (commits, pre-change symbol map, reverse diffs for selected files), `_build_review_context`, `set_review_context`/`clear_review_context` on ContextManager
+- [x] **Git graph selector UI** — Floating draggable dialog with SVG commit graph, stable lane columns, frozen branch legend, lazy loading via scroll, commit click selection, branch disambiguation popover, clean tree check on open
+- [x] **Git graph lane algorithm** — Client-side lane assignment from parent relationships, fork/merge edges with Bézier curves, lane dedup for shared tips, remote branch dashed lines
+- [x] **Review banner** — File picker header showing branch, commit range, stats, exit button
+- [x] **Review status bar** — Slim bar above chat input with diff inclusion count (`N/M diffs in context`), exit button, disabled commit button
+- [x] **Review snippets** — Separate `review-snippets.json` config file, full replacement of snippet drawer when review active (not merged), `get_snippets()` checks `_review_active`
+- [x] **Read-only edit mode** — Skip `apply_edits_to_repo` when `_review_active`, disable commit button in UI, edit blocks still rendered for reference
