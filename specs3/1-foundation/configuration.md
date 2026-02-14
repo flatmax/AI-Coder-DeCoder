@@ -23,7 +23,7 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 {
     env: { ENV_VAR: "value" },
     model: "provider/model-name",
-    smaller_model: "provider/model",
+    smaller_model: "provider/model",   # also accepts "smallerModel" (camelCase)
     cache_min_tokens: 1024,
     cache_buffer_multiplier: 1.5
 }
