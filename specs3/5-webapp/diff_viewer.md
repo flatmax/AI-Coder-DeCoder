@@ -68,13 +68,13 @@ Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to
 | Source | Event Path |
 |--------|------------|
 | File picker click | `file-clicked` → `navigate-file` → diff-viewer |
-| Chat edit result | `navigate-file` with `searchText` → scroll to edit |
+| Chat edit result (goto icon) | `navigate-file` with `searchText` → scroll to edit |
 | Search match | `search-navigate` → `navigate-file` with `line` |
 | Post-edit refresh | Direct call from app-shell |
 
 ### Scroll to Edit Anchor
 
-When clicking an edit block's file path: open file, search for progressively shorter prefixes of the edit text, scroll to and highlight match (3-second highlight).
+When clicking an edit block's goto icon (↗): open file, search for progressively shorter prefixes of the edit text, scroll to and highlight match (3-second highlight).
 
 ## File Loading
 

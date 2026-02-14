@@ -762,6 +762,24 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       text-decoration: underline;
     }
 
+    .edit-goto-btn {
+      background: none;
+      border: 1px solid rgba(79, 195, 247, 0.5);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      padding: 1px 6px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+      box-shadow: 0 0 8px 2px rgba(79, 195, 247, 0.25);
+    }
+    .edit-goto-btn:hover {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.3);
+    }
+
     .edit-badge {
       font-size: 0.7rem;
       font-weight: 600;
@@ -1985,10 +2003,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       ? `<div class="edit-error">${escapeHtml(statusMsg)}</div>`
       : '';
 
+    // Build searchText from the new lines (or old lines for context)
+    const searchLines = (seg.newLines && seg.newLines.length > 0 ? seg.newLines : seg.oldLines) || [];
+    const searchText = searchLines.slice(0, 5).join('\n').trim();
+    const encodedSearch = escapeHtml(searchText);
+
     return `
       <div class="edit-block-card">
         <div class="edit-block-header">
           <span class="edit-file-path" data-path="${escapeHtml(seg.filePath)}">${escapeHtml(seg.filePath)}</span>
+          <button class="edit-goto-btn" data-path="${escapeHtml(seg.filePath)}" data-search="${encodedSearch}" title="Open in diff viewer">↗</button>
           ${badge}
         </div>
         ${failMsg}
@@ -2174,14 +2198,24 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       return;
     }
 
-    // Handle file path clicks in edit blocks
+    // Handle file path clicks in edit blocks — toggle selection (like file mentions)
     const pathEl = e.target.closest('.edit-file-path');
     if (pathEl) {
       const filePath = pathEl.dataset.path;
       if (filePath) {
-        // Dispatch on window for app shell to route to diff viewer
+        this._dispatchFileMentionClick(filePath, false);
+      }
+      return;
+    }
+
+    // Handle goto button clicks in edit blocks — open in diff viewer
+    const gotoBtn = e.target.closest('.edit-goto-btn');
+    if (gotoBtn) {
+      const filePath = gotoBtn.dataset.path;
+      const searchText = gotoBtn.dataset.search || '';
+      if (filePath) {
         window.dispatchEvent(new CustomEvent('navigate-file', {
-          detail: { path: filePath },
+          detail: { path: filePath, searchText },
         }));
       }
       return;

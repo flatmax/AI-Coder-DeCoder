@@ -122,7 +122,7 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 | Method | Purpose |
 |--------|---------|
 | `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render |
-| `_renderEditBlockHtml(seg, result)` | Renders a single edit block card: header with file path and status badge, optional error, diff lines |
+| `_renderEditBlockHtml(seg, result)` | Renders a single edit block card: header with file path (click to toggle selection), goto icon (click to open in diff viewer with searchText), status badge, optional error, diff lines |
 | `_renderDiffLineHtml(line)` | Renders one diff line with optional character-level `<span class="diff-change">` highlights |
 
 ### Edit Summary
