@@ -204,6 +204,11 @@ class AcApp extends JRPCClient {
       const state = this._extract(raw);
       console.log('Initial state loaded:', state);
 
+      // Set browser tab title to ⚡ {repo_name}
+      if (state?.repo_name) {
+        document.title = `${state.repo_name}`;
+      }
+
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
     } catch (e) {
       console.error('Failed to load initial state:', e);

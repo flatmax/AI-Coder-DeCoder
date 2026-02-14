@@ -199,6 +199,7 @@ class LLMService:
             "selected_files": list(self._selected_files),
             "streaming_active": self._streaming_active,
             "session_id": self._session_id,
+            "repo_name": self._repo.root.name if self._repo else None,
         }
 
     def set_selected_files(self, files):
