@@ -357,7 +357,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     super();
     this._data = null;
     this._loading = false;
-    this._expandedSections = new Set();
+    this._expandedSections = this._loadExpandedSections();
     this._stale = false;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
@@ -438,6 +438,19 @@ export class AcContextTab extends RpcMixin(LitElement) {
       next.add(name);
     }
     this._expandedSections = next;
+    this._saveExpandedSections(next);
+  }
+
+  _saveExpandedSections(sections) {
+    try { localStorage.setItem('ac-dc-context-expanded', JSON.stringify([...sections])); } catch {}
+  }
+
+  _loadExpandedSections() {
+    try {
+      const v = localStorage.getItem('ac-dc-context-expanded');
+      if (v) return new Set(JSON.parse(v));
+    } catch {}
+    return new Set();
   }
 
   /** Build category data from breakdown */

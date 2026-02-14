@@ -285,7 +285,7 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
     this._disambiguate = null;
     this._cleanCheck = null;
     this._starting = false;
-    this._showRemotes = false;
+    this._showRemotes = this._loadBool('ac-dc-review-remotes', false);
     this._hiddenBranches = new Set();
     this._visible = false;
     this._error = null;
@@ -295,6 +295,14 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
     this._branchLanes = [];      // [{name, lane, color}]
     this._forkEdges = [];        // [{fromRow, fromLane, toRow, toLane}]
     this._maxLane = 0;
+  }
+
+  _loadBool(key, defaultVal) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v === null) return defaultVal;
+      return v === 'true';
+    } catch { return defaultVal; }
   }
 
   show() {
@@ -355,6 +363,7 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
 
   async _toggleRemotes() {
     this._showRemotes = !this._showRemotes;
+    try { localStorage.setItem('ac-dc-review-remotes', String(this._showRemotes)); } catch {}
     this._selectedCommit = null;
     this._selectedBranch = null;
     this._disambiguate = null;

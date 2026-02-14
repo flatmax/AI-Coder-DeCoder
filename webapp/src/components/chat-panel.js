@@ -1092,7 +1092,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._inputValue = '';
     this._images = [];
     this._autoScroll = true;
-    this._snippetDrawerOpen = false;
+    this._snippetDrawerOpen = this._loadBoolPref('ac-dc-snippet-drawer', false);
     this._historyOpen = false;
     this._snippets = [];
     this._observer = null;
@@ -1443,6 +1443,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._inputValue = '';
     this._images = [];
     this._snippetDrawerOpen = false;
+    this._saveBoolPref('ac-dc-snippet-drawer', false);
     const textarea = this.shadowRoot?.querySelector('.input-textarea');
     if (textarea) {
       textarea.value = '';
@@ -1479,6 +1480,19 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _toggleSnippets() {
     this._snippetDrawerOpen = !this._snippetDrawerOpen;
+    this._saveBoolPref('ac-dc-snippet-drawer', this._snippetDrawerOpen);
+  }
+
+  _saveBoolPref(key, value) {
+    try { localStorage.setItem(key, String(value)); } catch {}
+  }
+
+  _loadBoolPref(key, defaultVal) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v === null) return defaultVal;
+      return v === 'true';
+    } catch { return defaultVal; }
   }
 
   _insertSnippet(snippet) {

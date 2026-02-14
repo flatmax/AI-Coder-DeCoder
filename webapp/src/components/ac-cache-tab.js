@@ -322,7 +322,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     super();
     this._data = null;
     this._loading = false;
-    this._expandedTiers = new Set(['L0', 'L1', 'L2', 'L3', 'active']);
+    this._expandedTiers = this._loadExpandedTiers();
     this._filter = '';
     this._stale = false;
 
@@ -404,6 +404,19 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       next.add(tier);
     }
     this._expandedTiers = next;
+    this._saveExpandedTiers(next);
+  }
+
+  _saveExpandedTiers(tiers) {
+    try { localStorage.setItem('ac-dc-cache-expanded', JSON.stringify([...tiers])); } catch {}
+  }
+
+  _loadExpandedTiers() {
+    try {
+      const v = localStorage.getItem('ac-dc-cache-expanded');
+      if (v) return new Set(JSON.parse(v));
+    } catch {}
+    return new Set(['L0', 'L1', 'L2', 'L3', 'active']);
   }
 
   _onFilterInput(e) {

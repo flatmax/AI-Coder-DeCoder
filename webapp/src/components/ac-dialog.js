@@ -190,11 +190,11 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    this.activeTab = 'files';
-    this.minimized = false;
+    this.activeTab = this._loadPref('ac-dc-active-tab', 'files');
+    this.minimized = this._loadBoolPref('ac-dc-minimized', false);
     this._historyPercent = 0;
     this._reviewActive = false;
-    this._visitedTabs = new Set(['files']);
+    this._visitedTabs = new Set(['files', this.activeTab]);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
   }
@@ -202,6 +202,10 @@ export class AcDialog extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('keydown', this._onKeyDown);
+    // Restore dialog width if previously resized
+    this._restoreDialogWidth();
+    // Restore dialog position if previously undocked
+    this._restoreDialogPosition();
   }
 
   disconnectedCallback() {
@@ -274,7 +278,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     // Alt+M toggle minimize
     if (e.altKey && (e.key === 'm' || e.key === 'M')) {
       e.preventDefault();
-      this.minimized = !this.minimized;
+      this._toggleMinimize();
       return;
     }
     // Ctrl+Shift+F → Search tab with selection/clipboard prefill
@@ -295,6 +299,7 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   _switchTab(tabId) {
     this.activeTab = tabId;
+    this._savePref('ac-dc-active-tab', tabId);
     this._visitedTabs.add(tabId);
     if (this.minimized) {
       this.minimized = false;
@@ -321,6 +326,7 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   _toggleMinimize() {
     this.minimized = !this.minimized;
+    this._saveBoolPref('ac-dc-minimized', this.minimized);
   }
 
   _getHistoryBarColor() {
@@ -357,6 +363,7 @@ export class AcDialog extends RpcMixin(LitElement) {
 
     const onUp = () => {
       this._isResizing = false;
+      this._savePref('ac-dc-dialog-width', String(container.offsetWidth));
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
@@ -419,11 +426,82 @@ export class AcDialog extends RpcMixin(LitElement) {
       if (!thresholdMet) {
         // Click (under 5px threshold) → toggle minimize
         this._toggleMinimize();
+      } else if (this._undocked) {
+        // Persist undocked position
+        const r = container.getBoundingClientRect();
+        this._savePref('ac-dc-dialog-pos', JSON.stringify({
+          left: r.left, top: r.top, width: r.width, height: r.height,
+        }));
       }
     };
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  }
+
+  // === Persistence Helpers ===
+
+  _savePref(key, value) {
+    try { localStorage.setItem(key, value); } catch {}
+  }
+
+  _loadPref(key, defaultVal) {
+    try {
+      const v = localStorage.getItem(key);
+      return v !== null ? v : defaultVal;
+    } catch { return defaultVal; }
+  }
+
+  _saveBoolPref(key, value) {
+    this._savePref(key, String(value));
+  }
+
+  _loadBoolPref(key, defaultVal) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v === null) return defaultVal;
+      return v === 'true';
+    } catch { return defaultVal; }
+  }
+
+  _restoreDialogWidth() {
+    const saved = this._loadPref('ac-dc-dialog-width', null);
+    if (!saved) return;
+    const width = parseInt(saved);
+    if (isNaN(width) || width < 300) return;
+    const container = this._getContainer();
+    if (container) {
+      container.style.width = `${Math.min(width, window.innerWidth - 50)}px`;
+    }
+  }
+
+  _restoreDialogPosition() {
+    const saved = this._loadPref('ac-dc-dialog-pos', null);
+    if (!saved) return;
+    try {
+      const pos = JSON.parse(saved);
+      if (!pos || typeof pos.left !== 'number') return;
+
+      // Bounds-check: ensure at least 100px visible on screen
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const width = Math.min(pos.width || 400, vw - 20);
+      const height = Math.min(pos.height || vh, vh - 20);
+      const left = Math.max(0, Math.min(pos.left, vw - 100));
+      const top = Math.max(0, Math.min(pos.top, vh - 100));
+
+      const container = this._getContainer();
+      if (!container) return;
+
+      this._undocked = true;
+      container.style.position = 'fixed';
+      container.style.left = `${left}px`;
+      container.style.top = `${top}px`;
+      container.style.width = `${width}px`;
+      container.style.height = `${height}px`;
+      container.style.right = 'auto';
+      container.style.bottom = 'auto';
+    } catch {}
   }
 
   render() {

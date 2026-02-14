@@ -143,7 +143,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Error handling** — WebSocket reconnection with exponential backoff (1s→2s→4s→8s→max 15s), reconnecting banner with attempt count, status bar (green on connect, red on disconnect), global toast system via `ac-toast` custom events, `rpcSafeExtract`/`rpcSafeCall` in RPC mixin for non-critical operations, `showToast()` helper on all RPC components, SharedRpc disconnect notification to listeners, `onRpcDisconnected()` hook in mixin
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry
-- [ ] **State persistence** — Local storage for UI preferences
+- [x] **State persistence** — Local storage for UI preferences (dialog width/position/tab/minimized, HUD sections, cache/context expanded, review remotes, snippet drawer)
 - [x] **Content-visibility optimization** — CSS containment for off-screen messages
 - [x] **Duplicate streamChunk cleanup** — Only one streamChunk method in app-shell.js
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit

@@ -317,7 +317,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
     this._fading = false;
     this._data = null;
     this._basicData = null;
-    this._collapsed = new Set();
+    this._collapsed = this._loadCollapsedSections();
     this._hideTimer = null;
     this._fadeTimer = null;
     this._hovered = false;
@@ -405,6 +405,19 @@ export class AcTokenHud extends RpcMixin(LitElement) {
       next.add(name);
     }
     this._collapsed = next;
+    this._saveCollapsedSections(next);
+  }
+
+  _saveCollapsedSections(sections) {
+    try { localStorage.setItem('ac-dc-hud-collapsed', JSON.stringify([...sections])); } catch {}
+  }
+
+  _loadCollapsedSections() {
+    try {
+      const v = localStorage.getItem('ac-dc-hud-collapsed');
+      if (v) return new Set(JSON.parse(v));
+    } catch {}
+    return new Set();
   }
 
   _isExpanded(name) {
