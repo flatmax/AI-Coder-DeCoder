@@ -51,19 +51,22 @@ class TestURLCacheBasic:
         time.sleep(0.01)
         assert cache.get("https://example.com") is None
 
-    def test_invalidate_removes_entry(self, tmp_path):
-        """Invalidate removes single entry."""
+    def test_invalidate_removes_entry_and_returns_found(self, tmp_path):
+        """Invalidate removes single entry and returns found status."""
         cache = URLCache(cache_dir=tmp_path / "cache")
         cache.set("https://example.com", {"title": "X"})
-        cache.invalidate("https://example.com")
+        assert cache.invalidate("https://example.com") is True
         assert cache.get("https://example.com") is None
+        # Second invalidate returns False
+        assert cache.invalidate("https://example.com") is False
 
-    def test_clear_removes_all(self, tmp_path):
-        """Clear removes all entries."""
+    def test_clear_removes_all_and_returns_count(self, tmp_path):
+        """Clear removes all entries and returns count."""
         cache = URLCache(cache_dir=tmp_path / "cache")
         cache.set("https://a.com", {"a": 1})
         cache.set("https://b.com", {"b": 2})
-        cache.clear()
+        removed = cache.clear()
+        assert removed == 2
         assert cache.get("https://a.com") is None
         assert cache.get("https://b.com") is None
 
@@ -113,6 +116,24 @@ class TestURLCacheDefaultDir:
         """Default cache dir created automatically."""
         cache = URLCache()
         assert cache.cache_dir.exists()
+
+
+class TestURLCacheFetchedAt:
+    def test_set_adds_fetched_at_if_missing(self, tmp_path):
+        """set() adds fetched_at if not already present."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "Test"})
+        result = cache.get("https://example.com")
+        assert result is not None
+        assert "fetched_at" in result
+        assert result["fetched_at"] is not None
+
+    def test_set_preserves_existing_fetched_at(self, tmp_path):
+        """set() preserves existing fetched_at."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "Test", "fetched_at": "2025-01-01T00:00:00Z"})
+        result = cache.get("https://example.com")
+        assert result["fetched_at"] == "2025-01-01T00:00:00Z"
 
 
 # ============================================================
@@ -170,6 +191,12 @@ class TestURLDetection:
         assert detect_urls("") == []
         assert detect_urls(None) == []
 
+    def test_raw_githubusercontent_recognized(self):
+        """raw.githubusercontent.com URLs recognized as GitHub file type."""
+        results = detect_urls("See https://raw.githubusercontent.com/owner/repo/main/src/app.py")
+        assert len(results) == 1
+        assert results[0]["url_type"] == "github_file"
+
 
 # ============================================================
 # URL Classification Tests
@@ -219,6 +246,15 @@ class TestURLClassification:
     def test_documentation_api_path(self):
         """Path with /api/."""
         assert classify_url("https://example.com/api/reference") == URLType.DOCUMENTATION
+
+    def test_documentation_documentation_path(self):
+        """Path with /documentation/."""
+        assert classify_url("https://example.com/documentation/guide") == URLType.DOCUMENTATION
+
+    def test_raw_githubusercontent_as_github_file(self):
+        """raw.githubusercontent.com classified as GitHub file."""
+        url = "https://raw.githubusercontent.com/owner/repo/main/README.md"
+        assert classify_url(url) == URLType.GITHUB_FILE
 
     def test_generic_fallback(self):
         """Unrecognized URLs classified as generic."""
@@ -498,6 +534,40 @@ class TestURLService:
         svc._fetched["https://b.com"] = URLContent(url="https://b.com")
         svc.clear_fetched()
         assert len(svc.get_fetched_urls()) == 0
+
+    def test_get_url_content_falls_back_to_cache(self, tmp_path):
+        """get_url_content falls back to filesystem cache when not in fetched dict."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {
+            "url": "https://example.com",
+            "url_type": "generic",
+            "title": "Cached Page",
+            "content": "Cached content",
+        })
+        svc = URLService(cache=cache)
+        # Not in _fetched, but in cache
+        result = svc.get_url_content("https://example.com")
+        assert result.error is None
+        assert result.title == "Cached Page"
+        assert result.content == "Cached content"
+
+    def test_remove_fetched_preserves_cache(self, tmp_path):
+        """remove_fetched removes from in-memory dict but preserves filesystem cache."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        # Simulate a fetched URL that was also cached
+        content = URLContent(url="https://example.com", title="Test", content="Body")
+        svc._fetched["https://example.com"] = content
+        cache.set("https://example.com", content.to_dict())
+
+        # Remove from fetched
+        svc.remove_fetched("https://example.com")
+        assert len(svc.get_fetched_urls()) == 0
+
+        # Cache still intact — get_url_content falls back to it
+        result = svc.get_url_content("https://example.com")
+        assert result.error is None
+        assert result.title == "Test"
 
     def test_format_url_context_joins(self):
         """format_url_context joins multiple URLs with separator."""

@@ -319,7 +319,9 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
-    this.loadTree();
+    // Defer to next microtask so SharedRpc._call is fully propagated
+    // to all children before we issue the first RPC call.
+    Promise.resolve().then(() => this.loadTree());
   }
 
   _onActiveFileChanged(e) {

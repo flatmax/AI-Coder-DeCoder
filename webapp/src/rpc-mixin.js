@@ -82,12 +82,16 @@ export const RpcMixin = (superClass) => class extends superClass {
    *
    * Uses bracket notation: this.call['ClassName.method_name'](...args)
    * Returns { "method_name": value }
+   *
+   * Falls back to SharedRpc.get() if local proxy hasn't arrived yet
+   * (handles race where parent triggers call before child listener fires).
    */
   async rpcCall(method, ...args) {
-    if (!this._rpcCallProxy) {
+    const call = this._rpcCallProxy || SharedRpc.get();
+    if (!call) {
       throw new Error('RPC not connected');
     }
-    return await this._rpcCallProxy[method](...args);
+    return await call[method](...args);
   }
 
   /**

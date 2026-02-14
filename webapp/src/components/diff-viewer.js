@@ -164,6 +164,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._highlightTimer = null;
     this._highlightDecorations = [];
     this._lspRegistered = false;
+    this._virtualContents = {};
 
     this._onKeyDown = this._onKeyDown.bind(this);
   }
@@ -213,6 +214,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const { path, searchText, line } = opts;
     if (!path) return;
 
+    // Store virtual content if provided (for URL content viewing, etc.)
+    if (opts.virtualContent != null) {
+      this._virtualContents[path] = opts.virtualContent;
+    }
+
     // Check if already open
     const existingIdx = this._files.findIndex(f => f.path === path);
     if (existingIdx !== -1) {
@@ -234,14 +240,20 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     let is_new = opts.is_new ?? false;
     let is_read_only = opts.is_read_only ?? false;
 
-    if (!opts.original && !opts.modified) {
+    if (opts.virtualContent != null) {
+      // Virtual content provided directly — no fetch needed
+      original = '';
+      modified = opts.virtualContent;
+      is_new = true;
+      is_read_only = opts.readOnly ?? true;
+    } else if (!opts.original && !opts.modified) {
       // Fetch from server
       const content = await this._fetchFileContent(path);
       if (content === null) return;
       original = content.original;
       modified = content.modified;
       is_new = content.is_new;
-      is_read_only = content.is_read_only;
+      is_read_only = content.is_read_only ?? false;
     }
 
     const fileObj = {
@@ -312,6 +324,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    * Close a file tab.
    */
   closeFile(path) {
+    delete this._virtualContents[path];
     const idx = this._files.findIndex(f => f.path === path);
     if (idx === -1) return;
 
@@ -343,6 +356,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   // === File Fetching ===
 
   async _fetchFileContent(path) {
+    // Virtual files (URL content, etc.) — use stored content, skip RPC
+    if (path.startsWith('virtual://')) {
+      const virtualContent = this._virtualContents[path] || '(no content)';
+      return { original: '', modified: virtualContent };
+    }
+
     if (!this.rpcConnected) return null;
     try {
       // Try to get HEAD version for diff

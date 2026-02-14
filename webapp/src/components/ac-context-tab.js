@@ -10,6 +10,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
+import './url-content-dialog.js';
 
 function formatTokens(n) {
   if (n == null) return '—';
@@ -281,6 +282,20 @@ export class AcContextTab extends RpcMixin(LitElement) {
       flex-shrink: 0;
     }
 
+    .detail-item.clickable {
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+      padding-left: 4px;
+      padding-right: 4px;
+      margin: 0 -4px;
+    }
+    .detail-item.clickable:hover {
+      background: rgba(79, 195, 247, 0.1);
+    }
+    .detail-item.clickable .detail-name {
+      color: var(--accent-primary);
+    }
+
     /* Session totals */
     .session-section {
       padding: 10px 16px;
@@ -439,6 +454,20 @@ export class AcContextTab extends RpcMixin(LitElement) {
     }
     this._expandedSections = next;
     this._saveExpandedSections(next);
+  }
+
+  async _onUrlItemClick(url) {
+    if (!url || !this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract('LLMService.get_url_content', url);
+      if (!result) return;
+      const dialog = this.shadowRoot?.querySelector('ac-url-content-dialog');
+      if (dialog) {
+        dialog.show(result);
+      }
+    } catch (e) {
+      console.warn('Failed to load URL content:', e);
+    }
   }
 
   _saveExpandedSections(sections) {
@@ -602,8 +631,10 @@ export class AcContextTab extends RpcMixin(LitElement) {
                 <div class="category-detail ${expanded ? 'expanded' : ''}">
                   ${cat.details.map(item => {
                     const itemPct = maxDetail > 0 ? ((item.tokens || 0) / maxDetail) * 100 : 0;
+                    const isUrl = cat.key === 'urls' && item.url;
                     return html`
-                      <div class="detail-item">
+                      <div class="detail-item ${isUrl ? 'clickable' : ''}"
+                        @click=${isUrl ? () => this._onUrlItemClick(item.url) : nothing}>
                         <span class="detail-name"
                           title="${item.name || item.path || item.url || '—'}"
                         >${item.name || item.path || item.url || '—'}</span>
@@ -680,6 +711,8 @@ export class AcContextTab extends RpcMixin(LitElement) {
         ${this._renderCategories()}
         ${this._renderSessionTotals()}
       `}
+
+      <ac-url-content-dialog></ac-url-content-dialog>
     `;
   }
 }

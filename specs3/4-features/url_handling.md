@@ -191,11 +191,11 @@ The `URLService` class manages the lifecycle of URL content:
 | `detect_urls(text)` | Find and classify URLs in text |
 | `fetch_url(url, ...)` | Fetch, cache, optionally summarize |
 | `detect_and_fetch(text, ...)` | Detect all URLs in text and fetch sequentially |
-| `get_url_content(url)` | Return cached content with token counts for display |
-| `invalidate_url_cache(url)` | Remove from cache and fetched dict |
+| `get_url_content(url)` | Return content for display; checks in-memory fetched dict first, then filesystem cache; returns error URLContent if not found anywhere |
+| `invalidate_url_cache(url)` | Remove from both filesystem cache and in-memory fetched dict |
 | `clear_url_cache()` | Clear all cached and fetched URLs |
 | `get_fetched_urls()` | List all fetched URLContent objects |
-| `remove_fetched(url)` | Remove from in-memory fetched dict |
+| `remove_fetched(url)` | Remove from in-memory fetched dict only; filesystem cache preserved for later retrieval |
 | `clear_fetched()` | Clear in-memory fetched dict |
 | `format_url_context(urls, excluded?, max_length?)` | Format fetched URLs for prompt injection, excluding specified URLs and errors |
 
@@ -208,9 +208,10 @@ Known documentation domains include: official language docs (docs.python.org, de
 | `LLM.detect_urls(text)` | Find and classify URLs |
 | `LLM.fetch_url(url, use_cache, summarize, ...)` | Fetch and optionally summarize |
 | `LLM.detect_and_fetch(text, use_cache, summarize)` | Detect and fetch all URLs in text |
-| `LLM.get_url_content(url)` | Get cached content with token counts for modal display |
-| `LLM.invalidate_url_cache(url)` | Remove from cache |
-| `LLM.clear_url_cache()` | Clear all cached URLs |
+| `LLM.get_url_content(url)` | Get content for modal display; checks in-memory fetched dict first, then filesystem cache |
+| `LLM.remove_fetched_url(url)` | Remove from active context (in-memory) but preserve filesystem cache |
+| `LLM.invalidate_url_cache(url)` | Remove from both filesystem cache and in-memory fetched dict |
+| `LLM.clear_url_cache()` | Clear all cached and fetched URLs |
 
 ## Testing
 
@@ -256,8 +257,10 @@ Known documentation domains include: official language docs (docs.python.org, de
 ### URL Service
 - detect_urls returns classified results
 - detect_and_fetch returns results for all URLs in text
-- get_url_content returns error for unfetched URL; returns token counts for fetched content
-- Invalidate and clear cache operations
+- get_url_content returns error for unfetched URL; returns content for fetched URL
+- get_url_content falls back to filesystem cache when URL not in in-memory fetched dict
+- Invalidate removes from both cache and fetched dict; clear removes all
+- remove_fetched removes from in-memory dict only; filesystem cache preserved
 - get_fetched_urls empty initially; remove_fetched and clear_fetched
 - format_url_context joins multiple URLs with separator; excludes specified URLs; skips errors
 - Fetch uses cache when available; web page fetch via mocked urlopen; GitHub file fetch with main/master fallback

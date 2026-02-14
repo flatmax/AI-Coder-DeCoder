@@ -69,31 +69,44 @@ class URLCache:
         return data
 
     def set(self, url, content):
-        """Write content dict to cache with timestamp."""
+        """Write content dict to cache with timestamp.
+
+        Sets fetched_at if not already present in the content.
+        """
         path = self._path_for(url)
         data = dict(content)
         data["_cached_at"] = time.time()
+        if "fetched_at" not in data or data["fetched_at"] is None:
+            data["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         try:
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to write URL cache: {e}")
 
     def invalidate(self, url):
-        """Delete single cache entry."""
+        """Delete single cache entry. Returns whether entry was found."""
         path = self._path_for(url)
         try:
             if path.exists():
                 path.unlink()
+                return True
         except OSError:
             pass
+        return False
 
     def clear(self):
-        """Delete all cache entries."""
+        """Delete all cache entries. Returns count of removed."""
+        count = 0
         try:
             for f in self._cache_dir.glob("*.json"):
-                f.unlink()
+                try:
+                    f.unlink()
+                    count += 1
+                except OSError:
+                    pass
         except OSError:
             pass
+        return count
 
     def cleanup_expired(self):
         """Scan and delete expired entries. Returns count of removed."""

@@ -135,12 +135,10 @@ export class AcFilesTab extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
-    // State will be loaded via state-loaded event from app-shell
-    // File picker loads its own tree via onRpcReady
-    this._loadReviewState();
-    // Refresh file tree on reconnect
-    const picker = this.shadowRoot?.querySelector('ac-file-picker');
-    if (picker) picker.loadTree();
+    // State will be loaded via state-loaded event from app-shell.
+    // File picker's own onRpcReady handles loadTree with proper deferral;
+    // do NOT call loadTree here — it races with RPC not yet connected.
+    Promise.resolve().then(() => this._loadReviewState());
   }
 
   async _loadReviewState() {

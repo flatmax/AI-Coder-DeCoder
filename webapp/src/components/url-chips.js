@@ -282,9 +282,9 @@ export class AcUrlChips extends RpcMixin(LitElement) {
     nextExcl.delete(url);
     this._excluded = nextExcl;
 
-    // Invalidate cache
+    // Remove from active context but keep in filesystem cache for re-use
     if (this.rpcConnected) {
-      this.rpcExtract('LLMService.invalidate_url_cache', url).catch(() => {});
+      this.rpcExtract('LLMService.remove_fetched_url', url).catch(() => {});
     }
 
     this._notifyChange();

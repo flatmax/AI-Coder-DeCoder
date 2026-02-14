@@ -13,6 +13,7 @@ import './input-history.js';
 import './url-chips.js';
 import './ac-history-browser.js';
 import './speech-to-text.js';
+import './url-content-dialog.js';
 
 // Edit block segmentation and diffing
 import { segmentResponse, computeDiff } from '../utils/edit-blocks.js';
@@ -1111,18 +1112,24 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
     this._onStreamComplete = this._onStreamComplete.bind(this);
+    this._onViewUrlContent = this._onViewUrlContent.bind(this);
+    this._onCompactionEvent = this._onCompactionEvent.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-chunk', this._onStreamChunk);
     window.addEventListener('stream-complete', this._onStreamComplete);
+    window.addEventListener('compaction-event', this._onCompactionEvent);
+    this.addEventListener('view-url-content', this._onViewUrlContent);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('stream-chunk', this._onStreamChunk);
     window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener('compaction-event', this._onCompactionEvent);
+    this.removeEventListener('view-url-content', this._onViewUrlContent);
     if (this._rafId) cancelAnimationFrame(this._rafId);
     if (this._observer) this._observer.disconnect();
   }
@@ -1292,6 +1299,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       }));
       // Refresh repo file list (new files may have been created)
       this._loadRepoFiles();
+    }
+  }
+
+  _onCompactionEvent(e) {
+    const { requestId, event } = e.detail || {};
+    if (requestId !== this._currentRequestId) return;
+    const stage = event?.stage || '';
+    const message = event?.message || '';
+    if (stage === 'url_fetch' || stage === 'url_ready') {
+      this._showToast(message, stage === 'url_ready' ? 'success' : '');
     }
   }
 
@@ -1622,6 +1639,26 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       textarea.value = text;
       this._autoResize(textarea);
       textarea.focus();
+    }
+  }
+
+  async _onViewUrlContent(e) {
+    const url = e.detail?.url;
+    if (!url || !this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract('LLMService.get_url_content', url);
+      if (!result) {
+        this._showToast('Failed to load URL content', 'error');
+        return;
+      }
+      // Show in URL content dialog
+      const dialog = this.shadowRoot?.querySelector('ac-url-content-dialog');
+      if (dialog) {
+        dialog.show(result);
+      }
+    } catch (err) {
+      console.error('Failed to load URL content:', err);
+      this._showToast('Failed to load URL content', 'error');
     }
   }
 
@@ -2481,6 +2518,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           `}
         </div>
       </div>
+
+      <!-- URL Content Dialog -->
+      <ac-url-content-dialog></ac-url-content-dialog>
 
       <!-- History Browser -->
       <ac-history-browser

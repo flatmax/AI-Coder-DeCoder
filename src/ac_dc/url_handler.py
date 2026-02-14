@@ -35,6 +35,11 @@ DOC_DOMAINS = {
 # ReadTheDocs pattern
 READTHEDOCS_RE = re.compile(r"\.readthedocs\.(io|org)$")
 
+# raw.githubusercontent.com pattern
+RAW_GH_RE = re.compile(
+    r"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$"
+)
+
 # URL detection regex
 URL_RE = re.compile(
     r"https?://[^\s\[\](){}<>\"']+",
@@ -182,6 +187,10 @@ def detect_urls(text):
 
 def classify_url(url):
     """Classify a URL into a URLType."""
+    # raw.githubusercontent.com → GitHub file
+    if RAW_GH_RE.match(url):
+        return URLType.GITHUB_FILE
+
     # GitHub patterns (order matters — more specific first)
     if GITHUB_ISSUE_RE.match(url):
         return URLType.GITHUB_ISSUE
@@ -202,7 +211,7 @@ def classify_url(url):
         return URLType.DOCUMENTATION
 
     path = parsed.path or ""
-    if any(seg in path for seg in ("/docs/", "/api/", "/reference/")):
+    if any(seg in path for seg in ("/docs/", "/documentation/", "/api/", "/reference/")):
         return URLType.DOCUMENTATION
 
     return URLType.GENERIC
@@ -215,6 +224,13 @@ def _parse_github_info(url, url_type):
         if m:
             return GitHubInfo(owner=m.group(1), repo=m.group(2))
     elif url_type == URLType.GITHUB_FILE:
+        # Try raw.githubusercontent.com first
+        m = RAW_GH_RE.match(url)
+        if m:
+            return GitHubInfo(
+                owner=m.group(1), repo=m.group(2),
+                branch=m.group(3), path=m.group(4),
+            )
         m = GITHUB_FILE_RE.match(url)
         if m:
             return GitHubInfo(
@@ -448,16 +464,42 @@ def _fetch_github_repo(url, github_info, symbol_index_cls=None):
             result.error = f"Clone failed: {proc.stderr.decode(errors='replace')[:200]}"
             return result
 
-        # Find README
-        for name in ("README.md", "README.rst", "README.txt", "README"):
+        # Find README (case-insensitive search with priority ordering)
+        readme_candidates = ("README.md", "README.rst", "README.txt", "README",
+                             "readme.md", "readme.rst", "readme.txt", "readme",
+                             "Readme.md", "Readme.rst", "Readme.txt", "Readme")
+        # Also do a case-insensitive scan of actual files
+        actual_files = {}
+        try:
+            for entry in os.listdir(clone_path):
+                actual_files[entry.lower()] = entry
+        except OSError:
+            pass
+
+        readme_found = False
+        for name in readme_candidates:
+            # Try exact match first
             readme_path = os.path.join(clone_path, name)
             if os.path.exists(readme_path):
                 try:
                     result.readme = Path(readme_path).read_text(encoding="utf-8")
                     result.title = f"{owner}/{repo_name}"
+                    readme_found = True
                 except (OSError, UnicodeDecodeError):
                     pass
                 break
+        if not readme_found:
+            # Case-insensitive fallback
+            for name in ("readme.md", "readme.rst", "readme.txt", "readme"):
+                actual = actual_files.get(name)
+                if actual:
+                    readme_path = os.path.join(clone_path, actual)
+                    try:
+                        result.readme = Path(readme_path).read_text(encoding="utf-8")
+                        result.title = f"{owner}/{repo_name}"
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                    break
 
         # Generate symbol map if index class available
         if symbol_index_cls:
@@ -513,8 +555,8 @@ async def _summarize_content(url_content, summary_type, model):
 
     prompt = focus_prompts.get(summary_type, focus_prompts[SummaryType.BRIEF])
 
-    # Truncate body for summarization
-    max_body = 30000
+    # Truncate body for summarization (100,000 chars per spec)
+    max_body = 100000
     if len(body) > max_body:
         body = body[:max_body] + "\n\n... (truncated)"
 
@@ -585,6 +627,30 @@ class URLService:
             cached = self._cache.get(url)
             if cached:
                 content = URLContent.from_dict(cached)
+                # If cached entry has a summary, or no summary requested, return as-is
+                if content.summary or not summarize:
+                    self._fetched[url] = content
+                    return content
+                # Cached but no summary — generate summary without re-fetching
+                if summarize and self._model and not content.error:
+                    st = summary_type
+                    if st is None:
+                        url_type_enum = URLType(content.url_type) if content.url_type else URLType.GENERIC
+                        st = select_summary_type(
+                            url_type_enum,
+                            has_symbol_map=bool(content.symbol_map),
+                            user_text=user_text,
+                        )
+                    elif isinstance(st, str):
+                        st = SummaryType(st)
+                    summary_text = await _summarize_content(content, st, self._model)
+                    if summary_text:
+                        content.summary = summary_text
+                        content.summary_type = st.value
+                        # Update cache entry in-place
+                        self._cache.set(url, content.to_dict())
+                    self._fetched[url] = content
+                    return content
                 self._fetched[url] = content
                 return content
 
@@ -629,13 +695,46 @@ class URLService:
         self._fetched[url] = content
         return content
 
+    async def detect_and_fetch(self, text, use_cache=True, summarize=True,
+                               user_text="", max_urls=None):
+        """Detect all URLs in a text block and fetch them sequentially.
+
+        Args:
+            text: text to scan for URLs
+            use_cache: check cache first
+            summarize: generate summary via LLM
+            user_text: user message text for auto-selecting summary type
+            max_urls: maximum number of URLs to fetch (None = all)
+
+        Returns:
+            list of URLContent objects
+        """
+        detected = detect_urls(text)
+        results = []
+        for i, url_info in enumerate(detected):
+            if max_urls is not None and i >= max_urls:
+                break
+            url = url_info["url"]
+            content = await self.fetch_url(
+                url, use_cache=use_cache, summarize=summarize,
+                user_text=user_text,
+            )
+            results.append(content)
+        return results
+
     def get_url_content(self, url):
         """Return cached/fetched content for a URL.
 
-        Returns URLContent or error URLContent if not fetched.
+        Checks in-memory fetched dict first, then filesystem cache.
+        Returns URLContent or error URLContent if not found anywhere.
         """
         if url in self._fetched:
             return self._fetched[url]
+        # Fall back to filesystem cache
+        if self._cache:
+            cached = self._cache.get(url)
+            if cached:
+                return URLContent.from_dict(cached)
         return URLContent(url=url, error="URL not yet fetched")
 
     def invalidate_url_cache(self, url):

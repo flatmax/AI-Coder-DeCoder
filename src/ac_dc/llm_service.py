@@ -315,18 +315,40 @@ class LLMService:
                 flat_files = self._repo.get_flat_file_list()
                 file_tree = f"# File Tree ({len(flat_files)} files)\n\n" + "\n".join(flat_files)
 
-            # Detect and fetch URLs from prompt
+            # Detect and fetch URLs from prompt (up to 3 per message)
             try:
                 detected = self._url_service.detect_urls(message)
+                urls_fetched = 0
                 for url_info in detected:
+                    if urls_fetched >= 3:
+                        break
                     url = url_info["url"]
+                    display = url_info.get("display_name", url)
                     # Skip already-fetched URLs
                     existing = self._url_service.get_url_content(url)
                     if existing.error == "URL not yet fetched":
+                        # Notify client about fetch progress
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "url_fetch", "message": f"Fetching {display}..."},
+                                )
+                            except Exception:
+                                pass
                         await self._url_service.fetch_url(
                             url, use_cache=True, summarize=True,
                             user_text=message,
                         )
+                        urls_fetched += 1
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "url_ready", "message": f"Fetched {display}"},
+                                )
+                            except Exception:
+                                pass
                 # Update URL context on the context manager
                 url_context_text = self._url_service.format_url_context()
                 if url_context_text:
@@ -1492,7 +1514,10 @@ class LLMService:
             logger.warning(f"Failed to initialize URL cache: {e}")
 
         model = self._config.smaller_model or self._config.model
-        return URLService(cache=cache, model=model)
+
+        # Pass SymbolIndex class so GitHub repo fetches generate symbol maps
+        from .symbol_index.index import SymbolIndex
+        return URLService(cache=cache, model=model, symbol_index_cls=SymbolIndex)
 
     def detect_urls(self, text):
         """Find and classify URLs in text. (RPC)"""
@@ -1507,6 +1532,14 @@ class LLMService:
         )
         return result.to_dict()
 
+    async def detect_and_fetch(self, text, use_cache=True, summarize=True):
+        """Detect and fetch all URLs in text. (RPC)"""
+        results = await self._url_service.detect_and_fetch(
+            text, use_cache=use_cache, summarize=summarize,
+            user_text=text,
+        )
+        return [r.to_dict() for r in results]
+
     def get_url_content(self, url):
         """Get cached/fetched content for a URL. (RPC)"""
         result = self._url_service.get_url_content(url)
@@ -1515,6 +1548,11 @@ class LLMService:
     def invalidate_url_cache(self, url):
         """Remove URL from cache. (RPC)"""
         self._url_service.invalidate_url_cache(url)
+        return {"success": True}
+
+    def remove_fetched_url(self, url):
+        """Remove URL from active context but keep in cache. (RPC)"""
+        self._url_service.remove_fetched(url)
         return {"success": True}
 
     def clear_url_cache(self):
