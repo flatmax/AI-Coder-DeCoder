@@ -25,6 +25,13 @@ function getPortFromURL() {
 }
 
 class AcApp extends JRPCClient {
+  static properties = {
+    _statusBar: { type: String, state: true },
+    _reconnectVisible: { type: Boolean, state: true },
+    _reconnectMsg: { type: String, state: true },
+    _toasts: { type: Array, state: true },
+  };
+
   static styles = [theme, css`
     :host {
       display: block;
@@ -71,7 +78,7 @@ class AcApp extends JRPCClient {
       right: 0;
       height: 3px;
       z-index: 10001;
-      transition: opacity 0.3s;
+      transition: opacity 0.5s;
     }
     .status-bar.ok { background: var(--accent-green); }
     .status-bar.error { background: var(--accent-red); }
@@ -91,14 +98,59 @@ class AcApp extends JRPCClient {
       color: var(--text-secondary);
       z-index: 10001;
       display: none;
+      box-shadow: var(--shadow-md);
     }
     .reconnect-banner.visible { display: block; }
+
+    /* Global toasts */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10002;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    .global-toast {
+      pointer-events: auto;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md, 8px);
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      box-shadow: var(--shadow-md);
+      animation: toast-in 0.25s ease;
+      max-width: 420px;
+      text-align: center;
+    }
+    .global-toast.success { border-color: var(--accent-green); color: var(--accent-green); }
+    .global-toast.error { border-color: var(--accent-red); color: var(--accent-red); }
+    .global-toast.warning { border-color: var(--accent-orange); color: var(--accent-orange); }
+    .global-toast.fading { opacity: 0; transition: opacity 0.3s; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   `];
 
   constructor() {
     super();
     this._port = getPortFromURL();
     this._reconnectAttempt = 0;
+    this._reconnectTimer = null;
+    this._statusBar = 'hidden';
+    this._reconnectVisible = false;
+    this._reconnectMsg = '';
+    this._toasts = [];
+    this._toastIdCounter = 0;
+    this._wasConnected = false;
+    this._statusBarTimer = null;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
@@ -111,6 +163,7 @@ class AcApp extends JRPCClient {
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onSearchNavigate = this._onSearchNavigate.bind(this);
     this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
+    this._onToastEvent = this._onToastEvent.bind(this);
   }
 
   connectedCallback() {
@@ -129,6 +182,9 @@ class AcApp extends JRPCClient {
 
     // Intercept Ctrl+S globally to prevent browser Save dialog
     window.addEventListener('keydown', this._onGlobalKeyDown);
+
+    // Global toast event listener
+    window.addEventListener('ac-toast', this._onToastEvent);
   }
 
   disconnectedCallback() {
@@ -139,17 +195,35 @@ class AcApp extends JRPCClient {
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
     window.removeEventListener('keydown', this._onGlobalKeyDown);
+    window.removeEventListener('ac-toast', this._onToastEvent);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
 
   // === jrpc-oo lifecycle callbacks ===
 
   remoteIsUp() {
     console.log('WebSocket connected — remote is up');
+    const wasReconnecting = this._reconnectAttempt > 0;
     this._reconnectAttempt = 0;
+    this._reconnectVisible = false;
+    this._reconnectMsg = '';
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+
+    // Show green status bar briefly
+    this._showStatusBar('ok');
+
+    if (wasReconnecting) {
+      this._showToast('Reconnected', 'success');
+    }
   }
 
   setupDone() {
     console.log('jrpc-oo setup done — call proxy ready');
+    this._wasConnected = true;
 
     // Publish the call proxy so all child components get RPC access
     SharedRpc.set(this.call);
@@ -160,14 +234,95 @@ class AcApp extends JRPCClient {
 
   setupSkip() {
     console.warn('jrpc-oo setup skipped — connection failed');
+    // Trigger reconnection if we were previously connected
+    if (this._wasConnected) {
+      this._scheduleReconnect();
+    }
   }
 
   remoteDisconnected() {
     console.log('WebSocket disconnected');
     SharedRpc.clear();
 
+    // Show red status bar
+    this._showStatusBar('error', false); // Don't auto-hide while disconnected
+
     // Notify children
     window.dispatchEvent(new CustomEvent('rpc-disconnected'));
+
+    // Schedule reconnection
+    this._scheduleReconnect();
+  }
+
+  // === Reconnection with exponential backoff ===
+
+  _scheduleReconnect() {
+    if (this._reconnectTimer) return; // Already scheduled
+
+    this._reconnectAttempt++;
+    // Exponential backoff: 1s, 2s, 4s, 8s, capped at 15s
+    const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempt - 1), 15000);
+    const delaySec = (delay / 1000).toFixed(0);
+
+    this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})... retry in ${delaySec}s`;
+    this._reconnectVisible = true;
+
+    console.log(`Scheduling reconnect attempt ${this._reconnectAttempt} in ${delay}ms`);
+
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})...`;
+      this.requestUpdate();
+
+      // jrpc-oo reconnect: re-open the WebSocket
+      try {
+        this.open(this.serverURI);
+      } catch (e) {
+        console.error('Reconnect failed:', e);
+        this._scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  // === Status bar ===
+
+  _showStatusBar(state, autoHide = true) {
+    this._statusBar = state;
+    if (this._statusBarTimer) {
+      clearTimeout(this._statusBarTimer);
+      this._statusBarTimer = null;
+    }
+    if (autoHide) {
+      this._statusBarTimer = setTimeout(() => {
+        this._statusBar = 'hidden';
+      }, 3000);
+    }
+  }
+
+  // === Global Toast System ===
+
+  _onToastEvent(e) {
+    const { message, type } = e.detail || {};
+    if (message) {
+      this._showToast(message, type || '');
+    }
+  }
+
+  _showToast(message, type = '') {
+    const id = ++this._toastIdCounter;
+    this._toasts = [...this._toasts, { id, message, type, fading: false }];
+
+    // Auto-dismiss after 3s
+    setTimeout(() => {
+      // Start fade
+      this._toasts = this._toasts.map(t =>
+        t.id === id ? { ...t, fading: true } : t
+      );
+      // Remove after fade
+      setTimeout(() => {
+        this._toasts = this._toasts.filter(t => t.id !== id);
+      }, 300);
+    }, 3000);
   }
 
   // === Methods the server can call (registered via addClass) ===
@@ -284,6 +439,7 @@ class AcApp extends JRPCClient {
       }
     } catch (err) {
       console.error('File save failed:', err);
+      this._showToast(`Save failed: ${err.message || 'Unknown error'}`, 'error');
     }
   }
 
@@ -333,8 +489,14 @@ class AcApp extends JRPCClient {
 
       <ac-token-hud></ac-token-hud>
 
-      <div class="status-bar hidden"></div>
-      <div class="reconnect-banner">Reconnecting...</div>
+      <div class="status-bar ${this._statusBar}"></div>
+      <div class="reconnect-banner ${this._reconnectVisible ? 'visible' : ''}">${this._reconnectMsg}</div>
+
+      <div class="toast-container">
+        ${this._toasts.map(t => html`
+          <div class="global-toast ${t.type} ${t.fading ? 'fading' : ''}">${t.message}</div>
+        `)}
+      </div>
     `;
   }
 }

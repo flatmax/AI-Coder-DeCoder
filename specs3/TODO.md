@@ -140,7 +140,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
 - [x] **Server→browser callback wiring** — `AcApp.method` format for jrpc-oo class-prefixed calls, main event loop for async callbacks
 - [x] **Brand watermark** — AC⚡DC branding displayed in diff viewer empty state (8rem, 18% opacity)
-- [ ] **Error handling** — Reconnection with exponential backoff, toast notifications
+- [x] **Error handling** — WebSocket reconnection with exponential backoff (1s→2s→4s→8s→max 15s), reconnecting banner with attempt count, status bar (green on connect, red on disconnect), global toast system via `ac-toast` custom events, `rpcSafeExtract`/`rpcSafeCall` in RPC mixin for non-critical operations, `showToast()` helper on all RPC components, SharedRpc disconnect notification to listeners, `onRpcDisconnected()` hook in mixin
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry
 - [ ] **State persistence** — Local storage for UI preferences

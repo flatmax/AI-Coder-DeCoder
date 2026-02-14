@@ -138,6 +138,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     // State will be loaded via state-loaded event from app-shell
     // File picker loads its own tree via onRpcReady
     this._loadReviewState();
+    // Refresh file tree on reconnect
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) picker.loadTree();
   }
 
   async _loadReviewState() {
@@ -147,7 +150,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         this._reviewState = state;
       }
     } catch (e) {
-      // Review state not critical
+      console.warn('Failed to load review state:', e);
     }
   }
 
@@ -192,6 +195,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       const result = await this.rpcExtract('LLMService.end_review');
       if (result?.error) {
         console.error('Exit review failed:', result.error);
+        this.showToast(`Exit review failed: ${result.error}`, 'error');
         return;
       }
       this._reviewState = { active: false };
@@ -204,8 +208,10 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         chatPanel.reviewState = this._reviewState;
         chatPanel.requestUpdate();
       }
+      window.dispatchEvent(new CustomEvent('review-ended'));
     } catch (e) {
       console.error('Exit review failed:', e);
+      this.showToast(`Exit review failed: ${e.message || 'Unknown error'}`, 'error');
     }
   }
 

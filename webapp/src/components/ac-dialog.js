@@ -213,11 +213,15 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._refreshHistoryBar();
     this._refreshReviewState();
     // Listen for events that should refresh the history bar and review state
-    window.addEventListener('stream-complete', () => this._refreshHistoryBar());
-    window.addEventListener('compaction-event', () => this._refreshHistoryBar());
-    window.addEventListener('state-loaded', () => this._refreshHistoryBar());
-    window.addEventListener('review-started', () => { this._reviewActive = true; });
-    window.addEventListener('review-ended', () => { this._reviewActive = false; });
+    // (listeners added once; onRpcReady may fire on reconnect)
+    if (!this._dialogEventsRegistered) {
+      this._dialogEventsRegistered = true;
+      window.addEventListener('stream-complete', () => this._refreshHistoryBar());
+      window.addEventListener('compaction-event', () => this._refreshHistoryBar());
+      window.addEventListener('state-loaded', () => this._refreshHistoryBar());
+      window.addEventListener('review-started', () => { this._reviewActive = true; });
+      window.addEventListener('review-ended', () => { this._reviewActive = false; });
+    }
   }
 
   async _refreshReviewState() {

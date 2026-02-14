@@ -1450,7 +1450,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       console.error('Failed to start stream:', e);
       this.streamingActive = false;
       this._currentRequestId = null;
-      this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${e.message || 'Failed to connect'}` }];
+      const errorMsg = e.message || 'Failed to connect';
+      this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${errorMsg}` }];
+      this._showToast(`Stream failed: ${errorMsg}`, 'error');
     }
   }
 
@@ -1744,6 +1746,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _showToast(message, type = '') {
+    // Use both local toast (for immediate feedback) and global toast
     this._toast = { message, type };
     clearTimeout(this._toastTimer);
     this._toastTimer = setTimeout(() => {

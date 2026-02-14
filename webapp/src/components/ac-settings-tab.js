@@ -389,6 +389,10 @@ export class AcSettingsTab extends RpcMixin(LitElement) {
     this._toastTimer = setTimeout(() => {
       this._toast = null;
     }, 3000);
+    // Also dispatch global toast for visibility outside settings tab
+    window.dispatchEvent(new CustomEvent('ac-toast', {
+      detail: { message, type },
+    }));
   }
 
   // === Render ===

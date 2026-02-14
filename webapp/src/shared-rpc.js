@@ -44,8 +44,12 @@ export const SharedRpc = {
 
   /**
    * Clear the call proxy (on disconnect).
+   * Notifies all listeners with null so components can react.
    */
   clear() {
     _call = null;
+    for (const fn of _listeners) {
+      try { fn(null); } catch (e) { console.error('SharedRpc listener error:', e); }
+    }
   },
 };
