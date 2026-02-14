@@ -51,8 +51,11 @@ Six operations transform the repository into review state. The branch may be a l
 | 4. **Build symbol_map_before** | *(symbol index runs on disk)* | base^ | clean | pre-review |
 | 5. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
 | 6. Soft reset | `git reset --soft {base}^` | base^ (detached) | **all review changes staged** | branch tip |
+| 7. Clear file selection | *(internal)* | — | — | — |
 
 Step 5 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
+
+Step 7 clears the selected files list so review starts with a clean slate — this prevents stale file selections from before the review from inadvertently including all diffs in the first message.
 
 After step 6, the repository is in the perfect review state:
 
@@ -368,7 +371,7 @@ Having both maps lets the LLM assess blast radius, trace removed dependencies, a
 
 When a file is selected (checked in the file picker) during review mode, its full current content is included in the working files context as usual. Additionally, a **reverse diff** (`git diff --cached -R`) is included in the review context section. This gives the LLM complete information: the current code plus exactly what it replaced.
 
-Files that are not selected contribute neither content nor diffs — the user controls context size through file selection.
+Files that are not selected contribute neither content nor diffs — the user controls context size through file selection. Deleted files (which no longer exist on disk) are excluded from reverse diffs even if selected, since there is no current content to review against.
 
 ### File Selection Flow
 

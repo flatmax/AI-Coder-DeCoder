@@ -632,6 +632,8 @@ class LLMService:
     def generate_commit_message(self, diff_text):
         """Generate a commit message from a diff using a non-streaming LLM call.
 
+        Uses smaller_model if configured, falling back to primary model.
+
         Args:
             diff_text: git diff text
 
@@ -642,8 +644,9 @@ class LLMService:
             return {"error": "Empty diff"}
 
         try:
+            model = self._config.smaller_model or self._config.model
             response = litellm.completion(
-                model=self._config.model,
+                model=model,
                 messages=[
                     {"role": "system", "content": COMMIT_PROMPT},
                     {"role": "user", "content": diff_text},
@@ -704,12 +707,26 @@ class LLMService:
     def get_context_breakdown(self):
         """Return token breakdown for current context.
 
+        Syncs FileContext with current selected files before computing,
+        so the breakdown reflects what the next request would look like.
+
         Returns detailed per-item data for each category:
         - Per-file paths and token counts
         - Per-URL title and token counts
         - Symbol map chunk details
         - History message count and tokens
         """
+        # Sync FileContext with current selection
+        if self._repo:
+            current_context_files = set(self._context.file_context.get_files())
+            selected_set = set(self._selected_files)
+            for path in current_context_files - selected_set:
+                self._context.file_context.remove_file(path)
+            for path in selected_set:
+                if path not in current_context_files:
+                    if not self._repo.is_binary_file(path) and self._repo.file_exists(path):
+                        self._context.file_context.add_file(path)
+
         counter = self._context.counter
 
         system_tokens = counter.count(self._config.get_system_prompt())

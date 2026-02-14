@@ -169,6 +169,7 @@ This is the schema returned by `list_sessions()` for each session.
 | `LLM.history_list_sessions(limit?)` | Recent sessions, newest first |
 | `LLM.history_new_session()` | Start new session |
 | `LLM.load_session_into_context(session_id)` | Load into active context |
+| `LLM.get_history_status()` | Token counts, compaction status, session info for history bar |
 
 ### Dual Stores
 
