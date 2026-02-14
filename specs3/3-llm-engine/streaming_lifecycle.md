@@ -24,6 +24,7 @@ Server: LLM.chat_streaming(request_id, message, files, images)
     ▼
 Background task: _stream_chat
     │
+    ├─ Remove deselected files from context
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Detect & fetch URLs from prompt
@@ -46,6 +47,18 @@ Send streamComplete → browser
     ▼
 Post-response compaction (→ context_and_history.md)
 ```
+
+## File Context Sync
+
+Before loading files, the streaming handler compares the current FileContext against the incoming selected files list. Files present in the context but absent from the new selection are removed. This ensures deselected files don't linger in the in-memory context across requests.
+
+```pseudo
+current_context_files = context.file_context.get_files()
+for path in current_context_files - selected_files:
+    context.file_context.remove_file(path)
+```
+
+This is distinct from the cache tiering deselection cleanup (see [Cache Tiering — Item Removal](cache_tiering.md#item-removal)), which handles `file:*` entries in the stability tracker. Both operate on the same user action (unchecking a file) but manage different state stores.
 
 ## Client-Side Initiation
 
@@ -214,6 +227,7 @@ Session total: 182,756
 - Comments skipped, non-command text returns empty
 
 ### Commit Message
+- Uses the smaller model (`smaller_model` config, falling back to primary model)
 - Empty/whitespace diff rejected
 - Mocked LLM returns generated message
 

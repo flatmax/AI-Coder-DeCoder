@@ -261,6 +261,13 @@ class LLMService:
             # Validate and load files
             binary_files = []
             invalid_files = []
+
+            # Remove files from context that are no longer selected
+            current_context_files = set(self._context.file_context.get_files())
+            selected_set = set(files)
+            for path in current_context_files - selected_set:
+                self._context.file_context.remove_file(path)
+
             for path in files:
                 if self._repo and self._repo.is_binary_file(path):
                     binary_files.append(path)
