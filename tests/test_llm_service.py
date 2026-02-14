@@ -209,7 +209,8 @@ class TestStabilityIntegration:
 class TestContextBreakdown:
     def test_breakdown_has_required_keys(self, service):
         """Returns breakdown with system/symbol_map/files/history categories."""
-        breakdown = service.get_context_breakdown()
+        result = service.get_context_breakdown()
+        breakdown = result["breakdown"]
         assert "system" in breakdown
         assert "symbol_map" in breakdown
         assert "files" in breakdown
@@ -227,8 +228,8 @@ class TestContextBreakdown:
         """Session totals initially zero."""
         breakdown = service.get_context_breakdown()
         totals = breakdown["session_totals"]
-        assert totals["input_tokens"] == 0
-        assert totals["output_tokens"] == 0
+        assert totals["prompt"] == 0
+        assert totals["completion"] == 0
 
     def test_breakdown_shows_tier_data(self, service):
         """Breakdown includes tier blocks when tracker has items."""

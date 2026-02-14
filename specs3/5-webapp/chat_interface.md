@@ -52,7 +52,12 @@ Clicking a file mention dispatches `file-mention-click`. The Files tab **toggles
 
 **Inline text mentions** (in message body) navigate to the diff viewer on click.
 
+
+### Input Accumulation (on add)
+═══════ REPL
 **File summary chips** (in the "Files Referenced" section below messages) only toggle selection — they do not open the diff viewer. The "Add All" button also only toggles selection without navigation.
+
+### Input Accumulation (on add)
 ═══════ REPL is wrong, let me redo
 
 ### Input Accumulation (on add)
@@ -128,6 +133,17 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 ### Edit Summary
 
 Banner **after** all edit blocks (at the end of the assistant message, not the top): counts of applied/failed/skipped/not-in-context with color-coded stat badges (green/red/orange/amber). When not-in-context edits are present, the banner includes a prompt: "N files were added to context. Send a follow-up to retry those edits." Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
+
+### Ambiguous Anchor Retry Prompt
+
+When `streamComplete` delivers edit results containing **ambiguous anchor failures** (status `failed`, message containing "Ambiguous anchor"):
+
+1. A retry prompt is auto-composed listing each failed file with the error detail
+2. The prompt is placed into the chat textarea (auto-resized) but **not sent**
+3. The edit summary banner appends a note: *"A retry prompt has been prepared in the input below."*
+4. The user can review, edit, augment, or discard the prompt before sending
+
+This is consistent with the not-in-context pattern: suggest an action but let the user control when and what to send. Only ambiguous anchor failures trigger this behavior — other failure types (anchor not found, old text mismatch) do not, since they typically require different remediation.
 
 ### Dependencies
 

@@ -130,7 +130,8 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 6. Handle auto-added files — update file picker selection for files added due to not-in-context edits
 7. Run file mention detection on assistant message
 8. Show token usage HUD
-9. Focus input for next message
+9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
+10. Focus input for next message
 
 ## Post-Response Processing
 
@@ -250,3 +251,10 @@ Session total: 182,756
 - Auto-added files broadcast via filesChanged callback
 - files_auto_added in streamComplete lists paths that were auto-added
 - Review mode skips all edit application (existing behavior unchanged)
+
+### Ambiguous Anchor Retry
+- Failed edits with "Ambiguous anchor" in message trigger auto-populated retry prompt in chat input
+- Prompt lists each ambiguous failure with file path and error detail
+- Prompt is not auto-sent — user reviews and sends manually
+- Edit summary banner notes that a retry prompt has been prepared
+- Non-ambiguous failures (anchor not found, old text mismatch) do not trigger the retry prompt

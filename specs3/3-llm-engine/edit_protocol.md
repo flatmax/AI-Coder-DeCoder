@@ -256,6 +256,34 @@ A file is "in context" if it is in the current selected files list (`_selected_f
 
 Edits applied sequentially — earlier successes remain on disk and staged in git. No rollback. Failed edit details (file path, error, diagnostics) visible to AI in subsequent exchanges for retry with corrected anchors.
 
+## Ambiguous Anchor Retry Prompt
+
+When one or more edits fail due to **ambiguous anchors** (the anchor text matched multiple locations in the file), the system auto-populates the chat input with a retry prompt — but does **not** auto-send it. The user reviews and sends when ready.
+
+### Behavior
+
+1. **Detection**: On `streamComplete`, the frontend inspects `edit_results` for entries with status `failed` and message containing `"Ambiguous anchor"`
+2. **Prompt construction**: A retry prompt is composed listing each ambiguous failure with file path and error detail, instructing the LLM to use more unique context lines
+3. **Auto-populate input**: The prompt text is placed into the chat textarea and auto-resized, but not sent
+4. **User control**: The user can review, edit, or discard the prompt before sending. They may also add additional instructions or context
+
+### Retry Prompt Template
+
+```
+Some edits failed due to ambiguous anchors (the context lines matched multiple locations in the file). Please retry these edits with more unique anchor context — include a distinctive preceding line (like a function name, class definition, or unique comment) to disambiguate:
+
+- {file_path}: {error_message}
+- {file_path}: {error_message}
+```
+
+### Why Not Auto-Send
+
+Consistent with the not-in-context edit philosophy: the user maintains control over what is sent to the LLM. The user may want to provide additional guidance, select different files, or skip the retry entirely.
+
+### Edit Summary Banner
+
+When ambiguous anchor failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
+
 ## Testing
 
 ### Parsing
@@ -294,3 +322,11 @@ Edits applied sequentially — earlier successes remain on disk and staged in gi
 - Auto-added files appear in the selected files list after application
 - Mixed response: in-context edits applied, not-in-context edits deferred, both reported in results
 - The files_auto_added field in streamComplete lists the auto-added file paths
+
+### Ambiguous Anchor Retry
+- Ambiguous anchor failures (multiple matches) auto-populate retry prompt in chat input
+- Prompt lists each affected file path and match count
+- Prompt instructs LLM to include more distinctive context lines (function names, unique comments)
+- Prompt is not auto-sent — user reviews and sends manually
+- Edit summary banner notes the prepared retry prompt
+- Only ambiguous failures trigger this; anchor-not-found and old-text-mismatch do not

@@ -573,6 +573,11 @@ class ContextManager:
             messages.append({"role": "user", "content": URL_CONTEXT_HEADER + url_text})
             messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
 
+        # Review context as user/assistant pair
+        if self._review_context:
+            messages.append({"role": "user", "content": REVIEW_CONTEXT_HEADER + self._review_context})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the code changes."})
+
         # Active files (non-graduated)
         graduated = set()
         if tiered_content:

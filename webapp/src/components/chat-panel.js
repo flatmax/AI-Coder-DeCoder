@@ -1308,6 +1308,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       // Refresh repo file list (new files may have been created)
       this._loadRepoFiles();
     }
+
+    // Check for ambiguous anchor failures — auto-populate retry prompt
+    if (result?.edit_results) {
+      const ambiguousFailures = result.edit_results.filter(
+        er => er.status === 'failed' && er.message && er.message.includes('Ambiguous anchor')
+      );
+      if (ambiguousFailures.length > 0) {
+        this._populateAmbiguousRetryPrompt(ambiguousFailures);
+      }
+    }
   }
 
   _onCompactionEvent(e) {
@@ -1317,6 +1327,30 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const message = event?.message || '';
     if (stage === 'url_fetch' || stage === 'url_ready') {
       this._showToast(message, stage === 'url_ready' ? 'success' : '');
+    }
+  }
+
+  /**
+   * Auto-populate chat input with a retry prompt for ambiguous anchor failures.
+   * Does NOT auto-send — the user reviews and sends manually.
+   */
+  _populateAmbiguousRetryPrompt(ambiguousFailures) {
+    const lines = ambiguousFailures.map(
+      er => `- ${er.file}: ${er.message}`
+    );
+    const prompt =
+      'Some edits failed due to ambiguous anchors (the context lines matched multiple locations ' +
+      'in the file). Please retry these edits with more unique anchor context — include a ' +
+      'distinctive preceding line (like a function name, class definition, or unique comment) ' +
+      'to disambiguate:\n\n' +
+      lines.join('\n');
+
+    this._inputValue = prompt;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      textarea.value = prompt;
+      this._autoResize(textarea);
+      textarea.focus();
     }
   }
 
@@ -2138,7 +2172,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ${msg.files_auto_added.length} file${msg.files_auto_added.length > 1 ? 's were' : ' was'} added to context. Send a follow-up to retry those edits.
         </div>`
       : nothing;
-    return html`<div class="edit-summary">${parts}${autoAddNote}</div>`;
+    // Check for ambiguous anchor failures in edit results
+    const hasAmbiguous = msg.editResults && Object.values(msg.editResults).some(
+      er => er.status === 'failed' && er.message && er.message.includes('Ambiguous anchor')
+    );
+    const ambiguousNote = hasAmbiguous
+      ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
+          A retry prompt has been prepared in the input below.
+        </div>`
+      : nothing;
+    return html`<div class="edit-summary">${parts}${autoAddNote}${ambiguousNote}</div>`;
   }
 
   _renderMsgActions(msg) {

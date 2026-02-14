@@ -150,9 +150,10 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
 ### Phase 9.5: Edit Robustness
-- [ ] **Not-in-context edit detection** — Separate edit blocks by context membership, mark NOT_IN_CONTEXT status, auto-add files to selection, broadcast via filesChanged
-- [ ] **Edit summary with auto-add prompt** — Amber badge for not-in-context edits, banner message prompting user to retry
-- [ ] **Create block exemption** — Create blocks (empty EDIT section) bypass context check since they don't need existing file content
+- [x] **Not-in-context edit detection** — Separate edit blocks by context membership, mark NOT_IN_CONTEXT status, auto-add files to selection, broadcast via filesChanged
+- [x] **Edit summary with auto-add prompt** — Amber badge for not-in-context edits, banner message prompting user to retry
+- [x] **Create block exemption** — Create blocks (empty EDIT section) bypass context check since they don't need existing file content
+- [x] **Ambiguous anchor retry prompt** — Auto-populate chat input with retry instructions when edits fail due to ambiguous anchors (multiple matches). User reviews and sends manually. Edit summary banner notes the prepared prompt
 
 ### Phase 10: Code Review ✅
 - [x] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`, `get_review_changed_files`, `get_review_file_diff`
