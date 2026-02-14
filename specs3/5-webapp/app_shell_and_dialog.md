@@ -29,7 +29,7 @@ The root component extends `JRPCClient`, managing the WebSocket connection and r
 
 ### Responsibilities
 
-- Set browser tab title to `⚡ {repo_name}` (e.g., `⚡ my-project`). The repo name is the root node name from `get_current_state()` or `Repo.get_file_tree()`. Updated on initial state load.
+- Set browser tab title to `{repo_name}` (e.g., `my-project`). The repo name is the root node name from `get_current_state()` or `Repo.get_file_tree()`. Updated on initial state load.
 - Extract WebSocket port from `?port=N`
 - Publish `SharedRpc` on connection
 - Route `navigate-file` events to diff viewer

@@ -63,20 +63,6 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       color: var(--text-muted);
     }
 
-    .clear-selection-btn {
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      font-size: 0.85rem;
-      padding: 2px 6px;
-      cursor: pointer;
-      border-radius: var(--radius-sm);
-    }
-    .clear-selection-btn:hover {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-    }
-
     /* Tree container */
     .tree-container {
       flex: 1;
@@ -329,6 +315,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     this._allFilePaths = [];
     this._flatVisible = [];
     this._initialAutoSelect = false;
+    this._expanded.add('');  // Root node expanded by default
 
     this._onDocClick = this._onDocClick.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
@@ -419,11 +406,14 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     if (!node) return [];
     const items = [];
 
-    // Skip root node (repo name — empty path), start with its children
+    // Root node (repo name) — show as expandable root directory
     if (node.path === '' && node.type === 'dir') {
-      const children = this._sortChildren(node.children || []);
-      for (const child of children) {
-        items.push(...this._flattenTree(child, 0));
+      items.push({ node, depth: 0 });
+      if (this._expanded.has('') || this._filter) {
+        const children = this._sortChildren(node.children || []);
+        for (const child of children) {
+          items.push(...this._flattenTree(child, 1));
+        }
       }
       return items;
     }
@@ -504,11 +494,6 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     if (selCount === 0) return 'unchecked';
     if (selCount === childPaths.length) return 'checked';
     return 'indeterminate';
-  }
-
-  _clearSelection() {
-    this.selectedFiles = new Set();
-    this._notifySelection();
   }
 
   _notifySelection() {
@@ -908,7 +893,6 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           .value=${this._filter}
           @input=${this._onFilterInput}
         />
-        <button class="clear-selection-btn" title="Clear selection" @click=${this._clearSelection}>☐</button>
         ${!reviewActive ? html`
           <button class="review-open-btn" title="Code Review"
             @click=${() => this.dispatchEvent(new CustomEvent('open-review', { bubbles: true, composed: true }))}>

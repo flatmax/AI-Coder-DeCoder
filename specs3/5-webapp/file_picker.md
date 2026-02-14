@@ -21,10 +21,6 @@ Text filter narrows visible nodes by path substring. Directories auto-expand whe
 
 `@text` in chat input activates the file picker filter. See [Chat Interface — @-Filter](chat_interface.md#-filter).
 
-### Clear Selection
-
-☐ button beside filter input. Deselects all files.
-
 ### Keyboard Navigation
 
 Arrow keys move focus. Space/Enter toggles selection. Auto-scroll to focused item.
