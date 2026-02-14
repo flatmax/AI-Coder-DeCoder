@@ -244,6 +244,58 @@ def _start_vite_dev_server(webapp_port):
         return None
 
 
+def _start_vite_preview_server(webapp_port):
+    """Build and start Vite preview server as a child process.
+
+    Returns the subprocess.Popen object, or None if port already in use.
+    """
+    # Check if port already in use
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", webapp_port))
+    except OSError:
+        logger.info(f"Preview server port {webapp_port} already in use, skipping")
+        return None
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    node_modules = project_root / "node_modules"
+
+    if not node_modules.exists():
+        print(f"node_modules/ not found in {project_root}. Run: cd {project_root} && npm install")
+        sys.exit(1)
+
+    # Build first
+    logger.info(f"Building webapp (project: {project_root})")
+    try:
+        build_result = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=120,
+        )
+        if build_result.returncode != 0:
+            logger.error(f"Webapp build failed:\n{build_result.stderr}")
+            print(f"Webapp build failed:\n{build_result.stderr}")
+            sys.exit(1)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.error(f"Webapp build failed: {e}")
+        sys.exit(1)
+
+    # Start preview server
+    logger.info(f"Starting Vite preview server on port {webapp_port}")
+    try:
+        proc = subprocess.Popen(
+            ["npm", "run", "preview", "--", "--port", str(webapp_port)],
+            cwd=str(project_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)
+        return proc
+    except OSError as e:
+        logger.error(f"Failed to start preview server: {e}")
+        return None
+
+
 def _cleanup_vite(proc):
     """Terminate Vite dev server process."""
     if proc is None:
@@ -354,10 +406,12 @@ def main(args=None):
         config, repo=repo, symbol_index=symbol_index,
     )
 
-    # Step 4: Start Vite dev server if --dev
+    # Step 4: Start Vite dev/preview server
     vite_proc = None
     if parsed.dev:
         vite_proc = _start_vite_dev_server(webapp_port)
+    elif parsed.preview:
+        vite_proc = _start_vite_preview_server(webapp_port)
 
     # Step 5: Start RPC WebSocket server
     try:
@@ -404,7 +458,7 @@ def main(args=None):
         base_url = os.environ.get("AC_WEBAPP_BASE_URL")
         url = _build_browser_url(
             server_port, version,
-            dev_mode=parsed.dev,
+            dev_mode=(parsed.dev or parsed.preview),
             webapp_port=webapp_port,
             base_url_override=base_url,
         )

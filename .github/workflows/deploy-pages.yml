@@ -70,7 +70,7 @@ jobs:
           rm -rf "${DEPLOY_DIR}"
           
           # Copy new build (has base=/{sha}/)
-          cp -r source/webapp/dist "${DEPLOY_DIR}"
+          cp -r source/webapp/dist/ "${DEPLOY_DIR}"
 
       - name: Update versions.json
         run: |
