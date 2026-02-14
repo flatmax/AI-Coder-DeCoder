@@ -452,67 +452,46 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
   // === Commit Selection ===
 
   _onCommitClick(commit, rowIndex, e) {
-    // Find which branches this commit is reachable from
+    // Find all branches where this commit is reachable (walk ALL parents, not just first)
     const candidateBranches = this._branchLanes.filter(bl => {
-      // Walk first-parent from this branch tip to see if commit is on this branch
-      let sha = bl.sha;
+      const stack = [bl.sha];
       const visited = new Set();
-      while (sha && !visited.has(sha)) {
+      while (stack.length > 0) {
+        const sha = stack.pop();
+        if (!sha || visited.has(sha)) continue;
         if (sha === commit.sha) return true;
         visited.add(sha);
         const row = this._commits.findIndex(c => c.sha === sha);
-        if (row < 0) break;
-        sha = this._commits[row].parents?.[0] || null;
+        if (row < 0) continue;
+        const parents = this._commits[row].parents || [];
+        for (const p of parents) stack.push(p);
       }
       return false;
     });
 
     if (candidateBranches.length === 0) {
-      // Fallback: just pick any branch
+      // Fallback: offer all branches
       this._selectedCommit = commit.sha;
       this._selectedBranch = this._branchLanes[0]?.name || null;
-      this._disambiguate = null;
+      this._showBranchPopover(commit, rowIndex, e, this._branchLanes);
       return;
     }
 
-    if (candidateBranches.length === 1) {
-      this._selectedCommit = commit.sha;
-      this._selectedBranch = candidateBranches[0].name;
-      this._disambiguate = null;
-      return;
-    }
-
-    // Multiple branches — show disambiguation
-    // Pre-select the branch whose lane matches the commit's lane,
-    // falling back to the branch with the most commits (longest review range)
+    // Always show disambiguation — pre-select the branch whose lane matches
     const commitLane = this._laneMap.get(commit.sha);
     const laneMatch = candidateBranches.find(bl => bl.lane === commitLane);
+    const preSelected = laneMatch || candidateBranches[0];
 
-    let preSelected;
-    if (laneMatch) {
-      preSelected = laneMatch;
-    } else {
-      // Fall back to the branch with the most commits between selection and tip
-      // (i.e., the longest review range — most useful default)
-      preSelected = candidateBranches.reduce((best, bl) => {
-        let dist = 0;
-        let sha = bl.sha;
-        while (sha && sha !== commit.sha && dist < 1000) {
-          const row = this._commits.findIndex(c => c.sha === sha);
-          if (row < 0) break;
-          sha = this._commits[row].parents?.[0] || null;
-          dist++;
-        }
-        return (dist > best.dist) ? { bl, dist } : best;
-      }, { bl: candidateBranches[0], dist: -1 }).bl;
-    }
-
-    const scrollEl = this.shadowRoot?.querySelector('.graph-scroll');
-    const rect = scrollEl?.getBoundingClientRect() || { left: 0, top: 0 };
     this._selectedCommit = commit.sha;
     this._selectedBranch = preSelected.name;
+    this._showBranchPopover(commit, rowIndex, e, candidateBranches);
+  }
+
+  _showBranchPopover(commit, rowIndex, e, candidates) {
+    const scrollEl = this.shadowRoot?.querySelector('.graph-scroll');
+    const rect = scrollEl?.getBoundingClientRect() || { left: 0, top: 0 };
     this._disambiguate = {
-      candidates: candidateBranches,
+      candidates,
       x: (e.clientX - rect.left) + 20,
       y: (rowIndex * ROW_HEIGHT) - (scrollEl?.scrollTop || 0) + ROW_HEIGHT / 2,
     };
