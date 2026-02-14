@@ -110,6 +110,7 @@ class AcApp extends JRPCClient {
     this._onStreamCompleteForDiff = this._onStreamCompleteForDiff.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onSearchNavigate = this._onSearchNavigate.bind(this);
+    this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
   }
 
   connectedCallback() {
@@ -125,6 +126,9 @@ class AcApp extends JRPCClient {
     window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
     window.addEventListener('files-modified', this._onFilesModified);
     window.addEventListener('search-navigate', this._onSearchNavigate);
+
+    // Intercept Ctrl+S globally to prevent browser Save dialog
+    window.addEventListener('keydown', this._onGlobalKeyDown);
   }
 
   disconnectedCallback() {
@@ -134,6 +138,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('stream-complete', this._onStreamCompleteForDiff);
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
+    window.removeEventListener('keydown', this._onGlobalKeyDown);
   }
 
   // === jrpc-oo lifecycle callbacks ===
@@ -302,6 +307,15 @@ class AcApp extends JRPCClient {
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (viewer && viewer._files.length > 0) {
       viewer.refreshOpenFiles();
+    }
+  }
+
+  /**
+   * Intercept Ctrl+S globally to prevent browser Save dialog.
+   */
+  _onGlobalKeyDown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
     }
   }
 
