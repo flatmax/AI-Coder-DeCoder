@@ -31,6 +31,7 @@ class EditStatus(Enum):
     VALIDATED = "validated"
     FAILED = "failed"
     SKIPPED = "skipped"
+    NOT_IN_CONTEXT = "not_in_context"
 
 
 class ParseState(Enum):

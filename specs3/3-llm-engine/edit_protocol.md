@@ -207,6 +207,33 @@ During streaming, partially received blocks are tracked. The parser maintains st
 | Validated | Dry-run passed |
 | Failed | Anchor not found, ambiguous, or old text mismatch |
 | Skipped | Binary file or pre-condition failed |
+| Not In Context | File was not in the active context; edit deferred (see below) |
+
+### Not-In-Context Edit Handling
+
+When the LLM produces edit blocks for files that are not in the active file context (not selected in the file picker), the edits are **not attempted**. The LLM wrote these edits based on the symbol map alone, without seeing the full file content — anchors are likely wrong and edit quality is unreliable even if anchors happen to match.
+
+Instead, the system:
+
+1. **Separates edit blocks** into two groups: files currently in context vs files not in context
+2. **Applies in-context edits normally** — these proceed through the standard validate/apply pipeline
+3. **Marks not-in-context edits** with status `NOT_IN_CONTEXT` — distinct from `FAILED` to indicate a workflow issue rather than a matching error
+4. **Auto-adds the files** to the selected files list so their full content will be in context for the next request
+5. **Broadcasts the file change** via the `filesChanged` callback so the browser file picker updates
+6. **Includes a system note** in the `streamComplete` result listing which files were auto-added and advising the user to send a follow-up message to retry the edits
+
+The user then sends a follow-up (e.g., "please retry the edits for those files") and the LLM regenerates the edit blocks with full file content in context.
+
+#### Why Not Auto-Retry
+
+Automatically sending a follow-up LLM request was considered but rejected:
+- Adds complexity (continuation streams, loop prevention, cost control)
+- Removes user control — the user may want to review which files were added
+- The user's natural follow-up provides context the LLM can use to improve the edit
+
+#### Detecting Context Membership
+
+A file is "in context" if it is in the current selected files list (`_selected_files`) at the time edits are applied. Files that exist on disk but are not selected are not in context — the LLM has only seen their symbol map entry, not their full content.
 
 ### Post-Application
 
@@ -259,3 +286,11 @@ Edits applied sequentially — earlier successes remain on disk and staged in gi
 - Binary file skipped
 - Missing file fails
 - Multiple sequential edits to same file
+
+### Not-In-Context Handling
+- Edit blocks for files not in selected files get status NOT_IN_CONTEXT (not attempted)
+- Edit blocks for files in selected files are applied normally in the same response
+- Create blocks (empty EDIT section) are always attempted regardless of context membership
+- Auto-added files appear in the selected files list after application
+- Mixed response: in-context edits applied, not-in-context edits deferred, both reported in results
+- The files_auto_added field in streamComplete lists the auto-added file paths

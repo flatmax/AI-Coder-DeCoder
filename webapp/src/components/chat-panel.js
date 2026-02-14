@@ -832,6 +832,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: rgba(160, 160, 160, 0.15);
       color: var(--text-muted);
     }
+    .edit-badge.not-in-context {
+      background: rgba(255, 180, 50, 0.15);
+      color: #e0a030;
+    }
 
     .edit-error {
       padding: 4px 12px;
@@ -1269,10 +1273,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           editMeta.editResults[er.file] = { status: er.status, message: er.message };
         }
       }
-      if (result.passed || result.failed || result.skipped) {
+      if (result.passed || result.failed || result.skipped || result.not_in_context) {
         editMeta.passed = result.passed || 0;
         editMeta.failed = result.failed || 0;
         editMeta.skipped = result.skipped || 0;
+        editMeta.not_in_context = result.not_in_context || 0;
+        if (result.files_auto_added) {
+          editMeta.files_auto_added = result.files_auto_added;
+        }
       }
       // Add the assistant response with edit metadata
       this.messages = [...this.messages, {
@@ -2070,6 +2078,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     else if (status === 'failed') badge = '<span class="edit-badge failed">❌ failed</span>';
     else if (status === 'skipped') badge = '<span class="edit-badge skipped">⚠️ skipped</span>';
     else if (status === 'validated') badge = '<span class="edit-badge validated">☑ validated</span>';
+    else if (status === 'not_in_context') badge = '<span class="edit-badge not-in-context">⚠️ not in context</span>';
     else if (seg.isCreate) badge = '<span class="edit-badge applied">🆕 new</span>';
     else badge = '<span class="edit-badge pending">⏳ pending</span>';
 
@@ -2118,12 +2127,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _renderEditSummary(msg) {
-    if (!msg.passed && !msg.failed && !msg.skipped) return nothing;
+    if (!msg.passed && !msg.failed && !msg.skipped && !msg.not_in_context) return nothing;
     const parts = [];
     if (msg.passed) parts.push(html`<span class="stat pass">✅ ${msg.passed} applied</span>`);
     if (msg.failed) parts.push(html`<span class="stat fail">❌ ${msg.failed} failed</span>`);
     if (msg.skipped) parts.push(html`<span class="stat skip">⚠️ ${msg.skipped} skipped</span>`);
-    return html`<div class="edit-summary">${parts}</div>`;
+    if (msg.not_in_context) parts.push(html`<span class="stat skip">⚠️ ${msg.not_in_context} not in context</span>`);
+    const autoAddNote = msg.files_auto_added?.length > 0
+      ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
+          ${msg.files_auto_added.length} file${msg.files_auto_added.length > 1 ? 's were' : ' was'} added to context. Send a follow-up to retry those edits.
+        </div>`
+      : nothing;
+    return html`<div class="edit-summary">${parts}${autoAddNote}</div>`;
   }
 
   _renderMsgActions(msg) {
@@ -2258,7 +2273,6 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       <div class="message-card assistant" data-msg-index="${index}">
         ${this._renderMsgActions(msg)}
         <div class="role-label">Assistant</div>
-        ${this._renderEditSummary(msg)}
         <div class="md-content" @click=${this._onContentClick}>
           ${unsafeHTML(mentionHtml)}
         </div>
@@ -2267,6 +2281,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
             ${unsafeHTML(fileSummaryHtml)}
           </div>
         ` : nothing}
+        ${this._renderEditSummary(msg)}
         ${this._renderMsgActionsBottom(msg)}
       </div>
     `;

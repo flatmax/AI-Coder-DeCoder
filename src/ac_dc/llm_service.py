@@ -20,6 +20,7 @@ import litellm
 
 from .context import ContextManager
 from .edit_parser import (
+    EditResult,
     EditStatus,
     apply_edits_to_repo,
     detect_shell_commands,
@@ -427,7 +428,32 @@ class LLMService:
 
                 # Apply edits (skipped in review mode — read-only)
                 if self._repo and not was_cancelled and not self._review_active:
-                    edit_results = apply_edits_to_repo(blocks, str(self._repo.root))
+                    # Separate blocks by context membership
+                    selected_set = set(self._selected_files)
+                    in_context_blocks = []
+                    not_in_context_blocks = []
+
+                    for block in blocks:
+                        # Create blocks are always attempted (no existing content needed)
+                        if block.is_create:
+                            in_context_blocks.append(block)
+                        elif block.file_path in selected_set:
+                            in_context_blocks.append(block)
+                        else:
+                            not_in_context_blocks.append(block)
+
+                    # Apply in-context edits normally
+                    edit_results = apply_edits_to_repo(
+                        in_context_blocks, str(self._repo.root)
+                    ) if in_context_blocks else []
+
+                    # Mark not-in-context edits without attempting them
+                    for block in not_in_context_blocks:
+                        edit_results.append(EditResult(
+                            file_path=block.file_path,
+                            status=EditStatus.NOT_IN_CONTEXT,
+                            message="File not in active context — added for next request",
+                        ))
 
                     # Stage modified files
                     modified = []
@@ -444,10 +470,31 @@ class LLMService:
                         for path in modified:
                             self._symbol_index.invalidate_file(path)
 
+                    # Auto-add not-in-context files to selected files
+                    files_auto_added = []
+                    if not_in_context_blocks:
+                        for block in not_in_context_blocks:
+                            if block.file_path not in selected_set:
+                                self._selected_files.append(block.file_path)
+                                selected_set.add(block.file_path)
+                                files_auto_added.append(block.file_path)
+
+                        # Broadcast updated selection to browser
+                        if files_auto_added and self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "filesChanged", list(self._selected_files)
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to broadcast filesChanged: {e}")
+
                     result["files_modified"] = modified
                     result["passed"] = sum(1 for r in edit_results if r.status == EditStatus.APPLIED)
                     result["failed"] = sum(1 for r in edit_results if r.status == EditStatus.FAILED)
                     result["skipped"] = sum(1 for r in edit_results if r.status == EditStatus.SKIPPED)
+                    result["not_in_context"] = sum(1 for r in edit_results if r.status == EditStatus.NOT_IN_CONTEXT)
+                    if files_auto_added:
+                        result["files_auto_added"] = files_auto_added
                     result["edit_results"] = [
                         {
                             "file": r.file_path,

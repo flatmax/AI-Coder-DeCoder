@@ -56,6 +56,10 @@ Files mentioned in assistant responses toggle selection via `file-mention-click`
 2. If already selected: file removed from selected files set, picker checkbox unchecked
 3. In both cases: file opened in diff viewer
 
+## Auto-Add from Not-In-Context Edits
+
+When the LLM attempts to edit files that aren't in the active context, those files are automatically added to the selected files list (see [Edit Protocol — Not-In-Context Edit Handling](../3-llm-engine/edit_protocol.md#not-in-context-edit-handling)). The file picker receives the updated selection via the standard `filesChanged` broadcast and updates checkboxes accordingly. Parent directories of auto-added files are auto-expanded to make the new selections visible.
+
 ## Middle-Click Path Insertion
 
 Middle-click on any row inserts the path into chat input at cursor position (space-padded before and after). The browser's selection-buffer paste is suppressed via a flag on the chat panel to prevent duplicate content.

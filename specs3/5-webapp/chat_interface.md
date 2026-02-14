@@ -79,7 +79,7 @@ Coalesced per animation frame. Each chunk carries full accumulated content. Firs
 
 During streaming: edit blocks detected mid-stream render as `edit-pending` with a pending badge and partial diff. On completion:
 - File path (clickable → navigates to diff viewer with `searchText` from the edit block's old/new lines)
-- Status badge: ✅ Applied (green), ❌ Failed: reason (red), ⚠️ Skipped (orange), ☑ Validated (blue), 🆕 New (green, for file creates), ⏳ Pending (grey)
+- Status badge: ✅ Applied (green), ❌ Failed: reason (red), ⚠️ Skipped (orange), ☑ Validated (blue), 🆕 New (green, for file creates), ⏳ Pending (grey), ⚠️ Not in context — file added (amber, for not-in-context edits)
 - Two-level diff highlighting (see below)
 - Error message below header (for failed edits only)
 
@@ -127,7 +127,7 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 
 ### Edit Summary
 
-Banner after all edits: counts of applied/failed/skipped with color-coded stat badges (green/red/orange). Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
+Banner **after** all edit blocks (at the end of the assistant message, not the top): counts of applied/failed/skipped/not-in-context with color-coded stat badges (green/red/orange/amber). When not-in-context edits are present, the banner includes a prompt: "N files were added to context. Send a follow-up to retry those edits." Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
 
 ### Dependencies
 

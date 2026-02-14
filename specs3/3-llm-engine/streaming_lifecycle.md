@@ -38,6 +38,10 @@ Background task: _stream_chat
     ├─ Save symbol map to .ac-dc/
     ├─ Print terminal HUD
     ├─ Parse & apply edit blocks (→ edit_protocol.md; skipped in review mode)
+    │       ├─ Separate: in-context vs not-in-context files
+    │       ├─ Apply in-context edits normally
+    │       ├─ Mark not-in-context edits as NOT_IN_CONTEXT
+    │       └─ Auto-add not-in-context files to selected files, broadcast
     ├─ Persist assistant message
     ├─ Update cache stability (→ cache_tiering.md)
     │
@@ -110,6 +114,7 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 | `passed/failed/skipped` | Edit application results |
 | `files_modified` | Paths of changed files |
 | `edit_results` | Detailed per-edit results |
+| `files_auto_added` | Files added to context for not-in-context edits |
 | `cancelled` | Present if cancelled |
 | `error` | Present if fatal error |
 | `binary_files` | Rejected binary files |
@@ -122,9 +127,10 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 3. Handle errors — auto-deselect binary/invalid files
 4. Finalize message — attach edit results
 5. Refresh file tree if edits applied
-6. Run file mention detection on assistant message
-7. Show token usage HUD
-8. Focus input for next message
+6. Handle auto-added files — update file picker selection for files added due to not-in-context edits
+7. Run file mention detection on assistant message
+8. Show token usage HUD
+9. Focus input for next message
 
 ## Post-Response Processing
 
@@ -236,3 +242,11 @@ Session total: 182,756
 - Selected non-graduated file excluded from symbol blocks
 - Graduated selected file gets file content, not symbol block
 - Unselected file without cached content gets symbol block only
+
+### Not-In-Context Edit Handling
+- Edit blocks for unselected files get NOT_IN_CONTEXT status without application attempt
+- In-context edits in the same response are applied normally
+- Create blocks bypass the context check (always attempted)
+- Auto-added files broadcast via filesChanged callback
+- files_auto_added in streamComplete lists paths that were auto-added
+- Review mode skips all edit application (existing behavior unchanged)

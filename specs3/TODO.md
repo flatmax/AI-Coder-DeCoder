@@ -149,6 +149,11 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
 - [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
+### Phase 9.5: Edit Robustness
+- [ ] **Not-in-context edit detection** — Separate edit blocks by context membership, mark NOT_IN_CONTEXT status, auto-add files to selection, broadcast via filesChanged
+- [ ] **Edit summary with auto-add prompt** — Amber badge for not-in-context edits, banner message prompting user to retry
+- [ ] **Create block exemption** — Create blocks (empty EDIT section) bypass context check since they don't need existing file content
+
 ### Phase 10: Code Review ✅
 - [x] **Repo review methods** — `checkout_review_parent`, `setup_review_soft_reset`, `exit_review_mode`, `get_commit_graph`, `get_commit_log`, `get_commit_parent`, `is_clean`, `resolve_ref`, `get_review_changed_files`, `get_review_file_diff`
 - [x] **Review mode state** — LLM service review state fields, `start_review`/`end_review`/`get_review_state`/`check_review_ready`, `symbol_map_before` capture, system prompt swap (`review.md` ↔ `system.md`)
