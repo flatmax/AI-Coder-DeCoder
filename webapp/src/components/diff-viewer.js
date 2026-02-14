@@ -80,71 +80,39 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       overflow: hidden;
     }
 
-    /* File status bar */
-    .file-status-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 4px 12px;
-      background: var(--bg-tertiary);
-      border-bottom: 1px solid var(--border-primary);
-      min-height: 28px;
-      font-size: 0.78rem;
-      flex-shrink: 0;
-    }
-    .file-status-path {
-      font-family: var(--font-mono);
-      color: var(--text-secondary);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .file-status-spacer { flex: 1; }
-    .file-status-badge {
-      font-size: 0.65rem;
-      font-weight: 700;
-      padding: 1px 6px;
-      border-radius: 3px;
-      line-height: 1.5;
-    }
-    .file-status-badge.new {
-      color: var(--accent-green);
-      background: rgba(126, 231, 135, 0.15);
-    }
-    .file-status-badge.mod {
-      color: var(--accent-orange, #f0883e);
-      background: rgba(240, 136, 62, 0.15);
-    }
-    .dirty-indicator {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      color: var(--accent-orange, #f0883e);
-      font-size: 0.72rem;
-      animation: dirty-pulse 2s ease-in-out infinite;
-    }
-    .dirty-dot {
-      width: 8px;
-      height: 8px;
+    /* Status LED — floating top-right indicator */
+    .status-led {
+      position: absolute;
+      top: 8px;
+      right: 16px;
+      z-index: 10;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
-      background: var(--accent-orange, #f0883e);
-      box-shadow: 0 0 6px rgba(240, 136, 62, 0.5);
-    }
-    @keyframes dirty-pulse {
-      0%, 100% { opacity: 0.7; }
-      50% { opacity: 1; }
-    }
-    .file-status-save {
-      background: none;
-      border: 1px solid var(--accent-primary);
-      color: var(--accent-primary);
-      font-size: 0.7rem;
-      padding: 1px 8px;
-      border-radius: var(--radius-sm);
       cursor: pointer;
+      transition: box-shadow 0.3s, background 0.3s;
+      border: none;
+      padding: 0;
     }
-    .file-status-save:hover {
-      background: rgba(79, 195, 247, 0.15);
+    .status-led.dirty {
+      background: var(--accent-orange, #f0883e);
+      box-shadow: 0 0 6px 2px rgba(240, 136, 62, 0.6);
+      animation: led-pulse 2s ease-in-out infinite;
+    }
+    .status-led.clean {
+      background: var(--accent-green);
+      box-shadow: 0 0 4px 1px rgba(126, 231, 135, 0.4);
+    }
+    .status-led.new-file {
+      background: var(--accent-primary);
+      box-shadow: 0 0 4px 1px rgba(79, 195, 247, 0.4);
+    }
+    .status-led:hover {
+      transform: scale(1.4);
+    }
+    @keyframes led-pulse {
+      0%, 100% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(240, 136, 62, 0.4); }
+      50% { opacity: 1; box-shadow: 0 0 10px 3px rgba(240, 136, 62, 0.8); }
     }
 
     /* Editor container */
@@ -868,23 +836,14 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const hasDiff = file ? (file.is_new || file.original !== file.savedContent) : false;
 
     return html`
-      ${file ? html`
-        <div class="file-status-bar">
-          <span class="file-status-path" title="${file.path}">${file.path}</span>
-          ${file.is_new ? html`<span class="file-status-badge new">NEW</span>` : nothing}
-          ${hasDiff && !file.is_new ? html`<span class="file-status-badge mod">MOD</span>` : nothing}
-          <span class="file-status-spacer"></span>
-          ${isDirty ? html`
-            <span class="dirty-indicator">
-              <span class="dirty-dot"></span>
-              unsaved
-            </span>
-            <button class="file-status-save" @click=${() => this._saveActiveFile()} title="Save (Ctrl+S)">💾 Save</button>
-          ` : nothing}
-        </div>
-      ` : nothing}
-
       <div class="editor-container">
+        ${file ? html`
+          <button
+            class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
+            title="${file.path}${isDirty ? ' — unsaved (Ctrl+S to save)' : file.is_new ? ' — new file' : ''}"
+            @click=${() => isDirty ? this._saveActiveFile() : null}
+          ></button>
+        ` : nothing}
         ${!hasFiles ? html`
           <div class="empty-state">
             <div class="watermark">AC⚡DC</div>
