@@ -445,7 +445,7 @@ export class AcDialog extends RpcMixin(LitElement) {
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onReviewClick()}>
-            📋
+            👁️
           </button>
           <button class="header-action" title="Minimize (Alt+M)"
             @mousedown=${(e) => e.stopPropagation()}
