@@ -308,10 +308,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       transition: border-color 0.2s, box-shadow 0.2s;
       content-visibility: auto;
       contain-intrinsic-size: auto 120px;
+      contain: layout style paint;
+    }
+
+    .message-card.user {
+      contain-intrinsic-size: auto 80px;
+    }
+
+    .message-card.assistant {
+      contain-intrinsic-size: auto 200px;
     }
 
     .message-card.force-visible {
       content-visibility: visible;
+      contain: none;
     }
 
     .message-card.user {
@@ -2340,7 +2350,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ${this.messages.map((msg, i) => this._renderMessage(msg, i))}
 
           ${this._streamingContent ? html`
-            <div class="message-card assistant">
+            <div class="message-card assistant force-visible">
               <div class="role-label">
                 Assistant <span class="streaming-indicator"></span>
               </div>

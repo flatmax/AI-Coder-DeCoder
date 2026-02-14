@@ -144,7 +144,7 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Build pipeline** — Production bundling, versioned deployment, CI
 - [ ] **Hosted deployment** — GitHub Pages with version registry
 - [ ] **State persistence** — Local storage for UI preferences
-- [ ] **Content-visibility optimization** — CSS containment for off-screen messages
+- [x] **Content-visibility optimization** — CSS containment for off-screen messages
 - [x] **Duplicate streamChunk cleanup** — Only one streamChunk method in app-shell.js
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
 - [ ] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
