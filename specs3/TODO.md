@@ -136,6 +136,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Speech to text** — Auto-transcribe toggle using Web Speech API
 
 ### Phase 9: Polish (partial)
+- [x] **Version-aware config upgrades** — Managed files overwritten on upgrade with backup, user files preserved, `.bundled_version` tracking, sensible default `llm.json`
 - [x] **Bedrock token usage** — Streaming usage capture for all providers
 - [x] **Terminal HUD** — Cache blocks report, token usage, tier changes
 - [x] **Server→browser callback wiring** — `AcApp.method` format for jrpc-oo class-prefixed calls, main event loop for async callbacks

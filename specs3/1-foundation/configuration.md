@@ -74,9 +74,37 @@ Config directory relative to the application source.
 ### Packaged Builds
 
 1. Bundled configs embedded in the executable
-2. On first run, copied to persistent user directory (platform-specific: `~/.config/app/`, `%APPDATA%/app/`, etc.)
-3. Subsequent runs: only new files from updates are copied (existing files not overwritten)
-4. All reads go to user directory so edits persist
+2. On first run, copied to persistent user directory (platform-specific: `~/.config/ac-dc/`, `%APPDATA%/ac-dc/`, `~/Library/Application Support/ac-dc/`)
+3. A `.bundled_version` marker tracks which release populated the directory
+4. On upgrade (version mismatch), managed files are overwritten with backup; user files are never touched
+5. All reads go to user directory so edits persist
+
+### Config File Categories
+
+| Category | Files | Upgrade Behavior |
+|----------|-------|-----------------|
+| **Managed** | `system.md`, `compaction.md`, `review.md`, `app.json`, `snippets.json`, `review-snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
+| **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
+
+### Version-Aware Upgrade
+
+On each packaged startup:
+1. Read bundled version from `VERSION` file in the executable
+2. Read installed version from `.bundled_version` marker in user config directory
+3. If versions match → no config changes (fast startup)
+4. If versions differ (upgrade or first install):
+   - **New files** (not yet in user dir) → copied from bundle
+   - **Managed files** (already exist) → old file backed up, then overwritten
+   - **User files** (already exist) → never touched
+   - `.bundled_version` marker updated to current version
+
+### Backup Naming
+
+When managed files are overwritten during upgrade, the previous version is saved:
+- With known version: `system.md.2025.06.15-14.32-a1b2c3d4`
+- Without version marker (pre-tracking installs): `system.md.2025.06.15-14.32` (UTC timestamp)
+
+Users who customized managed files directly (instead of using `system_extra.md`) can diff backups to recover their changes.
 
 ## Loading and Caching
 
@@ -111,6 +139,11 @@ Only these types are accepted — arbitrary file paths are rejected.
 - Cache target tokens computed from defaults (1024 × 1.5 = 1536)
 - Snippets fallback returns non-empty list
 - System prompt assembly returns non-empty string
+- Managed files overwritten on version mismatch; user files preserved
+- Backup created before overwriting managed files
+- `.bundled_version` marker written after upgrade
+- First install copies all files and writes version marker
+- Same-version restart does not modify any files
 
 ### RPC Methods
 
