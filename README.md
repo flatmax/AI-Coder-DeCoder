@@ -4,7 +4,7 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
 
-https://github.com/user-attachments/assets/ece86b13-1d6f-4b1e-a029-f358c50ff858
+https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 
 ## Features
 
