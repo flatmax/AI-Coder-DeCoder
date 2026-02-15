@@ -4,6 +4,8 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
 
+https://github.com/user-attachments/assets/ece86b13-1d6f-4b1e-a029-f358c50ff858
+
 ## Features
 
 - **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
@@ -40,6 +42,8 @@ This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider)
 6. **Iterate** — File context and cache tiers evolve as you work.
 
 ### Code Review
+
+https://github.com/user-attachments/assets/0e853df6-2d84-4c58-8ea8-95251c4e6822
 
 1. Click the review button in the header bar.
 2. Select a commit in the git graph to set the review base.
