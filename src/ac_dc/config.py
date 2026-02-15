@@ -12,7 +12,27 @@ import logging
 import os
 import platform
 import shutil
+import time
 from pathlib import Path
+
+# Files managed by AC⚡DC that are safe to overwrite on upgrade.
+# These contain default prompts/settings — users customize via system_extra.md
+# or repo-local .ac-dc/ overrides instead.
+_MANAGED_FILES = {
+    "system.md",
+    "compaction.md",
+    "review.md",
+    "app.json",
+    "snippets.json",
+    "review-snippets.json",
+}
+
+# Files that users are expected to edit — never overwritten automatically.
+# These are only copied on first install when they don't exist.
+_USER_FILES = {
+    "llm.json",
+    "system_extra.md",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -74,26 +94,89 @@ class ConfigManager:
         self._app_config = self._load_app_config()
 
     def _resolve_config_dir(self):
-        """Resolve config directory based on running mode."""
+        """Resolve config directory based on running mode.
+
+        For packaged builds, uses a platform-specific user config directory
+        (e.g. ~/.config/ac-dc/) with version-aware file management:
+
+        - Managed files (prompts, default settings) are overwritten on upgrade
+        - User files (llm.json, system_extra.md) are only created if missing
+        - A .bundled_version marker tracks which release populated the directory
+        """
         if _is_packaged():
             user_dir = _get_user_config_dir()
             bundled_dir = _get_bundled_config_dir()
-            if not user_dir.exists():
-                user_dir.mkdir(parents=True, exist_ok=True)
-                if bundled_dir and bundled_dir.exists():
-                    for f in bundled_dir.iterdir():
-                        dest = user_dir / f.name
-                        if not dest.exists():
-                            shutil.copy2(f, dest)
-            else:
-                # Copy only new files from updates
-                if bundled_dir and bundled_dir.exists():
-                    for f in bundled_dir.iterdir():
-                        dest = user_dir / f.name
-                        if not dest.exists():
-                            shutil.copy2(f, dest)
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+            bundled_version = self._get_bundled_version()
+            installed_version = self._get_installed_version(user_dir)
+            is_upgrade = (bundled_version != installed_version)
+
+            if bundled_dir and bundled_dir.exists():
+                for f in bundled_dir.iterdir():
+                    if f.name.startswith('.'):
+                        continue
+                    dest = user_dir / f.name
+
+                    if not dest.exists():
+                        # New file — always copy
+                        shutil.copy2(f, dest)
+                        logger.info(f"Config: created {f.name}")
+                    elif is_upgrade and f.name in _MANAGED_FILES:
+                        # Managed file + version changed — backup old, then overwrite
+                        fallback_stamp = time.strftime("%Y.%m.%d-%H.%M", time.gmtime())
+                        backup_name = f"{f.name}.{installed_version or fallback_stamp}"
+                        backup_path = user_dir / backup_name
+                        try:
+                            shutil.copy2(dest, backup_path)
+                            logger.info(f"Config: backed up {f.name} → {backup_name}")
+                        except OSError as e:
+                            logger.warning(f"Config: failed to backup {f.name}: {e}")
+                        shutil.copy2(f, dest)
+                        logger.info(f"Config: updated {f.name} (upgrade {installed_version} → {bundled_version})")
+                    # User files with existing content are never overwritten
+
+            if is_upgrade and bundled_version:
+                self._set_installed_version(user_dir, bundled_version)
+                if installed_version:
+                    logger.info(f"Config upgraded: {installed_version} → {bundled_version}")
+                else:
+                    logger.info(f"Config initialized: {bundled_version}")
+
             return user_dir
         return _CONFIG_DIR
+
+    @staticmethod
+    def _get_bundled_version():
+        """Read version from the baked VERSION file in the bundle."""
+        if _is_packaged():
+            version_file = Path(os.sys._MEIPASS) / "ac_dc" / "VERSION"
+            if version_file.exists():
+                try:
+                    return version_file.read_text().strip()
+                except OSError:
+                    pass
+        return None
+
+    @staticmethod
+    def _get_installed_version(user_dir):
+        """Read the version marker from the user config directory."""
+        marker = user_dir / ".bundled_version"
+        if marker.exists():
+            try:
+                return marker.read_text().strip()
+            except OSError:
+                pass
+        return None
+
+    @staticmethod
+    def _set_installed_version(user_dir, version):
+        """Write the version marker to the user config directory."""
+        marker = user_dir / ".bundled_version"
+        try:
+            marker.write_text(version + "\n")
+        except OSError as e:
+            logger.warning(f"Failed to write version marker: {e}")
 
     def _init_ac_dc_dir(self):
         """Create .ac-dc/ directory and add to .gitignore."""
