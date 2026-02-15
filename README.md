@@ -6,20 +6,21 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 
 ## Features
 
-- Chat with any LLM supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
-- Tree-sitter powered symbol index across Python, JavaScript/TypeScript, and C/C++.
-- Compact symbol map with cross-file references, path aliases, and test collapsing.
-- Four-tier prompt cache (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
-- Structured edit blocks with anchor-based matching, validation, and automatic git staging.
-- Side-by-side Monaco diff editor with LSP features (hover, go-to-definition, references, completions).
-- File picker with git status badges, diff stats, context menu, and keyboard navigation.
-- URL detection, fetching, summarization, and caching — including GitHub repo symbol map generation.
-- History compaction with LLM-powered topic boundary detection.
-- Image paste support with persistent storage and session reload.
-- Code review mode via git soft reset with structural diff analysis.
-- Voice dictation via Web Speech API.
-- Token HUD with per-request and session-total usage reporting.
-- Configurable prompt snippets for common actions.
+- **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
+- **Structured code edits** with anchor-based matching, validation, and automatic git staging.
+- **Side-by-side diff viewer** — Monaco editor with hover, go-to-definition, references, and completions.
+- **File picker** with git status badges, diff stats, context menu, and keyboard navigation.
+- **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
+- **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
+- **Image paste support** — drop screenshots into chat with persistent storage across sessions.
+- **Voice dictation** via Web Speech API.
+- **Configurable prompt snippets** for common actions.
+- **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
+- **Session history browser** — search, revisit, and reload past conversations.
+- **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
+- **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
+- **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
+- **Token HUD** with per-request and session-total usage reporting.
 
 ## Philosophy
 
