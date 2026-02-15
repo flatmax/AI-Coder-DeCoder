@@ -167,6 +167,9 @@ class LLMService:
         # URL service
         self._url_service = self._init_url_service()
 
+        # Auto-restore last session into context
+        self._restore_last_session()
+
         # Session totals
         self._session_totals = {
             "input_tokens": 0,
@@ -191,6 +194,32 @@ class LLMService:
     @staticmethod
     def _new_session_id():
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+
+    def _restore_last_session(self):
+        """Restore the most recent session into context on startup.
+
+        Loads messages from the persistent history store so the chat
+        resumes where the user left off after a server restart.
+        """
+        if not self._history_store:
+            return
+        try:
+            sessions = self._history_store.list_sessions(limit=1)
+            if not sessions:
+                return
+            last_session = sessions[0]
+            session_id = last_session.get("session_id")
+            if not session_id:
+                return
+            msgs = self._history_store.get_session_messages_for_context(session_id)
+            if not msgs:
+                return
+            for msg in msgs:
+                self._context.add_message(msg["role"], msg["content"])
+            self._session_id = session_id
+            logger.info(f"Restored session {session_id} with {len(msgs)} messages")
+        except Exception as e:
+            logger.warning(f"Failed to restore last session: {e}")
 
     # === State Management (RPC) ===
 

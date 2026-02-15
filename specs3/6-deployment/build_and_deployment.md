@@ -142,6 +142,15 @@ Platforms: Linux, Windows, macOS (ARM).
    **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime.
 4. Create GitHub Release with all platform binaries attached
 
+## Config Lifecycle in Packaged Builds
+
+The bundled `config/` directory contains sensible defaults:
+- `llm.json` — defaults to `anthropic/claude-sonnet-4-20250514` with empty env (no provider-specific settings)
+- `system.md`, `compaction.md`, `review.md` — current prompts
+- `app.json`, `snippets.json`, `review-snippets.json` — default application settings
+
+On first run, all configs are copied to the user config directory. On subsequent releases, managed files (prompts, default settings) are overwritten with backups; user files (`llm.json`, `system_extra.md`) are preserved. See [Configuration — Packaged Builds](../1-foundation/configuration.md#packaged-builds) for details.
+
 ## Security
 
 | Area | Policy |

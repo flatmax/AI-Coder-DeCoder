@@ -190,11 +190,11 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    this.activeTab = this._loadPref('ac-dc-active-tab', 'files');
+    this.activeTab = 'files';
     this.minimized = this._loadBoolPref('ac-dc-minimized', false);
     this._historyPercent = 0;
     this._reviewActive = false;
-    this._visitedTabs = new Set(['files', this.activeTab]);
+    this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
   }
@@ -216,6 +216,11 @@ export class AcDialog extends RpcMixin(LitElement) {
   onRpcReady() {
     this._refreshHistoryBar();
     this._refreshReviewState();
+    // Restore last-used tab now that RPC is connected and tabs can load data
+    const savedTab = this._loadPref('ac-dc-active-tab', 'files');
+    if (savedTab !== this.activeTab) {
+      this._switchTab(savedTab);
+    }
     // Listen for events that should refresh the history bar and review state
     // (listeners added once; onRpcReady may fire on reconnect)
     if (!this._dialogEventsRegistered) {
