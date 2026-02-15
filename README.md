@@ -1,5 +1,5 @@
 # AC⚡DC — AI-assisted Code editing tool, De-Coder
-
+ 
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
