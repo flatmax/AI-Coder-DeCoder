@@ -1,1185 +1,1608 @@
-"""LLM service — orchestrates context, streaming, and edit application."""
+"""LLM service — streaming handler, state management, and RPC interface.
+
+Manages the full lifecycle of LLM interactions:
+- Streaming chat with chunk delivery
+- Cancellation support
+- Edit block parsing and application
+- Commit message generation
+- Session and file selection state
+"""
 
 import asyncio
-import concurrent.futures
+import hashlib
 import logging
-import re
-import threading
 import time
 import traceback
 import uuid
-from pathlib import Path
-from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor
 
-from .config import ConfigManager
-from .context import ContextManager, COMMIT_MSG_SYSTEM
-from .edit_parser import parse_edit_blocks, apply_edits_to_repo, EditStatus
+import litellm
+
+from .context import ContextManager
+from .edit_parser import (
+    EditResult,
+    EditStatus,
+    apply_edits_to_repo,
+    detect_shell_commands,
+    parse_edit_blocks,
+)
 from .history_store import HistoryStore
-from .repo import Repo
-from .stability_tracker import Tier, ItemType, _hash_content
+from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier
 from .token_counter import TokenCounter
+from .url_cache import URLCache
 from .url_handler import URLService
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# Thread pool for blocking LLM calls
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm")
+# Commit message system prompt
+COMMIT_PROMPT = (
+    "You are an expert software engineer. Generate a git commit message for the "
+    "following diff. Use conventional commit style with a type prefix (feat, fix, "
+    "refactor, docs, test, chore, etc.). Use imperative mood. Subject line max 50 "
+    "characters, body wrap at 72 characters. Output ONLY the commit message, no "
+    "commentary or explanation."
+)
 
-
-def _init_symbol_index(repo_root: Path):
-    """Initialize symbol index, returning None if tree-sitter unavailable."""
-    try:
-        from .symbol_index import SymbolIndex
-        idx = SymbolIndex(repo_root)
-        if idx.available:
-            return idx
-        log.warning("Tree-sitter not available — symbol index disabled")
-    except Exception as e:
-        log.warning("Symbol index init failed: %s", e)
-    return None
-
-
-def _detect_shell_commands(text: str) -> list[str]:
-    """Extract shell command suggestions from LLM response."""
-    commands = []
-    # Match: ```bash/sh/shell blocks
-    for m in re.finditer(r"```(?:bash|sh|shell)\n(.*?)```", text, re.DOTALL):
-        for line in m.group(1).strip().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                commands.append(line)
-    # Match: $ command or > command at line start
-    for m in re.finditer(r"^[>$]\s+(.+)$", text, re.MULTILINE):
-        cmd = m.group(1).strip()
-        if cmd:
-            commands.append(cmd)
-    return commands
+# System reminder for edit format reinforcement (code constant, not loaded from file)
+SYSTEM_REMINDER = (
+    "Remember: use the edit block format exactly as specified. "
+    "path/to/file.ext\\n"
+    "\\u00ab\\u00ab\\u00ab EDIT\\n"
+    "[old text]\\n"
+    "\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550 REPL\\n"
+    "[new text]\\n"
+    "\\u00bb\\u00bb\\u00bb EDIT END"
+)
 
 
-class LLM:
-    """LLM service exposed via RPC.
+def _extract_token_usage(response_or_chunk):
+    """Extract token usage from LLM response, handling multiple provider formats.
 
-    All public methods become remotely callable as LLM.<method_name>.
+    Uses dual-mode getter (attribute + key access) with fallback chains.
+    """
+    usage = {}
+
+    def _get(obj, *keys):
+        """Try multiple keys with both attribute and dict access."""
+        for key in keys:
+            # Attribute access
+            val = getattr(obj, key, None)
+            if val is not None:
+                return val
+            # Dict access
+            if isinstance(obj, dict):
+                val = obj.get(key)
+                if val is not None:
+                    return val
+        return None
+
+    # Try to find usage data
+    usage_obj = _get(response_or_chunk, "usage")
+    if usage_obj is None:
+        return usage
+
+    # Input tokens
+    input_tokens = _get(usage_obj, "prompt_tokens", "input_tokens")
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+
+    # Output tokens
+    output_tokens = _get(usage_obj, "completion_tokens", "output_tokens")
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+
+    # Cache read tokens — provider-specific fallback chain
+    cache_read = _get(usage_obj, "cache_read_input_tokens", "cache_read_tokens")
+    if cache_read is None:
+        # Bedrock/OpenAI nested format
+        details = _get(usage_obj, "prompt_tokens_details")
+        if details:
+            cache_read = _get(details, "cached_tokens")
+    if cache_read is not None:
+        usage["cache_read_tokens"] = cache_read
+
+    # Cache write tokens
+    cache_write = _get(usage_obj, "cache_creation_input_tokens", "cache_creation_tokens")
+    if cache_write is not None:
+        usage["cache_write_tokens"] = cache_write
+
+    return usage
+
+
+class LLMService:
+    """RPC service for LLM interactions.
+
+    Public methods are exposed as LLM.method_name RPC endpoints.
     """
 
-    def __init__(self, config: ConfigManager, repo: Repo):
-        self._config = config
+    def __init__(self, config_manager, repo=None, symbol_index=None,
+                 chunk_callback=None, event_callback=None):
+        """Initialize LLM service.
+
+        Args:
+            config_manager: ConfigManager instance
+            repo: Repo instance (optional)
+            symbol_index: SymbolIndex instance (optional)
+            chunk_callback: async fn(request_id, content) for streaming chunks
+            event_callback: async fn(event_name, data) for lifecycle events
+        """
+        self._config = config_manager
         self._repo = repo
-        self._model = config.get_llm_config().get("model", "")
-        self._smaller_model = config.get_llm_config().get("smaller_model", "")
-        self._counter = TokenCounter(self._model)
+        self._symbol_index = symbol_index
+        self._chunk_callback = chunk_callback
+        self._event_callback = event_callback
 
         # Context manager
-        compaction_config = config.get_app_config().get("history_compaction", {})
         self._context = ContextManager(
-            model_name=self._model,
-            repo_root=repo.root,
-            cache_target_tokens=config.cache_target_tokens,
-            compaction_config=compaction_config,
+            model_name=config_manager.model,
+            repo_root=str(repo.root) if repo else None,
+            cache_target_tokens=config_manager.cache_target_tokens,
+            compaction_config=config_manager.compaction_config,
+            system_prompt=config_manager.get_system_prompt(),
         )
 
-        # Initialize compactor with detection model
-        skill_prompt = config.get_compaction_prompt()
-        if self._smaller_model and skill_prompt and compaction_config.get("enabled", True):
-            self._context.init_compactor(self._smaller_model, skill_prompt)
+        # History store (persistent)
+        self._history_store = None
+        if repo:
+            try:
+                self._history_store = HistoryStore(str(repo.root))
+            except Exception as e:
+                logger.warning(f"Failed to initialize history store: {e}")
 
-        # History store (persistent JSONL)
-        self._history_store = HistoryStore(config.ac_dc_dir)
+        # State
+        self._selected_files = []
+        self._streaming_active = False
+        self._current_request_id = None
+        self._cancelled_requests = set()
+        self._session_id = self._new_session_id()
+        self._executor = ThreadPoolExecutor(max_workers=2)
+
+        # Stability tracker
+        self._stability_tracker = StabilityTracker(
+            cache_target_tokens=config_manager.cache_target_tokens,
+        )
+        self._context.set_stability_tracker(self._stability_tracker)
+        self._stability_initialized = False
 
         # URL service
-        url_config = config.get_app_config().get("url_cache", {})
-        self._url_service = URLService(url_config, self._smaller_model)
+        self._url_service = self._init_url_service()
 
-        # Session state (must be before symbol index build, which uses _selected_files)
-        self._session_id = self._new_session_id()
-        self._selected_files: list[str] = []
-        self._streaming_active = False
-
-        # Symbol index
-        self._symbol_index = _init_symbol_index(repo.root)
-        if self._symbol_index:
-            self._build_symbol_index()
-            self._init_stability()
-        self._active_request_id: Optional[str] = None
-        self._cancelled: set[str] = set()  # Thread-safe via GIL for simple set ops
-
-        # Session token totals
+        # Session totals
         self._session_totals = {
-            "prompt": 0, "completion": 0, "total": 0,
-            "cache_hit": 0, "cache_write": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
         }
 
-    def _new_session_id(self) -> str:
+        # Review mode state
+        self._review_active = False
+        self._saved_system_prompt = None  # original system prompt, saved during review
+        self._review_branch = None
+        self._review_branch_tip = None
+        self._review_base_commit = None
+        self._review_parent = None
+        self._review_original_branch = None
+        self._review_commits = []
+        self._review_changed_files = []
+        self._review_stats = {}
+        self._symbol_map_before = None
+
+    @staticmethod
+    def _new_session_id():
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
 
-    # ------------------------------------------------------------------
-    # State management
-    # ------------------------------------------------------------------
+    # === State Management (RPC) ===
 
-    def get_current_state(self) -> dict:
-        """Return current session state for client reconnection."""
+    def get_current_state(self):
+        """Return current session state."""
         return {
             "messages": self._context.get_history(),
             "selected_files": list(self._selected_files),
             "streaming_active": self._streaming_active,
             "session_id": self._session_id,
+            "repo_name": self._repo.root.name if self._repo else None,
         }
 
-    def set_selected_files(self, files: list[str]) -> dict:
-        """Update selected files list."""
+    def set_selected_files(self, files):
+        """Update selected file list. Returns copy."""
         self._selected_files = list(files)
-        return {"ok": True, "selected_files": self._selected_files}
-
-    def get_selected_files(self) -> list[str]:
         return list(self._selected_files)
 
-    @property
-    def call(self):
-        """Get the jrpc-oo call proxy for calling browser-side methods.
-        Returns None if no client is connected."""
-        try:
-            result = self.get_call()
-            return result
-        except Exception as e:
-            log.debug("get_call() failed: %s", e)
-            return None
+    def get_selected_files(self):
+        """Return independent copy of selected files."""
+        return list(self._selected_files)
 
-    # ------------------------------------------------------------------
-    # Chat streaming
-    # ------------------------------------------------------------------
+    def new_session(self):
+        """Start a new session — clears history and generates new session ID."""
+        self._context.clear_history()
+        self._session_id = self._new_session_id()
+        # Don't reset stability_initialized — symbol tiers persist across sessions
+        # Only history items are purged (done by clear_history -> purge_history_items)
+        return {"session_id": self._session_id}
 
-    def chat_streaming(self, request_id: str, message: str,
-                       files: list[str] = None, images: list[str] = None) -> dict:
-        """Start a streaming chat request."""
+    # === Streaming Chat (RPC) ===
+
+    async def chat_streaming(self, request_id, message, files=None, images=None):
+        """Start a streaming LLM chat.
+
+        Args:
+            request_id: unique request ID for callback correlation
+            message: user message text
+            files: list of file paths to include
+            images: list of base64 image data URIs
+
+        Returns:
+            {status: "started"} immediately; results via streamComplete callback
+        """
         if self._streaming_active:
-            return {"error": "A stream is already active"}
+            return {"error": "Another stream is active"}
 
         self._streaming_active = True
-        self._active_request_id = request_id
+        self._current_request_id = request_id
 
-        # Launch background task
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.create_task(self._stream_chat(request_id, message, files or [], images or []))
+        # Store the main event loop so callbacks can schedule on it
+        self._main_loop = asyncio.get_event_loop()
+
+        # Launch background task on the main event loop (not a nested one)
+        asyncio.ensure_future(
+            self._stream_chat(request_id, message, files or [], images or [])
+        )
 
         return {"status": "started"}
 
-    def cancel_streaming(self, request_id: str) -> dict:
-        """Cancel an active streaming request."""
-        if self._active_request_id == request_id:
-            self._cancelled.add(request_id)
-            return {"ok": True}
-        return {"error": "No matching active stream"}
+    async def _stream_chat(self, request_id, message, files, images):
+        """Background streaming task.
 
-    async def _stream_chat(self, request_id: str, message: str,
-                           files: list[str], images: list[str]):
-        """Background task: assemble prompt, stream LLM, apply edits."""
-        result = {
-            "response": "",
-            "token_usage": {},
-            "edit_blocks": [],
-            "shell_commands": [],
-            "passed": [],
-            "failed": [],
-            "skipped": [],
-            "files_modified": [],
-            "edit_results": [],
-            "binary_files": [],
-            "invalid_files": [],
-        }
+        Validates files, assembles prompt, streams response, parses edits.
+        """
+        result = {}
+        full_content = ""
 
         try:
-            # -- Validate files --
-            valid_files: list[str] = []
-            for fpath in files:
-                if self._repo.is_binary_file(fpath):
-                    result["binary_files"].append(fpath)
-                elif not self._repo.file_exists(fpath):
-                    result["invalid_files"].append(fpath)
-                else:
-                    valid_files.append(fpath)
+            # Validate and load files
+            binary_files = []
+            invalid_files = []
 
-            if result["binary_files"] or result["invalid_files"]:
-                err_parts = []
-                if result["binary_files"]:
-                    err_parts.append(f"Binary files rejected: {', '.join(result['binary_files'])}")
-                if result["invalid_files"]:
-                    err_parts.append(f"Files not found: {', '.join(result['invalid_files'])}")
-                result["error"] = "; ".join(err_parts)
+            # Remove files from context that are no longer selected
+            current_context_files = set(self._context.file_context.get_files())
+            selected_set = set(files)
+            for path in current_context_files - selected_set:
+                self._context.file_context.remove_file(path)
 
-            # -- Load files into context --
-            self._context.file_context.clear()
-            for fpath in valid_files:
-                self._context.file_context.add_file(fpath)
+            for path in files:
+                if self._repo and self._repo.is_binary_file(path):
+                    binary_files.append(path)
+                    continue
+                if self._repo and not self._repo.file_exists(path):
+                    invalid_files.append(path)
+                    continue
+                self._context.file_context.add_file(path)
 
-            # -- Rebuild symbol index before request --
-            if self._symbol_index:
-                try:
-                    self._symbol_index.index_repo()
-                    self._save_symbol_map()
-                except Exception as e:
-                    log.warning("Symbol index rebuild failed: %s", e)
+            if binary_files or invalid_files:
+                result["binary_files"] = binary_files
+                result["invalid_files"] = invalid_files
 
-            # -- Assemble prompt --
-            system_prompt = self._config.get_system_prompt()
-            file_tree = self._repo.get_flat_file_list()
-
-            # -- Build URL context --
-            url_context = ""
-            fetched_urls = self._url_service.get_fetched_urls()
-            if fetched_urls:
-                active_urls = [
-                    u["url"] for u in fetched_urls if not u.get("error")
-                ]
-                url_context = self._url_service.format_url_context(active_urls)
-
-            # Pre-request shedding (Layer 3 defense)
+            # Get symbol map and file tree
             symbol_map = ""
+            symbol_legend = ""
+            file_tree = ""
+
             if self._symbol_index:
-                symbol_map = self._symbol_index.get_symbol_map(
-                    exclude_files=set(valid_files),
+                self._symbol_index.index_repo(
+                    self._repo.get_flat_file_list() if self._repo else None
                 )
-            shed = self._context.shed_files_if_needed(
-                message, system_prompt, symbol_map, file_tree, url_context,
-            )
+
+                # Initialize stability tracker from reference graph on first request
+                if not self._stability_initialized:
+                    try:
+                        ref_index = self._symbol_index.reference_index
+                        all_files = list(self._symbol_index._all_symbols.keys())
+                        self._stability_tracker.initialize_from_reference_graph(
+                            ref_index, all_files, counter=self._context.counter,
+                        )
+                        self._stability_initialized = True
+                        logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize stability tracker: {e}")
+                        self._stability_initialized = True  # don't retry
+
+                symbol_map = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                symbol_legend = self._symbol_index.get_legend()
+
+            if self._repo:
+                flat_files = self._repo.get_flat_file_list()
+                file_tree = f"# File Tree ({len(flat_files)} files)\n\n" + "\n".join(flat_files)
+
+            # Detect and fetch URLs from prompt (up to 3 per message)
+            try:
+                detected = self._url_service.detect_urls(message)
+                urls_fetched = 0
+                for url_info in detected:
+                    if urls_fetched >= 3:
+                        break
+                    url = url_info["url"]
+                    display = url_info.get("display_name", url)
+                    # Skip already-fetched URLs
+                    existing = self._url_service.get_url_content(url)
+                    if existing.error == "URL not yet fetched":
+                        # Notify client about fetch progress
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "url_fetch", "message": f"Fetching {display}..."},
+                                )
+                            except Exception:
+                                pass
+                        await self._url_service.fetch_url(
+                            url, use_cache=True, summarize=True,
+                            user_text=message,
+                        )
+                        urls_fetched += 1
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "url_ready", "message": f"Fetched {display}"},
+                                )
+                            except Exception:
+                                pass
+                # Update URL context on the context manager
+                url_context_text = self._url_service.format_url_context()
+                if url_context_text:
+                    self._context.set_url_context(
+                        [url_context_text]
+                    )
+            except Exception as e:
+                logger.warning(f"URL detection/fetch failed: {e}")
+
+            # Persist user message
+            if self._history_store:
+                try:
+                    self._history_store.append_message(
+                        session_id=self._session_id,
+                        role="user",
+                        content=message,
+                        files=files if files else None,
+                        images=images if images else None,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist user message: {e}")
+
+            # Build and inject review context if review mode is active
+            if self._review_active:
+                try:
+                    review_context = self._build_review_context()
+                    if review_context:
+                        self._context.set_review_context(review_context)
+                except Exception as e:
+                    logger.warning(f"Failed to build review context: {e}")
+
+            # Budget enforcement
+            shed = self._context.shed_files_if_needed()
             if shed:
                 result["shed_files"] = shed
-                log.warning("Shed files due to budget: %s", shed)
 
-            # Emergency truncation (Layer 2 defense)
-            self._context.emergency_truncate()
-
-            # Build messages — tiered if stability tracker has content
-            if self._context.has_tiered_content and self._symbol_index:
-                symbol_blocks, file_contents = self._gather_tiered_content(valid_files)
-                legend = self._symbol_index.get_legend()
-                messages = self._context.assemble_tiered_messages(
-                    user_prompt=message,
-                    system_prompt=system_prompt,
-                    symbol_map_legend=legend,
-                    symbol_blocks=symbol_blocks,
-                    file_contents=file_contents,
-                    file_tree=file_tree,
-                    url_context=url_context,
-                    images=images or None,
-                )
-            else:
-                messages = self._context.assemble_messages(
-                    user_prompt=message,
-                    system_prompt=system_prompt,
-                    symbol_map=symbol_map,
-                    file_tree=file_tree,
-                    url_context=url_context,
-                    images=images or None,
-                )
-
-            # -- Persist user message --
-            self._history_store.append_message(
-                session_id=self._session_id,
-                role="user",
-                content=message,
-                files=valid_files or None,
-                images=len(images) if images else 0,
+            # Assemble messages
+            assembled = self._context.assemble_messages(
+                user_prompt=message,
+                images=images if images else None,
+                symbol_map=symbol_map,
+                symbol_legend=symbol_legend,
+                file_tree=file_tree,
             )
 
-            # -- Stream LLM completion --
+            # Stream LLM completion
             full_content, was_cancelled, usage = await self._run_llm_stream(
-                request_id, messages,
+                request_id, assembled
             )
+
+            if was_cancelled:
+                result["cancelled"] = True
+                full_content = full_content + "\n\n[stopped]" if full_content else "[stopped]"
+
+            # Add exchange to context
+            self._context.add_exchange(message, full_content)
+
+            # Update session totals
+            for key in self._session_totals:
+                self._session_totals[key] += usage.get(key, 0)
+
+            # Estimate output tokens if not reported
+            if "output_tokens" not in usage and full_content:
+                usage["output_tokens"] = max(1, len(full_content) // 4)
 
             result["response"] = full_content
             result["token_usage"] = usage
 
-            if was_cancelled:
-                result["cancelled"] = True
-                full_content += "\n\n[stopped]"
-                self._context.add_exchange(message, full_content)
-                # Persist cancelled response
-                self._history_store.append_message(
-                    session_id=self._session_id,
-                    role="assistant",
-                    content=full_content,
-                )
-            else:
-                # -- Add exchange to context --
-                self._context.add_exchange(message, full_content)
+            # Parse edit blocks
+            blocks = parse_edit_blocks(full_content)
+            if blocks:
+                result["edit_blocks"] = [
+                    {"file": b.file_path, "is_create": b.is_create}
+                    for b in blocks
+                ]
 
-                # -- Parse and apply edit blocks --
-                blocks = parse_edit_blocks(full_content)
-                result["shell_commands"] = _detect_shell_commands(full_content)
+                # Apply edits (skipped in review mode — read-only)
+                if self._repo and not was_cancelled and not self._review_active:
+                    # Separate blocks by context membership
+                    selected_set = set(self._selected_files)
+                    in_context_blocks = []
+                    not_in_context_blocks = []
 
-                if blocks:
-                    result["edit_blocks"] = [
-                        {"file": b.file_path, "is_create": b.is_create}
-                        for b in blocks
-                    ]
+                    for block in blocks:
+                        # Create blocks are always attempted (no existing content needed)
+                        if block.is_create:
+                            in_context_blocks.append(block)
+                        elif block.file_path in selected_set:
+                            in_context_blocks.append(block)
+                        else:
+                            not_in_context_blocks.append(block)
 
-                    edit_results = apply_edits_to_repo(blocks, self._repo.root)
-                    files_modified = []
+                    # Apply in-context edits normally
+                    edit_results = apply_edits_to_repo(
+                        in_context_blocks, str(self._repo.root)
+                    ) if in_context_blocks else []
 
-                    for er in edit_results:
-                        er_dict = {
-                            "file_path": er.file_path,
-                            "status": er.status.name.lower(),
-                            "error": er.error,
-                        }
-                        result["edit_results"].append(er_dict)
-
-                        if er.status == EditStatus.APPLIED:
-                            result["passed"].append(er.file_path)
-                            files_modified.append(er.file_path)
-                        elif er.status == EditStatus.FAILED:
-                            result["failed"].append({
-                                "file": er.file_path,
-                                "error": er.error,
-                            })
-                        elif er.status == EditStatus.SKIPPED:
-                            result["skipped"].append(er.file_path)
-
-                    result["files_modified"] = files_modified
+                    # Mark not-in-context edits without attempting them
+                    for block in not_in_context_blocks:
+                        edit_results.append(EditResult(
+                            file_path=block.file_path,
+                            status=EditStatus.NOT_IN_CONTEXT,
+                            message="File not in active context — added for next request",
+                        ))
 
                     # Stage modified files
-                    if files_modified:
-                        self._repo.stage_files(files_modified)
+                    modified = []
+                    for er in edit_results:
+                        if er.status == EditStatus.APPLIED:
+                            modified.append(er.file_path)
+                            try:
+                                self._repo.stage_files([er.file_path])
+                            except Exception:
+                                pass
 
                     # Invalidate symbol cache for modified files
-                    if files_modified and self._symbol_index:
-                        self._symbol_index.invalidate_files(files_modified)
+                    if self._symbol_index:
+                        for path in modified:
+                            self._symbol_index.invalidate_file(path)
 
-                # -- Persist assistant message --
-                self._history_store.append_message(
-                    session_id=self._session_id,
-                    role="assistant",
-                    content=full_content,
-                    files_modified=result.get("files_modified") or None,
-                    edit_results=result.get("edit_results") or None,
-                )
+                    # Auto-add not-in-context files to selected files
+                    files_auto_added = []
+                    if not_in_context_blocks:
+                        for block in not_in_context_blocks:
+                            if block.file_path not in selected_set:
+                                self._selected_files.append(block.file_path)
+                                selected_set.add(block.file_path)
+                                files_auto_added.append(block.file_path)
 
-            # -- Update stability tracker --
-            tier_changes = self._update_stability(valid_files, result.get("files_modified", []))
+                        # Broadcast updated selection to browser
+                        if files_auto_added and self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "filesChanged", list(self._selected_files)
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to broadcast filesChanged: {e}")
 
-            # -- Save symbol map --
-            self._save_symbol_map()
+                    result["files_modified"] = modified
+                    result["passed"] = sum(1 for r in edit_results if r.status == EditStatus.APPLIED)
+                    result["failed"] = sum(1 for r in edit_results if r.status == EditStatus.FAILED)
+                    result["skipped"] = sum(1 for r in edit_results if r.status == EditStatus.SKIPPED)
+                    result["not_in_context"] = sum(1 for r in edit_results if r.status == EditStatus.NOT_IN_CONTEXT)
+                    if files_auto_added:
+                        result["files_auto_added"] = files_auto_added
+                    result["edit_results"] = [
+                        {
+                            "file": r.file_path,
+                            "status": r.status.value,
+                            "message": r.message,
+                        }
+                        for r in edit_results
+                    ]
 
-            # -- Update session totals --
-            if usage:
-                self._session_totals["prompt"] += usage.get("prompt_tokens", 0)
-                self._session_totals["completion"] += usage.get("completion_tokens", 0)
-                self._session_totals["total"] += usage.get("total_tokens", 0)
-                self._session_totals["cache_hit"] += usage.get("cache_read_tokens", 0)
-                self._session_totals["cache_write"] += usage.get("cache_creation_tokens", 0)
+            # Persist assistant message
+            if self._history_store:
+                try:
+                    self._history_store.append_message(
+                        session_id=self._session_id,
+                        role="assistant",
+                        content=full_content,
+                        files_modified=result.get("files_modified"),
+                        edit_results=result.get("edit_results"),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist assistant message: {e}")
 
-            # -- Print terminal report --
-            self._print_usage_report(result, tier_changes=tier_changes)
+            # Update cache stability
+            try:
+                self._update_stability()
+            except Exception as e:
+                logger.warning(f"Stability update failed: {e}")
+
+            # Detect shell commands
+            shell_cmds = detect_shell_commands(full_content)
+            if shell_cmds:
+                result["shell_commands"] = shell_cmds
+
+            # Save symbol map
+            if self._symbol_index and self._repo:
+                try:
+                    ac_dc_dir = self._repo.root / ".ac-dc"
+                    ac_dc_dir.mkdir(exist_ok=True)
+                    self._symbol_index.save_symbol_map(
+                        ac_dc_dir / "symbol_map.txt",
+                        exclude_files=set(self._selected_files),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save symbol map: {e}")
+
+            # Print terminal HUD
+            self._print_hud(usage)
 
         except Exception as e:
-            log.error("Streaming error: %s\n%s", e, traceback.format_exc())
+            logger.error(f"Streaming error: {traceback.format_exc()}")
             result["error"] = str(e)
+            result["response"] = full_content
 
         finally:
             self._streaming_active = False
-            self._active_request_id = None
-            self._cancelled.discard(request_id)
+            self._current_request_id = None
+            self._cancelled_requests.discard(request_id)
 
-            # Send completion
-            await self._send_stream_complete(request_id, result)
+            # Send streamComplete
+            if self._event_callback:
+                try:
+                    await self._event_callback("streamComplete", request_id, result)
+                except Exception as e:
+                    logger.error(f"streamComplete callback failed: {e}")
 
-            # Post-response compaction (non-blocking)
-            if not result.get("cancelled") and not result.get("error"):
-                await self._post_response_compaction(request_id)
+            # Post-response compaction
+            try:
+                await self._context.compact_history_if_needed()
+            except Exception as e:
+                logger.warning(f"Compaction failed: {e}")
 
-    async def _run_llm_stream(
-        self, request_id: str, messages: list[dict],
-    ) -> tuple[str, bool, dict]:
-        """Run LLM streaming in a thread. Returns (content, cancelled, usage)."""
-        loop = asyncio.get_event_loop()
+    async def _run_llm_stream(self, request_id, messages):
+        """Run LLM completion with streaming in a thread pool.
 
+        Returns (full_content, was_cancelled, usage).
+        """
         full_content = ""
         was_cancelled = False
         usage = {}
 
-        def _extract_usage(chunk) -> dict:
-            """Extract token usage from a streaming chunk or response.
+        loop = self._main_loop
 
-            Handles multiple provider formats:
-            - OpenAI: chunk.usage with prompt_tokens/completion_tokens
-            - Anthropic direct: cache_read_input_tokens/cache_creation_input_tokens
-            - Bedrock Anthropic: prompt_tokens_details.cached_tokens (dict or object)
-            - litellm unified: maps provider-specific fields to common names
-
-            The usage object may be an object with attributes OR a dict,
-            depending on provider and litellm version.
-            """
-            u = getattr(chunk, "usage", None)
-            if not u:
-                return {}
-
-            def _get(obj, key, default=0):
-                """Get a value from an object or dict."""
-                if isinstance(obj, dict):
-                    return obj.get(key, default)
-                return getattr(obj, key, default)
-
-            prompt = _get(u, "prompt_tokens", 0) or 0
-            completion = _get(u, "completion_tokens", 0) or 0
-            total = _get(u, "total_tokens", 0) or 0
-
-            # Extract cache read tokens — try multiple field names/locations
-            cache_read = _get(u, "cache_read_input_tokens", 0) or 0
-            if not cache_read:
-                # Bedrock/OpenAI: prompt_tokens_details.cached_tokens
-                details = _get(u, "prompt_tokens_details", None)
-                if details:
-                    cache_read = _get(details, "cached_tokens", 0) or 0
-            if not cache_read:
-                # Some litellm versions use this field name
-                cache_read = _get(u, "cache_read_tokens", 0) or 0
-
-            # Extract cache write tokens
-            cache_write = _get(u, "cache_creation_input_tokens", 0) or 0
-            if not cache_write:
-                cache_write = _get(u, "cache_creation_tokens", 0) or 0
-
-            extracted = {
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": total,
-                "cache_read_tokens": cache_read,
-                "cache_creation_tokens": cache_write,
-            }
-            # Compute total if provider didn't supply it
-            if not extracted["total_tokens"] and (prompt or completion):
-                extracted["total_tokens"] = prompt + completion
-            return extracted
-
-        def _blocking_stream():
+        def _stream_sync():
             nonlocal full_content, was_cancelled, usage
             try:
-                import litellm
-
-                # Build stream kwargs — some providers don't support stream_options
-                stream_kwargs = {
-                    "model": self._model,
-                    "messages": messages,
-                    "stream": True,
-                }
-                # Only add stream_options for providers known to support it
-                model_lower = (self._model or "").lower()
-                is_bedrock = "bedrock" in model_lower or model_lower.startswith("global.")
-                is_anthropic_direct = model_lower.startswith("anthropic/") or model_lower.startswith("claude")
-                if not is_bedrock:
-                    stream_kwargs["stream_options"] = {"include_usage": True}
-
-                # For Bedrock streaming, request usage in the final message
-                # Bedrock Anthropic models return usage via the stream's
-                # message_stop event when stream_usage is enabled.
-                if is_bedrock:
-                    stream_kwargs["stream_options"] = {"include_usage": True}
-
-                response = litellm.completion(**stream_kwargs)
+                response = litellm.completion(
+                    model=self._config.model,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
 
                 for chunk in response:
-                    if request_id in self._cancelled:
+                    # Check cancellation
+                    if request_id in self._cancelled_requests:
                         was_cancelled = True
                         break
 
-                    delta = chunk.choices[0].delta if chunk.choices else None
-                    if delta and delta.content:
-                        full_content += delta.content
-                        # Fire chunk callback (fire-and-forget)
-                        asyncio.run_coroutine_threadsafe(
-                            self._send_chunk(request_id, full_content),
-                            loop,
-                        )
+                    # Extract content delta
+                    delta = None
+                    if hasattr(chunk, "choices") and chunk.choices:
+                        choice = chunk.choices[0]
+                        if hasattr(choice, "delta") and choice.delta:
+                            delta = getattr(choice.delta, "content", None)
 
-                    # Capture usage from any chunk that has it (last chunk typically)
-                    chunk_usage = _extract_usage(chunk)
+                    if delta:
+                        full_content += delta
+
+                        # Fire chunk callback (full accumulated content)
+                        if self._chunk_callback:
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    self._chunk_callback(request_id, full_content),
+                                    loop,
+                                )
+                            except Exception:
+                                pass
+
+                    # Track usage from any chunk that has it
+                    chunk_usage = _extract_token_usage(chunk)
                     if chunk_usage:
-                        usage = chunk_usage
-
-                # For Bedrock/Anthropic: also check response-level attributes
-                if hasattr(response, "usage") and response.usage:
-                    resp_usage = _extract_usage(response)
-                    if resp_usage:
-                        # Merge: prefer chunk-level but fill in missing fields
-                        for k, v in resp_usage.items():
-                            if v and not usage.get(k):
-                                usage[k] = v
-
-                # Estimate completion tokens from content if provider didn't report
-                if full_content and not usage.get("completion_tokens"):
-                    estimated = max(1, len(full_content) // 4)
-                    if usage:
-                        usage["completion_tokens"] = estimated
-                        usage["total_tokens"] = usage.get("prompt_tokens", 0) + estimated
-                    # If no usage at all, leave empty — don't fabricate prompt tokens
+                        usage.update(chunk_usage)
 
             except Exception as e:
-                log.error("LLM call failed: %s", e)
-                if not full_content:
-                    full_content = f"[Error: {e}]"
+                logger.error(f"LLM stream error: {e}")
+                raise
 
-        await loop.run_in_executor(_executor, _blocking_stream)
+        await loop.run_in_executor(self._executor, _stream_sync)
         return full_content, was_cancelled, usage
 
-    async def _send_chunk(self, request_id: str, content: str):
-        """Send a streaming chunk to the client via RPC callback."""
-        if not self.call:
-            return
-        try:
-            await asyncio.wait_for(
-                self.call["AcApp.streamChunk"](request_id, content),
-                timeout=5.0,
-            )
-        except Exception as e:
-            log.debug("Chunk send failed: %s", e)
+    def cancel_streaming(self, request_id):
+        """Cancel an active stream."""
+        if self._current_request_id == request_id:
+            self._cancelled_requests.add(request_id)
+            return {"success": True}
+        return {"error": f"No active stream with request_id {request_id}"}
 
-    async def _send_stream_complete(self, request_id: str, result: dict):
-        """Send stream completion to the client."""
-        if not self.call:
-            return
-        try:
-            await asyncio.wait_for(
-                self.call["AcApp.streamComplete"](request_id, result),
-                timeout=5.0,
-            )
-        except Exception as e:
-            log.warning("streamComplete send failed: %s", e)
+    # === Stability Update ===
 
-    # ------------------------------------------------------------------
-    # Commit message generation
-    # ------------------------------------------------------------------
+    def _update_stability(self):
+        """Run the per-request stability update cycle.
 
-    def generate_commit_message(self, diff: str) -> dict:
-        """Generate a commit message from a diff using a smaller/cheaper model."""
-        if not diff or not diff.strip():
-            return {"error": "No diff provided"}
-
-        smaller_model = self._config.get_llm_config().get("smaller_model", self._model)
-        messages = [
-            {"role": "system", "content": COMMIT_MSG_SYSTEM},
-            {"role": "user", "content": f"Generate a commit message for this diff:\n\n{diff}"},
-        ]
-
-        try:
-            import litellm
-            response = litellm.completion(
-                model=smaller_model,
-                messages=messages,
-                stream=False,
-            )
-            msg = response.choices[0].message.content.strip()
-            # Track usage
-            if hasattr(response, "usage") and response.usage:
-                self._session_totals["prompt"] += getattr(response.usage, "prompt_tokens", 0) or 0
-                self._session_totals["completion"] += getattr(response.usage, "completion_tokens", 0) or 0
-                self._session_totals["total"] += getattr(response.usage, "total_tokens", 0) or 0
-            return {"message": msg}
-        except Exception as e:
-            log.error("Commit message generation failed: %s", e)
-            return {"error": str(e)}
-
-    # ------------------------------------------------------------------
-    # History
-    # ------------------------------------------------------------------
-
-    def history_new_session(self) -> dict:
-        self._session_id = self._new_session_id()
-        self._context.clear_history()
-        return {"session_id": self._session_id}
-
-    def history_list_sessions(self, limit: int = 20) -> list[dict]:
-        return self._history_store.list_sessions(limit)
-
-    def history_get_session(self, session_id: str) -> list[dict]:
-        return self._history_store.get_session(session_id)
-
-    def history_search(self, query: str, role: str = None, limit: int = 50) -> list[dict]:
-        return self._history_store.search(query, role, limit)
-
-    def load_session_into_context(self, session_id: str) -> dict:
-        """Load a previous session into the active context."""
-        messages = self._history_store.get_session_messages_for_context(session_id)
-        if not messages:
-            return {"error": f"Session not found: {session_id}"}
-        self._context.clear_history()
-        self._session_id = session_id
-        for msg in messages:
-            self._context.add_message(msg["role"], msg["content"])
-        return {"ok": True, "message_count": len(messages), "session_id": session_id}
-
-    # ------------------------------------------------------------------
-    # URL handling
-    # ------------------------------------------------------------------
-
-    def detect_urls(self, text: str) -> list[dict]:
-        """Find and classify URLs in text."""
-        return self._url_service.detect_urls(text)
-
-    def fetch_url(self, url: str, use_cache: bool = True,
-                  summarize: bool = True, user_hint: str = "") -> dict:
-        """Fetch URL content with caching and optional summarization."""
-        return self._url_service.fetch_url(url, use_cache, summarize, user_hint)
-
-    def get_url_content(self, url: str) -> dict:
-        """Get previously fetched content for display."""
-        return self._url_service.get_url_content(url)
-
-    def invalidate_url_cache(self, url: str) -> dict:
-        """Remove a URL from the cache."""
-        return self._url_service.invalidate_url_cache(url)
-
-    def clear_url_cache(self) -> dict:
-        """Clear all cached URLs."""
-        return self._url_service.clear_url_cache()
-
-    def get_history_status(self) -> dict:
-        """Return history token usage for the history bar."""
-        return self._context.get_compaction_status()
-
-    # ------------------------------------------------------------------
-    # Post-response compaction
-    # ------------------------------------------------------------------
-
-    async def _post_response_compaction(self, request_id: str):
-        """Run compaction after response delivery if needed."""
-        if not self._context.should_compact():
+        Builds the active items list and calls tracker.update() to drive
+        N-value progression, graduation, and cascade.
+        """
+        if not self._stability_tracker:
             return
 
-        try:
-            # Brief pause to let frontend process completion
-            await asyncio.sleep(0.5)
+        counter = self._context.counter
+        active_items = []
 
-            # Notify start
-            await self._send_compaction_event(request_id, {
-                "type": "compaction_start",
-            })
-
-            # Run compaction (may involve LLM call — run in executor)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                _executor,
-                self._context.compact_history_if_needed,
-            )
-
-            if result is None or result.get("case") == "none":
-                await self._send_compaction_event(request_id, {
-                    "type": "compaction_complete",
-                    "case": "none",
+        # File entries for selected files
+        for path in self._selected_files:
+            content = self._context.file_context.get_content(path)
+            if content is not None:
+                active_items.append({
+                    "key": f"file:{path}",
+                    "content_hash": StabilityTracker.hash_content(content),
+                    "tokens": counter.count(content),
                 })
-                return
 
-            # Track compaction LLM usage in session totals
-            # (topic detection usage is internal to the detector)
-
-            await self._send_compaction_event(request_id, {
-                "type": "compaction_complete",
-                "case": result["case"],
-                "messages_before": result.get("messages_before", 0),
-                "messages_after": result.get("messages_after", 0),
-                "tokens_before": result.get("tokens_before", 0),
-                "tokens_after": result.get("tokens_after", 0),
-                "summary": result.get("summary", ""),
-                "messages": self._context.get_history(),
-            })
-
-            log.info(
-                "Compaction complete: %s, %d → %d messages",
-                result["case"],
-                result.get("messages_before", 0),
-                result.get("messages_after", 0),
-            )
-
-        except Exception as e:
-            log.error("Compaction error: %s", e)
-            await self._send_compaction_event(request_id, {
-                "type": "compaction_error",
-                "error": str(e),
-            })
-
-    async def _send_compaction_event(self, request_id: str, event: dict):
-        """Send a compaction event to the client."""
-        if not self.call:
-            return
-        try:
-            await asyncio.wait_for(
-                self.call["AcApp.compactionEvent"](request_id, event),
-                timeout=5.0,
-            )
-        except Exception as e:
-            log.debug("Compaction event send failed: %s", e)
-
-    # ------------------------------------------------------------------
-    # Context info
-    # ------------------------------------------------------------------
-
-    def get_context_breakdown(self, selected_files: list[str] = None,
-                               included_urls: list[str] = None) -> dict:
-        """Return context breakdown for the UI viewers."""
-        system_prompt = self._config.get_system_prompt()
-        system_tokens = self._counter.count(system_prompt)
-
-        symbol_map_tokens = 0
-        symbol_files = 0
+        # Symbol entries for selected files
         if self._symbol_index:
-            sm = self._symbol_index.get_symbol_map(
-                exclude_files=set(selected_files or self._selected_files),
-            )
-            symbol_map_tokens = self._counter.count(sm) if sm else 0
-            symbol_files = len(self._symbol_index.all_symbols)
-
-        file_tokens = self._context.file_context.count_tokens(self._counter)
-        file_items = []
-        for path, tokens in self._context.file_context.get_tokens_by_file(self._counter).items():
-            file_items.append({"path": path, "tokens": tokens})
-
-        # URL context tokens
-        url_tokens = 0
-        url_items = []
-        fetched = self._url_service.get_fetched_urls()
-        for u in fetched:
-            if not u.get("error"):
-                content_obj = self._url_service._fetched.get(u["url"])
-                if content_obj:
-                    prompt_text = content_obj.format_for_prompt()
-                    t = self._counter.count(prompt_text)
-                    url_tokens += t
-                    url_items.append({
-                        "url": u["url"],
-                        "title": u.get("title", ""),
-                        "tokens": t,
-                        "display_name": u.get("display_name", u["url"]),
+            for path in self._selected_files:
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    active_items.append({
+                        "key": f"symbol:{path}",
+                        "content_hash": StabilityTracker.hash_content(block),
+                        "tokens": counter.count(block),
                     })
 
+        # History entries
+        history = self._context.get_history()
+        for i, msg in enumerate(history):
+            content_str = f"{msg['role']}:{msg.get('content', '')}"
+            active_items.append({
+                "key": f"history:{i}",
+                "content_hash": StabilityTracker.hash_content(content_str),
+                "tokens": counter.count_message(msg),
+            })
+
+        # Existing files for stale removal
+        existing_files = None
+        if self._repo:
+            try:
+                existing_files = set(self._repo.get_flat_file_list())
+            except Exception:
+                pass
+
+        # Run update cycle
+        result = self._stability_tracker.update(active_items, existing_files)
+
+        # Log tier changes
+        for change in result.get("changes", []):
+            action = change.get("action", "")
+            key = change.get("key", "")
+            if action in ("promoted", "graduated"):
+                logger.info(f"📈 {change.get('from', '?')} → {change.get('to', '?')}: {key}")
+            elif action in ("demoted", "demoted_underfilled"):
+                logger.info(f"📉 {change.get('from', '?')} → {change.get('to', '?')}: {key}")
+
+    # === Commit Message Generation (RPC) ===
+
+    def generate_commit_message(self, diff_text):
+        """Generate a commit message from a diff using a non-streaming LLM call.
+
+        Uses smaller_model if configured, falling back to primary model.
+
+        Args:
+            diff_text: git diff text
+
+        Returns:
+            {message: str} or {error: str}
+        """
+        if not diff_text or not diff_text.strip():
+            return {"error": "Empty diff"}
+
+        try:
+            model = self._config.smaller_model or self._config.model
+            response = litellm.completion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": COMMIT_PROMPT},
+                    {"role": "user", "content": diff_text},
+                ],
+                stream=False,
+            )
+            message = response.choices[0].message.content.strip()
+            return {"message": message}
+        except Exception as e:
+            logger.error(f"Commit message generation failed: {e}")
+            return {"error": str(e)}
+
+    # === Context Breakdown (RPC) ===
+
+    @staticmethod
+    def _tier_content_breakdown(tier_items):
+        """Break down tier items into individual entries with N values and thresholds.
+
+        Returns list of per-item dicts with {type, name, path, tokens, n, threshold}.
+        """
+        contents = []
+        for key, item in tier_items.items():
+            if key.startswith("file:"):
+                item_type = "files"
+                path = key.split(":", 1)[1]
+                name = path
+            elif key.startswith("symbol:"):
+                item_type = "symbols"
+                path = key.split(":", 1)[1]
+                name = path
+            elif key.startswith("history:"):
+                item_type = "history"
+                path = None
+                name = f"Message {key.split(':', 1)[1]}"
+            else:
+                item_type = "other"
+                path = None
+                name = key
+
+            # Get promotion threshold for this item's tier
+            tier_config = TIER_CONFIG.get(item.tier)
+            threshold = tier_config["promotion_n"] if tier_config else None
+
+            contents.append({
+                "type": item_type,
+                "name": name,
+                "path": path,
+                "tokens": item.tokens,
+                "n": item.n,
+                "threshold": threshold,
+            })
+
+        # Sort: symbols first, then files, then history, then other; within each by name
+        type_order = {"symbols": 0, "files": 1, "history": 2, "other": 3}
+        contents.sort(key=lambda c: (type_order.get(c["type"], 99), c["name"] or ""))
+        return contents
+
+    def get_context_breakdown(self):
+        """Return token breakdown for current context.
+
+        Syncs FileContext with current selected files before computing,
+        so the breakdown reflects what the next request would look like.
+
+        Returns detailed per-item data for each category:
+        - Per-file paths and token counts
+        - Per-URL title and token counts
+        - Symbol map chunk details
+        - History message count and tokens
+        """
+        # Sync FileContext with current selection
+        if self._repo:
+            current_context_files = set(self._context.file_context.get_files())
+            selected_set = set(self._selected_files)
+            for path in current_context_files - selected_set:
+                self._context.file_context.remove_file(path)
+            for path in selected_set:
+                if path not in current_context_files:
+                    if not self._repo.is_binary_file(path) and self._repo.file_exists(path):
+                        self._context.file_context.add_file(path)
+
+        counter = self._context.counter
+
+        system_tokens = counter.count(self._config.get_system_prompt())
+        legend_tokens = 0
+        if self._symbol_index:
+            legend = self._symbol_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+
+        symbol_map_tokens = 0
+        symbol_map_chunks = []
+        if self._symbol_index:
+            sm = self._symbol_index.get_symbol_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+            # Get chunked symbol map for per-chunk detail breakdown
+            try:
+                sm_chunks_raw = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files),
+                    chunks=4,
+                )
+                if sm_chunks_raw and isinstance(sm_chunks_raw, list):
+                    for i, chunk in enumerate(sm_chunks_raw):
+                        if not chunk:
+                            continue
+                        chunk_tokens = counter.count(chunk)
+                        # Estimate file count from path-like lines
+                        lines = chunk.strip().split('\n')
+                        file_count = sum(
+                            1 for line in lines
+                            if line and not line.startswith(' ') and not line.startswith('#')
+                            and ':' in line
+                        )
+                        symbol_map_chunks.append({
+                            "name": f"Chunk {i + 1} ({file_count} files)",
+                            "tokens": chunk_tokens,
+                        })
+            except Exception as e:
+                logger.debug(f"Symbol map chunking failed: {e}")
+
+        # Per-file token counts
+        file_tokens = self._context.file_context.count_tokens(counter)
+        file_details = []
+        tokens_by_file = self._context.file_context.get_tokens_by_file(counter)
+        for path in sorted(tokens_by_file.keys()):
+            file_details.append({
+                "name": path,
+                "path": path,
+                "tokens": tokens_by_file[path],
+            })
+
+        # Per-URL token counts
+        url_tokens = 0
+        url_details = []
+        if self._url_service:
+            for url_content in self._url_service.get_fetched_urls():
+                if url_content.error:
+                    continue
+                formatted = url_content.format_for_prompt(max_length=50000)
+                tok = counter.count(formatted) if formatted else 0
+                url_tokens += tok
+                url_details.append({
+                    "name": url_content.title or url_content.url,
+                    "url": url_content.url,
+                    "tokens": tok,
+                })
+
+        # History details
         history_tokens = self._context.history_token_count()
+        history = self._context.get_history()
+        history_msg_count = len(history)
 
         total = system_tokens + symbol_map_tokens + file_tokens + url_tokens + history_tokens
 
-        # Build cache tier blocks for the cache viewer
-        blocks = self._build_tier_blocks()
-
-        # Cache stats from real provider-reported session totals
-        cached_tokens = self._session_totals.get("cache_hit", 0)
-        total_prompt = self._session_totals.get("prompt", 0)
-        cache_hit_rate = int(cached_tokens / max(1, total_prompt) * 100) if total_prompt > 0 else 0
-
-        # Get tier changes
-        changes = self._context.stability.get_changes()
-        promotions = [
-            {"key": c.key, "from": c.old_tier.name, "to": c.new_tier.name}
-            for c in changes if c.is_promotion
-        ]
-        demotions = [
-            {"key": c.key, "from": c.old_tier.name, "to": c.new_tier.name}
-            for c in changes if c.is_demotion
-        ]
-
-        return {
-            "blocks": blocks,
-            "breakdown": {
-                "system": {"tokens": system_tokens},
-                "symbol_map": {"tokens": symbol_map_tokens, "files": symbol_files, "chunks": []},
-                "files": {"tokens": file_tokens, "items": file_items},
-                "urls": {"tokens": url_tokens, "items": url_items},
-                "history": {
-                    "tokens": history_tokens,
-                    "needs_summary": self._context.should_compact(),
-                    "max_tokens": self._context.max_history_tokens,
-                },
-            },
-            "total_tokens": total,
-            "cached_tokens": cached_tokens,
-            "cache_hit_rate": cache_hit_rate,
-            "max_input_tokens": self._counter.max_input_tokens,
-            "model": self._model,
-            "promotions": promotions,
-            "demotions": demotions,
-            "session_totals": dict(self._session_totals),
-        }
-
-    # ------------------------------------------------------------------
-    # Terminal reports
-    # ------------------------------------------------------------------
-
-    def _build_tier_blocks(self) -> list[dict]:
-        """Build tier block info for the cache viewer."""
+        # Cache tier blocks for HUD visualization
         blocks = []
-        from .stability_tracker import Tier, TIER_CONFIG
-
-        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]:
-            items = self._context.stability.get_tier_items(tier)
-            if not items and tier != Tier.L0:
-                continue
-
-            tokens = self._context.stability.get_tier_tokens(tier)
-            config = TIER_CONFIG[tier]
-
-            # Group by type
-            contents = []
-
-            # L0 always has system prompt + legend as fixed content
-            if tier == Tier.L0:
-                system_prompt = self._config.get_system_prompt()
-                system_tokens = self._counter.count(system_prompt) if system_prompt else 0
-                legend_tokens = 0
-                if self._symbol_index:
-                    legend = self._symbol_index.get_legend()
-                    legend_tokens = self._counter.count(legend) if legend else 0
-                if system_tokens or legend_tokens:
-                    contents.append({
-                        "type": "system",
-                        "count": 1,
-                        "tokens": system_tokens + legend_tokens,
+        cached_tokens = 0
+        tracker = self._context._stability_tracker
+        if tracker:
+            for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                tier_items = tracker.get_tier_items(tier)
+                if tier_items:
+                    tier_tokens = sum(i.tokens for i in tier_items.values())
+                    contents = self._tier_content_breakdown(tier_items)
+                    blocks.append({
+                        "name": tier.name,
+                        "tier": tier.name,
+                        "tokens": tier_tokens,
+                        "count": len(tier_items),
+                        "cached": True,
+                        "contents": contents,
                     })
-                    tokens += system_tokens + legend_tokens
-
-            symbol_items = [it for it in items if it.item_type == "symbol"]
-            file_items = [it for it in items if it.item_type == "file"]
-            history_items = [it for it in items if it.item_type == "history"]
-
-            if symbol_items:
-                contents.append({
-                    "type": "symbols",
-                    "count": len(symbol_items),
-                    "tokens": sum(it.token_estimate for it in symbol_items),
-                    "items": [
-                        {
-                            "key": it.key,
-                            "tokens": it.token_estimate,
-                            "n": it.n,
-                            "threshold": config.get("promotion_n", config["entry_n"]),
-                        }
-                        for it in symbol_items
-                    ],
-                })
-            if file_items:
-                contents.append({
-                    "type": "files",
-                    "count": len(file_items),
-                    "tokens": sum(it.token_estimate for it in file_items),
-                    "items": [
-                        {
-                            "key": it.key,
-                            "tokens": it.token_estimate,
-                            "n": it.n,
-                            "threshold": config.get("promotion_n", config["entry_n"]),
-                        }
-                        for it in file_items
-                    ],
-                })
-            if history_items:
-                contents.append({
-                    "type": "history",
-                    "count": len(history_items),
-                    "tokens": sum(it.token_estimate for it in history_items),
+                    cached_tokens += tier_tokens
+            active_items = tracker.get_tier_items(Tier.ACTIVE)
+            if active_items:
+                active_tokens = sum(i.tokens for i in active_items.values())
+                contents = self._tier_content_breakdown(active_items)
+                blocks.append({
+                    "name": "active",
+                    "tier": "active",
+                    "tokens": active_tokens,
+                    "count": len(active_items),
+                    "cached": False,
+                    "contents": contents,
                 })
 
-            cached = tier != Tier.ACTIVE and tokens > 0
+        # If no tracker, build a simple active block from known data
+        if not blocks:
+            contents = []
+            if system_tokens:
+                contents.append({"type": "system", "name": "System + Legend",
+                                 "path": None,
+                                 "tokens": system_tokens + legend_tokens,
+                                 "n": None, "threshold": None})
+            if symbol_map_tokens:
+                contents.append({"type": "symbols", "name": "Symbol Map",
+                                 "path": None,
+                                 "tokens": symbol_map_tokens,
+                                 "n": None, "threshold": None})
+            if file_tokens:
+                for fd in file_details:
+                    contents.append({"type": "files", "name": fd["name"],
+                                     "path": fd.get("path"),
+                                     "tokens": fd["tokens"],
+                                     "n": None, "threshold": None})
+            if url_tokens:
+                for ud in url_details:
+                    contents.append({"type": "urls", "name": ud["name"],
+                                     "path": ud.get("url"),
+                                     "tokens": ud["tokens"],
+                                     "n": None, "threshold": None})
+            if history_tokens:
+                contents.append({"type": "history", "name": f"History ({history_msg_count} msgs)",
+                                 "path": None,
+                                 "tokens": history_tokens,
+                                 "n": None, "threshold": None})
             blocks.append({
-                "tier": config["name"],
-                "name": config["name"],
-                "tokens": tokens,
-                "cached": cached,
-                "threshold": self._context.cache_target_tokens,
+                "name": "active",
+                "tier": "active",
+                "tokens": total,
+                "count": 0,
+                "cached": False,
                 "contents": contents,
             })
 
-        return blocks
+        cache_hit_rate = cached_tokens / total if total > 0 else 0
 
-    def _print_usage_report(self, result: dict, tier_changes: list = None):
-        """Print token usage, cache blocks, and edit results to terminal."""
-        usage = result.get("token_usage", {})
+        # Tier changes — group by direction
+        promotions = []
+        demotions = []
+        if tracker:
+            # Group changes by (action, from, to)
+            grouped = {}
+            for c in tracker.changes:
+                action = c.get("action", "")
+                direction = "promotion" if action in ("promoted", "graduated") else "demotion"
+                group_key = (direction, c.get("from", "?"), c.get("to", "?"))
+                if group_key not in grouped:
+                    grouped[group_key] = []
+                grouped[group_key].append(c["key"])
 
-        # ── Cache Blocks Report ──
-        try:
-            blocks = self._build_tier_blocks()
-            if blocks:
-                lines = ["╭─ Cache Blocks ─────────────────────────╮"]
-                total_tokens = 0
-                cached_tokens = 0
-                for block in blocks:
-                    tokens = block.get("tokens", 0)
-                    total_tokens += tokens
-                    cached = block.get("cached", False)
-                    if cached:
-                        cached_tokens += tokens
-                    tag = " [cached]" if cached else ""
-                    name = block.get("name", "?")
-                    lines.append(f"│ {name:<14} {tokens:>6,} tokens{tag:<10}│")
-                    # Summarize contents
-                    for content in block.get("contents", []):
-                        ctype = content.get("type", "?")
-                        count = content.get("count", 0)
-                        ctokens = content.get("tokens", 0)
-                        if ctype == "system":
-                            lines.append(f"│   └─ system + legend ({ctokens:,} tok)        │"[:43] + "│")
-                        elif ctype == "symbols":
-                            lines.append(f"│   └─ {count} symbols ({ctokens:,} tok)            │"[:43] + "│")
-                        elif ctype == "files":
-                            lines.append(f"│   └─ {count} files ({ctokens:,} tok)              │"[:43] + "│")
-                        elif ctype == "history":
-                            lines.append(f"│   └─ {count} history msgs ({ctokens:,} tok)       │"[:43] + "│")
-                lines.append("├────────────────────────────────────────┤")
-                usage = result.get("token_usage", {})
-                real_cache_read = usage.get("cache_read_tokens", 0)
-                real_prompt = usage.get("prompt_tokens", 0)
-                hit_rate = int(real_cache_read / real_prompt * 100) if real_prompt > 0 else 0
-                lines.append(f"│ Total: {total_tokens:,} | Cache hit: {hit_rate}%{' ' * max(0, 14 - len(str(total_tokens)) - len(str(hit_rate)))}│")
-                lines.append("╰────────────────────────────────────────╯")
-                for line in lines:
-                    log.info(line)
-        except Exception as e:
-            log.debug("Cache blocks report failed: %s", e)
+            for (direction, from_tier, to_tier), keys in grouped.items():
+                desc = f"{from_tier} → {to_tier}: {len(keys)} items — {', '.join(keys)}"
+                if direction == "promotion":
+                    promotions.append(desc)
+                else:
+                    demotions.append(desc)
 
-        # ── Token Usage Report ──
-        if usage:
-            prompt = usage.get("prompt_tokens", 0)
-            completion = usage.get("completion_tokens", 0)
-            cache_read = usage.get("cache_read_tokens", 0)
-            cache_write = usage.get("cache_creation_tokens", 0)
-            max_input = self._counter.max_input_tokens
+        # Session totals in HUD-friendly format
+        st = self._session_totals
+        session_totals = {
+            "prompt": st["input_tokens"],
+            "completion": st["output_tokens"],
+            "total": sum(st.values()),
+            "cache_hit": st["cache_read_tokens"],
+            "cache_write": st["cache_write_tokens"],
+        }
 
-            log.info("Model: %s", self._model)
-            log.info("Last request: %s in, %s out", f"{prompt:,}", f"{completion:,}")
-            if cache_read:
-                log.info("Cache: read: %s", f"{cache_read:,}")
-            if cache_write:
-                log.info("Cache: write: %s", f"{cache_write:,}")
-            log.info("Session total: %s", f"{self._session_totals['total']:,}")
+        return {
+            "model": counter.model_name,
+            "total_tokens": total,
+            "max_input_tokens": counter.max_input_tokens,
+            "cache_hit_rate": cache_hit_rate,
+            "blocks": blocks,
+            "breakdown": {
+                "system": system_tokens,
+                "legend": legend_tokens,
+                "symbol_map": symbol_map_tokens,
+                "symbol_map_chunks": symbol_map_chunks,
+                "symbol_map_files": len(tokens_by_file),
+                "files": file_tokens,
+                "file_count": len(file_details),
+                "file_details": file_details,
+                "urls": url_tokens,
+                "url_details": url_details,
+                "history": history_tokens,
+                "history_messages": history_msg_count,
+            },
+            "session_totals": session_totals,
+            "promotions": promotions,
+            "demotions": demotions,
+        }
 
-        # ── Tier Change Notifications ──
-        try:
-            changes = tier_changes if tier_changes is not None else []
-            if changes:
-                # Group changes by (direction, old_tier, new_tier)
-                groups: dict[tuple, list] = {}
-                for change in changes:
-                    direction = "📈" if change.is_promotion else "📉"
-                    key = (direction, change.old_tier.name, change.new_tier.name)
-                    groups.setdefault(key, []).append(change.key)
-                for (direction, old_name, new_name), keys in sorted(groups.items()):
-                    items_str = ", ".join(keys)
-                    log.info("%s %s → %s: %d items — %s",
-                             direction, old_name, new_name, len(keys), items_str)
-        except Exception as e:
-            log.debug("Tier change report failed: %s", e)
+    # === Terminal HUD ===
 
-        # ── Edit Results ──
-        passed = result.get("passed", [])
-        failed = result.get("failed", [])
-        skipped = result.get("skipped", [])
-        if passed or failed or skipped:
-            log.info(
-                "Edits: %d applied, %d failed, %d skipped",
-                len(passed), len(failed), len(skipped),
-            )
-            for f in failed:
-                if isinstance(f, dict):
-                    log.warning("  FAILED %s: %s", f.get("file", "?"), f.get("error", "?"))
+    def _print_hud(self, usage):
+        """Print terminal HUD after response.
 
-    # ------------------------------------------------------------------
-    # Symbol index
-    # ------------------------------------------------------------------
-
-    def _init_stability(self):
-        """Initialize stability tracker from the reference graph."""
-        if self._symbol_index is None:
-            return
-        try:
-            self._context.initialize_stability(
-                self._symbol_index,
-                self._symbol_index.reference_index,
-            )
-        except Exception as e:
-            log.warning("Stability initialization failed: %s", e)
-
-    def _update_stability(self, selected_files: list[str], modified_files: list[str]) -> list:
-        """Update stability tracker after a response. Returns tier changes."""
-        if self._symbol_index is None:
-            return []
-        try:
-            # Build symbol blocks for selected files
-            symbol_blocks = {}
-            for fpath in self._symbol_index.all_symbols:
-                key = f"symbol:{fpath}"
-                block = self._symbol_index.get_file_block(fpath)
-                if block:
-                    symbol_blocks[key] = block
-
-            # Build active items
-            active_items = self._context.build_active_items(
-                selected_files, symbol_blocks,
-            )
-
-            # Register unselected symbol entries that aren't already tracked
-            for fpath in self._symbol_index.all_symbols:
-                key = f"symbol:{fpath}"
-                if key not in active_items:
-                    item = self._context.stability.get_item(key)
-                    if item is None:
-                        block = self._symbol_index.get_file_block(fpath)
-                        if block:
-                            self._context.stability.register_item(
-                                key, ItemType.SYMBOL,
-                                _hash_content(block),
-                                max(1, len(block) // 4),
-                            )
-
-            # Get all repo files
-            r = self._repo.get_file_tree()
-            all_files = set()
-            if "tree" in r:
-                self._collect_file_paths(r["tree"], all_files)
-
-            # Run the update
-            changes = self._context.stability.update_after_response(
-                active_items, modified_files, all_files,
-            )
-            return changes
-
-        except Exception as e:
-            log.warning("Stability update failed: %s", e)
-            return []
-
-    def _gather_tiered_content(self, selected_files: list[str]) -> tuple[dict, dict]:
-        """Gather symbol blocks and file contents for tiered assembly.
-
-        Returns (symbol_blocks, file_contents) keyed by tracker keys.
+        Three reports: Cache Blocks (boxed with sub-items), Token Usage, Tier Changes.
+        Uses logger.info for structured output.
         """
-        symbol_blocks: dict[str, str] = {}
-        file_contents: dict[str, str] = {}
+        counter = self._context.counter
+        tracker = self._context._stability_tracker
 
-        if self._symbol_index is None:
-            return symbol_blocks, file_contents
+        # Gather provider-reported usage
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_tokens", 0)
+        cache_write = usage.get("cache_write_tokens", 0)
 
-        # Determine which selected files have graduated to cached tiers
-        # (their content goes in the tier block, not in active files)
-        graduated_files = set()
-        for fpath in selected_files:
-            file_key = f"file:{fpath}"
-            item = self._context.stability.get_item(file_key)
-            if item and item.tier != Tier.ACTIVE:
-                graduated_files.add(fpath)
-
-        # Symbol blocks for all files NOT in selected (those are in active context),
-        # UNLESS they've graduated to a cached tier
-        excluded = set(selected_files) - graduated_files
-        for fpath, fsyms in self._symbol_index.all_symbols.items():
-            if fpath not in excluded:
-                key = f"symbol:{fpath}"
-                block = self._symbol_index.get_file_block(fpath)
-                if block:
-                    symbol_blocks[key] = block
-
-        # File contents for files in cached tiers (including graduated selected files)
-        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
-            for item in self._context.stability.get_tier_items(tier):
-                if item.item_type == ItemType.FILE:
-                    path = item.key.split(":", 1)[1] if ":" in item.key else item.key
-                    r = self._repo.get_file_content(path)
-                    if "content" in r:
-                        file_contents[item.key] = r["content"]
-
-        return symbol_blocks, file_contents
-
-    @staticmethod
-    def _collect_file_paths(tree_node: dict, paths: set[str]):
-        """Recursively collect file paths from a tree node."""
-        if tree_node.get("type") == "file" and tree_node.get("path"):
-            paths.add(tree_node["path"])
-        for child in tree_node.get("children", []):
-            LLM._collect_file_paths(child, paths)
-
-    def _build_symbol_index(self):
-        """Build the symbol index from repo files."""
-        if self._symbol_index is None:
-            return
-        try:
-            self._symbol_index.index_repo()
-            self._save_symbol_map()
-        except Exception as e:
-            log.warning("Symbol index build failed: %s", e)
-
-    def _save_symbol_map(self):
-        """Save symbol map to .ac-dc/symbol_map.txt."""
-        if self._symbol_index is None:
-            return
-        try:
-            out_path = self._config.ac_dc_dir / "symbol_map.txt"
-            symbol_map = self._symbol_index.get_symbol_map(
-                exclude_files=set(self._selected_files),
-            )
-            out_path.write_text(symbol_map, encoding="utf-8")
-        except Exception as e:
-            log.warning("Failed to save symbol map: %s", e)
-
-    def rebuild_symbol_index(self) -> dict:
-        """Rebuild the symbol index (e.g. after file changes)."""
-        if self._symbol_index is None:
-            return {"error": "Symbol index not available"}
-        self._build_symbol_index()
-        return {"ok": True}
-
-    def invalidate_symbol_files(self, file_paths: list[str]):
-        """Invalidate symbol cache for modified files."""
+        # Gather per-tier data
+        system_tokens = counter.count(self._config.get_system_prompt())
+        legend_tokens = 0
         if self._symbol_index:
-            self._symbol_index.invalidate_files(file_paths)
+            legend = self._symbol_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
 
-    def get_symbol_map(self) -> str:
-        """Return the current symbol map text."""
-        if self._symbol_index is None:
-            return ""
-        return self._symbol_index.get_symbol_map(
-            exclude_files=set(self._selected_files),
-        )
+        tier_data = []  # list of (name, tokens, is_cached, contents)
+        cached_tokens = 0
+        total = 0
 
-    def get_symbol_map_chunks(self, num_chunks: int = 3) -> list[dict]:
-        """Get symbol map split into chunks for cache tier distribution."""
-        if self._symbol_index is None:
-            return []
-        return self._symbol_index.get_symbol_map_chunks(
-            exclude_files=set(self._selected_files),
-            num_chunks=num_chunks,
-        )
+        if tracker:
+            for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                tier_items = tracker.get_tier_items(tier)
+                if tier_items:
+                    tier_tokens = sum(i.tokens for i in tier_items.values())
+                    contents = self._tier_content_breakdown(tier_items)
+                    # For L0, add system + legend as a special sub-item
+                    if tier == Tier.L0:
+                        contents.insert(0, {
+                            "type": "system",
+                            "name": "System + Legend",
+                            "path": None,
+                            "tokens": system_tokens + legend_tokens,
+                            "n": None,
+                            "threshold": None,
+                        })
+                        tier_tokens += system_tokens + legend_tokens
+                    tier_data.append((tier.name, tier_tokens, True, contents))
+                    cached_tokens += tier_tokens
+                    total += tier_tokens
+                elif tier == Tier.L0:
+                    # L0 always has system prompt even without tracked items
+                    sys_tok = system_tokens + legend_tokens
+                    if sys_tok > 0:
+                        contents = [{"type": "system", "name": "System + Legend",
+                                     "path": None, "tokens": sys_tok,
+                                     "n": None, "threshold": None}]
+                        tier_data.append((tier.name, sys_tok, True, contents))
+                        cached_tokens += sys_tok
+                        total += sys_tok
 
-    # ------------------------------------------------------------------
-    # LSP
-    # ------------------------------------------------------------------
+            active_items = tracker.get_tier_items(Tier.ACTIVE)
+            if active_items:
+                active_tokens = sum(i.tokens for i in active_items.values())
+                contents = self._tier_content_breakdown(active_items)
+                tier_data.append(("active", active_tokens, False, contents))
+                total += active_tokens
+        else:
+            # No tracker — show everything as active
+            symbol_map_tokens = 0
+            if self._symbol_index:
+                sm = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if sm:
+                    symbol_map_tokens = counter.count(sm)
+            file_tokens = self._context.file_context.count_tokens(counter)
+            history_tokens = self._context.history_token_count()
+            total = system_tokens + symbol_map_tokens + file_tokens + history_tokens
+            contents = []
+            if system_tokens:
+                contents.append({"type": "system", "name": "System + Legend",
+                                 "path": None,
+                                 "tokens": system_tokens + legend_tokens,
+                                 "n": None, "threshold": None})
+            if symbol_map_tokens:
+                contents.append({"type": "symbols", "name": "Symbol Map",
+                                 "path": None,
+                                 "tokens": symbol_map_tokens,
+                                 "n": None, "threshold": None})
+            if file_tokens:
+                contents.append({"type": "files", "name": "Files",
+                                 "path": None,
+                                 "tokens": file_tokens,
+                                 "n": None, "threshold": None})
+            if history_tokens:
+                contents.append({"type": "history", "name": "History",
+                                 "path": None,
+                                 "tokens": history_tokens,
+                                 "n": None, "threshold": None})
+            tier_data.append(("active", total, False, contents))
 
-    def lsp_get_hover(self, path: str, line: int, col: int) -> str:
-        if self._symbol_index is None:
-            return ""
-        return self._symbol_index.get_hover_info(path, line, col)
+        # --- Cache Blocks Report (boxed with sub-items) ---
+        cache_hit = round(cached_tokens / total * 100) if total > 0 else 0
 
-    def lsp_get_definition(self, path: str, line: int, col: int) -> Optional[dict]:
-        if self._symbol_index is None:
+        # Build lines
+        box_lines = []
+        for name, tokens, is_cached, contents in tier_data:
+            cached_tag = " [cached]" if is_cached else ""
+            box_lines.append(f"│ {name:<6} {tokens:>8,} tokens{cached_tag}")
+            # Group sub-items by type for compact terminal display
+            type_groups = {}
+            for c in contents:
+                ctype = c["type"]
+                if ctype not in type_groups:
+                    type_groups[ctype] = {"count": 0, "tokens": 0}
+                type_groups[ctype]["count"] += 1
+                type_groups[ctype]["tokens"] += c["tokens"]
+            for ctype, info in type_groups.items():
+                ctokens = info["tokens"]
+                ccount = info["count"]
+                if ctype == "system":
+                    box_lines.append(f"│   └─ system + legend ({ctokens:,} tok)")
+                elif ctype == "symbols":
+                    box_lines.append(f"│   └─ {ccount} symbols ({ctokens:,} tok)")
+                elif ctype == "files":
+                    box_lines.append(f"│   └─ {ccount} files ({ctokens:,} tok)")
+                elif ctype == "history":
+                    box_lines.append(f"│   └─ {ccount} history msgs ({ctokens:,} tok)")
+                else:
+                    box_lines.append(f"│   └─ {ccount} {ctype} ({ctokens:,} tok)")
+
+        footer = f"│ Total: {total:,} | Cache hit: {cache_hit}%"
+        content_width = max((len(line) for line in box_lines + [footer]), default=40)
+        box_width = content_width + 2
+
+        hud_lines = [f"╭─ Cache Blocks {'─' * max(1, box_width - 15)}╮"]
+        for line in box_lines:
+            hud_lines.append(f"{line:<{box_width}}│")
+        hud_lines.append(f"├{'─' * box_width}┤")
+        hud_lines.append(f"{footer:<{box_width}}│")
+        hud_lines.append(f"╰{'─' * box_width}╯")
+
+        for line in hud_lines:
+            logger.info(line)
+
+        # --- Token Usage (compact) ---
+        logger.info(f"Model: {counter.model_name}")
+        if input_tokens or output_tokens:
+            logger.info(f"Last request: {input_tokens:,} in, {output_tokens:,} out")
+        if cache_read or cache_write:
+            parts = []
+            if cache_read:
+                parts.append(f"read: {cache_read:,}")
+            if cache_write:
+                parts.append(f"write: {cache_write:,}")
+            logger.info(f"Cache: {', '.join(parts)}")
+        session_total = sum(self._session_totals.values())
+        if session_total:
+            logger.info(f"Session total: {session_total:,}")
+
+        # --- Tier Changes (grouped) ---
+        if tracker:
+            changes = tracker.changes
+            # Group by (action_type, from, to)
+            grouped = {}
+            for c in changes:
+                action = c.get("action", "")
+                direction = "📈" if action in ("promoted", "graduated") else "📉"
+                group_key = (direction, c.get("from", "?"), c.get("to", "?"))
+                if group_key not in grouped:
+                    grouped[group_key] = []
+                grouped[group_key].append(c["key"])
+
+            # Print promotions first, then demotions
+            for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
+                logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
+
+    # === Review Mode (RPC) ===
+
+    def check_review_ready(self):
+        """Check if working tree is clean for review."""
+        if not self._repo:
+            return {"clean": False, "message": "No repository available"}
+        if self._repo.is_clean():
+            return {"clean": True}
+        return {
+            "clean": False,
+            "message": (
+                "Cannot enter review mode: working tree has uncommitted changes.\n"
+                "Please commit, stash, or discard changes first:\n"
+                "  git stash\n"
+                "  git commit -am \"wip\"\n"
+                "  git checkout -- <file>"
+            ),
+        }
+
+    def get_commit_graph(self, limit=100, offset=0, include_remote=False):
+        """Get commit graph for the review selector. Delegates to repo."""
+        if not self._repo:
+            return {"error": "No repository available"}
+        return self._repo.get_commit_graph(limit=limit, offset=offset,
+                                           include_remote=include_remote)
+
+    async def start_review(self, branch, base_commit):
+        """Enter review mode.
+
+        Full entry sequence:
+        1. checkout_review_parent → build symbol_map_before
+        2. setup_review_soft_reset → rebuild symbol index
+        """
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        if self._review_active:
+            return {"error": "Review already active. End current review first."}
+
+        # Phase 1: Checkout parent
+        checkout_result = self._repo.checkout_review_parent(branch, base_commit)
+        if "error" in checkout_result:
+            return checkout_result
+
+        branch_tip = checkout_result["branch_tip"]
+        parent_commit = checkout_result["parent_commit"]
+        original_branch = checkout_result["original_branch"]
+
+        # Phase 2: Build symbol_map_before (at parent commit state)
+        symbol_map_before = ""
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+                symbol_map_before = self._symbol_index.get_symbol_map() or ""
+            except Exception as e:
+                logger.warning(f"Failed to build symbol_map_before: {e}")
+
+        # Phase 3: Setup soft reset
+        setup_result = self._repo.setup_review_soft_reset(branch_tip, parent_commit)
+        if "error" in setup_result:
+            # Recovery: try to exit
+            try:
+                self._repo.exit_review_mode(branch_tip, original_branch)
+            except Exception:
+                pass
+            return setup_result
+
+        # Phase 4: Rebuild symbol index for branch tip state
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+            except Exception as e:
+                logger.warning(f"Failed to rebuild symbol index: {e}")
+
+        # Get review metadata
+        commits = self._repo.get_commit_log(base_commit, branch_tip)
+        changed_files = self._repo.get_review_changed_files()
+        total_additions = sum(f.get("additions", 0) for f in changed_files)
+        total_deletions = sum(f.get("deletions", 0) for f in changed_files)
+
+        # Store review state
+        self._review_active = True
+        self._review_branch = branch
+        self._review_branch_tip = branch_tip
+        self._review_base_commit = base_commit
+        self._review_parent = parent_commit
+        self._review_original_branch = original_branch
+        self._review_commits = commits if isinstance(commits, list) else []
+        self._review_changed_files = changed_files
+        self._review_stats = {
+            "commit_count": len(self._review_commits),
+            "files_changed": len(changed_files),
+            "additions": total_additions,
+            "deletions": total_deletions,
+        }
+        self._symbol_map_before = symbol_map_before
+
+        # Swap system prompt to review-specific instructions
+        self._saved_system_prompt = self._context.get_system_prompt()
+        review_prompt = self._config.get_review_prompt()
+        if review_prompt.strip():
+            self._context.set_system_prompt(review_prompt)
+
+        # Clear file selection so review starts with a clean slate —
+        # prevents stale selections from before review including all diffs
+        self._selected_files = []
+
+        logger.info(f"Review mode entered: {branch} ({base_commit[:7]} → {branch_tip[:7]})")
+
+        return {
+            "status": "review_active",
+            "branch": branch,
+            "base_commit": base_commit,
+            "commits": self._review_commits,
+            "changed_files": self._review_changed_files,
+            "stats": self._review_stats,
+        }
+
+    async def end_review(self):
+        """Exit review mode and restore repository."""
+        if not self._review_active:
+            return {"error": "No active review"}
+
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        branch_tip = self._review_branch_tip
+        original_branch = self._review_original_branch
+
+        # Exit review mode in git
+        result = self._repo.exit_review_mode(branch_tip, original_branch)
+
+        # Restore original system prompt
+        if self._saved_system_prompt is not None:
+            self._context.set_system_prompt(self._saved_system_prompt)
+            self._saved_system_prompt = None
+
+        # Clear review state regardless
+        self._review_active = False
+        self._review_branch = None
+        self._review_branch_tip = None
+        self._review_base_commit = None
+        self._review_parent = None
+        self._review_original_branch = None
+        self._review_commits = []
+        self._review_changed_files = []
+        self._review_stats = {}
+        self._symbol_map_before = None
+        self._context.clear_review_context()
+
+        # Rebuild symbol index
+        if self._symbol_index:
+            try:
+                file_list = self._repo.get_flat_file_list()
+                self._symbol_index.index_repo(file_list)
+            except Exception as e:
+                logger.warning(f"Failed to rebuild symbol index after review: {e}")
+
+        # Re-initialize stability tracker
+        if self._symbol_index and self._stability_tracker:
+            try:
+                ref_index = self._symbol_index.reference_index
+                all_files = list(self._symbol_index._all_symbols.keys())
+                self._stability_tracker.initialize_from_reference_graph(
+                    ref_index, all_files, counter=self._context.counter,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to reinitialize stability tracker: {e}")
+
+        logger.info("Review mode exited")
+        return result
+
+    def get_review_state(self):
+        """Get current review state."""
+        if not self._review_active:
+            return {"active": False}
+        return {
+            "active": True,
+            "branch": self._review_branch,
+            "base_commit": self._review_base_commit,
+            "branch_tip": self._review_branch_tip,
+            "commits": self._review_commits,
+            "changed_files": self._review_changed_files,
+            "stats": self._review_stats,
+        }
+
+    def get_review_file_diff(self, path):
+        """Get reverse diff for a file during review."""
+        if not self._review_active:
+            return {"error": "No active review"}
+        if not self._repo:
+            return {"error": "No repository available"}
+        return self._repo.get_review_file_diff(path)
+
+    def get_snippets(self):
+        """Return snippets appropriate for the current mode.
+
+        In review mode, returns review-specific snippets.
+        Otherwise, returns standard coding snippets.
+        """
+        if self._review_active:
+            return self._config.get_review_snippets()
+        return self._config.get_snippets()
+
+    def _build_review_context(self):
+        """Build review context string for prompt injection.
+
+        Includes: review summary, commit log, pre-change symbol map,
+        and reverse diffs for selected files.
+        """
+        if not self._review_active:
             return None
-        return self._symbol_index.get_definition(path, line, col)
 
-    def lsp_get_references(self, path: str, line: int, col: int) -> list[dict]:
-        if self._symbol_index is None:
-            return []
-        return self._symbol_index.get_references(path, line, col)
+        parts = []
 
-    def lsp_get_completions(self, path: str, line: int, col: int) -> list[dict]:
-        if self._symbol_index is None:
+        # Review summary
+        parent_short = self._review_parent[:7] if self._review_parent else "?"
+        tip_short = self._review_branch_tip[:7] if self._review_branch_tip else "?"
+        stats = self._review_stats
+        parts.append(
+            f"## Review: {self._review_branch} ({parent_short} → {tip_short})\n"
+            f"{stats.get('commit_count', 0)} commits, "
+            f"{stats.get('files_changed', 0)} files changed, "
+            f"+{stats.get('additions', 0)} -{stats.get('deletions', 0)}\n"
+        )
+
+        # Commit log
+        if self._review_commits:
+            parts.append("## Commits")
+            for i, c in enumerate(self._review_commits, 1):
+                date = c.get("date", "")
+                parts.append(
+                    f"{i}. {c.get('short_sha', '?')} {c.get('message', '')} "
+                    f"({c.get('author', '?')}, {date})"
+                )
+            parts.append("")
+
+        # Pre-change symbol map
+        if self._symbol_map_before:
+            parts.append(
+                "## Pre-Change Symbol Map\n"
+                "Symbol map from the parent commit (before the reviewed changes).\n"
+                "Compare against the current symbol map in the repository structure above.\n"
+            )
+            parts.append(self._symbol_map_before)
+            parts.append("")
+
+        # Reverse diffs for selected files that exist on disk
+        # (excludes deleted files — they have no current content to review)
+        changed_paths = {f["path"] for f in self._review_changed_files}
+        selected_and_changed = [
+            p for p in self._selected_files
+            if p in changed_paths and self._repo and self._repo.file_exists(p)
+        ]
+
+        if selected_and_changed and self._repo:
+            parts.append(
+                "## Reverse Diffs (selected files)\n"
+                "These diffs show what would revert each file to the pre-review state.\n"
+                "The full current content is in the working files above.\n"
+            )
+            for path in selected_and_changed:
+                diff_result = self._repo.get_review_file_diff(path)
+                diff_text = diff_result.get("diff", "")
+                # Get stats for this file
+                file_info = next(
+                    (f for f in self._review_changed_files if f["path"] == path),
+                    {}
+                )
+                adds = file_info.get("additions", 0)
+                dels = file_info.get("deletions", 0)
+                parts.append(f"### {path} (+{adds} -{dels})")
+                if diff_text:
+                    parts.append(f"```diff\n{diff_text}```")
+                else:
+                    parts.append("*(no diff available)*")
+                parts.append("")
+
+        return "\n".join(parts)
+
+    # === History RPC Methods ===
+
+    def history_search(self, query, role=None, limit=50):
+        """Search conversation history.
+
+        Searches persistent store first, falls back to in-memory history.
+        """
+        if not query:
             return []
+
+        # Try persistent store first
+        if self._history_store:
+            results = self._history_store.search(query, role=role, limit=limit)
+            if results:
+                return results
+
+        # Fall back to in-memory history
+        results = []
+        for msg in self._context.get_history():
+            if role and msg["role"] != role:
+                continue
+            if query.lower() in msg.get("content", "").lower():
+                results.append(msg)
+                if len(results) >= limit:
+                    break
+        return results
+
+    def history_get_session(self, session_id):
+        """Get all messages from a session."""
+        if self._history_store:
+            return self._history_store.get_session_messages(session_id)
+        return []
+
+    def history_list_sessions(self, limit=None):
+        """List recent sessions, newest first."""
+        if self._history_store:
+            return self._history_store.list_sessions(limit=limit)
+        return []
+
+    def history_new_session(self):
+        """Start new session — alias for new_session."""
+        return self.new_session()
+
+    def load_session_into_context(self, session_id):
+        """Load a previous session into active context.
+
+        Clears current history, reads messages from store,
+        adds each to context manager, and sets session ID.
+        """
+        if not self._history_store:
+            return {"error": "No history store available"}
+
+        msgs = self._history_store.get_session_messages_for_context(session_id)
+        if not msgs:
+            return {"error": "Session not found or empty"}
+
+        self._context.clear_history()
+        for msg in msgs:
+            self._context.add_message(msg["role"], msg["content"])
+
+        # Build frontend messages with reconstructed images
+        frontend_messages = []
+        for msg in msgs:
+            entry = {"role": msg["role"], "content": msg["content"]}
+            if msg.get("_images"):
+                entry["images"] = msg["_images"]
+            frontend_messages.append(entry)
+
+        self._session_id = session_id
+        return {
+            "session_id": session_id,
+            "message_count": len(msgs),
+            "messages": frontend_messages,
+        }
+
+    def get_history_status(self):
+        """Return history status for the history bar.
+
+        Includes token counts and compaction status.
+        """
+        return {
+            **self._context.get_compaction_status(),
+            "session_id": self._session_id,
+            "message_count": len(self._context.get_history()),
+        }
+
+    # === URL Handling (RPC) ===
+
+    def _init_url_service(self):
+        """Initialize the URL service with cache and model."""
+        cache = None
         try:
-            file_result = self._repo.get_file_content(path)
-            content = file_result.get("content", "")
-            lines = content.splitlines()
-            if 0 < line <= len(lines):
-                line_text = lines[line - 1]
-                prefix = ""
-                if col > 0 and col <= len(line_text):
-                    i = col - 1
-                    while i >= 0 and (line_text[i].isalnum() or line_text[i] == "_"):
-                        i -= 1
-                    prefix = line_text[i + 1:col]
-                return self._symbol_index.get_completions(path, line, col, prefix)
-        except Exception:
-            pass
-        return self._symbol_index.get_completions(path, line, col)
+            url_config = self._config.url_cache_config or {}
+            cache_dir = url_config.get("path")
+            ttl_hours = url_config.get("ttl_hours", 24)
+            cache = URLCache(cache_dir=cache_dir, ttl_hours=ttl_hours)
+        except Exception as e:
+            logger.warning(f"Failed to initialize URL cache: {e}")
+
+        model = self._config.smaller_model or self._config.model
+
+        # Pass SymbolIndex class so GitHub repo fetches generate symbol maps
+        from .symbol_index.index import SymbolIndex
+        return URLService(cache=cache, model=model, symbol_index_cls=SymbolIndex)
+
+    def detect_urls(self, text):
+        """Find and classify URLs in text. (RPC)"""
+        return self._url_service.detect_urls(text)
+
+    async def fetch_url(self, url, use_cache=True, summarize=True,
+                        summary_type=None, user_text=""):
+        """Fetch URL content, cache, and optionally summarize. (RPC)"""
+        result = await self._url_service.fetch_url(
+            url, use_cache=use_cache, summarize=summarize,
+            summary_type=summary_type, user_text=user_text,
+        )
+        return result.to_dict()
+
+    async def detect_and_fetch(self, text, use_cache=True, summarize=True):
+        """Detect and fetch all URLs in text. (RPC)"""
+        results = await self._url_service.detect_and_fetch(
+            text, use_cache=use_cache, summarize=summarize,
+            user_text=text,
+        )
+        return [r.to_dict() for r in results]
+
+    def get_url_content(self, url):
+        """Get cached/fetched content for a URL. (RPC)"""
+        result = self._url_service.get_url_content(url)
+        return result.to_dict()
+
+    def invalidate_url_cache(self, url):
+        """Remove URL from cache. (RPC)"""
+        self._url_service.invalidate_url_cache(url)
+        return {"success": True}
+
+    def remove_fetched_url(self, url):
+        """Remove URL from active context but keep in cache. (RPC)"""
+        self._url_service.remove_fetched(url)
+        return {"success": True}
+
+    def clear_url_cache(self):
+        """Clear all cached URLs. (RPC)"""
+        self._url_service.clear_url_cache()
+        return {"success": True}

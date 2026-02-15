@@ -1,215 +1,207 @@
-# AI Coder / DeCoder (AC⚡DC)
+# AC⚡DC — AI-assisted Code editing tool, De-Coder
 
-AC⚡DC is a fast, lightweight AI code editor designed for speed over autonomy. It helps you write, edit, and refactor code through natural language conversations, applying precise edits using an anchored EDIT/REPLACE block format.
+AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
 
 This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
 
-## Philosophy: Speed Over Agency
-
-AC⚡DC intentionally avoids agentic behavior. No automatic tool use, no shell command execution, no multi-step autonomous workflows. This keeps the feedback loop tight and the token costs low.
-
 ## Features
 
-- **Natural Language Code Editing** — Describe changes in plain English and get precise code modifications
-- **Visual Diff Viewer** — Monaco-based side-by-side diff editor to review and edit AI-proposed changes before saving
-- **Symbol Map Navigation** — Tree-sitter based code indexing generates a compact symbol map showing classes, functions, imports, and cross-file references
-- **Tiered Context Caching** — Automatically promotes frequently-used files through stability tiers for optimal prompt caching
-- **File Selection** — Pick specific files to include in context, with git status indicators
-- **Image Support** — Paste screenshots or diagrams directly into the chat for visual context
-- **Streaming Responses** — Real-time streaming of AI responses with stop capability
-- **Token Usage Tracking** — Monitor context window usage with detailed token breakdowns
-- **Git Integration** — Stage files, view diffs, auto-generate commit messages, and commit directly from the UI
-- **Conversation History** — Persistent history with search, session browsing, and automatic compaction when context grows too large
-- **Find in Files** — Search across the codebase with regex support and context preview
-- **URL Context** — Paste URLs to fetch web pages, GitHub repos, or documentation — content is automatically extracted, cached, and optionally summarized
-- **Prompt Snippets** — Save and reuse common prompts via configurable snippets
-- **Voice Input** — Speech-to-text for hands-free prompt dictation
+- **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
+- **Structured code edits** with anchor-based matching, validation, and automatic git staging.
+- **Side-by-side diff viewer** — Monaco editor with hover, go-to-definition, references, and completions.
+- **File picker** with git status badges, diff stats, context menu, and keyboard navigation.
+- **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
+- **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
+- **Image paste support** — drop screenshots into chat with persistent storage across sessions.
+- **Voice dictation** via Web Speech API.
+- **Configurable prompt snippets** for common actions.
+- **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
+- **Session history browser** — search, revisit, and reload past conversations.
+- **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
+- **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
+- **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
+- **Token HUD** with per-request and session-total usage reporting.
 
----
+## Philosophy
+
+- **Symbol map, not full files** — A compact, reference-annotated map of your codebase gives the LLM structural context without burning tokens on full file contents.
+- **Stability-based caching** — Content that stays unchanged across requests promotes to higher cache tiers, aligning with provider cache breakpoints (e.g., Anthropic's ephemeral caching). You pay to ingest once; subsequent requests hit cache.
+- **Deterministic edits** — The LLM proposes changes using anchored edit blocks with exact context matching. No fuzzy patching, no guessing.
+- **Git-native** — Every applied edit is staged automatically. Commit messages are LLM-generated. The file picker shows git status natively.
+- **Bidirectional RPC** — Terminal and browser are symmetric peers over WebSocket (JSON-RPC 2.0). Either side can call the other.
+
+## Workflow
+
+1. **Start** — Run `ac-dc` in your git repo. Browser opens automatically.
+2. **Select files** — Check files in the picker to add their full content to context.
+3. **Chat** — Ask the LLM to understand, modify, or create code.
+4. **Review edits** — Applied edits appear in the diff viewer with two-level highlighting.
+5. **Commit** — Click 💾 to stage all, generate an LLM commit message, and commit.
+6. **Iterate** — File context and cache tiers evolve as you work.
+
+### Code Review
+
+1. Click the review button in the header bar.
+2. Select a commit in the git graph to set the review base.
+3. Click **Start Review** — the repo enters review mode (soft reset).
+4. Select files to include their reverse diffs in context.
+5. Chat with the LLM about the changes.
+6. Click **Exit Review** to restore the branch.
 
 ## Quick Start
 
-### Installation
+Download the latest standalone binary for your platform from the [GitHub Releases](https://github.com/flatmax/AI-Coder-DeCoder/releases) page:
 
-Download the pre-built executable for your platform from the [Releases](https://github.com/flatmax/AI-Coder-DeCoder/releases) page:
+| Platform | Binary |
+|----------|--------|
+| Linux | `ac-dc-linux` |
+| macOS (ARM) | `ac-dc-macos` |
+| Windows | `ac-dc-windows.exe` |
 
-- **Linux:** `ac-dc-linux`
-- **macOS:** `ac-dc-macos`
-- **Windows:** `ac-dc-windows.exe`
-
-Make it executable (Linux/macOS):
-```bash
-chmod +x ac-dc-linux  # or ac-dc-macos
-```
-
-### Running
-
-Navigate to your git repository and run:
+Then run it inside any git repository:
 
 ```bash
-./ac-dc-linux  # or ./ac-dc-macos or ac-dc-windows.exe
+cd /path/to/your/project
+./ac-dc-linux
 ```
 
-This starts the backend server and opens the webapp in your browser.
+AC⚡DC opens your browser and connects via WebSocket. The terminal stays running as the backend.
 
----
+### Provider Configuration
 
-## Configuration
+On first run, AC⚡DC creates a `.ac-dc/` directory in your repo. Edit `.ac-dc/llm.json` with your provider credentials:
 
-AC⚡DC uses configuration files stored in `~/.config/ac-dc/` (Linux/macOS) or `%APPDATA%/ac-dc/` (Windows). On first run, default configs are created automatically.
-
-### LLM Configuration (litellm_config.json)
-
-Configures which LLM provider and model to use. AC⚡DC uses [LiteLLM](https://github.com/BerriAI/litellm) under the hood, supporting 100+ providers.
-
-#### Examples
-
-**Anthropic:**
+**AWS Bedrock:**
 ```json
 {
-  "env": {
-    "ANTHROPIC_API_KEY": "sk-ant-..."
-  },
-  "model": "claude-sonnet-4-20250514",
-  "smallerModel": "claude-haiku-4-5-20251001"
+  "env": { "AWS_REGION": "us-east-1" },
+  "model": "bedrock/anthropic.claude-sonnet-4-20250514",
+  "smallerModel": "bedrock/anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+```
+
+**Anthropic direct:**
+```json
+{
+  "env": { "ANTHROPIC_API_KEY": "sk-ant-..." },
+  "model": "anthropic/claude-sonnet-4-20250514",
+  "smallerModel": "anthropic/claude-haiku-4-5-20251001-v1:0"
 }
 ```
 
 **OpenAI:**
 ```json
 {
-  "env": {
-    "OPENAI_API_KEY": "sk-..."
-  },
-  "model": "gpt-4o",
-  "smallerModel": "gpt-4o-mini"
+  "env": { "OPENAI_API_KEY": "sk-..." },
+  "model": "openai/gpt-4o",
+  "smallerModel": "openai/gpt-4o-mini"
 }
 ```
 
-**Local LLM (Ollama):**
+**Local (Ollama):**
 ```json
 {
-  "env": {
-    "OLLAMA_API_BASE": "http://localhost:11434"
-  },
-  "model": "ollama/qwen3-coder-next",
-  "smallerModel": "ollama/qwen3-coder-next"
+  "env": {},
+  "model": "ollama/llama3",
+  "smallerModel": "ollama/llama3"
 }
 ```
 
-**Local LLM (OpenAI-compatible server — LM Studio, llama.cpp, vLLM, etc.):**
-```json
-{
-  "env": {
-    "OPENAI_API_KEY": "not-needed",
-    "OPENAI_API_BASE": "http://localhost:1234/v1"
-  },
-  "model": "openai/local-model",
-  "smallerModel": "openai/local-model"
-}
-```
-
-**AWS Bedrock:**
-```json
-{
-  "env": {
-    "AWS_REGION": "us-east-1"
-  },
-  "model": "anthropic.claude-sonnet-4-20250514-v1:0",
-  "smallerModel": "anthropic.claude-haiku-4-5-20251001-v1:0"
-}
-```
-
-**Azure OpenAI:**
-```json
-{
-  "env": {
-    "AZURE_API_KEY": "...",
-    "AZURE_API_BASE": "https://your-resource.openai.azure.com",
-    "AZURE_API_VERSION": "2024-02-15-preview"
-  },
-  "model": "azure/your-deployment-name",
-  "smallerModel": "azure/your-smaller-deployment"
-}
-```
-
-**Google Vertex AI:**
-```json
-{
-  "env": {
-    "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json",
-    "VERTEXAI_PROJECT": "your-project-id",
-    "VERTEXAI_LOCATION": "us-central1"
-  },
-  "model": "vertex_ai/gemini-1.5-pro",
-  "smallerModel": "vertex_ai/gemini-1.5-flash"
-}
-```
-
-#### Configuration Reference
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `env` | Yes | Environment variables for your LLM provider |
-| `model` | Yes | Primary model for code generation |
-| `smallerModel` | Yes | Faster/cheaper model for summaries and commit messages |
-| `cacheMinTokens` | No | Minimum tokens for prompt caching (default: 1024) |
-| `cacheBufferMultiplier` | No | Buffer multiplier for cache allocation (default: 1.5) |
-
-For all supported providers, see the [LiteLLM Provider Documentation](https://docs.litellm.ai/docs/providers).
-
-### Application Configuration (app_config.json)
-
-```json
-{
-  "url_cache": {
-    "path": "/tmp/ac_url_cache",
-    "ttl_hours": 24
-  },
-  "history_compaction": {
-    "enabled": true,
-    "compaction_trigger_tokens": 12000,
-    "verbatim_window_tokens": 3000,
-    "summary_budget_tokens": 500,
-    "min_verbatim_exchanges": 2
-  }
-}
-```
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `url_cache.path` | `/tmp/ac_url_cache` | Directory for caching fetched URL content |
-| `url_cache.ttl_hours` | `24` | How long cached URLs remain valid |
-| `history_compaction.enabled` | `true` | Enable automatic history compaction |
-| `history_compaction.compaction_trigger_tokens` | `12000` | Token threshold to trigger compaction |
-| `history_compaction.verbatim_window_tokens` | `3000` | Tokens to keep verbatim (recent messages) |
-| `history_compaction.summary_budget_tokens` | `500` | Max tokens for the summary |
-| `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges to preserve |
-
----
-
-## Workflow
-
-1. **Describe Your Task** — Type your request in natural language
-2. **AI Navigates the Codebase** — The AI uses the symbol map to find relevant files and may ask you to add specific files to the context
-3. **Add Requested Files** — Click on file references in the AI's response or use the file picker
-4. **Review Diffs** — Code changes appear in the diff viewer for review
-5. **Edit & Save** — Modify the proposed changes if needed, then save to disk
-6. **Commit** — Stage changes and auto-generate a commit message from the UI
+Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. You can also edit the configuration from the Settings tab inside the browser UI.
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Enter` | Send message |
-| `Shift+Enter` | New line in input |
-| `Escape` | Close snippets / clear input |
-| `↑` at start | Open message history search |
-| `↓` at end | Restore input from before history search |
-| `Ctrl+S` / `Cmd+S` | Save active file (in diff viewer) |
-| `Ctrl+W` / `Cmd+W` | Close active tab (in diff viewer) |
-| `Alt+1..5` | Switch tabs (Files, Search, Context, Cache, Settings) |
-| `Alt+M` | Toggle minimize/maximize dialog |
+| Shortcut | Context | Action |
+|----------|---------|--------|
+| `Enter` | Chat input | Send message |
+| `Shift+Enter` | Chat input | New line |
+| `↑` | Chat input (empty) | Open input history |
+| `Escape` | Chat input | Clear @-filter → close snippets → clear input |
+| `@text` | Chat input | Filter file picker |
+| `Ctrl+S` | Diff viewer / Settings | Save file |
+| `Ctrl+Shift+F` | Global | Open search tab with selection |
+| `Alt+1` | Global | Files & Chat tab |
+| `Alt+2` | Global | Search tab |
+| `Alt+3` | Global | Context Budget tab |
+| `Alt+4` | Global | Cache Tiers tab |
+| `Alt+5` | Global | Settings tab |
+| `Alt+M` | Global | Toggle minimize dialog |
+| `↑/↓` | Search results | Navigate matches |
+| `Enter` | Search results | Open match in diff viewer |
+| `Space/Enter` | File picker | Toggle file selection |
+| `↑/↓` | File picker | Navigate tree |
+
+## CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--server-port` | `18080` | RPC WebSocket port |
+| `--webapp-port` | `18999` | Webapp dev/preview port |
+| `--no-browser` | `false` | Don't auto-open browser |
+| `--repo-path` | `.` | Git repository path |
+| `--dev` | `false` | Run local Vite dev server |
+| `--preview` | `false` | Build and preview locally |
+| `--verbose` | `false` | Enable debug logging |
+
+## Configuration
+
+All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root}/.ac-dc/` (per-repo overrides).
+
+| File | Purpose | Format |
+|------|---------|--------|
+| `llm.json` | Provider, model, env vars, cache tuning | JSON |
+| `app.json` | URL cache, history compaction settings | JSON |
+| `system.md` | Main LLM system prompt | Markdown |
+| `system_extra.md` | Additional project-specific instructions | Markdown |
+| `snippets.json` | Quick-insert prompt buttons | JSON |
+| `compaction.md` | History compaction skill prompt | Markdown |
+| `review.md` | Code review system prompt | Markdown |
+| `review-snippets.json` | Review mode snippet buttons | JSON |
+
+### LLM Config Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `env` | `{}` | Environment variables (API keys, regions) |
+| `model` | — | Primary LLM model identifier |
+| `smallerModel` | — | Cheaper model for summaries and commit messages |
+| `cache_min_tokens` | `1024` | Minimum tokens for cache tier targeting |
+| `cache_buffer_multiplier` | `1.5` | Multiplier for cache target (`1024 × 1.5 = 1536`) |
+
+### App Config Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url_cache.path` | `/tmp/ac-dc-url-cache` | URL content cache directory |
+| `url_cache.ttl_hours` | `24` | Cache expiry in hours |
+| `history_compaction.enabled` | `true` | Enable automatic history compaction |
+| `history_compaction.compaction_trigger_tokens` | `24000` | Token threshold to trigger compaction |
+| `history_compaction.verbatim_window_tokens` | `4000` | Recent tokens kept verbatim |
+| `history_compaction.summary_budget_tokens` | `500` | Max tokens for compaction summary |
+| `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges always kept |
+
+All configs are editable from the Settings tab in the browser UI with hot-reload support.
+
+---
+
+## Running from Source
+
+If you prefer running from a clone instead of the standalone binary:
+
+```bash
+git clone https://github.com/flatmax/AI-Coder-DeCoder.git
+cd AI-Coder-DeCoder
+pip install -e .
+```
+
+Then run inside any git repo:
+
+```bash
+cd /path/to/your/project
+ac-dc
+```
+
+The webapp is served from [GitHub Pages](https://flatmax.github.io/AI-Coder-DeCoder/) — no local build step needed.
 
 ---
 
@@ -217,8 +209,8 @@ For all supported providers, see the [LiteLLM Provider Documentation](https://do
 
 ### Prerequisites
 
-- Python 3.12+
-- Node.js 18+
+- Python ≥ 3.10
+- Node.js ≥ 18 (for webapp development)
 
 ### Setup
 
@@ -226,107 +218,155 @@ For all supported providers, see the [LiteLLM Provider Documentation](https://do
 git clone https://github.com/flatmax/AI-Coder-DeCoder.git
 cd AI-Coder-DeCoder
 
-# Python
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+# Install Python dependencies (with dev extras)
+pip install -e ".[dev]"
 
-# Webapp
-cd webapp && npm install && cd ..
+# Install webapp dependencies
+npm install
 ```
 
-### Run Modes
-
-| Mode | Command | Description |
-|------|---------|-------------|
-| **Standard** | `ac-dc` | Uses hosted webapp |
-| **Dev** | `ac-dc --dev` | Local Vite dev server with HMR |
-| **Preview** | `ac-dc --preview` | Production bundle served locally |
-
-### Command Line Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--server-port` | 18080 | JRPC WebSocket server port |
-| `--webapp-port` | 18999 | Local webapp port (dev/preview modes) |
-| `--no-browser` | false | Don't auto-open browser |
-| `--repo-path` | cwd | Path to git repository |
-| `--dev` | false | Run with local Vite dev server |
-| `--preview` | false | Build and serve production bundle locally |
-
-### Tests
+### Run in Dev Mode
 
 ```bash
-pytest                          # all tests
-pytest tests/test_edit_parser.py  # specific file
-pytest --cov=src/ac_dc          # with coverage
+ac-dc --dev
+```
+
+This starts both the Python RPC server and a Vite dev server with hot module replacement.
+
+### Run Tests
+
+```bash
+pytest
+```
+
+### Build Webapp
+
+```bash
+npm run build
 ```
 
 ### Tech Stack
 
-**Backend (Python):** [LiteLLM](https://github.com/BerriAI/litellm) · [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) · [JRPC-OO](https://github.com/flatmax/jrpc-oo)
+**Backend (Python):**
 
-**Frontend (JavaScript):** [Lit](https://lit.dev/) · [Monaco Editor](https://microsoft.github.io/monaco-editor/) · [JRPC-OO](https://github.com/flatmax/jrpc-oo) · [Marked](https://marked.js.org/) · [highlight.js](https://highlightjs.org/)
+| Package | Purpose |
+|---------|---------|
+| [jrpc-oo](https://github.com/flatmax/jrpc-oo) | Bidirectional JSON-RPC 2.0 over WebSocket |
+| [LiteLLM](https://docs.litellm.ai/) | Universal LLM provider interface (100+ providers) |
+| [tiktoken](https://github.com/openai/tiktoken) | Model-aware token counting |
+| [Tree-sitter](https://tree-sitter.github.io/) | AST parsing for symbol extraction (Python, JS/TS, C/C++) |
+| [trafilatura](https://trafilatura.readthedocs.io/) | Web page content extraction |
+| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/) | AWS Bedrock support |
 
-### Project Structure
+**Frontend (JavaScript):**
+
+| Package | Purpose |
+|---------|---------|
+| [Lit](https://lit.dev/) | Web component framework |
+| [@flatmax/jrpc-oo](https://github.com/flatmax/jrpc-oo) | Browser-side JSON-RPC client |
+| [Monaco Editor](https://microsoft.github.io/monaco-editor/) | Side-by-side diff editor |
+| [Marked](https://marked.js.org/) | Markdown rendering |
+| [highlight.js](https://highlightjs.org/) | Syntax highlighting |
+| [diff](https://github.com/kpdecker/jsdiff) | Myers diff algorithm for edit block display |
+
+**Build & Deploy:**
+
+| Tool | Purpose |
+|------|---------|
+| [Vite](https://vitejs.dev/) | Webapp bundler and dev server |
+| [PyInstaller](https://pyinstaller.org/) | Standalone binary packaging |
+| GitHub Actions | CI/CD for releases and GitHub Pages deployment |
+
+## Project Structure
 
 ```
-src/ac_dc/                  # Python backend
-├── llm_service.py          # LLM integration, streaming chat
-├── context.py              # Context management (tokens, files, history)
-├── context_builder.py      # Tiered prompt assembly with cache control
-├── stability_tracker.py    # File stability tracking for cache tiers
-├── edit_parser.py          # EDIT/REPLACE block parsing and application
-├── repo.py                 # Git operations (file tree, commits, diffs)
-├── history_store.py        # Persistent conversation history
-├── history_compactor.py    # Automatic history summarization
-├── topic_detector.py       # Topic boundary detection for compaction
-├── url_handler.py          # URL fetching, extraction, summarization
-├── url_cache.py            # URL content caching
-├── token_counter.py        # Token counting utilities
-├── config.py               # Configuration management
-├── settings.py             # Settings RPC interface
-├── main.py                 # Entry point and server setup
-└── symbol_index/           # Tree-sitter based code indexing
-    ├── index.py            # Main indexer orchestration
-    ├── compact_format.py   # Symbol map formatting
-    ├── reference_index.py  # Cross-file reference tracking
-    ├── import_resolver.py  # Import path resolution
-    ├── parser.py           # Tree-sitter parser management
-    ├── cache.py            # Parse result caching
-    ├── models.py           # Data models (Symbol, Import, etc.)
-    └── extractors/         # Language-specific extractors
-        ├── python_ext.py
-        ├── javascript_ext.py
-        └── c_ext.py
-
-webapp/                     # JavaScript frontend (Lit web components)
-├── src/
-│   ├── app-shell.js        # Main application shell
-│   ├── rpc-mixin.js        # Shared RPC client mixin
-│   ├── chat/
-│   │   ├── files-tab.js    # Main chat + file management tab
-│   │   ├── chat-panel.js   # Chat message display
-│   │   ├── chat-input.js   # Message input with history
-│   │   ├── diff-viewer.js  # Monaco diff editor
-│   │   ├── file-picker.js  # File selection tree
-│   │   ├── search-tab.js   # Find in files
-│   │   ├── context-tab.js  # Token usage breakdown
-│   │   ├── cache-tab.js    # Cache tier viewer
-│   │   ├── settings-tab.js # Configuration editor
-│   │   ├── history-browser.js # Session history browser
-│   │   ├── url-chips.js    # URL context chips
-│   │   ├── token-hud.js    # Token usage HUD
-│   │   └── toast-container.js # Notifications
-│   ├── dialog/
-│   │   └── ac-dialog.js    # Main dialog container
-│   ├── prompt/
-│   │   └── SpeechToText.js # Voice input
-│   └── utils/
-│       ├── edit-blocks.js  # Edit block parsing & diffing
-│       └── markdown.js     # Markdown rendering
-└── vite.config.js
-
-tests/                      # Unit tests
+.github/workflows/
+    deploy-pages.yml
+    release.yml
+specs3/                          # Specification documents
+    1-foundation/
+    2-code-analysis/
+    3-llm-engine/
+    4-features/
+    5-webapp/
+    6-deployment/
+src/ac_dc/
+    __init__.py
+    config.py                    # Configuration loading and management
+    context.py                   # Context manager, file context, prompt assembly
+    edit_parser.py               # Edit block parsing, validation, application
+    history_compactor.py         # History truncation and summarization
+    history_store.py             # JSONL persistent history
+    llm_service.py               # LLM streaming, context orchestration, review mode
+    main.py                      # CLI entry point, server startup
+    repo.py                      # Git operations, file I/O, search
+    settings.py                  # Config read/write/reload RPC service
+    stability_tracker.py         # Cache tier N-value tracking and cascade
+    token_counter.py             # Model-aware token counting
+    topic_detector.py            # LLM-based topic boundary detection
+    url_cache.py                 # Filesystem TTL cache for URLs
+    url_handler.py               # URL detection, fetching, summarization
+    config/                      # Default configuration files
+        app.json
+        compaction.md
+        llm.json
+        review-snippets.json
+        review.md
+        snippets.json
+        system.md
+        system_extra.md
+    symbol_index/
+        __init__.py
+        cache.py                 # mtime-based symbol cache
+        compact_format.py        # LLM-optimized text output
+        index.py                 # Orchestrator, LSP queries
+        parser.py                # Tree-sitter multi-language parser
+        reference_index.py       # Cross-file reference tracking
+        import_resolver.py       # Import-to-file resolution
+        extractors/
+            __init__.py
+            base.py              # Base extractor class
+            python_extractor.py
+            javascript_extractor.py
+            c_extractor.py
+tests/
+    test_config.py
+    test_context.py
+    test_edit_parser.py
+    test_history.py
+    test_llm_service.py
+    test_main.py
+    test_repo.py
+    test_stability_tracker.py
+    test_symbol_index.py
+    test_url_handler.py
+webapp/
+    index.html
+    src/
+        app-shell.js             # Root component, WebSocket, event routing
+        rpc-mixin.js             # Shared RPC access for child components
+        shared-rpc.js            # Singleton call proxy
+        styles/
+            theme.js             # Design tokens and shared styles
+        utils/
+            edit-blocks.js       # Edit block segmentation and diffing
+            markdown.js          # Markdown rendering with syntax highlighting
+        components/
+            ac-cache-tab.js      # Cache tier viewer
+            ac-context-tab.js    # Context budget viewer
+            ac-dialog.js         # Main dialog container with tabs
+            ac-files-tab.js      # Files & chat split panel
+            ac-history-browser.js # Session browser modal
+            ac-search-tab.js     # Full-text search
+            ac-settings-tab.js   # Configuration editor
+            chat-panel.js        # Chat messages, streaming, input
+            diff-viewer.js       # Monaco diff editor
+            file-picker.js       # File tree with git status
+            input-history.js     # Input history overlay
+            review-selector.js   # Git graph for code review
+            speech-to-text.js    # Voice dictation
+            token-hud.js         # Floating token usage overlay
+            url-chips.js         # URL detection and fetch chips
 ```
 
 ## License

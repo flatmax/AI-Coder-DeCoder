@@ -1,152 +1,133 @@
 """Tests for repository operations."""
 
 import subprocess
-import pytest
+import tempfile
 from pathlib import Path
+
+import pytest
+
 from ac_dc.repo import Repo
 
 
 @pytest.fixture
 def git_repo(tmp_path):
-    """Create a real git repo for testing."""
-    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"],
-                   cwd=str(tmp_path), capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"],
-                   cwd=str(tmp_path), capture_output=True)
+    """Create a temporary git repo with initial commit."""
+    repo_dir = tmp_path / "test_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", str(repo_dir)], capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], capture_output=True)
 
-    # Create some files
-    (tmp_path / "README.md").write_text("# Test\n")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("def main():\n    pass\n")
-    (tmp_path / "src" / "utils.py").write_text("import os\n\ndef helper():\n    pass\n")
+    # Create initial files
+    (repo_dir / "README.md").write_text("# Test\n")
+    (repo_dir / "src").mkdir()
+    (repo_dir / "src" / "main.py").write_text("def main():\n    print('hello')\n")
+    (repo_dir / "src" / "utils.py").write_text("def helper():\n    pass\n")
 
-    # Initial commit
-    subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "add", "-A"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "initial"], capture_output=True)
 
-    return tmp_path
+    return repo_dir
+
+
+@pytest.fixture
+def repo(git_repo):
+    return Repo(git_repo)
 
 
 class TestFileOperations:
-
-    def test_read_file(self, git_repo):
-        repo = Repo(git_repo)
+    def test_read_file(self, repo):
         result = repo.get_file_content("README.md")
-        assert result["content"] == "# Test\n"
+        assert "content" in result
+        assert "# Test" in result["content"]
 
-    def test_read_file_at_head(self, git_repo):
-        repo = Repo(git_repo)
-        # Modify file
+    def test_read_at_head(self, repo, git_repo):
         (git_repo / "README.md").write_text("# Modified\n")
-        # HEAD version should be original
         result = repo.get_file_content("README.md", version="HEAD")
-        assert result["content"] == "# Test\n"
+        assert "# Test" in result["content"]
 
-    def test_write_file(self, git_repo):
-        repo = Repo(git_repo)
-        result = repo.write_file("src/new.py", "print('hello')")
-        assert result.get("ok")
-        assert (git_repo / "src" / "new.py").read_text() == "print('hello')"
+    def test_write_file(self, repo, git_repo):
+        repo.write_file("new.txt", "hello")
+        assert (git_repo / "new.txt").read_text() == "hello"
 
-    def test_create_file_exists_error(self, git_repo):
-        repo = Repo(git_repo)
-        result = repo.create_file("README.md", "overwrite")
+    def test_create_file_exists_error(self, repo):
+        result = repo.create_file("README.md", "duplicate")
         assert "error" in result
 
-    def test_path_traversal_blocked(self, git_repo):
-        repo = Repo(git_repo)
+    def test_path_traversal_blocked(self, repo):
         result = repo.get_file_content("../../../etc/passwd")
         assert "error" in result
 
-    def test_binary_detection(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
-        assert repo.is_binary_file("binary.bin") is True
+    def test_binary_detection(self, repo, git_repo):
+        (git_repo / "data.bin").write_bytes(b"text\x00binary")
+        assert repo.is_binary_file("data.bin") is True
         assert repo.is_binary_file("README.md") is False
 
 
-class TestGitOperations:
+class TestGitStaging:
+    def test_stage_and_diff(self, repo, git_repo):
+        (git_repo / "README.md").write_text("# Modified\n")
+        repo.stage_files(["README.md"])
+        result = repo.get_staged_diff()
+        assert "Modified" in result["diff"]
 
-    def test_stage_and_diff(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "README.md").write_text("# Changed\n")
-        result = repo.stage_files(["README.md"])
-        assert result.get("ok")
-        diff = repo.get_staged_diff()
-        assert "Changed" in diff["diff"]
-
-    def test_unstage(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "README.md").write_text("# Changed\n")
+    def test_unstage(self, repo, git_repo):
+        (git_repo / "README.md").write_text("# Modified\n")
         repo.stage_files(["README.md"])
         repo.unstage_files(["README.md"])
-        diff = repo.get_staged_diff()
-        assert diff["diff"] == ""
+        result = repo.get_staged_diff()
+        assert result["diff"] == ""
 
-    def test_commit(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "README.md").write_text("# Updated\n")
+    def test_commit(self, repo, git_repo):
+        (git_repo / "README.md").write_text("# Modified\n")
         repo.stage_files(["README.md"])
         result = repo.commit("test commit")
-        assert result.get("ok")
+        assert "success" in result
 
-    def test_reset_hard(self, git_repo):
-        repo = Repo(git_repo)
+    def test_reset_hard(self, repo, git_repo):
+        original = (git_repo / "README.md").read_text()
         (git_repo / "README.md").write_text("# Changed\n")
         repo.reset_hard()
-        assert (git_repo / "README.md").read_text() == "# Test\n"
+        assert (git_repo / "README.md").read_text() == original
 
-    def test_rename_file(self, git_repo):
-        repo = Repo(git_repo)
-        result = repo.rename_file("README.md", "ABOUT.md")
-        assert result.get("ok")
+
+class TestRename:
+    def test_rename_tracked_file(self, repo, git_repo):
+        result = repo.rename_file("README.md", "README.txt")
+        assert result.get("success") is True
+        assert (git_repo / "README.txt").exists()
         assert not (git_repo / "README.md").exists()
-        assert (git_repo / "ABOUT.md").exists()
 
 
 class TestFileTree:
-
-    def test_basic_tree(self, git_repo):
-        repo = Repo(git_repo)
+    def test_tree_structure(self, repo):
         result = repo.get_file_tree()
         assert "tree" in result
-        tree = result["tree"]
-        assert tree["type"] == "dir"
+        assert result["tree"]["type"] == "dir"
+        assert len(result["tree"]["children"]) > 0
 
-    def test_modified_detection(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "README.md").write_text("# Modified\n")
+    def test_tree_includes_status_arrays(self, repo, git_repo):
+        (git_repo / "untracked.txt").write_text("new file")
         result = repo.get_file_tree()
-        assert "README.md" in result["modified"]
+        assert "untracked" in result
+        assert "untracked.txt" in result["untracked"]
 
-    def test_untracked_detection(self, git_repo):
-        repo = Repo(git_repo)
-        (git_repo / "new_file.txt").write_text("new\n")
-        result = repo.get_file_tree()
-        assert "new_file.txt" in result["untracked"]
-
-    def test_flat_file_list(self, git_repo):
-        repo = Repo(git_repo)
-        flat = repo.get_flat_file_list()
-        assert "README.md" in flat
-        assert "src/main.py" in flat
+    def test_flat_file_list(self, repo):
+        files = repo.get_flat_file_list()
+        assert "README.md" in files
+        assert "src/main.py" in files
 
 
 class TestSearch:
-
-    def test_basic_search(self, git_repo):
-        repo = Repo(git_repo)
-        results = repo.search_files("def main")
+    def test_search_finds_content(self, repo):
+        results = repo.search_files("hello")
         assert len(results) > 0
-        assert results[0]["file"] == "src/main.py"
+        assert any("main.py" in r["file"] for r in results)
 
-    def test_case_insensitive(self, git_repo):
-        repo = Repo(git_repo)
-        results = repo.search_files("DEF MAIN", ignore_case=True)
+    def test_case_insensitive_search(self, repo):
+        results = repo.search_files("HELLO", ignore_case=True)
         assert len(results) > 0
 
-    def test_no_results(self, git_repo):
-        repo = Repo(git_repo)
-        results = repo.search_files("xyznonexistent")
+    def test_no_results_returns_empty(self, repo):
+        results = repo.search_files("nonexistent_string_xyz")
         assert len(results) == 0

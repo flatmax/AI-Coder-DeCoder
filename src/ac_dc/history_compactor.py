@@ -1,284 +1,256 @@
-"""History compactor — truncation and summarization strategies.
+"""History compactor — truncation/summarization strategies with verbatim window.
 
-Runs after the assistant response has been delivered. The compacted
-history takes effect on the next request.
-
-Three cases:
-  1. Truncate only — boundary inside/after verbatim window, high confidence
-  2. Summarize — boundary before verbatim window or low confidence
-  3. None — below trigger threshold
+Compacts conversation history when token count exceeds the trigger threshold.
+Uses topic boundary detection to decide between truncation and summarization.
 """
 
 import logging
-from dataclasses import dataclass
-from typing import Optional
 
 from .token_counter import TokenCounter
-from .topic_detector import TopicDetector, TopicBoundary, SAFE_BOUNDARY
+from .topic_detector import SAFE_BOUNDARY, detect_topic_boundary
 
-log = logging.getLogger(__name__)
-
-
-@dataclass
-class CompactionResult:
-    """Result of a compaction attempt."""
-    case: str                           # "truncate", "summarize", "none"
-    messages_before: int                # Count before compaction
-    messages_after: int                 # Count after compaction
-    tokens_before: int = 0
-    tokens_after: int = 0
-    summary: str = ""                   # Summary text (if case=summarize)
-    boundary_index: Optional[int] = None
-    error: Optional[str] = None
+logger = logging.getLogger(__name__)
 
 
 class HistoryCompactor:
-    """Compacts conversation history via truncation or summarization.
+    """Compacts conversation history to stay within token budgets.
 
-    Configuration:
-        compaction_trigger_tokens: Token count that triggers compaction
-        verbatim_window_tokens: Recent tokens kept unchanged
-        summary_budget_tokens: Max tokens for summary
-        min_verbatim_exchanges: Minimum recent exchanges always kept
+    Two strategies:
+    - Truncate: discard everything before a topic boundary
+    - Summarize: replace old messages with a summary
+
+    Configuration keys:
+        enabled: bool (master switch)
+        compaction_trigger_tokens: int (threshold to trigger)
+        verbatim_window_tokens: int (recent tokens kept unchanged)
+        summary_budget_tokens: int (max tokens for summary)
+        min_verbatim_exchanges: int (minimum recent exchanges always kept)
     """
 
-    def __init__(
-        self,
-        counter: TokenCounter,
-        config: dict,
-        detection_model: str = "",
-        skill_prompt: str = "",
-    ):
-        self._counter = counter
-        self._trigger_tokens = config.get("compaction_trigger_tokens", 24000)
-        self._verbatim_window_tokens = config.get("verbatim_window_tokens", 4000)
-        self._summary_budget_tokens = config.get("summary_budget_tokens", 500)
-        self._min_verbatim_exchanges = config.get("min_verbatim_exchanges", 2)
-        self._enabled = config.get("enabled", True)
+    def __init__(self, config, model=None, detection_model=None,
+                 compaction_prompt=None):
+        """Initialize compactor.
 
-        # Topic detector (requires a model)
-        self._detector: Optional[TopicDetector] = None
-        if detection_model and skill_prompt:
-            self._detector = TopicDetector(detection_model, skill_prompt)
+        Args:
+            config: compaction config dict
+            model: primary model name (for token counting)
+            detection_model: smaller model for topic detection
+            compaction_prompt: system prompt for topic detector
+        """
+        self._config = config or {}
+        self._model = model
+        self._detection_model = detection_model or config.get("detection_model")
+        self._compaction_prompt = compaction_prompt
+        self._counter = TokenCounter(model)
 
     @property
-    def enabled(self) -> bool:
-        return self._enabled
+    def enabled(self):
+        return self._config.get("enabled", False)
 
     @property
-    def trigger_tokens(self) -> int:
-        return self._trigger_tokens
+    def trigger_tokens(self):
+        return self._config.get("compaction_trigger_tokens", 24000)
 
-    def should_compact(self, messages: list[dict]) -> bool:
-        """Check if compaction should run."""
-        if not self._enabled:
+    @property
+    def verbatim_window_tokens(self):
+        return self._config.get("verbatim_window_tokens", 4000)
+
+    @property
+    def summary_budget_tokens(self):
+        return self._config.get("summary_budget_tokens", 500)
+
+    @property
+    def min_verbatim_exchanges(self):
+        return self._config.get("min_verbatim_exchanges", 2)
+
+    def should_compact(self, messages):
+        """Check if compaction should run.
+
+        Returns True if enabled and history tokens exceed trigger.
+        """
+        if not self.enabled:
             return False
-        if not messages:
-            return False
-        return self._counter.count(messages) > self._trigger_tokens
+        tokens = self._counter.count_messages(messages)
+        return tokens > self.trigger_tokens
 
-    def compact(self, messages: list[dict]) -> CompactionResult:
-        """Run compaction on the given message history.
+    async def compact(self, messages):
+        """Run compaction on message history.
 
-        Returns a CompactionResult with the compacted messages accessible
-        via get_compacted_messages().
+        Returns dict:
+            case: "truncate" | "summarize" | "none"
+            messages: list of compacted messages
+            boundary: TopicBoundary dict (if detected)
+            summary: str (if summarized)
         """
         if not messages:
-            return CompactionResult(
-                case="none", messages_before=0, messages_after=0,
-            )
+            return {"case": "none", "messages": list(messages)}
 
-        tokens_before = self._counter.count(messages)
-        if tokens_before <= self._trigger_tokens:
-            return CompactionResult(
-                case="none",
-                messages_before=len(messages),
-                messages_after=len(messages),
-                tokens_before=tokens_before,
-                tokens_after=tokens_before,
-            )
+        if not self.should_compact(messages):
+            return {"case": "none", "messages": list(messages)}
 
-        # Find the verbatim window start index
+        # Find verbatim window start
         verbatim_start = self._find_verbatim_start(messages)
 
         # Detect topic boundary
-        boundary = SAFE_BOUNDARY
-        if self._detector:
-            try:
-                boundary = self._detector.detect(messages)
-            except Exception as e:
-                log.warning("Topic detection error: %s", e)
-                boundary = SAFE_BOUNDARY
+        boundary = await detect_topic_boundary(
+            messages[:verbatim_start] if verbatim_start > 0 else messages,
+            model=self._detection_model,
+            compaction_prompt=self._compaction_prompt,
+        )
 
-        # Choose strategy
-        result = self._apply_strategy(messages, boundary, verbatim_start, tokens_before)
+        boundary_index = boundary.get("boundary_index")
+        confidence = boundary.get("confidence", 0.0)
 
-        return result
-
-    def apply_compaction(
-        self, messages: list[dict], result: CompactionResult
-    ) -> list[dict]:
-        """Apply the compaction result to produce the new message list.
-
-        Call this separately so the caller can inspect the result first.
-        """
-        if result.case == "none":
-            return list(messages)
-
-        verbatim_start = self._find_verbatim_start(messages)
-
-        if result.case == "truncate":
-            idx = result.boundary_index
-            if idx is not None and 0 <= idx < len(messages):
-                compacted = list(messages[idx:])
-            else:
-                compacted = list(messages[verbatim_start:])
-        elif result.case == "summarize":
-            verbatim = list(messages[verbatim_start:])
-            if result.summary:
-                summary_msg = {
-                    "role": "user",
-                    "content": (
-                        f"[History Summary - {verbatim_start} earlier messages]\n\n"
-                        f"{result.summary}"
-                    ),
-                }
-                compacted = [summary_msg] + verbatim
-            else:
-                compacted = verbatim
+        # Decide strategy
+        if (boundary_index is not None
+                and boundary_index >= verbatim_start
+                and confidence >= 0.5):
+            # Truncate: boundary is in or after verbatim window
+            result = self._apply_truncate(messages, boundary_index)
+            result["boundary"] = boundary
+            return result
+        elif (boundary_index is not None
+              and boundary_index < verbatim_start
+              and confidence >= 0.5):
+            # Summarize: boundary is before verbatim window
+            result = self._apply_summarize(messages, verbatim_start, boundary)
+            result["boundary"] = boundary
+            return result
         else:
-            compacted = list(messages)
+            # Low confidence or no boundary: summarize as fallback
+            result = self._apply_summarize(messages, verbatim_start, boundary)
+            result["boundary"] = boundary
+            return result
 
-        # Enforce minimum exchanges
-        compacted = self._enforce_min_exchanges(messages, compacted)
-
-        # Ensure pairs are aligned (starts with user)
-        if compacted and compacted[0].get("role") == "assistant":
-            compacted.pop(0)
-
-        return compacted
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _find_verbatim_start(self, messages: list[dict]) -> int:
+    def _find_verbatim_start(self, messages):
         """Find the start index of the verbatim window.
 
-        Walk backwards from the end, accumulating tokens until
-        we reach verbatim_window_tokens. Ensure at least
-        min_verbatim_exchanges user messages.
+        Works backward from the end, counting tokens until we exceed
+        verbatim_window_tokens. Also ensures min_verbatim_exchanges.
         """
         if not messages:
             return 0
 
-        total_tokens = 0
-        user_count = 0
-        start_idx = len(messages)
+        target = self.verbatim_window_tokens
+        min_exchanges = self.min_verbatim_exchanges
 
+        # Count from end
+        tokens = 0
+        start = len(messages)
         for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            msg_tokens = self._counter.count(msg)
-            total_tokens += msg_tokens
-            if msg.get("role") == "user":
-                user_count += 1
-
-            if (total_tokens >= self._verbatim_window_tokens
-                    and user_count >= self._min_verbatim_exchanges):
-                start_idx = i
+            msg_tokens = self._counter.count_message(messages[i])
+            tokens += msg_tokens
+            start = i
+            if tokens >= target:
                 break
-        else:
-            # Walked through everything
-            start_idx = 0
 
-        # Align to user message boundary
-        while start_idx < len(messages) and messages[start_idx].get("role") != "user":
-            start_idx += 1
+        # Ensure min_verbatim_exchanges (count user messages from end)
+        user_count = 0
+        min_start = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                user_count += 1
+            min_start = i
+            if user_count >= min_exchanges:
+                break
 
-        return start_idx
+        # Take the earlier (more inclusive) start
+        return min(start, min_start)
 
-    def _apply_strategy(
-        self,
-        messages: list[dict],
-        boundary: TopicBoundary,
-        verbatim_start: int,
-        tokens_before: int,
-    ) -> CompactionResult:
-        """Choose and apply compaction strategy."""
+    def _apply_truncate(self, messages, boundary_index):
+        """Truncate: discard everything before boundary.
 
-        # Case 1: Truncate — boundary inside/after verbatim window, high confidence
-        if (boundary.boundary_index is not None
-                and boundary.confidence >= 0.5
-                and boundary.boundary_index >= verbatim_start):
-            truncated = messages[boundary.boundary_index:]
-            tokens_after = self._counter.count(truncated)
-            return CompactionResult(
-                case="truncate",
-                messages_before=len(messages),
-                messages_after=len(truncated),
-                tokens_before=tokens_before,
-                tokens_after=tokens_after,
-                boundary_index=boundary.boundary_index,
+        Returns compaction result dict.
+        """
+        result_messages = list(messages[boundary_index:])
+
+        # Ensure min_verbatim_exchanges
+        result_messages = self._ensure_min_exchanges(messages, result_messages, boundary_index)
+
+        return {
+            "case": "truncate",
+            "messages": result_messages,
+        }
+
+    def _apply_summarize(self, messages, verbatim_start, boundary):
+        """Summarize: replace pre-verbatim messages with summary.
+
+        Returns compaction result dict.
+        """
+        summary_text = boundary.get("summary", "")
+
+        if not summary_text:
+            # Fallback: just truncate at verbatim window
+            result_messages = list(messages[verbatim_start:])
+            result_messages = self._ensure_min_exchanges(
+                messages, result_messages, verbatim_start
             )
-
-        # Case 2: Summarize — boundary before verbatim window, low confidence, or no boundary
-        verbatim = messages[verbatim_start:]
-        summary_text = boundary.summary if boundary.summary else ""
-
-        tokens_after = self._counter.count(verbatim)
-        if summary_text:
-            summary_msg = {
-                "role": "user",
-                "content": (
-                    f"[History Summary - {verbatim_start} earlier messages]\n\n"
-                    f"{summary_text}"
-                ),
+            return {
+                "case": "summarize",
+                "messages": result_messages,
+                "summary": "",
             }
-            tokens_after += self._counter.count(summary_msg)
 
-        return CompactionResult(
-            case="summarize",
-            messages_before=len(messages),
-            messages_after=len(verbatim) + (1 if summary_text else 0),
-            tokens_before=tokens_before,
-            tokens_after=tokens_after,
-            summary=summary_text,
-            boundary_index=boundary.boundary_index,
+        # Build summary message
+        summary_msg = {
+            "role": "user",
+            "content": f"[History Summary]\n{summary_text}",
+        }
+        summary_ack = {
+            "role": "assistant",
+            "content": "Ok, I understand the context from the previous conversation.",
+        }
+
+        result_messages = [summary_msg, summary_ack] + list(messages[verbatim_start:])
+
+        # Ensure min_verbatim_exchanges (the summary pair counts as one)
+        result_messages = self._ensure_min_exchanges(
+            messages, result_messages, verbatim_start,
+            prepend_offset=2,  # account for summary pair
         )
 
-    def _enforce_min_exchanges(
-        self, original: list[dict], compacted: list[dict]
-    ) -> list[dict]:
-        """Ensure minimum number of user messages in compacted result."""
-        user_count = sum(1 for m in compacted if m.get("role") == "user")
-        if user_count >= self._min_verbatim_exchanges:
-            return compacted
+        return {
+            "case": "summarize",
+            "messages": result_messages,
+            "summary": summary_text,
+        }
 
-        # Find where compacted starts in original
-        # Walk backwards from compacted start to add more exchanges
-        if not compacted:
-            return compacted
+    def _ensure_min_exchanges(self, original, result, cut_index, prepend_offset=0):
+        """Ensure minimum verbatim exchanges are preserved.
 
-        # Find the first message of compacted in original
-        first_content = compacted[0].get("content", "")
-        start_in_original = None
-        for i, m in enumerate(original):
-            if m.get("content") == first_content and m.get("role") == compacted[0].get("role"):
-                start_in_original = i
+        If result has fewer user messages than min_verbatim_exchanges,
+        prepend earlier messages from original.
+        """
+        min_exchanges = self.min_verbatim_exchanges
+
+        # Count user messages in result (excluding summary pair)
+        user_count = sum(
+            1 for m in result[prepend_offset:]
+            if m.get("role") == "user"
+        )
+
+        if user_count >= min_exchanges:
+            return result
+
+        # Need more messages from before cut_index
+        needed = min_exchanges - user_count
+        prepend = []
+        for i in range(cut_index - 1, -1, -1):
+            prepend.insert(0, dict(original[i]))
+            if original[i].get("role") == "user":
+                needed -= 1
+            if needed <= 0:
                 break
 
-        if start_in_original is None or start_in_original == 0:
-            return compacted
+        # Insert before the verbatim portion (after summary pair if present)
+        return result[:prepend_offset] + prepend + result[prepend_offset:]
 
-        # Prepend messages from original
-        needed = self._min_verbatim_exchanges - user_count
-        prepend = []
-        for i in range(start_in_original - 1, -1, -1):
-            msg = original[i]
-            prepend.insert(0, msg)
-            if msg.get("role") == "user":
-                needed -= 1
-                if needed <= 0:
-                    break
+    def apply_compaction(self, messages, compaction_result):
+        """Apply a compaction result to messages.
 
-        return prepend + compacted
+        Convenience method for external callers. Returns the compacted messages
+        or original if case is "none".
+        """
+        if compaction_result.get("case") == "none":
+            return list(messages)
+        return list(compaction_result.get("messages", messages))

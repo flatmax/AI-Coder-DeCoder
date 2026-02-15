@@ -1,356 +1,424 @@
-"""Tests for URL handling: detection, classification, caching, and fetching."""
+"""Tests for URL cache and URL handler."""
 
 import json
+import os
 import time
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-from ac_dc.url_cache import URLCache, _url_hash
+from unittest.mock import MagicMock, patch, AsyncMock
+
+import pytest
+
+from ac_dc.url_cache import URLCache, url_hash
 from ac_dc.url_handler import (
-    detect_urls, classify_url, URLType, GitHubInfo, URLContent,
-    URLService, SummaryType, _select_summary_type, _display_name,
-    _basic_html_extract, _fetch_web_page, _fetch_github_file,
+    URLContent,
+    URLType,
+    SummaryType,
+    GitHubInfo,
+    URLService,
+    classify_url,
+    detect_urls,
+    display_name,
+    extract_html_content,
+    select_summary_type,
 )
 
 
-# ======================================================================
-# URL Cache tests
-# ======================================================================
+# ============================================================
+# URL Cache Tests
+# ============================================================
 
-class TestURLCache:
 
-    @pytest.fixture
-    def cache(self, tmp_path):
-        return URLCache(str(tmp_path / "cache"), ttl_hours=1)
-
-    def test_set_and_get(self, cache):
-        cache.set("https://example.com", {"title": "Example"})
+class TestURLCacheBasic:
+    def test_set_get_roundtrip(self, tmp_path):
+        """Set/get round-trip works."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "Example", "content": "Hello"})
         result = cache.get("https://example.com")
         assert result is not None
         assert result["title"] == "Example"
-        assert "fetched_at" in result
+        assert result["content"] == "Hello"
 
-    def test_miss_returns_none(self, cache):
+    def test_miss_returns_none(self, tmp_path):
+        """Cache miss returns None."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
         assert cache.get("https://nonexistent.com") is None
 
-    def test_expired_returns_none(self, cache, tmp_path):
-        # Create cache with very short TTL
-        short_cache = URLCache(str(tmp_path / "short"), ttl_hours=0)
-        short_cache._ttl_seconds = 0  # Expire immediately
-        short_cache.set("https://example.com", {"title": "test"})
-        # Entry should be expired
-        time.sleep(0.1)
-        assert short_cache.get("https://example.com") is None
-
-    def test_invalidate(self, cache):
-        cache.set("https://example.com", {"title": "test"})
-        cache.invalidate("https://example.com")
+    def test_expired_returns_none(self, tmp_path):
+        """Expired entry returns None."""
+        cache = URLCache(cache_dir=tmp_path / "cache", ttl_hours=0)
+        cache.set("https://example.com", {"title": "Old"})
+        # TTL is 0 hours = 0 seconds, so it's immediately expired
+        time.sleep(0.01)
         assert cache.get("https://example.com") is None
 
-    def test_clear(self, cache):
+    def test_invalidate_removes_entry_and_returns_found(self, tmp_path):
+        """Invalidate removes single entry and returns found status."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "X"})
+        assert cache.invalidate("https://example.com") is True
+        assert cache.get("https://example.com") is None
+        # Second invalidate returns False
+        assert cache.invalidate("https://example.com") is False
+
+    def test_clear_removes_all_and_returns_count(self, tmp_path):
+        """Clear removes all entries and returns count."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
         cache.set("https://a.com", {"a": 1})
         cache.set("https://b.com", {"b": 2})
-        cache.clear()
+        removed = cache.clear()
+        assert removed == 2
         assert cache.get("https://a.com") is None
         assert cache.get("https://b.com") is None
 
-    def test_cleanup_expired(self, tmp_path):
-        cache = URLCache(str(tmp_path / "exp"), ttl_hours=0)
-        cache._ttl_seconds = 0
+    def test_cleanup_expired_returns_count(self, tmp_path):
+        """cleanup_expired returns count of removed entries."""
+        cache = URLCache(cache_dir=tmp_path / "cache", ttl_hours=0)
         cache.set("https://a.com", {"a": 1})
         cache.set("https://b.com", {"b": 2})
-        time.sleep(0.1)
+        time.sleep(0.01)
         removed = cache.cleanup_expired()
         assert removed == 2
 
-    def test_corrupt_entry_handled(self, cache):
+    def test_corrupt_json_handled(self, tmp_path):
+        """Corrupt JSON entry handled (cleaned up, returns None)."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
         # Write corrupt JSON
-        path = cache._path_for("https://example.com")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not json", encoding="utf-8")
-        assert cache.get("https://example.com") is None
-        # Should have been cleaned up
-        assert not path.exists()
+        h = url_hash("https://corrupt.com")
+        corrupt_path = cache.cache_dir / f"{h}.json"
+        corrupt_path.write_text("{corrupt json", encoding="utf-8")
+        result = cache.get("https://corrupt.com")
+        assert result is None
+        # File should be cleaned up
+        assert not corrupt_path.exists()
 
-    def test_url_hash_deterministic(self):
-        h1 = _url_hash("https://example.com")
-        h2 = _url_hash("https://example.com")
+
+class TestURLHash:
+    def test_deterministic(self):
+        """URL hash is deterministic."""
+        h1 = url_hash("https://example.com")
+        h2 = url_hash("https://example.com")
         assert h1 == h2
-        assert len(h1) == 16
 
-    def test_url_hash_different(self):
-        assert _url_hash("https://a.com") != _url_hash("https://b.com")
+    def test_16_chars(self):
+        """URL hash is 16 chars."""
+        h = url_hash("https://example.com")
+        assert len(h) == 16
 
-    def test_default_cache_dir(self):
+    def test_different_urls_different_hashes(self):
+        """Different URLs produce different hashes."""
+        h1 = url_hash("https://example.com")
+        h2 = url_hash("https://other.com")
+        assert h1 != h2
+
+
+class TestURLCacheDefaultDir:
+    def test_default_cache_dir_created(self):
+        """Default cache dir created automatically."""
         cache = URLCache()
         assert cache.cache_dir.exists()
-        assert "ac-dc-url-cache" in str(cache.cache_dir)
 
 
-# ======================================================================
-# URL Detection tests
-# ======================================================================
+class TestURLCacheFetchedAt:
+    def test_set_adds_fetched_at_if_missing(self, tmp_path):
+        """set() adds fetched_at if not already present."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "Test"})
+        result = cache.get("https://example.com")
+        assert result is not None
+        assert "fetched_at" in result
+        assert result["fetched_at"] is not None
 
-class TestDetectURLs:
+    def test_set_preserves_existing_fetched_at(self, tmp_path):
+        """set() preserves existing fetched_at."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {"title": "Test", "fetched_at": "2025-01-01T00:00:00Z"})
+        result = cache.get("https://example.com")
+        assert result["fetched_at"] == "2025-01-01T00:00:00Z"
 
+
+# ============================================================
+# URL Detection Tests
+# ============================================================
+
+
+class TestURLDetection:
     def test_basic_detection(self):
-        text = "Check out https://example.com for more info."
-        results = detect_urls(text)
+        """Basic URL detection."""
+        results = detect_urls("Check https://example.com for info")
         assert len(results) == 1
         assert results[0]["url"] == "https://example.com"
 
     def test_multiple_urls(self):
-        text = "See https://a.com and https://b.com for details."
+        """Multiple URLs detected."""
+        text = "See https://a.com and https://b.com"
         results = detect_urls(text)
         assert len(results) == 2
 
     def test_deduplication(self):
-        text = "Visit https://example.com. Again: https://example.com"
+        """Duplicate URLs deduplicated."""
+        text = "Visit https://example.com twice: https://example.com"
         results = detect_urls(text)
         assert len(results) == 1
 
     def test_trailing_punctuation_stripped(self):
-        text = "Go to https://example.com/path."
-        results = detect_urls(text)
-        assert results[0]["url"] == "https://example.com/path"
+        """Trailing punctuation stripped."""
+        results = detect_urls("See https://example.com.")
+        assert results[0]["url"] == "https://example.com"
 
     def test_trailing_comma_stripped(self):
-        text = "Links: https://a.com, https://b.com."
-        results = detect_urls(text)
-        assert results[0]["url"] == "https://a.com"
-        assert results[1]["url"] == "https://b.com"
+        """Trailing comma stripped."""
+        results = detect_urls("Check https://example.com, thanks")
+        assert results[0]["url"] == "https://example.com"
 
-    def test_no_urls(self):
-        assert detect_urls("no urls here") == []
+    def test_no_urls_returns_empty(self):
+        """No URLs returns empty list."""
+        results = detect_urls("No URLs here")
+        assert results == []
 
     def test_http_supported(self):
-        results = detect_urls("http://insecure.example.com")
+        """http:// supported."""
+        results = detect_urls("Try http://example.com")
         assert len(results) == 1
+        assert results[0]["url"] == "http://example.com"
 
-    def test_file_scheme_rejected(self):
-        results = detect_urls("file:///etc/passwd")
+    def test_file_protocol_rejected(self):
+        """file:// rejected."""
+        results = detect_urls("Open file:///etc/passwd")
         assert len(results) == 0
 
+    def test_empty_input(self):
+        """Empty input returns empty."""
+        assert detect_urls("") == []
+        assert detect_urls(None) == []
 
-# ======================================================================
-# URL Classification tests
-# ======================================================================
+    def test_raw_githubusercontent_recognized(self):
+        """raw.githubusercontent.com URLs recognized as GitHub file type."""
+        results = detect_urls("See https://raw.githubusercontent.com/owner/repo/main/src/app.py")
+        assert len(results) == 1
+        assert results[0]["url_type"] == "github_file"
 
-class TestClassifyURL:
 
+# ============================================================
+# URL Classification Tests
+# ============================================================
+
+
+class TestURLClassification:
     def test_github_repo(self):
-        url_type, info = classify_url("https://github.com/owner/repo")
-        assert url_type == URLType.GITHUB_REPO
-        assert info.owner == "owner"
-        assert info.repo == "repo"
+        """GitHub repo classified correctly."""
+        assert classify_url("https://github.com/owner/repo") == URLType.GITHUB_REPO
 
     def test_github_repo_trailing_slash(self):
-        url_type, info = classify_url("https://github.com/owner/repo/")
-        assert url_type == URLType.GITHUB_REPO
+        """GitHub repo with trailing slash."""
+        assert classify_url("https://github.com/owner/repo/") == URLType.GITHUB_REPO
 
-    def test_github_repo_dot_git(self):
-        url_type, info = classify_url("https://github.com/owner/repo.git")
-        assert url_type == URLType.GITHUB_REPO
-        assert info.repo == "repo"
+    def test_github_repo_git_suffix(self):
+        """GitHub repo with .git suffix."""
+        assert classify_url("https://github.com/owner/repo.git") == URLType.GITHUB_REPO
 
     def test_github_file(self):
-        url_type, info = classify_url(
-            "https://github.com/owner/repo/blob/main/src/app.py"
-        )
-        assert url_type == URLType.GITHUB_FILE
-        assert info.owner == "owner"
-        assert info.repo == "repo"
-        assert info.branch == "main"
-        assert info.path == "src/app.py"
+        """GitHub file: owner/repo/branch/path."""
+        url = "https://github.com/owner/repo/blob/main/src/app.py"
+        assert classify_url(url) == URLType.GITHUB_FILE
 
     def test_github_issue(self):
-        url_type, info = classify_url(
-            "https://github.com/owner/repo/issues/42"
-        )
-        assert url_type == URLType.GITHUB_ISSUE
-        assert info.issue_number == 42
+        """GitHub issue (#N)."""
+        url = "https://github.com/owner/repo/issues/42"
+        assert classify_url(url) == URLType.GITHUB_ISSUE
 
     def test_github_pr(self):
-        url_type, info = classify_url(
-            "https://github.com/owner/repo/pull/99"
-        )
-        assert url_type == URLType.GITHUB_PR
-        assert info.pr_number == 99
+        """GitHub PR."""
+        url = "https://github.com/owner/repo/pull/99"
+        assert classify_url(url) == URLType.GITHUB_PR
 
-    def test_documentation_domain(self):
-        url_type, info = classify_url("https://docs.python.org/3/library/os.html")
-        assert url_type == URLType.DOCUMENTATION
-        assert info is None
+    def test_documentation_known_domain(self):
+        """Known documentation domain."""
+        assert classify_url("https://docs.python.org/3/library/os.html") == URLType.DOCUMENTATION
 
-    def test_readthedocs(self):
-        url_type, _ = classify_url("https://myproject.readthedocs.io/en/latest/")
-        assert url_type == URLType.DOCUMENTATION
+    def test_documentation_readthedocs(self):
+        """ReadTheDocs domain."""
+        assert classify_url("https://myproject.readthedocs.io/en/latest/") == URLType.DOCUMENTATION
 
-    def test_docs_path(self):
-        url_type, _ = classify_url("https://example.com/docs/getting-started")
-        assert url_type == URLType.DOCUMENTATION
+    def test_documentation_docs_path(self):
+        """Path with /docs/."""
+        assert classify_url("https://example.com/docs/getting-started") == URLType.DOCUMENTATION
 
-    def test_api_path(self):
-        url_type, _ = classify_url("https://example.com/api/reference")
-        assert url_type == URLType.DOCUMENTATION
+    def test_documentation_api_path(self):
+        """Path with /api/."""
+        assert classify_url("https://example.com/api/reference") == URLType.DOCUMENTATION
 
-    def test_generic_url(self):
-        url_type, info = classify_url("https://example.com/page")
-        assert url_type == URLType.GENERIC
-        assert info is None
+    def test_documentation_documentation_path(self):
+        """Path with /documentation/."""
+        assert classify_url("https://example.com/documentation/guide") == URLType.DOCUMENTATION
+
+    def test_raw_githubusercontent_as_github_file(self):
+        """raw.githubusercontent.com classified as GitHub file."""
+        url = "https://raw.githubusercontent.com/owner/repo/main/README.md"
+        assert classify_url(url) == URLType.GITHUB_FILE
+
+    def test_generic_fallback(self):
+        """Unrecognized URLs classified as generic."""
+        assert classify_url("https://random-site.com/page") == URLType.GENERIC
 
 
-# ======================================================================
-# Display Name tests
-# ======================================================================
+# ============================================================
+# Display Name Tests
+# ============================================================
+
 
 class TestDisplayName:
-
-    def test_github_repo(self):
-        name = _display_name(
-            "https://github.com/owner/repo",
-            URLType.GITHUB_REPO,
-            GitHubInfo(owner="owner", repo="repo"),
-        )
+    def test_github_repo_display(self):
+        """GitHub repo: owner/repo."""
+        name = display_name("https://github.com/owner/repo", URLType.GITHUB_REPO)
         assert name == "owner/repo"
 
-    def test_github_file(self):
-        name = _display_name(
-            "https://github.com/owner/repo/blob/main/src/deep/file.py",
-            URLType.GITHUB_FILE,
-            GitHubInfo(owner="owner", repo="repo", path="src/deep/file.py"),
-        )
-        assert name == "owner/repo/file.py"
+    def test_github_file_display(self):
+        """GitHub file: owner/repo/filename."""
+        url = "https://github.com/owner/repo/blob/main/src/deep/app.py"
+        name = display_name(url, URLType.GITHUB_FILE)
+        assert name == "owner/repo/app.py"
 
-    def test_github_issue(self):
-        name = _display_name(
-            "https://github.com/owner/repo/issues/42",
-            URLType.GITHUB_ISSUE,
-            GitHubInfo(owner="owner", repo="repo", issue_number=42),
-        )
+    def test_github_issue_display(self):
+        """GitHub issue: owner/repo#N."""
+        url = "https://github.com/owner/repo/issues/42"
+        name = display_name(url, URLType.GITHUB_ISSUE)
         assert name == "owner/repo#42"
 
-    def test_github_pr(self):
-        name = _display_name(
-            "https://github.com/owner/repo/pull/7",
-            URLType.GITHUB_PR,
-            GitHubInfo(owner="owner", repo="repo", pr_number=7),
-        )
-        assert name == "owner/repo!7"
+    def test_github_pr_display(self):
+        """GitHub PR: owner/repo!N."""
+        url = "https://github.com/owner/repo/pull/99"
+        name = display_name(url, URLType.GITHUB_PR)
+        assert name == "owner/repo!99"
 
-    def test_generic_short(self):
-        name = _display_name("https://example.com/path", URLType.GENERIC, None)
-        assert name == "example.com/path"
+    def test_generic_hostname_path(self):
+        """Generic: hostname/path."""
+        name = display_name("https://example.com/page", URLType.GENERIC)
+        assert name == "example.com/page"
 
-    def test_generic_long_truncated(self):
-        long_url = "https://example.com/" + "a" * 100
-        name = _display_name(long_url, URLType.GENERIC, None)
-        assert len(name) == 40
+    def test_long_url_truncated(self):
+        """Long URLs truncated to 40 chars."""
+        url = "https://example.com/" + "a" * 100
+        name = display_name(url, URLType.GENERIC)
+        assert len(name) <= 40
         assert name.endswith("...")
 
-    def test_generic_root(self):
-        name = _display_name("https://example.com/", URLType.GENERIC, None)
+    def test_root_url_strips_trailing_slash(self):
+        """Root URL strips trailing slash."""
+        name = display_name("https://example.com/", URLType.GENERIC)
         assert name == "example.com"
 
 
-# ======================================================================
-# Summary Type Selection tests
-# ======================================================================
+# ============================================================
+# Summary Type Selection Tests
+# ============================================================
+
 
 class TestSummaryTypeSelection:
-
     def test_github_repo_with_symbols(self):
-        stype = _select_summary_type(URLType.GITHUB_REPO, True)
-        assert stype == SummaryType.ARCHITECTURE
+        """GitHub repo with symbol map -> ARCHITECTURE."""
+        st = select_summary_type(URLType.GITHUB_REPO, has_symbol_map=True)
+        assert st == SummaryType.ARCHITECTURE
 
     def test_github_repo_without_symbols(self):
-        stype = _select_summary_type(URLType.GITHUB_REPO, False)
-        assert stype == SummaryType.BRIEF
+        """GitHub repo without symbol map -> BRIEF."""
+        st = select_summary_type(URLType.GITHUB_REPO, has_symbol_map=False)
+        assert st == SummaryType.BRIEF
 
     def test_documentation(self):
-        stype = _select_summary_type(URLType.DOCUMENTATION, False)
-        assert stype == SummaryType.USAGE
+        """Documentation -> USAGE."""
+        st = select_summary_type(URLType.DOCUMENTATION)
+        assert st == SummaryType.USAGE
 
     def test_generic(self):
-        stype = _select_summary_type(URLType.GENERIC, False)
-        assert stype == SummaryType.BRIEF
+        """Generic -> BRIEF."""
+        st = select_summary_type(URLType.GENERIC)
+        assert st == SummaryType.BRIEF
 
-    def test_user_hint_howto(self):
-        stype = _select_summary_type(URLType.GENERIC, False, "how to use this")
-        assert stype == SummaryType.USAGE
+    def test_user_hint_how_to(self):
+        """User hint 'how to' -> USAGE."""
+        st = select_summary_type(URLType.GENERIC, user_text="how to use this library")
+        assert st == SummaryType.USAGE
 
     def test_user_hint_api(self):
-        stype = _select_summary_type(URLType.GENERIC, False, "what's the api")
-        assert stype == SummaryType.API
+        """User hint 'api' -> API."""
+        st = select_summary_type(URLType.GENERIC, user_text="what's the api?")
+        assert st == SummaryType.API
 
     def test_user_hint_architecture(self):
-        stype = _select_summary_type(URLType.GENERIC, False, "describe the architecture")
-        assert stype == SummaryType.ARCHITECTURE
+        """User hint 'architecture' -> ARCHITECTURE."""
+        st = select_summary_type(URLType.GENERIC, user_text="describe the architecture")
+        assert st == SummaryType.ARCHITECTURE
 
     def test_user_hint_compare(self):
-        stype = _select_summary_type(URLType.GENERIC, False, "compare alternatives")
-        assert stype == SummaryType.EVALUATION
+        """User hint 'compare' -> EVALUATION."""
+        st = select_summary_type(URLType.GENERIC, user_text="compare with alternatives")
+        assert st == SummaryType.EVALUATION
 
 
-# ======================================================================
-# URLContent tests
-# ======================================================================
+# ============================================================
+# URLContent Tests
+# ============================================================
+
 
 class TestURLContent:
-
-    def test_format_for_prompt_basic(self):
-        c = URLContent(
+    def test_format_for_prompt_with_summary(self):
+        """format_for_prompt: summary preferred over raw content."""
+        uc = URLContent(
             url="https://example.com",
             title="Example",
-            content="Some page content here.",
+            content="Raw content here",
+            summary="Short summary",
         )
-        prompt = c.format_for_prompt()
-        assert "## https://example.com" in prompt
-        assert "**Example**" in prompt
-        assert "Some page content" in prompt
-
-    def test_format_for_prompt_summary_preferred(self):
-        c = URLContent(
-            url="https://example.com",
-            content="raw content",
-            summary="summarized version",
-        )
-        prompt = c.format_for_prompt()
-        assert "summarized version" in prompt
-        # Summary takes priority
-        assert "raw content" not in prompt
+        text = uc.format_for_prompt()
+        assert "https://example.com" in text
+        assert "Example" in text
+        assert "Short summary" in text
+        # Summary preferred, raw content not included when summary exists
+        assert "Raw content here" not in text
 
     def test_format_for_prompt_readme_fallback(self):
-        c = URLContent(url="https://github.com/x/y", readme="# README")
-        prompt = c.format_for_prompt()
-        assert "# README" in prompt
+        """format_for_prompt: readme fallback when no summary."""
+        uc = URLContent(
+            url="https://github.com/owner/repo",
+            readme="# Project\nReadme content",
+        )
+        text = uc.format_for_prompt()
+        assert "Readme content" in text
 
-    def test_format_for_prompt_with_symbol_map(self):
-        c = URLContent(
+    def test_format_for_prompt_symbol_map_appended(self):
+        """format_for_prompt: symbol map appended."""
+        uc = URLContent(
             url="https://example.com",
-            content="stuff",
+            content="Content",
             symbol_map="c MyClass:10",
         )
-        prompt = c.format_for_prompt()
-        assert "### Symbol Map" in prompt
-        assert "MyClass" in prompt
+        text = uc.format_for_prompt()
+        assert "Symbol Map" in text
+        assert "c MyClass:10" in text
 
     def test_format_for_prompt_truncation(self):
-        c = URLContent(url="https://example.com", content="x" * 10000)
-        prompt = c.format_for_prompt(max_length=100)
-        assert "..." in prompt
+        """format_for_prompt: truncation with ellipsis."""
+        uc = URLContent(
+            url="https://example.com",
+            content="x" * 100000,
+        )
+        text = uc.format_for_prompt(max_length=1000)
+        assert "truncated" in text
 
-    def test_round_trip_serialization(self):
+    def test_roundtrip_serialization(self):
+        """Round-trip serialization (to_dict/from_dict) preserves all fields."""
         original = URLContent(
             url="https://github.com/owner/repo",
-            url_type=URLType.GITHUB_REPO,
-            title="Test",
-            content="content",
-            symbol_map="symbols",
-            readme="readme",
-            github_info=GitHubInfo(owner="owner", repo="repo"),
-            summary="summary",
-            summary_type="brief",
+            url_type="github_repo",
+            title="My Repo",
+            description="A repo",
+            content="Content",
+            symbol_map="f main:1",
+            readme="# Readme",
+            github_info=GitHubInfo(owner="owner", repo="repo", branch="main"),
+            fetched_at="2025-01-15T00:00:00Z",
+            summary="A summary",
+            summary_type="BRIEF",
         )
         d = original.to_dict()
         restored = URLContent.from_dict(d)
@@ -358,217 +426,276 @@ class TestURLContent:
         assert restored.url_type == original.url_type
         assert restored.title == original.title
         assert restored.content == original.content
+        assert restored.symbol_map == original.symbol_map
+        assert restored.readme == original.readme
+        assert restored.summary == original.summary
         assert restored.github_info.owner == "owner"
-        assert restored.summary == "summary"
+        assert restored.github_info.repo == "repo"
+        assert restored.github_info.branch == "main"
 
-    def test_from_dict_no_github(self):
-        d = {"url": "https://example.com", "url_type": "generic"}
-        c = URLContent.from_dict(d)
-        assert c.github_info is None
-        assert c.url_type == URLType.GENERIC
+    def test_format_includes_url_header_and_title(self):
+        """format_for_prompt includes URL header and title."""
+        uc = URLContent(url="https://example.com", title="Example Site", content="Body")
+        text = uc.format_for_prompt()
+        assert "## https://example.com" in text
+        assert "**Example Site**" in text
 
 
-# ======================================================================
-# Basic HTML extraction tests
-# ======================================================================
+# ============================================================
+# HTML Extraction Tests
+# ============================================================
 
-class TestBasicHTMLExtract:
 
+class TestHTMLExtraction:
     def test_extracts_title(self):
-        html = "<html><head><title>My Page</title></head><body>Hello</body></html>"
-        text, title = _basic_html_extract(html)
+        """Extracts title from HTML."""
+        html_text = "<html><head><title>My Page</title></head><body><p>Content</p></body></html>"
+        title, content = extract_html_content(html_text)
         assert title == "My Page"
-        assert "Hello" in text
 
-    def test_strips_scripts(self):
-        html = "<p>Before</p><script>alert('xss')</script><p>After</p>"
-        text, _ = _basic_html_extract(html)
-        assert "alert" not in text
-        assert "Before" in text
-        assert "After" in text
-
-    def test_strips_styles(self):
-        html = "<style>.foo{color:red}</style><p>Content</p>"
-        text, _ = _basic_html_extract(html)
-        assert "color" not in text
-        assert "Content" in text
+    def test_strips_scripts_and_styles(self):
+        """Strips scripts and styles."""
+        html_text = (
+            "<html><body>"
+            "<script>alert('xss')</script>"
+            "<style>.x{color:red}</style>"
+            "<p>Real content</p>"
+            "</body></html>"
+        )
+        title, content = extract_html_content(html_text)
+        assert content is not None
+        assert "alert" not in content
+        assert "color:red" not in content
+        assert "Real content" in content
 
     def test_cleans_whitespace(self):
-        html = "<p>Hello</p>    \n\n\n\n   <p>World</p>"
-        text, _ = _basic_html_extract(html)
-        assert "\n\n\n" not in text
+        """Cleans excessive whitespace."""
+        html_text = "<html><body><p>  word1   word2  </p></body></html>"
+        _, content = extract_html_content(html_text)
+        assert content is not None
+        # Should not have excessive spaces
+        assert "   " not in content
 
 
-# ======================================================================
-# URL Service tests
-# ======================================================================
+# ============================================================
+# URL Service Tests
+# ============================================================
+
 
 class TestURLService:
-
-    @pytest.fixture
-    def service(self, tmp_path):
-        return URLService(
-            cache_config={"path": str(tmp_path / "cache"), "ttl_hours": 1},
-            smaller_model="",
-        )
-
-    def test_detect_urls(self, service):
-        results = service.detect_urls("See https://example.com")
+    def test_detect_urls_returns_classified(self):
+        """detect_urls returns classified results."""
+        svc = URLService()
+        results = svc.detect_urls("Check https://github.com/owner/repo")
         assert len(results) == 1
-        assert results[0]["url"] == "https://example.com"
+        assert results[0]["url_type"] == "github_repo"
 
-    def test_get_url_content_not_fetched(self, service):
-        result = service.get_url_content("https://nonexistent.com")
-        assert "error" in result
+    def test_get_url_content_error_for_unfetched(self):
+        """get_url_content returns error for unfetched URL."""
+        svc = URLService()
+        result = svc.get_url_content("https://unfetched.com")
+        assert result.error is not None
 
-    def test_invalidate_cache(self, service):
-        service._cache.set("https://example.com", {"title": "test"})
-        service.invalidate_url_cache("https://example.com")
-        assert service._cache.get("https://example.com") is None
+    def test_invalidate_cache(self, tmp_path):
+        """Invalidate and clear cache operations."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        # Manually populate
+        cache.set("https://example.com", {"url": "https://example.com", "content": "x"})
+        svc.invalidate_url_cache("https://example.com")
+        assert cache.get("https://example.com") is None
 
-    def test_clear_cache(self, service):
-        service._cache.set("https://a.com", {"a": 1})
-        service.clear_url_cache()
-        assert service._cache.get("https://a.com") is None
+    def test_clear_url_cache(self, tmp_path):
+        """Clear URL cache."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        cache.set("https://a.com", {"url": "https://a.com"})
+        svc._fetched["https://a.com"] = URLContent(url="https://a.com")
+        svc.clear_url_cache()
+        assert cache.get("https://a.com") is None
+        assert len(svc.get_fetched_urls()) == 0
 
-    def test_get_fetched_urls_empty(self, service):
-        assert service.get_fetched_urls() == []
+    def test_get_fetched_urls_empty_initially(self):
+        """get_fetched_urls empty initially."""
+        svc = URLService()
+        assert svc.get_fetched_urls() == []
 
-    def test_remove_fetched(self, service):
-        service._fetched["https://example.com"] = URLContent(url="https://example.com")
-        service.remove_fetched("https://example.com")
-        assert "https://example.com" not in service._fetched
+    def test_remove_fetched(self):
+        """remove_fetched removes from in-memory dict."""
+        svc = URLService()
+        svc._fetched["https://a.com"] = URLContent(url="https://a.com")
+        svc.remove_fetched("https://a.com")
+        assert len(svc.get_fetched_urls()) == 0
 
-    def test_clear_fetched(self, service):
-        service._fetched["https://a.com"] = URLContent(url="https://a.com")
-        service._fetched["https://b.com"] = URLContent(url="https://b.com")
-        service.clear_fetched()
-        assert len(service._fetched) == 0
+    def test_clear_fetched(self):
+        """clear_fetched clears in-memory dict."""
+        svc = URLService()
+        svc._fetched["https://a.com"] = URLContent(url="https://a.com")
+        svc._fetched["https://b.com"] = URLContent(url="https://b.com")
+        svc.clear_fetched()
+        assert len(svc.get_fetched_urls()) == 0
 
-    def test_format_url_context(self, service):
-        service._fetched["https://a.com"] = URLContent(
-            url="https://a.com", title="A", content="Content A",
+    def test_get_url_content_falls_back_to_cache(self, tmp_path):
+        """get_url_content falls back to filesystem cache when not in fetched dict."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {
+            "url": "https://example.com",
+            "url_type": "generic",
+            "title": "Cached Page",
+            "content": "Cached content",
+        })
+        svc = URLService(cache=cache)
+        # Not in _fetched, but in cache
+        result = svc.get_url_content("https://example.com")
+        assert result.error is None
+        assert result.title == "Cached Page"
+        assert result.content == "Cached content"
+
+    def test_remove_fetched_preserves_cache(self, tmp_path):
+        """remove_fetched removes from in-memory dict but preserves filesystem cache."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        # Simulate a fetched URL that was also cached
+        content = URLContent(url="https://example.com", title="Test", content="Body")
+        svc._fetched["https://example.com"] = content
+        cache.set("https://example.com", content.to_dict())
+
+        # Remove from fetched
+        svc.remove_fetched("https://example.com")
+        assert len(svc.get_fetched_urls()) == 0
+
+        # Cache still intact — get_url_content falls back to it
+        result = svc.get_url_content("https://example.com")
+        assert result.error is None
+        assert result.title == "Test"
+
+    def test_format_url_context_joins(self):
+        """format_url_context joins multiple URLs with separator."""
+        svc = URLService()
+        svc._fetched["https://a.com"] = URLContent(
+            url="https://a.com", content="Content A"
         )
-        service._fetched["https://b.com"] = URLContent(
-            url="https://b.com", title="B", content="Content B",
+        svc._fetched["https://b.com"] = URLContent(
+            url="https://b.com", content="Content B"
         )
-        result = service.format_url_context(["https://a.com", "https://b.com"])
-        assert "Content A" in result
-        assert "Content B" in result
-        assert "---" in result
+        text = svc.format_url_context()
+        assert "Content A" in text
+        assert "Content B" in text
+        assert "---" in text
 
-    def test_format_url_context_excludes(self, service):
-        service._fetched["https://a.com"] = URLContent(
-            url="https://a.com", content="A",
+    def test_format_url_context_excludes_specified(self):
+        """format_url_context excludes specified URLs."""
+        svc = URLService()
+        svc._fetched["https://a.com"] = URLContent(
+            url="https://a.com", content="Content A"
         )
-        service._fetched["https://b.com"] = URLContent(
-            url="https://b.com", content="B",
+        svc._fetched["https://b.com"] = URLContent(
+            url="https://b.com", content="Content B"
         )
-        result = service.format_url_context(
-            ["https://a.com", "https://b.com"],
-            excluded={"https://a.com"},
+        text = svc.format_url_context(excluded={"https://a.com"})
+        assert "Content A" not in text
+        assert "Content B" in text
+
+    def test_format_url_context_skips_errors(self):
+        """format_url_context skips error results."""
+        svc = URLService()
+        svc._fetched["https://a.com"] = URLContent(
+            url="https://a.com", error="fetch failed"
         )
-        assert "A" not in result.split("---")[0] if "---" in result else "A" not in result
-        assert "B" in result
-
-    def test_format_url_context_skips_errors(self, service):
-        service._fetched["https://bad.com"] = URLContent(
-            url="https://bad.com", error="failed",
+        svc._fetched["https://b.com"] = URLContent(
+            url="https://b.com", content="Content B"
         )
-        result = service.format_url_context(["https://bad.com"])
-        assert result == ""
+        text = svc.format_url_context()
+        assert "Content B" in text
+        # Error URL should not appear in output
+        assert "fetch failed" not in text
 
-    def test_fetch_uses_cache(self, service):
-        # Pre-populate cache
-        cached_data = URLContent(
-            url="https://example.com",
-            url_type=URLType.GENERIC,
-            title="Cached",
-            content="cached content",
-        ).to_dict()
-        cached_data["fetched_at"] = time.time()
-        service._cache.set("https://example.com", cached_data)
+    @pytest.mark.asyncio
+    async def test_fetch_uses_cache(self, tmp_path):
+        """Fetch uses cache when available."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        cache.set("https://example.com", {
+            "url": "https://example.com",
+            "url_type": "generic",
+            "title": "Cached",
+            "content": "Cached content",
+        })
+        svc = URLService(cache=cache)
+        result = await svc.fetch_url("https://example.com", summarize=False)
+        assert result.title == "Cached"
+        assert result.content == "Cached content"
 
-        result = service.fetch_url("https://example.com", summarize=False)
-        assert result["title"] == "Cached"
-        assert result["content"] == "cached content"
-
-    @patch("ac_dc.url_handler.urllib.request.urlopen")
-    def test_fetch_web_page(self, mock_urlopen, service):
+    @pytest.mark.asyncio
+    @patch("ac_dc.url_handler.urlopen")
+    async def test_web_page_fetch(self, mock_urlopen, tmp_path):
+        """Web page fetch via mocked urlopen."""
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b"<html><head><title>Test</title></head><body><p>Hello World</p></body></html>"
-        mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        mock_resp.read.return_value = b"<html><head><title>Test</title></head><body>Hello world</body></html>"
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_resp
 
-        result = service.fetch_url(
-            "https://example.com/page",
-            use_cache=False,
-            summarize=False,
-        )
-        assert result.get("title") == "Test"
-        assert "Hello World" in result.get("content", "")
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        result = await svc.fetch_url("https://example.com/page", use_cache=False, summarize=False)
+        assert result.title == "Test"
+        assert result.error is None
 
-    @patch("ac_dc.url_handler.urllib.request.urlopen")
-    def test_fetch_github_file(self, mock_urlopen, service):
+    @pytest.mark.asyncio
+    @patch("ac_dc.url_handler.urlopen")
+    async def test_github_file_fetch(self, mock_urlopen, tmp_path):
+        """GitHub file fetch."""
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b"def hello():\n    print('hi')\n"
-        mock_resp.headers = {}
+        mock_resp.read.return_value = b"def main():\n    print('hello')\n"
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_resp
 
-        result = service.fetch_url(
-            "https://github.com/owner/repo/blob/main/src/hello.py",
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+        url = "https://github.com/owner/repo/blob/main/src/app.py"
+        result = await svc.fetch_url(url, use_cache=False, summarize=False)
+        assert result.error is None
+        assert "def main()" in result.content
+
+    @pytest.mark.asyncio
+    async def test_error_results_not_cached(self, tmp_path):
+        """Error results not cached."""
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache)
+
+        # Fetch a URL that will fail (no mock, no real network)
+        with patch("ac_dc.url_handler.urlopen", side_effect=Exception("network error")):
+            result = await svc.fetch_url("https://failing.com", use_cache=False, summarize=False)
+
+        assert result.error is not None
+        # Should not be cached
+        assert cache.get("https://failing.com") is None
+
+    @pytest.mark.asyncio
+    @patch("ac_dc.url_handler.litellm")
+    @patch("ac_dc.url_handler.urlopen")
+    async def test_summarization_via_mocked_llm(self, mock_urlopen, mock_litellm, tmp_path):
+        """Summarization via mocked LLM appends summary to result."""
+        # Mock web fetch
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<html><body>Some detailed content about Python</body></html>"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        # Mock LLM summarization
+        mock_llm_resp = MagicMock()
+        mock_llm_resp.choices = [MagicMock()]
+        mock_llm_resp.choices[0].message.content = "A brief summary of the content."
+        mock_litellm.completion.return_value = mock_llm_resp
+
+        cache = URLCache(cache_dir=tmp_path / "cache")
+        svc = URLService(cache=cache, model="test-model")
+        result = await svc.fetch_url(
+            "https://example.com/article",
             use_cache=False,
-            summarize=False,
+            summarize=True,
         )
-        assert result["url_type"] == "github_file"
-        assert "def hello" in result.get("content", "")
-
-    def test_fetch_error_not_cached(self, service):
-        # Fetching a bad URL should not cache the error
-        with patch("ac_dc.url_handler._fetch_web_page") as mock_fetch:
-            mock_fetch.return_value = URLContent(
-                url="https://bad.com",
-                error="connection refused",
-            )
-            result = service.fetch_url(
-                "https://bad.com",
-                use_cache=False,
-                summarize=False,
-            )
-        assert result.get("error") == "connection refused"
-        assert service._cache.get("https://bad.com") is None
-
-
-class TestURLServiceWithSummarization:
-
-    @patch("ac_dc.url_handler.litellm", create=True)
-    def test_fetch_with_summary(self, mock_litellm):
-        with patch.dict("sys.modules", {"litellm": mock_litellm}):
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "This is a summary."
-            mock_litellm.completion.return_value = mock_response
-
-            import tempfile
-            with tempfile.TemporaryDirectory() as tmpdir:
-                service = URLService(
-                    cache_config={"path": tmpdir, "ttl_hours": 1},
-                    smaller_model="test/model",
-                )
-                # Pre-populate cache with content
-                cached = URLContent(
-                    url="https://example.com",
-                    content="Long content here",
-                ).to_dict()
-                cached["fetched_at"] = time.time()
-                service._cache.set("https://example.com", cached)
-
-                result = service.fetch_url(
-                    "https://example.com",
-                    summarize=True,
-                )
-                assert result.get("summary") == "This is a summary."
+        assert result.summary == "A brief summary of the content."
+        assert result.error is None

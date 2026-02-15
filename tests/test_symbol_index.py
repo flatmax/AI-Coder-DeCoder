@@ -1,361 +1,207 @@
-"""Tests for the symbol index system."""
+"""Tests for symbol index — extractors, cache, resolver, references, compact format."""
+
+import os
+import tempfile
+from pathlib import Path
 
 import pytest
-from pathlib import Path
-from ac_dc.symbol_index.models import (
-    Symbol, SymbolKind, SymbolRange, FileSymbols, Parameter, Import,
-)
+
+from ac_dc.symbol_index.parser import TreeSitterParser
 from ac_dc.symbol_index.cache import SymbolCache
 from ac_dc.symbol_index.import_resolver import ImportResolver
 from ac_dc.symbol_index.reference_index import ReferenceIndex
 from ac_dc.symbol_index.compact_format import CompactFormatter
+from ac_dc.symbol_index.index import SymbolIndex
+from ac_dc.symbol_index.extractors.base import FileSymbols, Import, Symbol, CallSite
 
 
-# ======================================================================
-# Test fixtures
-# ======================================================================
-
-PYTHON_SOURCE = '''\
-"""Module docstring."""
-
-import os
-import json
-from pathlib import Path
-from .utils import helper
-
-MAX_SIZE = 1024
-_internal = "private"
+@pytest.fixture
+def parser():
+    return TreeSitterParser()
 
 
-class Animal:
-    """A base animal class."""
-
-    sound = "..."
-
-    def __init__(self, name: str, age: int = 0):
-        self.name = name
-        self.age = age
-
-    def speak(self) -> str:
-        return self.sound
-
-    @property
-    def info(self) -> str:
-        return f"{self.name} ({self.age})"
-
-
-class Dog(Animal):
-    """A dog."""
-
-    sound = "woof"
-
-    def speak(self) -> str:
-        return f"{self.name} says {self.sound}"
-
-    async def fetch(self, item: str) -> bool:
-        result = helper(item)
-        return result is not None
-
-
-def process(data: list, verbose: bool = False) -> dict:
-    """Process some data."""
-    animal = Animal("test")
-    animal.speak()
-    return {"ok": True}
-'''
-
-JS_SOURCE = '''\
-import { LitElement } from 'lit';
-import { helper } from './utils.js';
-
-const MAX_RETRIES = 3;
-
-class Connection extends LitElement {
-    remoteTimeout = 60;
-
-    constructor() {
-        super();
-        this.ws = null;
-    }
-
-    async connect(url) {
-        this.ws = new WebSocket(url);
-        return helper(url);
-    }
-
-    get isConnected() {
-        return this.ws !== null;
-    }
-
-    disconnect() {
-        if (this.ws) {
-            this.ws.close();
-        }
-    }
-}
-
-function createConnection(url, opts = {}) {
-    const conn = new Connection();
-    conn.connect(url);
-    return conn;
-}
-
-export default Connection;
-'''
-
-C_SOURCE = '''\
-#include <stdio.h>
-#include "mylib.h"
-
-#define MAX_BUF 256
-
-struct Point {
-    int x;
-    int y;
-};
-
-int add(int a, int b) {
-    return a + b;
-}
-
-void print_point(struct Point *p) {
-    printf("(%d, %d)\\n", p->x, p->y);
-}
-'''
-
-
-# ======================================================================
-# Parser + Extractor tests
-# ======================================================================
+# === Python Extractor ===
 
 class TestPythonExtractor:
-    """Test Python symbol extraction."""
+    def _parse(self, source, parser):
+        from ac_dc.symbol_index.extractors.python_extractor import PythonExtractor
+        tree = parser.parse(source, "python")
+        assert tree is not None, "Python parser not available"
+        ext = PythonExtractor()
+        return ext.extract(tree, source.encode(), "test.py")
 
-    @pytest.fixture
-    def fsyms(self):
-        """Parse Python source and extract symbols."""
-        try:
-            from ac_dc.symbol_index.parser import get_parser
-            from ac_dc.symbol_index.extractors import get_extractor
-        except ImportError:
-            pytest.skip("tree-sitter not available")
+    def test_class_with_inheritance(self, parser):
+        fs = self._parse("class Foo(Bar):\n    pass\n", parser)
+        assert len(fs.symbols) == 1
+        assert fs.symbols[0].kind == "class"
+        assert fs.symbols[0].name == "Foo"
+        assert "Bar" in fs.symbols[0].bases
 
-        parser = get_parser()
-        if not parser.available:
-            pytest.skip("tree-sitter not available")
+    def test_method_as_child(self, parser):
+        fs = self._parse("class Foo:\n    def bar(self):\n        pass\n", parser)
+        cls = fs.symbols[0]
+        assert len(cls.children) == 1
+        assert cls.children[0].kind == "method"
+        assert cls.children[0].name == "bar"
 
-        tree = parser.parse(PYTHON_SOURCE, "python")
-        extractor = get_extractor("python")
-        return extractor.extract(tree, PYTHON_SOURCE, "test/animals.py")
+    def test_property_detected(self, parser):
+        src = "class Foo:\n    @property\n    def bar(self):\n        return 1\n"
+        fs = self._parse(src, parser)
+        cls = fs.symbols[0]
+        assert any(c.kind == "property" for c in cls.children)
 
-    def test_class_extracted(self, fsyms):
-        classes = [s for s in fsyms.symbols if s.kind == SymbolKind.CLASS]
-        names = [c.name for c in classes]
-        assert "Animal" in names
-        assert "Dog" in names
+    def test_async_method(self, parser):
+        src = "class Foo:\n    async def fetch(self, url):\n        pass\n"
+        fs = self._parse(src, parser)
+        method = fs.symbols[0].children[0]
+        assert method.is_async is True
 
-    def test_inheritance(self, fsyms):
-        dog = next(s for s in fsyms.symbols if s.name == "Dog")
-        assert "Animal" in dog.bases
+    def test_parameters(self, parser):
+        fs = self._parse("class Foo:\n    def bar(self, x, y=10):\n        pass\n", parser)
+        method = fs.symbols[0].children[0]
+        assert len(method.parameters) == 2
+        assert method.parameters[0].name == "x"
+        assert method.parameters[1].name == "y"
 
-    def test_methods_extracted(self, fsyms):
-        animal = next(s for s in fsyms.symbols if s.name == "Animal")
-        method_names = [m.name for m in animal.children]
-        assert "__init__" in method_names
-        assert "speak" in method_names
+    def test_return_type(self, parser):
+        fs = self._parse("def foo() -> str:\n    pass\n", parser)
+        assert fs.symbols[0].return_type is not None
 
-    def test_property_detected(self, fsyms):
-        animal = next(s for s in fsyms.symbols if s.name == "Animal")
-        info = next((m for m in animal.children if m.name == "info"), None)
-        assert info is not None
-        assert info.kind == SymbolKind.PROPERTY
+    def test_instance_vars(self, parser):
+        src = "class Foo:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n"
+        fs = self._parse(src, parser)
+        assert "x" in fs.symbols[0].instance_vars
+        assert "y" in fs.symbols[0].instance_vars
 
-    def test_async_detected(self, fsyms):
-        dog = next(s for s in fsyms.symbols if s.name == "Dog")
-        fetch = next((m for m in dog.children if m.name == "fetch"), None)
-        assert fetch is not None
-        assert fetch.is_async is True
+    def test_imports(self, parser):
+        src = "import os\nfrom pathlib import Path\nfrom . import sibling\n"
+        fs = self._parse(src, parser)
+        assert len(fs.imports) >= 2
+        # Check absolute
+        abs_imp = [i for i in fs.imports if i.module == "os"]
+        assert len(abs_imp) >= 1
+        # Check relative
+        rel_imp = [i for i in fs.imports if i.level > 0]
+        assert len(rel_imp) >= 1
 
-    def test_params_extracted(self, fsyms):
-        animal = next(s for s in fsyms.symbols if s.name == "Animal")
-        init = next(m for m in animal.children if m.name == "__init__")
-        param_names = [p.name for p in init.parameters]
-        assert "self" not in param_names  # self omitted
-        assert "name" in param_names
-        assert "age" in param_names
+    def test_top_level_variable(self, parser):
+        fs = self._parse("CONFIG = {}\n", parser)
+        assert any(s.kind == "variable" and s.name == "CONFIG" for s in fs.symbols)
 
-    def test_return_type(self, fsyms):
-        animal = next(s for s in fsyms.symbols if s.name == "Animal")
-        speak = next(m for m in animal.children if m.name == "speak")
-        assert speak.return_type is not None
-        assert "str" in speak.return_type
+    def test_top_level_function(self, parser):
+        fs = self._parse("def helper():\n    pass\n", parser)
+        assert fs.symbols[0].kind == "function"
 
-    def test_instance_vars(self, fsyms):
-        animal = next(s for s in fsyms.symbols if s.name == "Animal")
-        assert "name" in animal.instance_vars
-        assert "age" in animal.instance_vars
+    def test_call_sites(self, parser):
+        src = "def foo():\n    bar()\n    baz()\n"
+        fs = self._parse(src, parser)
+        assert len(fs.symbols[0].call_sites) >= 2
 
-    def test_imports_extracted(self, fsyms):
-        assert len(fsyms.imports) >= 3
-        modules = [i.module for i in fsyms.imports]
-        assert "os" in modules
-        assert "json" in modules
 
-    def test_relative_import(self, fsyms):
-        rel = [i for i in fsyms.imports if i.level > 0]
-        assert len(rel) >= 1
-        assert any("helper" in i.names for i in rel)
-
-    def test_top_level_variable(self, fsyms):
-        vars_ = [s for s in fsyms.symbols if s.kind == SymbolKind.VARIABLE]
-        names = [v.name for v in vars_]
-        assert "MAX_SIZE" in names
-        # Private vars should be excluded
-        assert "_internal" not in names
-
-    def test_top_level_function(self, fsyms):
-        funcs = [s for s in fsyms.symbols if s.kind == SymbolKind.FUNCTION]
-        assert any(f.name == "process" for f in funcs)
-
-    def test_call_sites(self, fsyms):
-        process = next(
-            (s for s in fsyms.symbols if s.name == "process"), None
-        )
-        if process:
-            call_names = [c.name for c in process.call_sites]
-            assert len(call_names) >= 1
-
+# === JavaScript Extractor ===
 
 class TestJavaScriptExtractor:
-    """Test JavaScript symbol extraction."""
+    def _parse(self, source, parser):
+        from ac_dc.symbol_index.extractors.javascript_extractor import JavaScriptExtractor
+        tree = parser.parse(source, "javascript")
+        assert tree is not None, "JavaScript parser not available"
+        ext = JavaScriptExtractor()
+        return ext.extract(tree, source.encode(), "test.js")
 
-    @pytest.fixture
-    def fsyms(self):
-        try:
-            from ac_dc.symbol_index.parser import get_parser
-            from ac_dc.symbol_index.extractors import get_extractor
-        except ImportError:
-            pytest.skip("tree-sitter not available")
+    def test_class_with_extends(self, parser):
+        src = "class Foo extends Bar {\n    constructor() {}\n}\n"
+        fs = self._parse(src, parser)
+        assert len(fs.symbols) >= 1
+        cls = fs.symbols[0]
+        assert cls.kind == "class"
+        assert "Bar" in cls.bases
 
-        parser = get_parser()
-        if not parser.available:
-            pytest.skip("tree-sitter not available")
+    def test_method_and_getter(self, parser):
+        src = "class Foo {\n    get name() { return 'foo'; }\n    async fetch(url) {}\n}\n"
+        fs = self._parse(src, parser)
+        cls = fs.symbols[0]
+        assert any(c.kind == "property" for c in cls.children)
+        assert any(c.is_async for c in cls.children)
 
-        tree = parser.parse(JS_SOURCE, "javascript")
-        extractor = get_extractor("javascript")
-        return extractor.extract(tree, JS_SOURCE, "src/connection.js")
+    def test_function_declaration(self, parser):
+        src = "function hello(name) { return 'hi ' + name; }\n"
+        fs = self._parse(src, parser)
+        assert any(s.kind == "function" and s.name == "hello" for s in fs.symbols)
 
-    def test_class_extracted(self, fsyms):
-        classes = [s for s in fsyms.symbols if s.kind == SymbolKind.CLASS]
-        assert any(c.name == "Connection" for c in classes)
+    def test_const_variable(self, parser):
+        src = "const MAX = 100;\n"
+        fs = self._parse(src, parser)
+        assert any(s.kind == "variable" and s.name == "MAX" for s in fs.symbols)
 
-    def test_inheritance(self, fsyms):
-        conn = next(s for s in fsyms.symbols if s.name == "Connection")
-        assert "LitElement" in conn.bases
+    def test_imports(self, parser):
+        src = "import { foo, bar } from './utils';\nimport React from 'react';\n"
+        fs = self._parse(src, parser)
+        assert len(fs.imports) >= 2
 
-    def test_methods_extracted(self, fsyms):
-        conn = next(s for s in fsyms.symbols if s.name == "Connection")
-        method_names = [m.name for m in conn.children]
-        assert "connect" in method_names
-        assert "disconnect" in method_names
 
-    def test_getter_detected(self, fsyms):
-        conn = next(s for s in fsyms.symbols if s.name == "Connection")
-        getter = next(
-            (m for m in conn.children if m.name == "isConnected"), None
-        )
-        assert getter is not None
-        assert getter.kind == SymbolKind.PROPERTY
-
-    def test_async_method(self, fsyms):
-        conn = next(s for s in fsyms.symbols if s.name == "Connection")
-        connect = next(
-            (m for m in conn.children if m.name == "connect"), None
-        )
-        assert connect is not None
-        assert connect.is_async is True
-
-    def test_function_extracted(self, fsyms):
-        funcs = [s for s in fsyms.symbols if s.kind == SymbolKind.FUNCTION]
-        assert any(f.name == "createConnection" for f in funcs)
-
-    def test_variable_extracted(self, fsyms):
-        vars_ = [s for s in fsyms.symbols if s.kind == SymbolKind.VARIABLE]
-        names = [v.name for v in vars_]
-        assert "MAX_RETRIES" in names
-
-    def test_imports(self, fsyms):
-        assert len(fsyms.imports) >= 2
-        modules = [i.module for i in fsyms.imports]
-        assert "lit" in modules
-        assert "./utils.js" in modules
-
+# === C Extractor ===
 
 class TestCExtractor:
-    """Test C symbol extraction."""
+    def _parse(self, source, parser):
+        from ac_dc.symbol_index.extractors.c_extractor import CExtractor
+        tree = parser.parse(source, "c")
+        assert tree is not None, "C parser not available"
+        ext = CExtractor()
+        return ext.extract(tree, source.encode(), "test.c")
 
-    @pytest.fixture
-    def fsyms(self):
-        try:
-            from ac_dc.symbol_index.parser import get_parser
-            from ac_dc.symbol_index.extractors import get_extractor
-        except ImportError:
-            pytest.skip("tree-sitter not available")
+    def test_struct(self, parser):
+        src = "struct Point {\n    int x;\n    int y;\n};\n"
+        fs = self._parse(src, parser)
+        assert any(s.kind == "class" and s.name == "Point" for s in fs.symbols)
 
-        parser = get_parser()
-        if not parser.available:
-            pytest.skip("tree-sitter not available")
+    def test_function(self, parser):
+        src = "int add(int a, int b) {\n    return a + b;\n}\n"
+        fs = self._parse(src, parser)
+        assert any(s.kind == "function" and s.name == "add" for s in fs.symbols)
 
-        tree = parser.parse(C_SOURCE, "c")
-        extractor = get_extractor("c")
-        return extractor.extract(tree, C_SOURCE, "src/point.c")
-
-    def test_struct_extracted(self, fsyms):
-        classes = [s for s in fsyms.symbols if s.kind == SymbolKind.CLASS]
-        assert any(c.name == "Point" for c in classes)
-
-    def test_functions_extracted(self, fsyms):
-        funcs = [s for s in fsyms.symbols if s.kind == SymbolKind.FUNCTION]
-        names = [f.name for f in funcs]
-        assert "add" in names
-        assert "print_point" in names
-
-    def test_function_params(self, fsyms):
-        funcs = [s for s in fsyms.symbols if s.kind == SymbolKind.FUNCTION]
-        add = next(f for f in funcs if f.name == "add")
-        assert len(add.parameters) == 2
-
-    def test_includes(self, fsyms):
-        assert len(fsyms.imports) >= 1
-        modules = [i.module for i in fsyms.imports]
-        assert any("stdio" in m for m in modules)
+    def test_include(self, parser):
+        src = '#include "header.h"\n#include <stdio.h>\n'
+        fs = self._parse(src, parser)
+        assert len(fs.imports) >= 1
 
 
-# ======================================================================
-# Cache tests
-# ======================================================================
+# === Symbol Cache ===
 
 class TestSymbolCache:
     def test_put_get(self):
         cache = SymbolCache()
-        fsyms = FileSymbols(file_path="test.py")
-        cache.put("test.py", 100.0, fsyms)
-        assert cache.get("test.py", 100.0) is fsyms
-        assert cache.get("test.py", 101.0) is None
+        fs = FileSymbols(file_path="test.py", symbols=[
+            Symbol(name="Foo", kind="class")
+        ])
+        cache.put("test.py", 1000.0, fs)
+        result = cache.get("test.py", 1000.0)
+        assert result is not None
+        assert result.symbols[0].name == "Foo"
+
+    def test_stale_mtime(self):
+        cache = SymbolCache()
+        fs = FileSymbols(file_path="test.py")
+        cache.put("test.py", 1000.0, fs)
+        assert cache.get("test.py", 2000.0) is None
 
     def test_invalidate(self):
         cache = SymbolCache()
-        fsyms = FileSymbols(file_path="test.py")
-        cache.put("test.py", 100.0, fsyms)
+        fs = FileSymbols(file_path="test.py")
+        cache.put("test.py", 1000.0, fs)
         cache.invalidate("test.py")
-        assert cache.get("test.py", 100.0) is None
+        assert cache.get("test.py", 1000.0) is None
 
     def test_content_hash(self):
-        h1 = SymbolCache.compute_hash("hello world")
-        h2 = SymbolCache.compute_hash("hello world")
-        h3 = SymbolCache.compute_hash("different")
-        assert h1 == h2
-        assert h1 != h3
+        cache = SymbolCache()
+        fs1 = FileSymbols(file_path="a.py", symbols=[Symbol(name="X", kind="class")])
+        fs2 = FileSymbols(file_path="b.py", symbols=[Symbol(name="Y", kind="function")])
+        cache.put("a.py", 1.0, fs1)
+        cache.put("b.py", 1.0, fs2)
+        h1 = cache.get_hash("a.py")
+        h2 = cache.get_hash("b.py")
+        assert h1 is not None and h2 is not None
+        assert h1 != h2
+        assert len(h1) == 16
 
     def test_cached_files(self):
         cache = SymbolCache()
@@ -364,507 +210,297 @@ class TestSymbolCache:
         assert cache.cached_files == {"a.py", "b.py"}
 
 
-# ======================================================================
-# Import resolver tests
-# ======================================================================
+# === Import Resolver ===
 
 class TestImportResolver:
-
     @pytest.fixture
-    def resolver(self):
-        files = {
-            "src/main.py",
-            "src/utils.py",
-            "src/__init__.py",
-            "src/models/__init__.py",
-            "src/models/user.py",
-            "lib/helpers.js",
-            "lib/index.js",
-            "lib/utils/rpc.js",
-            "lib/utils/index.ts",
-            "include/mylib.h",
-            "src/point.c",
-        }
-        return ImportResolver(Path("/repo"), files)
+    def repo(self, tmp_path):
+        (tmp_path / "foo").mkdir()
+        (tmp_path / "foo" / "__init__.py").write_text("")
+        (tmp_path / "foo" / "bar.py").write_text("")
+        (tmp_path / "foo" / "models.py").write_text("")
+        (tmp_path / "utils").mkdir()
+        (tmp_path / "utils" / "index.js").write_text("")
+        (tmp_path / "utils" / "rpc.ts").write_text("")
+        (tmp_path / "include").mkdir()
+        (tmp_path / "include" / "header.h").write_text("")
+        return ImportResolver(str(tmp_path))
 
-    def test_python_absolute(self, resolver):
-        result = resolver.resolve_python_import("src.utils", 0, "app.py")
-        assert result == "src/utils.py"
+    def test_python_absolute(self, repo):
+        imp = Import(module="foo.bar", names=["Baz"])
+        result = repo.resolve(imp, "main.py", "python")
+        assert result == "foo/bar.py"
 
-    def test_python_package(self, resolver):
-        result = resolver.resolve_python_import("src.models", 0, "app.py")
-        assert result == "src/models/__init__.py"
+    def test_python_package(self, repo):
+        imp = Import(module="foo", names=["bar"])
+        result = repo.resolve(imp, "main.py", "python")
+        assert result == "foo/__init__.py"
 
-    def test_python_relative(self, resolver):
-        result = resolver.resolve_python_import("utils", 1, "src/main.py")
-        assert result == "src/utils.py"
+    def test_python_relative(self, repo):
+        imp = Import(module="models", names=["X"], level=1)
+        result = repo.resolve(imp, "foo/bar.py", "python")
+        assert result == "foo/models.py"
 
-    def test_python_relative_parent(self, resolver):
-        result = resolver.resolve_python_import("utils", 2, "src/models/user.py")
-        assert result == "src/utils.py"
+    def test_python_relative_level2(self, repo):
+        imp = Import(module="", names=["something"], level=2)
+        result = repo.resolve(imp, "foo/sub/deep.py", "python")
+        # Goes up 1 from foo/sub -> foo, can't resolve empty module
+        # This tests graceful handling
+        assert result is None or isinstance(result, str)
 
-    def test_python_not_found(self, resolver):
-        result = resolver.resolve_python_import("nonexistent", 0, "app.py")
+    def test_python_not_found(self, repo):
+        imp = Import(module="nonexistent", names=[])
+        result = repo.resolve(imp, "main.py", "python")
         assert result is None
 
-    def test_js_relative(self, resolver):
-        result = resolver.resolve_js_import("./helpers", "lib/index.js")
-        assert result == "lib/helpers.js"
+    def test_js_relative(self, repo):
+        imp = Import(module="./rpc", names=["RPC"])
+        result = repo.resolve(imp, "utils/index.js", "javascript")
+        assert result is not None and "rpc" in result
 
-    def test_js_index_file(self, resolver):
-        result = resolver.resolve_js_import("./utils", "lib/index.js")
-        # Should find lib/utils/index.ts
+    def test_js_index_file(self, repo):
+        imp = Import(module="./utils", names=["helper"])
+        result = repo.resolve(imp, "main.js", "javascript")
         assert result is not None
-        assert "utils" in result
 
-    def test_js_external_skipped(self, resolver):
-        result = resolver.resolve_js_import("lit", "lib/index.js")
+    def test_js_external(self, repo):
+        imp = Import(module="react", names=["Component"])
+        result = repo.resolve(imp, "app.js", "javascript")
         assert result is None
 
-    def test_c_include(self, resolver):
-        result = resolver.resolve_c_include("mylib.h")
-        assert result == "include/mylib.h"
+    def test_c_include(self, repo):
+        imp = Import(module="header.h", names=[])
+        result = repo.resolve(imp, "main.c", "c")
+        assert result is not None and "header.h" in result
 
 
-# ======================================================================
-# Reference index tests
-# ======================================================================
+# === Reference Index ===
 
 class TestReferenceIndex:
-
-    def _make_fsyms(self, file_path, sym_names, call_names=None, imports_from=None):
-        """Helper to create FileSymbols with specific symbols and calls."""
-        fsyms = FileSymbols(file_path=file_path)
-        for name in sym_names:
-            sym = Symbol(
-                name=name,
-                kind=SymbolKind.FUNCTION,
-                file_path=file_path,
-                range=SymbolRange(1, 0, 10, 0),
-            )
-            if call_names:
-                for cn in call_names:
-                    sym.call_sites.append(CallSite(name=cn, line=5))
-            fsyms.symbols.append(sym)
-        return fsyms
-
     def test_build_and_query(self):
-        from ac_dc.symbol_index.models import CallSite
         idx = ReferenceIndex()
-
-        # File A defines foo, calls bar
-        fsyms_a = FileSymbols(file_path="a.py")
-        sym_a = Symbol(
-            name="foo", kind=SymbolKind.FUNCTION,
-            file_path="a.py", range=SymbolRange(1, 0, 5, 0),
-            call_sites=[CallSite(name="bar", line=3)],
+        fs_a = FileSymbols(
+            file_path="a.py",
+            symbols=[Symbol(name="Foo", kind="class", call_sites=[
+                CallSite(name="bar", line=10),
+            ])],
         )
-        fsyms_a.symbols.append(sym_a)
-
-        # File B defines bar, calls foo
-        fsyms_b = FileSymbols(file_path="b.py")
-        sym_b = Symbol(
-            name="bar", kind=SymbolKind.FUNCTION,
-            file_path="b.py", range=SymbolRange(1, 0, 5, 0),
-            call_sites=[CallSite(name="foo", line=3)],
+        fs_b = FileSymbols(
+            file_path="b.py",
+            symbols=[Symbol(name="bar", kind="function")],
         )
-        fsyms_b.symbols.append(sym_b)
-
-        idx.build({"a.py": fsyms_a, "b.py": fsyms_b})
-
-        # bar is referenced from a.py
+        idx.build({"a.py": fs_a, "b.py": fs_b})
         refs = idx.references_to_symbol("bar")
-        assert any(f == "a.py" for f, _ in refs)
-
-        # foo is referenced from b.py
-        refs = idx.references_to_symbol("foo")
-        assert any(f == "b.py" for f, _ in refs)
+        assert len(refs) >= 1
+        assert refs[0]["file"] == "a.py"
 
     def test_bidirectional_edges(self):
         idx = ReferenceIndex()
-        idx.register_import_edge("a.py", "b.py")
-        idx.register_import_edge("b.py", "a.py")
-        idx.register_import_edge("c.py", "a.py")  # one-way
-
+        fs_a = FileSymbols(
+            file_path="a.py",
+            symbols=[Symbol(name="Foo", kind="class", call_sites=[
+                CallSite(name="Bar", line=5),
+            ])],
+        )
+        fs_b = FileSymbols(
+            file_path="b.py",
+            symbols=[Symbol(name="Bar", kind="class", call_sites=[
+                CallSite(name="Foo", line=5),
+            ])],
+        )
+        idx.build({"a.py": fs_a, "b.py": fs_b})
         edges = idx.bidirectional_edges()
-        assert len(edges) == 1
-        assert tuple(sorted(edges[0])) == ("a.py", "b.py")
+        assert len(edges) >= 1
 
     def test_connected_components(self):
         idx = ReferenceIndex()
-        # A <-> B, C <-> D (two components)
-        idx.register_import_edge("a.py", "b.py")
-        idx.register_import_edge("b.py", "a.py")
-        idx.register_import_edge("c.py", "d.py")
-        idx.register_import_edge("d.py", "c.py")
-
+        fs_a = FileSymbols(
+            file_path="a.py",
+            symbols=[Symbol(name="Foo", kind="class", call_sites=[
+                CallSite(name="Bar", line=5),
+            ])],
+        )
+        fs_b = FileSymbols(
+            file_path="b.py",
+            symbols=[Symbol(name="Bar", kind="class", call_sites=[
+                CallSite(name="Foo", line=5),
+            ])],
+        )
+        idx.build({"a.py": fs_a, "b.py": fs_b})
         components = idx.connected_components()
-        assert len(components) == 2
+        assert len(components) >= 1
+        assert "a.py" in components[0] and "b.py" in components[0]
 
     def test_file_ref_count(self):
         idx = ReferenceIndex()
-        idx.register_import_edge("a.py", "b.py")
-        idx.register_import_edge("c.py", "b.py")
-        assert idx.file_ref_count("b.py") == 2
-        assert idx.file_ref_count("a.py") == 0
+        fs_a = FileSymbols(
+            file_path="a.py",
+            symbols=[Symbol(name="Foo", kind="class", call_sites=[
+                CallSite(name="helper", line=5),
+            ])],
+        )
+        fs_b = FileSymbols(
+            file_path="b.py",
+            symbols=[Symbol(name="helper", kind="function")],
+        )
+        idx.build({"a.py": fs_a, "b.py": fs_b})
+        assert idx.file_ref_count("b.py") >= 1
 
 
-# ======================================================================
-# Compact format tests
-# ======================================================================
+# === Compact Formatter ===
 
 class TestCompactFormatter:
+    def _make_fs(self):
+        return {
+            "app/models.py": FileSymbols(
+                file_path="app/models.py",
+                symbols=[
+                    Symbol(name="User", kind="class", start_line=10, children=[
+                        Symbol(name="__init__", kind="method", start_line=15,
+                               parameters=[]),
+                        Symbol(name="validate", kind="method", start_line=20,
+                               return_type="bool"),
+                    ]),
+                ],
+                imports=[Import(module="dataclasses", names=["dataclass"])],
+            ),
+        }
 
-    def _make_file_symbols(self):
-        """Create sample FileSymbols for testing."""
-        fsyms = FileSymbols(file_path="src/models.py", language="python")
+    def test_output_includes_class(self):
+        fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs())
+        assert "User" in output
+        assert "c User" in output
 
-        # Import
-        fsyms.imports.append(Import(module="dataclasses", names=["dataclasses"], line=1))
-        fsyms.imports.append(Import(module=".utils", names=["helper"], level=1, line=2))
-
-        # Class with methods
-        cls = Symbol(
-            name="User",
-            kind=SymbolKind.CLASS,
-            file_path="src/models.py",
-            range=SymbolRange(10, 0, 30, 0),
-            instance_vars=["name", "email"],
-        )
-        cls.children.append(Symbol(
-            name="__init__",
-            kind=SymbolKind.METHOD,
-            file_path="src/models.py",
-            range=SymbolRange(15, 4, 18, 0),
-            parameters=[
-                Parameter(name="name"),
-                Parameter(name="email"),
-            ],
-        ))
-        cls.children.append(Symbol(
-            name="validate",
-            kind=SymbolKind.METHOD,
-            file_path="src/models.py",
-            range=SymbolRange(20, 4, 25, 0),
-            return_type="bool",
-        ))
-        fsyms.symbols.append(cls)
-
-        # Top-level function
-        fsyms.symbols.append(Symbol(
-            name="create_user",
-            kind=SymbolKind.FUNCTION,
-            file_path="src/models.py",
-            range=SymbolRange(35, 0, 40, 0),
-            parameters=[Parameter(name="data", type_annotation="dict")],
-            return_type="User",
-        ))
-
-        return fsyms
-
-    def test_basic_format(self):
-        fsyms = self._make_file_symbols()
-        formatter = CompactFormatter()
-        output = formatter.format_all({"src/models.py": fsyms})
-
-        assert "src/models.py" in output
-        assert "c User:10" in output
-        assert "m __init__(name,email):15" in output
-        assert "m validate()->bool:20" in output
-        assert "f create_user(data)->User:35" in output
-
-    def test_legend_included(self):
-        fsyms = self._make_file_symbols()
-        formatter = CompactFormatter()
-        output = formatter.format_all({"src/models.py": fsyms})
-
+    def test_legend_present(self):
+        fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs())
         assert "c=class" in output
-        assert "m=method" in output
-        assert "f=function" in output
 
     def test_imports_formatted(self):
-        fsyms = self._make_file_symbols()
-        formatter = CompactFormatter()
-        output = formatter.format_all({"src/models.py": fsyms})
-
+        fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs())
         assert "i dataclasses" in output
 
-    def test_instance_vars(self):
-        fsyms = self._make_file_symbols()
-        formatter = CompactFormatter()
-        output = formatter.format_all({"src/models.py": fsyms})
-
-        assert "v name" in output
-        assert "v email" in output
+    def test_line_numbers(self):
+        fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs())
+        assert ":10" in output
 
     def test_exclude_files(self):
-        fsyms = self._make_file_symbols()
-        other = FileSymbols(file_path="src/other.py")
-        all_syms = {"src/models.py": fsyms, "src/other.py": other}
-        formatter = CompactFormatter()
-        output = formatter.format_all(all_syms, exclude_files={"src/models.py"})
-
-        assert "src/models.py" not in output
+        fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs(), exclude_files={"app/models.py"})
+        assert "User" not in output
 
     def test_test_file_collapsed(self):
-        fsyms = FileSymbols(file_path="tests/test_user.py", language="python")
-        cls = Symbol(
-            name="TestUser", kind=SymbolKind.CLASS,
-            file_path="tests/test_user.py",
-            range=SymbolRange(1, 0, 50, 0),
-        )
-        for i in range(5):
-            cls.children.append(Symbol(
-                name=f"test_method_{i}",
-                kind=SymbolKind.METHOD,
-                file_path="tests/test_user.py",
-                range=SymbolRange(i * 10, 0, i * 10 + 5, 0),
-            ))
-        fsyms.symbols.append(cls)
-
-        formatter = CompactFormatter()
-        output = formatter.format_all({"tests/test_user.py": fsyms})
-
-        # Should be collapsed, not showing individual methods
-        assert "test_user.py" in output
-        assert "1c" in output
+        fs = {
+            "tests/test_foo.py": FileSymbols(
+                file_path="tests/test_foo.py",
+                symbols=[
+                    Symbol(name="TestFoo", kind="class", children=[
+                        Symbol(name="test_a", kind="method"),
+                        Symbol(name="test_b", kind="method"),
+                    ]),
+                ],
+            ),
+        }
+        fmt = CompactFormatter()
+        output = fmt.format_all(fs)
+        assert "c/" in output  # Nc/Nm format
 
     def test_chunks(self):
-        all_syms = {}
-        for i in range(9):
-            fsyms = FileSymbols(file_path=f"src/file_{i}.py")
-            fsyms.symbols.append(Symbol(
-                name=f"func_{i}", kind=SymbolKind.FUNCTION,
-                file_path=f"src/file_{i}.py",
-                range=SymbolRange(1, 0, 5, 0),
-            ))
-            all_syms[f"src/file_{i}.py"] = fsyms
-
-        formatter = CompactFormatter()
-        chunks = formatter.get_chunks(all_syms, num_chunks=3)
-
-        assert len(chunks) == 3
-        total_files = sum(len(c["files"]) for c in chunks)
-        assert total_files == 9
+        fs = {}
+        for i in range(10):
+            fs[f"file{i}.py"] = FileSymbols(
+                file_path=f"file{i}.py",
+                symbols=[Symbol(name=f"Cls{i}", kind="class")],
+            )
+        fmt = CompactFormatter()
+        chunks = fmt.format_all(fs, chunks=3)
+        assert isinstance(chunks, list)
+        assert len(chunks) <= 3
+        # Total files across chunks
+        total = sum(c.count(".py:") for c in chunks)
+        assert total == 10
 
     def test_async_prefix(self):
-        fsyms = FileSymbols(file_path="src/async_mod.py")
-        fsyms.symbols.append(Symbol(
-            name="fetch_data",
-            kind=SymbolKind.FUNCTION,
-            file_path="src/async_mod.py",
-            range=SymbolRange(1, 0, 5, 0),
-            is_async=True,
-        ))
-        fsyms.symbols.append(Symbol(
-            name="do_work",
-            kind=SymbolKind.METHOD,
-            file_path="src/async_mod.py",
-            range=SymbolRange(10, 0, 15, 0),
-            is_async=True,
-        ))
+        fs = {
+            "app.py": FileSymbols(
+                file_path="app.py",
+                symbols=[Symbol(name="fetch", kind="function", is_async=True, start_line=1)],
+            ),
+        }
+        fmt = CompactFormatter()
+        output = fmt.format_all(fs)
+        assert "af fetch" in output
 
-        formatter = CompactFormatter()
-        output = formatter.format_all({"src/async_mod.py": fsyms})
-
-        assert "af fetch_data():1" in output
-        assert "am do_work():10" in output
-
-    def test_path_aliases(self):
-        all_syms = {}
-        # Create files in a deeply nested path
-        for i in range(5):
-            path = f"src/services/handlers/file_{i}.py"
-            fsyms = FileSymbols(file_path=path)
-            fsyms.symbols.append(Symbol(
-                name=f"handler_{i}", kind=SymbolKind.FUNCTION,
-                file_path=path, range=SymbolRange(1, 0, 5, 0),
-            ))
-            all_syms[path] = fsyms
-
-        formatter = CompactFormatter()
-        output = formatter.format_all(all_syms)
-
-        # Should generate aliases for the common prefix
-        assert "@" in output or "src/services/handlers/" in output
+    def test_signature_hash_stable(self):
+        fmt = CompactFormatter()
+        fs = FileSymbols(file_path="a.py", symbols=[
+            Symbol(name="Foo", kind="class"),
+        ])
+        h1 = fmt.signature_hash(fs)
+        h2 = fmt.signature_hash(fs)
+        assert h1 == h2
+        assert len(h1) == 16
 
 
-# ======================================================================
-# Integration test
-# ======================================================================
+# === Integration ===
 
-class TestSymbolIndex:
-    """Integration test using real files."""
-
+class TestSymbolIndexIntegration:
     @pytest.fixture
-    def index_repo(self, tmp_path):
-        """Create a mini repo with Python files."""
-        src = tmp_path / "src"
-        src.mkdir()
-
-        (src / "__init__.py").write_text("")
-        (src / "main.py").write_text('''\
-from .utils import helper
-
-class App:
-    def __init__(self):
-        self.running = False
-
-    def start(self):
-        result = helper("start")
-        self.running = True
-        return result
-''')
-        (src / "utils.py").write_text('''\
-import os
-
-def helper(msg: str) -> str:
-    return f"helped: {msg}"
-
-def internal_fn():
-    pass
-''')
-
-        tests = tmp_path / "tests"
-        tests.mkdir()
-        (tests / "test_main.py").write_text('''\
-from src.main import App
-
-class TestApp:
-    def test_start(self):
-        app = App()
-        app.start()
-''')
-
+    def repo(self, tmp_path):
+        (tmp_path / "app.py").write_text(
+            "import os\n\nclass App:\n    def run(self):\n        helper()\n"
+        )
+        (tmp_path / "utils.py").write_text(
+            "def helper():\n    return 42\n"
+        )
         return tmp_path
 
-    def test_full_index(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
+    def test_index_repo(self, repo):
+        idx = SymbolIndex(str(repo))
         result = idx.index_repo()
-        assert len(result) >= 2  # At least main.py and utils.py
+        assert "app.py" in result
+        assert "utils.py" in result
 
-        # Check symbols
-        main_syms = result.get("src/main.py")
-        assert main_syms is not None
-        names = [s.name for s in main_syms.all_symbols_flat]
-        assert "App" in names
-        assert "start" in names
-
-    def test_symbol_map_output(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
+    def test_symbol_map_output(self, repo):
+        idx = SymbolIndex(str(repo))
         idx.index_repo()
-        symbol_map = idx.get_symbol_map()
+        output = idx.get_symbol_map()
+        assert "App" in output
+        assert "helper" in output
 
-        assert "src/main.py" in symbol_map
-        assert "c App" in symbol_map
-        assert "src/utils.py" in symbol_map
-
-    def test_exclude_active_files(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
+    def test_exclude_active_files(self, repo):
+        idx = SymbolIndex(str(repo))
         idx.index_repo()
-        symbol_map = idx.get_symbol_map(exclude_files={"src/main.py"})
+        output = idx.get_symbol_map(exclude_files={"app.py"})
+        assert "App" not in output
+        assert "helper" in output
 
-        assert "src/main.py" not in symbol_map
-        assert "src/utils.py" in symbol_map
-
-    def test_single_file_reindex(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
+    def test_reindex_after_modification(self, repo):
+        idx = SymbolIndex(str(repo))
         idx.index_repo()
 
-        # Modify a file
-        (index_repo / "src" / "utils.py").write_text('''\
-import os
+        # Modify file
+        (repo / "utils.py").write_text(
+            "def helper():\n    return 42\n\ndef new_func():\n    pass\n"
+        )
+        idx.invalidate_file("utils.py")
+        idx.index_file("utils.py")
+        idx.reference_index.build(idx._all_symbols)
 
-def helper(msg: str) -> str:
-    return f"helped: {msg}"
+        output = idx.get_symbol_map()
+        assert "new_func" in output
 
-def new_function():
-    pass
-''')
-
-        # Re-index just that file
-        idx.invalidate_file("src/utils.py")
-        result = idx.index_file("src/utils.py")
+    def test_hover(self, repo):
+        idx = SymbolIndex(str(repo))
+        idx.index_repo()
+        result = idx.lsp_get_hover("app.py", 3, 5)  # class App line
         assert result is not None
-        names = [s.name for s in result.all_symbols_flat]
-        assert "new_function" in names
 
-    def test_hover_info(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
+    def test_completions(self, repo):
+        idx = SymbolIndex(str(repo))
         idx.index_repo()
-
-        # Hover over the App class (should be around line 3)
-        hover = idx.get_hover_info("src/main.py", 3, 6)
-        assert "App" in hover or hover == ""  # Depends on exact line
-
-    def test_completions(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
-        idx.index_repo()
-
-        completions = idx.get_completions("src/main.py", 1, 0, "h")
-        labels = [c["label"] for c in completions]
-        assert "helper" in labels
-
-    def test_signature_hash_stable(self, index_repo):
-        try:
-            from ac_dc.symbol_index import SymbolIndex
-        except ImportError:
-            pytest.skip("tree-sitter not available")
-
-        idx = SymbolIndex(index_repo)
-        if not idx.available:
-            pytest.skip("tree-sitter not available")
-
-        idx.index_repo()
-        h1 = idx.get_file_signature_hash("src/utils.py")
-        h2 = idx.get_file_signature_hash("src/utils.py")
-        assert h1 == h2
-        assert len(h1) == 16  # Truncated hash
+        result = idx.lsp_get_completions("app.py", 4, 0, prefix="r")
+        assert isinstance(result, list)

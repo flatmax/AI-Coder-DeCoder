@@ -1,441 +1,292 @@
-"""Compact format output for LLM context — the 'repository map'."""
+"""Compact symbol map formatter for LLM context."""
 
-import logging
-from collections import Counter, defaultdict
-from pathlib import PurePosixPath
-from typing import Optional
-
-from .models import (
-    Symbol, SymbolKind, FileSymbols, Parameter,
-)
-from .reference_index import ReferenceIndex
-
-log = logging.getLogger(__name__)
-
-# Compact kind prefixes
-KIND_PREFIX = {
-    SymbolKind.CLASS: "c",
-    SymbolKind.FUNCTION: "f",
-    SymbolKind.METHOD: "m",
-    SymbolKind.VARIABLE: "v",
-    SymbolKind.IMPORT: "i",
-    SymbolKind.PROPERTY: "p",
-}
-
-# Test file detection
-TEST_PATTERNS = {
-    "test_", "_test.", "tests/", "test/", "spec/", "specs/",
-    ".test.", ".spec.",
-}
+import os
+import re
+from collections import Counter
 
 
-def _is_test_file(path: str) -> bool:
-    """Heuristic: is this a test file?"""
-    lower = path.lower()
-    return any(p in lower for p in TEST_PATTERNS)
+LEGEND = """# c=class m=method f=function af=async func am=async method
+# v=var p=property i=import i→=local
+# :N=line(s) ->T=returns ?=optional ←N=refs →=calls
+# +N=more ″=ditto Nc/Nm=test summary"""
 
 
 class CompactFormatter:
-    """Generate compact symbol map text for LLM context."""
+    """Format symbols into LLM-optimized compact text."""
 
-    def __init__(self, ref_index: Optional[ReferenceIndex] = None):
-        self._ref_index = ref_index
-        self._aliases: dict[str, str] = {}  # full prefix -> @N/
-        self._exclude_files: set[str] = set()
+    def __init__(self, reference_index=None):
+        self._ref_index = reference_index
+        self._path_aliases = {}
 
-    def format_all(
-        self,
-        all_symbols: dict[str, FileSymbols],
-        exclude_files: set[str] | None = None,
-    ) -> str:
-        """Format all files into a complete symbol map.
+    def format_all(self, all_file_symbols, exclude_files=None, chunks=1):
+        """Format all file symbols into compact text.
 
         Args:
-            all_symbols: dict of file_path -> FileSymbols
-            exclude_files: files to exclude (e.g. files in active context)
+            all_file_symbols: dict of {path: FileSymbols}
+            exclude_files: set of paths to exclude
+            chunks: number of chunks to split into
+
+        Returns:
+            str or list[str] if chunks > 1
         """
-        exclude = exclude_files or set()
-        files = {k: v for k, v in all_symbols.items() if k not in exclude}
-
-        if not files:
-            return ""
-
-        # Store exclude set for annotation filtering
-        self._exclude_files = exclude
+        exclude = set(exclude_files or [])
+        paths = sorted(p for p in all_file_symbols if p not in exclude)
 
         # Compute path aliases
-        self._aliases = self._compute_aliases(files)
+        self._path_aliases = self._compute_aliases(paths)
 
-        # Build legend
-        parts = [self._format_legend()]
+        # Format each file
+        blocks = []
+        test_blocks = []
+        for path in paths:
+            fs = all_file_symbols[path]
+            if self._is_test_file(path):
+                test_blocks.append(self._format_test_file(path, fs))
+            else:
+                blocks.append(self._format_file(path, fs))
 
-        # Sort files: by reference count descending, then alphabetically
-        sorted_files = sorted(
-            files.keys(),
-            key=lambda f: (-self._file_ref_count(f), f),
-        )
+        all_blocks = blocks + test_blocks
 
-        prev_refs: Optional[list[str]] = None
-        for fpath in sorted_files:
-            fsyms = files[fpath]
-            block, prev_refs = self._format_file(
-                fpath, fsyms, prev_refs,
-            )
-            if block:
-                parts.append(block)
+        if chunks <= 1:
+            legend = self._format_legend()
+            return legend + "\n\n" + "\n\n".join(all_blocks)
 
-        return "\n".join(parts)
+        # Split into chunks (ceiling division to never exceed requested count)
+        chunk_size = max(1, -(-len(all_blocks) // chunks))
+        result = []
+        for i in range(0, len(all_blocks), chunk_size):
+            chunk_blocks = all_blocks[i:i + chunk_size]
+            if i == 0:
+                result.append(self._format_legend() + "\n\n" + "\n\n".join(chunk_blocks))
+            else:
+                result.append("\n\n".join(chunk_blocks))
+        return result
 
-    def format_file_block(
-        self, file_path: str, fsyms: FileSymbols
-    ) -> str:
-        """Format a single file's symbol block."""
-        block, _ = self._format_file(file_path, fsyms, None)
-        return block or ""
+    def format_file(self, path, file_symbols):
+        """Format a single file's symbols."""
+        return self._format_file(path, file_symbols)
 
-    def format_legend(self) -> str:
-        """Return just the legend text."""
+    def _format_legend(self):
+        """Format the legend with path aliases."""
+        legend = LEGEND
+        for alias, prefix in sorted(self._path_aliases.items()):
+            legend += f"\n# {alias}={prefix}"
+        return legend
+
+    def get_legend(self):
+        """Get just the legend text."""
         return self._format_legend()
 
-    def get_chunks(
-        self,
-        all_symbols: dict[str, FileSymbols],
-        exclude_files: set[str] | None = None,
-        num_chunks: int = 3,
-    ) -> list[dict]:
-        """Split the symbol map into chunks for cache tier distribution.
+    def _compute_aliases(self, paths):
+        """Compute path aliases for frequent prefixes."""
+        if not paths:
+            return {}
 
-        Returns list of {content, files, token_estimate}.
-        """
-        exclude = exclude_files or set()
-        files = {k: v for k, v in all_symbols.items() if k not in exclude}
-
-        if not files:
-            return []
-
-        self._aliases = self._compute_aliases(files)
-
-        sorted_files = sorted(
-            files.keys(),
-            key=lambda f: (-self._file_ref_count(f), f),
-        )
-
-        # Build per-file blocks
-        file_blocks: list[tuple[str, str, int]] = []  # (path, content, token_est)
-        prev_refs = None
-        for fpath in sorted_files:
-            block, prev_refs = self._format_file(fpath, files[fpath], prev_refs)
-            if block:
-                token_est = max(1, len(block) // 4)
-                file_blocks.append((fpath, block, token_est))
-
-        if not file_blocks:
-            return []
-
-        # Distribute into chunks (round-robin by token count)
-        chunks: list[dict] = [
-            {"content": "", "files": [], "token_estimate": 0}
-            for _ in range(min(num_chunks, len(file_blocks)))
-        ]
-
-        for fpath, block, tokens in file_blocks:
-            # Add to chunk with fewest tokens
-            target = min(range(len(chunks)), key=lambda i: chunks[i]["token_estimate"])
-            if chunks[target]["content"]:
-                chunks[target]["content"] += "\n"
-            chunks[target]["content"] += block
-            chunks[target]["files"].append(fpath)
-            chunks[target]["token_estimate"] += tokens
-
-        return [c for c in chunks if c["content"]]
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _format_legend(self) -> str:
-        lines = [
-            "# c=class m=method f=function af=async func am=async method "
-            "v=var p=property i=import i→=local",
-            "# :N=line(s) ->T=returns ?=optional ←N=refs →=calls "
-            "+N=more ″=ditto Nc/Nm=test summary",
-        ]
-
-        if self._aliases:
-            alias_parts = []
-            for prefix, alias in sorted(self._aliases.items(), key=lambda x: x[1]):
-                alias_parts.append(f"{alias}={prefix}")
-            lines.append(f"# {' '.join(alias_parts)}")
-
-        return "\n".join(lines)
-
-    def _compute_aliases(self, files: dict[str, FileSymbols]) -> dict[str, str]:
-        """Compute @N/ aliases for frequent directory prefixes."""
-        dir_counts: Counter = Counter()
-
-        for fpath in files:
-            parts = PurePosixPath(fpath).parts
+        # Count directory prefixes
+        prefix_count = Counter()
+        for p in paths:
+            parts = p.split("/")
             for i in range(1, len(parts)):
                 prefix = "/".join(parts[:i]) + "/"
-                dir_counts[prefix] += 1
+                prefix_count[prefix] += 1
 
-        # Take top prefixes that appear 3+ times and save tokens
+        # Select prefixes that appear 3+ times and save significant chars
         aliases = {}
-        idx = 1
-        for prefix, count in dir_counts.most_common(10):
-            if count < 3:
-                break
-            if len(prefix) < 6:
-                continue  # Not worth aliasing short prefixes
-            aliases[prefix] = f"@{idx}/"
-            idx += 1
-            if idx > 9:
-                break
+        alias_num = 1
+        for prefix, count in prefix_count.most_common(5):
+            if count >= 3 and len(prefix) > 5:
+                aliases[f"@{alias_num}/"] = prefix
+                alias_num += 1
 
         return aliases
 
-    def _alias_path(self, path: str) -> str:
-        """Apply aliases to a path."""
-        for prefix, alias in self._aliases.items():
+    def _alias_path(self, path):
+        """Replace path prefix with alias if available."""
+        for alias, prefix in self._path_aliases.items():
             if path.startswith(prefix):
                 return alias + path[len(prefix):]
         return path
 
-    def _file_ref_count(self, file_path: str) -> int:
-        """Get ref count for sorting."""
-        if self._ref_index:
-            return self._ref_index.file_ref_count(file_path)
-        return 0
-
-    def _format_file(
-        self,
-        file_path: str,
-        fsyms: FileSymbols,
-        prev_refs: Optional[list[str]],
-    ) -> tuple[str, Optional[list[str]]]:
-        """Format a single file block.
-
-        Returns (formatted_text, current_refs_for_ditto).
-        """
-        aliased = self._alias_path(file_path)
-        ref_count = self._file_ref_count(file_path)
-
-        # Test file collapsing
-        if _is_test_file(file_path):
-            return self._format_test_file(aliased, fsyms, ref_count), prev_refs
-
+    def _format_file(self, path, fs):
+        """Format a single file block."""
         lines = []
 
-        # File header
-        header = f"\n{aliased}:"
+        # File header with ref count
+        ref_count = self._ref_index.file_ref_count(path) if self._ref_index else 0
+        header = self._alias_path(path) + ":"
         if ref_count > 0:
             header += f" ←{ref_count}"
         lines.append(header)
 
         # Imports
-        import_line = self._format_imports(fsyms, file_path)
-        if import_line:
-            lines.append(import_line)
+        ext_imports = []
+        local_imports = []
+        for imp in fs.imports:
+            if imp.level > 0 or (imp.module and "/" in imp.module):
+                local_imports.append(imp.module or ",".join(imp.names))
+            elif imp.module and not imp.module.startswith("."):
+                ext_imports.append(imp.module)
+
+        if ext_imports:
+            lines.append("i " + ",".join(ext_imports))
+        if local_imports:
+            lines.append("i→ " + ",".join(local_imports))
 
         # Symbols
-        current_refs = prev_refs
-        for sym in fsyms.symbols:
-            sym_lines, current_refs = self._format_symbol(
-                sym, file_path, indent=0, prev_refs=current_refs,
-            )
+        prev_refs = None
+        for sym in fs.symbols:
+            sym_lines, prev_refs = self._format_symbol(sym, indent=0, prev_refs=prev_refs, path=path)
             lines.extend(sym_lines)
-
-        return "\n".join(lines), current_refs
-
-    def _format_test_file(
-        self, aliased_path: str, fsyms: FileSymbols, ref_count: int
-    ) -> str:
-        """Collapsed test file format."""
-        all_syms = fsyms.all_symbols_flat
-        class_count = sum(1 for s in all_syms if s.kind == SymbolKind.CLASS)
-        method_count = sum(
-            1 for s in all_syms
-            if s.kind in (SymbolKind.METHOD, SymbolKind.FUNCTION)
-        )
-
-        # Find fixtures (functions with common test fixture names)
-        fixture_names = []
-        for sym in all_syms:
-            if sym.kind == SymbolKind.FUNCTION and not sym.name.startswith("test"):
-                fixture_names.append(sym.name)
-
-        header = f"\n{aliased_path}:"
-        if ref_count > 0:
-            header += f" ←{ref_count}"
-
-        # Imports
-        import_line = self._format_imports(fsyms, aliased_path)
-
-        summary_parts = []
-        if class_count:
-            summary_parts.append(f"{class_count}c")
-        if method_count:
-            summary_parts.append(f"/{method_count}m" if summary_parts else f"{method_count}m")
-
-        summary = " ".join(summary_parts) if summary_parts else ""
-        fixtures = f" fixtures:{','.join(fixture_names)}" if fixture_names else ""
-
-        result = header
-        if import_line:
-            result += f"\n{import_line}"
-        result += f"\n# {''.join(summary_parts)}{fixtures}"
-
-        return result
-
-    def _format_imports(self, fsyms: FileSymbols, file_path: str) -> str:
-        """Format import lines."""
-        stdlib_imports = []
-        local_imports = []
-
-        for imp in fsyms.imports:
-            if imp.level > 0 or imp.module.startswith("."):
-                # Relative/local
-                local_imports.append(imp.module)
-            elif "/" in imp.module or imp.module.startswith("."):
-                local_imports.append(imp.module)
-            else:
-                # Stdlib/external
-                stdlib_imports.append(imp.module)
-
-        lines = []
-        if stdlib_imports:
-            lines.append(f"i {','.join(stdlib_imports)}")
-        if local_imports:
-            aliased = [self._alias_path(p) for p in local_imports]
-            lines.append(f"i→ {','.join(aliased)}")
 
         return "\n".join(lines)
 
-    def _format_symbol(
-        self,
-        sym: Symbol,
-        file_path: str,
-        indent: int,
-        prev_refs: Optional[list[str]],
-    ) -> tuple[list[str], Optional[list[str]]]:
-        """Format a symbol and its children.
-
-        Returns (lines, current_refs_for_ditto).
-        """
-        prefix = "  " * indent
+    def _format_symbol(self, sym, indent=0, prev_refs=None, path=""):
+        """Format a single symbol with children."""
         lines = []
+        prefix = "  " * indent
 
-        # Kind prefix
-        if sym.is_async and sym.kind == SymbolKind.FUNCTION:
-            kind_str = "af"
-        elif sym.is_async and sym.kind == SymbolKind.METHOD:
-            kind_str = "am"
-        else:
-            kind_str = KIND_PREFIX.get(sym.kind, "?")
+        # Kind abbreviation
+        kind_map = {
+            "class": "c",
+            "function": "f",
+            "method": "m",
+            "variable": "v",
+            "property": "p",
+        }
+        kind = kind_map.get(sym.kind, sym.kind)
+        if sym.is_async:
+            if kind == "f":
+                kind = "af"
+            elif kind == "m":
+                kind = "am"
 
-        # Name with bases
-        name = sym.name
+        # Build the line
+        parts = [prefix + kind + " " + sym.name]
+
+        # Parameters (for functions/methods)
+        if sym.parameters and sym.kind in ("function", "method", "property"):
+            param_strs = []
+            for p in sym.parameters:
+                s = p.name
+                if p.default:
+                    s += "?"
+                param_strs.append(s)
+            parts[0] += "(" + ",".join(param_strs) + ")"
+
+        # Bases (for classes)
         if sym.bases:
-            name += f"({','.join(sym.bases)})"
-
-        # Parameters
-        if sym.kind in (SymbolKind.FUNCTION, SymbolKind.METHOD) or (
-            sym.kind == SymbolKind.PROPERTY and sym.parameters
-        ):
-            param_str = ",".join(self._format_param(p) for p in sym.parameters)
-            name += f"({param_str})"
+            parts[0] += "(" + ",".join(sym.bases) + ")"
 
         # Return type
         if sym.return_type:
-            opt = "?" if sym.is_optional_return else ""
-            name += f"->{opt}{sym.return_type}"
+            parts[0] += f"->{sym.return_type}"
 
         # Line number
-        line_str = f":{sym.range.start_line}"
+        parts[0] += f":{sym.start_line}"
 
-        # Annotations
-        annotations = self._format_annotations(sym, file_path, prev_refs)
-        ann_str = f" {annotations}" if annotations else ""
+        # Instance vars
+        if sym.instance_vars:
+            for iv in sym.instance_vars:
+                lines.append(parts[0])
+                parts[0] = prefix + "  v " + iv
 
-        lines.append(f"{prefix}{kind_str} {name}{line_str}{ann_str}")
+        # References
+        refs_str = self._format_refs(sym.name, path)
+        if refs_str:
+            if refs_str == prev_refs:
+                parts[0] += " ″"
+            else:
+                parts[0] += " " + refs_str
+                prev_refs = refs_str
 
-        # Instance vars for classes
-        if sym.kind == SymbolKind.CLASS:
-            for ivar in sym.instance_vars:
-                lines.append(f"{prefix}  v {ivar}")
+        # Calls
+        if sym.call_sites:
+            call_names = list(dict.fromkeys(c.name for c in sym.call_sites[:5]))
+            if call_names:
+                parts[0] += " →" + ",".join(call_names)
+
+        lines.append(parts[0])
 
         # Children
-        current_refs = prev_refs
         for child in sym.children:
-            child_lines, current_refs = self._format_symbol(
-                child, file_path, indent + 1, current_refs,
-            )
+            child_lines, prev_refs = self._format_symbol(
+                child, indent=indent + 1, prev_refs=prev_refs, path=path)
             lines.extend(child_lines)
 
-        # Update prev_refs with current symbol's refs
-        if self._ref_index:
-            refs, _ = self._ref_index.reference_annotations(sym.name, file_path)
-            if refs:
-                current_refs = refs
+        return lines, prev_refs
 
-        return lines, current_refs
+    def _format_refs(self, symbol_name, source_path):
+        """Format reference annotations for a symbol."""
+        if not self._ref_index:
+            return ""
+        refs = self._ref_index.references_to_symbol(symbol_name)
+        if not refs:
+            return ""
 
-    def _format_param(self, p: Parameter) -> str:
-        """Format a single parameter."""
-        s = p.name
-        if p.is_variadic:
-            s = f"*{s}"
-        elif p.is_keyword:
-            s = f"**{s}"
-        elif p.default is not None:
-            s += "?"
-        return s
+        # Group by file
+        by_file = {}
+        for ref in refs:
+            if ref["file"] != source_path:
+                f = self._alias_path(ref["file"])
+                if f not in by_file:
+                    by_file[f] = []
+                by_file[f].append(ref["line"])
 
-    def _format_annotations(
-        self, sym: Symbol, file_path: str, prev_refs: Optional[list[str]]
-    ) -> str:
-        """Format ←refs and →calls annotations."""
+        if not by_file:
+            return ""
+
+        if len(by_file) <= 3:
+            parts = []
+            for f, lines_list in list(by_file.items())[:3]:
+                parts.append(f"←{f}:{lines_list[0]}")
+            remaining = len(by_file) - 3
+            result = ",".join(parts)
+            if remaining > 0:
+                result += f",+{remaining}"
+            return result
+        else:
+            return f"←{len(by_file)}"
+
+    def _is_test_file(self, path):
+        """Check if a path is a test file."""
+        basename = os.path.basename(path)
+        return (basename.startswith("test_") or
+                basename.endswith("_test.py") or
+                basename.endswith(".test.js") or
+                basename.endswith(".test.ts") or
+                basename.endswith(".spec.js") or
+                basename.endswith(".spec.ts") or
+                "/test/" in path or
+                "/tests/" in path)
+
+    def _format_test_file(self, path, fs):
+        """Format test file as collapsed summary."""
+        classes = sum(1 for s in fs.symbols if s.kind == "class")
+        methods = sum(1 for s in fs.all_symbols_flat
+                     if s.kind in ("method", "function"))
+
+        # Collect fixture names
+        fixtures = []
+        for sym in fs.all_symbols_flat:
+            if sym.name and ("fixture" in sym.name.lower() or
+                            "setup" in sym.name.lower() or
+                            "teardown" in sym.name.lower()):
+                fixtures.append(sym.name)
+
+        header = self._alias_path(path) + ":"
+        summary = f"# {classes}c/{methods}m"
+        if fixtures:
+            summary += " fixtures:" + ",".join(fixtures[:3])
+
+        return header + "\n" + summary
+
+    def signature_hash(self, file_symbols):
+        """Compute a stable hash of file's symbol signatures."""
+        import hashlib
         parts = []
-        exclude = getattr(self, '_exclude_files', set())
-
-        # Incoming references
-        if self._ref_index:
-            refs, remaining = self._ref_index.reference_annotations(
-                sym.name, file_path,
-            )
-            if refs:
-                # Filter out references from excluded files
-                filtered = [r for r in refs if not any(
-                    r.startswith(ex) or r.split(":")[0] == ex for ex in exclude
-                )]
-                extra_filtered = len(refs) - len(filtered)
-                remaining += extra_filtered
-
-                if filtered:
-                    # Check for ditto
-                    if prev_refs and filtered == prev_refs:
-                        parts.append("←″")
-                    else:
-                        ref_strs = [self._alias_path(r) for r in filtered]
-                        parts.append(f"←{','.join(ref_strs)}")
-                        if remaining > 0:
-                            parts.append(f"+{remaining}")
-
-        # Outgoing calls
-        if sym.call_sites:
-            call_names = []
-            seen = set()
-            for cs in sym.call_sites:
-                short = cs.name.split(".")[-1]
-                if short not in seen and short not in (sym.name,):
-                    seen.add(short)
-                    target = short
-                    if cs.target_file:
-                        target = f"{self._alias_path(cs.target_file)}:{short}"
-                    call_names.append(target)
-                    if len(call_names) >= 4:
-                        break
-            if call_names:
-                parts.append(f"→{','.join(call_names)}")
-
-        return " ".join(parts)
+        for sym in file_symbols.symbols:
+            parts.append(sym.signature_hash_content())
+        for imp in file_symbols.imports:
+            parts.append(f"import:{imp.module}")
+        content = "\n".join(parts)
+        return hashlib.sha256(content.encode()).hexdigest()[:16]

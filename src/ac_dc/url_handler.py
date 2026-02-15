@@ -1,33 +1,69 @@
-"""URL detection, classification, fetching, and summarization.
+"""URL handler — detection, classification, fetching, summarization, and service.
 
-Handles GitHub repos/files, documentation sites, and generic web pages.
-Integrates with the URL cache and symbol index for repo analysis.
+Detects URLs in user input, fetches and extracts content,
+optionally summarizes via LLM, caches results, and formats for prompt injection.
 """
 
+import hashlib
+import html
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
-import urllib.request
-import urllib.error
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
-from .url_cache import URLCache
+import litellm
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# URL type classification
-# ---------------------------------------------------------------------------
+# Known documentation domains
+DOC_DOMAINS = {
+    "docs.python.org",
+    "developer.mozilla.org",
+    "devdocs.io",
+    "wiki.python.org",
+}
+
+# ReadTheDocs pattern
+READTHEDOCS_RE = re.compile(r"\.readthedocs\.(io|org)$")
+
+# raw.githubusercontent.com pattern
+RAW_GH_RE = re.compile(
+    r"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$"
+)
+
+# URL detection regex
+URL_RE = re.compile(
+    r"https?://[^\s\[\](){}<>\"']+",
+)
+
+# Trailing punctuation to strip
+TRAILING_PUNCT = re.compile(r"[.,;:!?)]+$")
+
+# GitHub patterns
+GITHUB_REPO_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$"
+)
+GITHUB_FILE_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$"
+)
+GITHUB_ISSUE_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)"
+)
+GITHUB_PR_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)"
+)
 
 
-class URLType(Enum):
+class URLType(str, Enum):
     GITHUB_REPO = "github_repo"
     GITHUB_FILE = "github_file"
     GITHUB_ISSUE = "github_issue"
@@ -36,677 +72,717 @@ class URLType(Enum):
     GENERIC = "generic"
 
 
+class SummaryType(str, Enum):
+    BRIEF = "BRIEF"
+    USAGE = "USAGE"
+    API = "API"
+    ARCHITECTURE = "ARCHITECTURE"
+    EVALUATION = "EVALUATION"
+
+
 @dataclass
 class GitHubInfo:
-    """Structured info extracted from a GitHub URL."""
     owner: str = ""
     repo: str = ""
-    branch: str = ""
-    path: str = ""
-    issue_number: int = 0
-    pr_number: int = 0
+    branch: Optional[str] = None
+    path: Optional[str] = None
+    issue_number: Optional[int] = None
+    pr_number: Optional[int] = None
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d):
+        if d is None:
+            return None
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
 class URLContent:
-    """Result of fetching and processing a URL."""
     url: str = ""
-    url_type: URLType = URLType.GENERIC
-    title: str = ""
-    description: str = ""
-    content: str = ""
-    symbol_map: str = ""
-    readme: str = ""
+    url_type: str = "generic"
+    title: Optional[str] = None
+    description: Optional[str] = None
+    content: Optional[str] = None
+    symbol_map: Optional[str] = None
+    readme: Optional[str] = None
     github_info: Optional[GitHubInfo] = None
-    fetched_at: float = 0.0
-    error: str = ""
-    summary: str = ""
-    summary_type: str = ""
+    fetched_at: Optional[str] = None
+    error: Optional[str] = None
+    summary: Optional[str] = None
+    summary_type: Optional[str] = None
 
-    def format_for_prompt(self, max_length: int = 4000) -> str:
-        """Format content for LLM prompt inclusion."""
+    def format_for_prompt(self, max_length=50000):
+        """Format content for LLM prompt inclusion.
+
+        Priority: summary > readme > content.
+        Symbol map appended if present. Truncated at max_length.
+        """
         parts = [f"## {self.url}"]
-
         if self.title:
             parts.append(f"**{self.title}**")
 
-        # Priority: summary → readme → content
+        # Choose best content
         body = self.summary or self.readme or self.content or ""
         if len(body) > max_length:
-            body = body[:max_length] + "..."
+            body = body[:max_length] + "\n\n... (truncated)"
         if body:
             parts.append(body)
 
         if self.symbol_map:
-            parts.append(f"\n### Symbol Map\n```\n{self.symbol_map}\n```")
+            parts.append(f"\n### Symbol Map\n{self.symbol_map}")
 
         return "\n\n".join(parts)
 
-    def to_dict(self) -> dict:
-        """Serialize for cache storage."""
-        d = {
-            "url": self.url,
-            "url_type": self.url_type.value,
-            "title": self.title,
-            "description": self.description,
-            "content": self.content,
-            "symbol_map": self.symbol_map,
-            "readme": self.readme,
-            "fetched_at": self.fetched_at,
-            "error": self.error,
-            "summary": self.summary,
-            "summary_type": self.summary_type,
-        }
+    def to_dict(self):
+        d = asdict(self)
         if self.github_info:
-            d["github_info"] = {
-                "owner": self.github_info.owner,
-                "repo": self.github_info.repo,
-                "branch": self.github_info.branch,
-                "path": self.github_info.path,
-                "issue_number": self.github_info.issue_number,
-                "pr_number": self.github_info.pr_number,
-            }
+            d["github_info"] = self.github_info.to_dict()
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "URLContent":
-        """Deserialize from cache."""
-        gh = None
-        if d.get("github_info"):
-            gh = GitHubInfo(**d["github_info"])
-        return cls(
-            url=d.get("url", ""),
-            url_type=URLType(d.get("url_type", "generic")),
-            title=d.get("title", ""),
-            description=d.get("description", ""),
-            content=d.get("content", ""),
-            symbol_map=d.get("symbol_map", ""),
-            readme=d.get("readme", ""),
-            github_info=gh,
-            fetched_at=d.get("fetched_at", 0.0),
-            error=d.get("error", ""),
-            summary=d.get("summary", ""),
-            summary_type=d.get("summary_type", ""),
-        )
+    def from_dict(cls, d):
+        if d is None:
+            return cls()
+        d = dict(d)
+        gi = d.pop("github_info", None)
+        # Remove internal cache fields
+        d.pop("_cached_at", None)
+        obj = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        if gi:
+            obj.github_info = GitHubInfo.from_dict(gi)
+        return obj
 
 
-# ---------------------------------------------------------------------------
-# URL detection
-# ---------------------------------------------------------------------------
-
-# Match http:// or https:// URLs, excluding trailing punctuation
-_URL_PATTERN = re.compile(
-    r'https?://[^\s<>\[\](){}"\']+'
-)
-
-# Trailing punctuation to strip
-_TRAILING_PUNCT = re.compile(r'[,.:;!?)]+$')
-
-# Known documentation domains
-_DOC_DOMAINS = {
-    "docs.python.org", "developer.mozilla.org", "mdn.mozilla.org",
-    "docs.djangoproject.com", "flask.palletsprojects.com",
-    "docs.rs", "doc.rust-lang.org", "pkg.go.dev",
-    "nodejs.org", "reactjs.org", "vuejs.org", "angular.io",
-    "kubernetes.io", "docs.docker.com", "wiki.archlinux.org",
-}
-
-# GitHub URL patterns
-_GH_REPO_RE = re.compile(
-    r'^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$'
-)
-_GH_FILE_RE = re.compile(
-    r'^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$'
-)
-_GH_ISSUE_RE = re.compile(
-    r'^https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)'
-)
-_GH_PR_RE = re.compile(
-    r'^https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)'
-)
-
-
-def detect_urls(text: str) -> list[dict]:
+def detect_urls(text):
     """Find and classify URLs in text.
 
-    Returns list of {url, url_type, display_name, github_info?}.
-    Deduplicates within the same text.
+    Returns list of {url, url_type, display_name} dicts. Deduplicated.
     """
+    if not text:
+        return []
+
+    matches = URL_RE.findall(text)
     seen = set()
     results = []
 
-    for match in _URL_PATTERN.finditer(text):
-        url = match.group(0)
-        url = _TRAILING_PUNCT.sub("", url)
-
+    for raw_url in matches:
+        # Strip trailing punctuation
+        url = TRAILING_PUNCT.sub("", raw_url)
         if url in seen:
             continue
         seen.add(url)
 
-        url_type, gh_info = classify_url(url)
-        display = _display_name(url, url_type, gh_info)
-
-        result = {
+        url_type = classify_url(url)
+        results.append({
             "url": url,
             "url_type": url_type.value,
-            "display_name": display,
-        }
-        if gh_info:
-            result["github_info"] = {
-                "owner": gh_info.owner,
-                "repo": gh_info.repo,
-                "branch": gh_info.branch,
-                "path": gh_info.path,
-                "issue_number": gh_info.issue_number,
-                "pr_number": gh_info.pr_number,
-            }
-        results.append(result)
+            "display_name": display_name(url, url_type),
+        })
 
     return results
 
 
-def classify_url(url: str) -> tuple[URLType, Optional[GitHubInfo]]:
-    """Classify a URL and extract structured info."""
+def classify_url(url):
+    """Classify a URL into a URLType."""
+    # raw.githubusercontent.com → GitHub file
+    if RAW_GH_RE.match(url):
+        return URLType.GITHUB_FILE
+
     # GitHub patterns (order matters — more specific first)
-    m = _GH_FILE_RE.match(url)
-    if m:
-        return URLType.GITHUB_FILE, GitHubInfo(
-            owner=m.group(1), repo=m.group(2),
-            branch=m.group(3), path=m.group(4),
-        )
+    if GITHUB_ISSUE_RE.match(url):
+        return URLType.GITHUB_ISSUE
+    if GITHUB_PR_RE.match(url):
+        return URLType.GITHUB_PR
+    if GITHUB_FILE_RE.match(url):
+        return URLType.GITHUB_FILE
+    if GITHUB_REPO_RE.match(url):
+        return URLType.GITHUB_REPO
 
-    m = _GH_ISSUE_RE.match(url)
-    if m:
-        return URLType.GITHUB_ISSUE, GitHubInfo(
-            owner=m.group(1), repo=m.group(2),
-            issue_number=int(m.group(3)),
-        )
-
-    m = _GH_PR_RE.match(url)
-    if m:
-        return URLType.GITHUB_PR, GitHubInfo(
-            owner=m.group(1), repo=m.group(2),
-            pr_number=int(m.group(3)),
-        )
-
-    m = _GH_REPO_RE.match(url)
-    if m:
-        return URLType.GITHUB_REPO, GitHubInfo(
-            owner=m.group(1), repo=m.group(2),
-        )
-
-    # Documentation domains
+    # Documentation
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
+
+    if hostname in DOC_DOMAINS:
+        return URLType.DOCUMENTATION
+    if READTHEDOCS_RE.search(hostname):
+        return URLType.DOCUMENTATION
+
     path = parsed.path or ""
+    if any(seg in path for seg in ("/docs/", "/documentation/", "/api/", "/reference/")):
+        return URLType.DOCUMENTATION
 
-    if hostname in _DOC_DOMAINS:
-        return URLType.DOCUMENTATION, None
-    # ReadTheDocs subdomains
-    if hostname.endswith(".readthedocs.io") or hostname.endswith(".readthedocs.org"):
-        return URLType.DOCUMENTATION, None
-    # Doc-like paths
-    if any(seg in path.lower() for seg in ("/docs/", "/api/", "/reference/")):
-        return URLType.DOCUMENTATION, None
-
-    return URLType.GENERIC, None
+    return URLType.GENERIC
 
 
-def _display_name(
-    url: str, url_type: URLType, gh_info: Optional[GitHubInfo]
-) -> str:
-    """Generate a short display name for the URL."""
-    if gh_info:
-        base = f"{gh_info.owner}/{gh_info.repo}"
-        if gh_info.path:
-            filename = gh_info.path.rsplit("/", 1)[-1]
-            return f"{base}/{filename}"
-        if gh_info.issue_number:
-            return f"{base}#{gh_info.issue_number}"
-        if gh_info.pr_number:
-            return f"{base}!{gh_info.pr_number}"
-        return base
+def _parse_github_info(url, url_type):
+    """Extract GitHubInfo from a URL."""
+    if url_type == URLType.GITHUB_REPO:
+        m = GITHUB_REPO_RE.match(url)
+        if m:
+            return GitHubInfo(owner=m.group(1), repo=m.group(2))
+    elif url_type == URLType.GITHUB_FILE:
+        # Try raw.githubusercontent.com first
+        m = RAW_GH_RE.match(url)
+        if m:
+            return GitHubInfo(
+                owner=m.group(1), repo=m.group(2),
+                branch=m.group(3), path=m.group(4),
+            )
+        m = GITHUB_FILE_RE.match(url)
+        if m:
+            return GitHubInfo(
+                owner=m.group(1), repo=m.group(2),
+                branch=m.group(3), path=m.group(4),
+            )
+    elif url_type == URLType.GITHUB_ISSUE:
+        m = GITHUB_ISSUE_RE.match(url)
+        if m:
+            return GitHubInfo(
+                owner=m.group(1), repo=m.group(2),
+                issue_number=int(m.group(3)),
+            )
+    elif url_type == URLType.GITHUB_PR:
+        m = GITHUB_PR_RE.match(url)
+        if m:
+            return GitHubInfo(
+                owner=m.group(1), repo=m.group(2),
+                pr_number=int(m.group(3)),
+            )
+    return None
 
+
+def display_name(url, url_type=None):
+    """Generate a short display name for a URL.
+
+    GitHub: owner/repo, owner/repo/filename, owner/repo#N, owner/repo!N
+    Generic: hostname/path (truncated to 40 chars).
+    """
+    if url_type is None:
+        url_type = classify_url(url)
+
+    if url_type == URLType.GITHUB_REPO:
+        m = GITHUB_REPO_RE.match(url)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+
+    if url_type == URLType.GITHUB_FILE:
+        m = GITHUB_FILE_RE.match(url)
+        if m:
+            filename = m.group(4).rsplit("/", 1)[-1]
+            return f"{m.group(1)}/{m.group(2)}/{filename}"
+
+    if url_type == URLType.GITHUB_ISSUE:
+        m = GITHUB_ISSUE_RE.match(url)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}#{m.group(3)}"
+
+    if url_type == URLType.GITHUB_PR:
+        m = GITHUB_PR_RE.match(url)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}!{m.group(3)}"
+
+    # Generic
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
-    path = (parsed.path or "").rstrip("/")
-
-    if path and path != "/":
-        name = f"{hostname}{path}"
-    else:
-        name = hostname
-
+    path = parsed.path.rstrip("/") or ""
+    name = f"{hostname}{path}"
     if len(name) > 40:
         name = name[:37] + "..."
     return name
 
 
-# ---------------------------------------------------------------------------
-# Summary type selection
-# ---------------------------------------------------------------------------
+def select_summary_type(url_type, has_symbol_map=False, user_text=""):
+    """Select the appropriate summary type based on URL type and context.
 
-class SummaryType(Enum):
-    BRIEF = "brief"
-    USAGE = "usage"
-    API = "api"
-    ARCHITECTURE = "architecture"
-    EVALUATION = "evaluation"
+    User text keywords can override the default.
+    """
+    text_lower = user_text.lower() if user_text else ""
 
-
-def _select_summary_type(
-    url_type: URLType, has_symbol_map: bool, user_hint: str = ""
-) -> SummaryType:
-    """Choose summary type based on URL type and user context."""
-    hint_lower = user_hint.lower()
-
-    # User hint overrides
-    if "how to" in hint_lower or "install" in hint_lower or "usage" in hint_lower:
+    # User keyword overrides
+    if "how to" in text_lower or "usage" in text_lower or "install" in text_lower:
         return SummaryType.USAGE
-    if "api" in hint_lower or "interface" in hint_lower:
+    if "api" in text_lower:
         return SummaryType.API
-    if "architecture" in hint_lower or "design" in hint_lower:
+    if "architecture" in text_lower or "design" in text_lower:
         return SummaryType.ARCHITECTURE
-    if "compare" in hint_lower or "evaluate" in hint_lower or "alternative" in hint_lower:
+    if "compare" in text_lower or "evaluation" in text_lower or "alternatives" in text_lower:
         return SummaryType.EVALUATION
 
-    # Default by URL type
+    # Auto-select by URL type
+    if isinstance(url_type, str):
+        url_type = URLType(url_type)
+
     if url_type == URLType.GITHUB_REPO:
         return SummaryType.ARCHITECTURE if has_symbol_map else SummaryType.BRIEF
     if url_type == URLType.DOCUMENTATION:
         return SummaryType.USAGE
+
     return SummaryType.BRIEF
 
 
-# ---------------------------------------------------------------------------
-# Fetchers
-# ---------------------------------------------------------------------------
+def extract_html_content(html_text):
+    """Extract readable content from HTML.
 
-def _fetch_github_repo(gh_info: GitHubInfo) -> URLContent:
-    """Fetch a GitHub repository via shallow clone."""
-    url = f"https://github.com/{gh_info.owner}/{gh_info.repo}.git"
+    Primary: trafilatura. Fallback: basic tag stripping.
+
+    Returns (title, content) tuple.
+    """
+    title = None
+    content = None
+
+    # Extract title
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
+    if title_match:
+        title = html.unescape(title_match.group(1)).strip()
+
+    # Try trafilatura first
+    try:
+        import trafilatura
+        content = trafilatura.extract(html_text)
+        if content:
+            return title, content
+    except (ImportError, Exception):
+        pass
+
+    # Fallback: basic HTML stripping
+    text = html_text
+    # Remove scripts and styles
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove tags
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Decode entities
+    text = html.unescape(text)
+    # Clean whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return title, text if text else None
+
+
+def _fetch_web_page(url, timeout=30):
+    """Fetch a web page and extract content.
+
+    Returns URLContent.
+    """
+    result = URLContent(url=url, url_type=URLType.GENERIC.value)
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 ac-dc URL fetcher"})
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            try:
+                html_text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                html_text = raw.decode("latin-1")
+
+        title, content = extract_html_content(html_text)
+        result.title = title
+        result.content = content
+        result.fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    except Exception as e:
+        result.error = str(e)
+        logger.warning(f"Failed to fetch {url}: {e}")
+
+    return result
+
+
+def _fetch_github_file(url, github_info):
+    """Fetch a GitHub file via raw content URL.
+
+    Returns URLContent.
+    """
     result = URLContent(
         url=url,
-        url_type=URLType.GITHUB_REPO,
-        title=f"{gh_info.owner}/{gh_info.repo}",
-        github_info=gh_info,
+        url_type=URLType.GITHUB_FILE.value,
+        github_info=github_info,
     )
+
+    owner = github_info.owner
+    repo = github_info.repo
+    branch = github_info.branch or "main"
+    path = github_info.path or ""
+
+    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+
+    try:
+        req = Request(raw_url, headers={"User-Agent": "Mozilla/5.0 ac-dc URL fetcher"})
+        with urlopen(req, timeout=30) as resp:
+            content = resp.read().decode("utf-8")
+        result.content = content
+        result.title = path.rsplit("/", 1)[-1] if path else f"{owner}/{repo}"
+        result.fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    except Exception:
+        # Retry with "master" if "main" failed
+        if branch == "main":
+            raw_url_master = f"https://raw.githubusercontent.com/{owner}/{repo}/master/{path}"
+            try:
+                req = Request(raw_url_master, headers={"User-Agent": "Mozilla/5.0 ac-dc URL fetcher"})
+                with urlopen(req, timeout=30) as resp:
+                    content = resp.read().decode("utf-8")
+                result.content = content
+                result.title = path.rsplit("/", 1)[-1] if path else f"{owner}/{repo}"
+                result.fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            except Exception as e:
+                result.error = str(e)
+                logger.warning(f"Failed to fetch GitHub file {url}: {e}")
+        else:
+            result.error = f"Failed to fetch {raw_url}"
+            logger.warning(f"Failed to fetch GitHub file {url}")
+
+    return result
+
+
+def _fetch_github_repo(url, github_info, symbol_index_cls=None):
+    """Fetch a GitHub repository: shallow clone, extract README and symbol map.
+
+    Returns URLContent.
+    """
+    result = URLContent(
+        url=url,
+        url_type=URLType.GITHUB_REPO.value,
+        github_info=github_info,
+    )
+
+    owner = github_info.owner
+    repo_name = github_info.repo
+    clone_url = f"https://github.com/{owner}/{repo_name}.git"
 
     tmp_dir = None
     try:
         tmp_dir = tempfile.mkdtemp(prefix="ac-dc-gh-")
-        clone_dir = os.path.join(tmp_dir, gh_info.repo)
+        clone_path = os.path.join(tmp_dir, repo_name)
 
-        # Shallow clone
+        # Shallow clone with timeout
         proc = subprocess.run(
-            ["git", "clone", "--depth=1", url, clone_dir],
-            capture_output=True, text=True, timeout=120,
+            ["git", "clone", "--depth", "1", clone_url, clone_path],
+            capture_output=True,
+            timeout=120,
         )
         if proc.returncode != 0:
-            result.error = f"Clone failed: {proc.stderr.strip()}"
+            result.error = f"Clone failed: {proc.stderr.decode(errors='replace')[:200]}"
             return result
 
-        # Find README
-        readme_names = [
-            "README.md", "readme.md", "Readme.md",
-            "README.rst", "README.txt", "README",
-        ]
-        clone_path = Path(clone_dir)
-        for name in readme_names:
-            readme_path = clone_path / name
-            if readme_path.exists():
+        # Find README (case-insensitive search with priority ordering)
+        readme_candidates = ("README.md", "README.rst", "README.txt", "README",
+                             "readme.md", "readme.rst", "readme.txt", "readme",
+                             "Readme.md", "Readme.rst", "Readme.txt", "Readme")
+        # Also do a case-insensitive scan of actual files
+        actual_files = {}
+        try:
+            for entry in os.listdir(clone_path):
+                actual_files[entry.lower()] = entry
+        except OSError:
+            pass
+
+        readme_found = False
+        for name in readme_candidates:
+            # Try exact match first
+            readme_path = os.path.join(clone_path, name)
+            if os.path.exists(readme_path):
                 try:
-                    result.readme = readme_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                    result.title = f"{gh_info.owner}/{gh_info.repo}"
-                except OSError:
+                    result.readme = Path(readme_path).read_text(encoding="utf-8")
+                    result.title = f"{owner}/{repo_name}"
+                    readme_found = True
+                except (OSError, UnicodeDecodeError):
                     pass
                 break
+        if not readme_found:
+            # Case-insensitive fallback
+            for name in ("readme.md", "readme.rst", "readme.txt", "readme"):
+                actual = actual_files.get(name)
+                if actual:
+                    readme_path = os.path.join(clone_path, actual)
+                    try:
+                        result.readme = Path(readme_path).read_text(encoding="utf-8")
+                        result.title = f"{owner}/{repo_name}"
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                    break
 
-        # Generate symbol map
-        try:
-            from .symbol_index import SymbolIndex
-            idx = SymbolIndex(clone_path)
-            if idx.available:
+        # Generate symbol map if index class available
+        if symbol_index_cls:
+            try:
+                idx = symbol_index_cls(clone_path)
                 idx.index_repo()
                 result.symbol_map = idx.get_symbol_map()
-        except Exception as e:
-            log.warning("Symbol index for %s failed: %s", url, e)
+            except Exception as e:
+                logger.warning(f"Symbol map generation failed for {url}: {e}")
+
+        result.fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     except subprocess.TimeoutExpired:
         result.error = "Clone timed out (120s)"
+        logger.warning(f"GitHub repo clone timed out: {url}")
     except Exception as e:
         result.error = str(e)
+        logger.warning(f"Failed to fetch GitHub repo {url}: {e}")
     finally:
-        if tmp_dir and os.path.exists(tmp_dir):
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Cleanup
+        if tmp_dir:
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     return result
 
 
-def _fetch_github_file(url: str, gh_info: GitHubInfo) -> URLContent:
-    """Fetch a single file from GitHub via raw content URL."""
-    result = URLContent(
-        url=url,
-        url_type=URLType.GITHUB_FILE,
-        github_info=gh_info,
-    )
+async def _summarize_content(url_content, summary_type, model):
+    """Summarize URL content using an LLM call.
 
-    filename = gh_info.path.rsplit("/", 1)[-1] if gh_info.path else ""
-    result.title = filename or f"{gh_info.owner}/{gh_info.repo}"
+    Args:
+        url_content: URLContent object
+        summary_type: SummaryType enum value
+        model: model name for summarization
 
-    branch = gh_info.branch or "main"
-    raw_url = (
-        f"https://raw.githubusercontent.com/"
-        f"{gh_info.owner}/{gh_info.repo}/{branch}/{gh_info.path}"
-    )
-
-    try:
-        req = urllib.request.Request(raw_url, headers={"User-Agent": "ac-dc/0.1"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result.content = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            if e.code == 404 and branch == "main":
-                # Retry with master
-                raw_url_master = raw_url.replace(f"/{branch}/", "/master/")
-                req2 = urllib.request.Request(
-                    raw_url_master, headers={"User-Agent": "ac-dc/0.1"}
-                )
-                with urllib.request.urlopen(req2, timeout=30) as resp:
-                    result.content = resp.read().decode("utf-8", errors="replace")
-            else:
-                raise
-
-    except Exception as e:
-        result.error = str(e)
-
-    return result
-
-
-def _fetch_web_page(url: str) -> URLContent:
-    """Fetch and extract content from a web page."""
-    result = URLContent(url=url, url_type=URLType.GENERIC)
-
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": (
-                "Mozilla/5.0 (compatible; ac-dc/0.1; "
-                "+https://github.com/example/ac-dc)"
-            ),
-        })
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            # Detect charset
-            content_type = resp.headers.get("Content-Type", "")
-            charset = "utf-8"
-            if "charset=" in content_type:
-                charset = content_type.split("charset=")[-1].split(";")[0].strip()
-
-            raw = resp.read()
-            html = raw.decode(charset, errors="replace")
-
-        # Try trafilatura for content extraction
-        try:
-            import trafilatura
-            extracted = trafilatura.extract(
-                html,
-                include_comments=False,
-                include_tables=True,
-                favor_precision=True,
-            )
-            if extracted:
-                result.content = extracted
-                # Get metadata
-                meta = trafilatura.extract(
-                    html, output_format="json",
-                    include_comments=False,
-                )
-                if meta:
-                    import json
-                    meta_dict = json.loads(meta)
-                    result.title = meta_dict.get("title", "")
-                    result.description = meta_dict.get("description", "")
-                return result
-        except ImportError:
-            pass  # trafilatura not installed — use fallback
-        except Exception as e:
-            log.debug("trafilatura failed: %s, using fallback", e)
-
-        # Fallback: basic HTML extraction
-        result.content, result.title = _basic_html_extract(html)
-
-    except Exception as e:
-        result.error = str(e)
-
-    return result
-
-
-def _basic_html_extract(html: str) -> tuple[str, str]:
-    """Basic HTML → text extraction without external libraries."""
-    import re as _re
-
-    # Extract title
-    title = ""
-    title_match = _re.search(r"<title[^>]*>(.*?)</title>", html, _re.DOTALL | _re.IGNORECASE)
-    if title_match:
-        title = title_match.group(1).strip()
-        title = _re.sub(r"<[^>]+>", "", title)
-
-    # Strip scripts, styles, and tags
-    text = _re.sub(r"<script[^>]*>.*?</script>", "", html, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"<style[^>]*>.*?</style>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"<!--.*?-->", "", text, flags=_re.DOTALL)
-    text = _re.sub(r"<[^>]+>", " ", text)
-
-    # Clean whitespace
-    text = _re.sub(r"[ \t]+", " ", text)
-    text = _re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-    text = text.strip()
-
-    return text, title
-
-
-# ---------------------------------------------------------------------------
-# Summarizer
-# ---------------------------------------------------------------------------
-
-_SUMMARY_PROMPTS = {
-    SummaryType.BRIEF: "Provide a 2-3 paragraph overview of this content. Focus on what it is, what it does, and key features.",
-    SummaryType.USAGE: "Summarize how to use this. Focus on installation, key imports, common patterns, and getting started.",
-    SummaryType.API: "Summarize the API surface. List main classes, functions, their signatures, and what they do.",
-    SummaryType.ARCHITECTURE: "Describe the architecture and design. Cover modules, design patterns, data flow, and key abstractions.",
-    SummaryType.EVALUATION: "Evaluate this project. Cover maturity, dependencies, maintenance activity, alternatives, and trade-offs.",
-}
-
-
-def _summarize(
-    content: URLContent,
-    summary_type: SummaryType,
-    model: str,
-) -> str:
-    """Generate an LLM summary of the URL content."""
-    if not model:
-        return ""
-
-    # Build input
-    body = content.readme or content.content or ""
+    Returns:
+        summary string or None
+    """
+    body = url_content.readme or url_content.content or ""
     if not body:
-        return ""
+        return None
 
-    # Truncate to reasonable size for summarization
-    if len(body) > 8000:
-        body = body[:8000] + "\n...[truncated]"
+    focus_prompts = {
+        SummaryType.BRIEF: "Provide a 2-3 paragraph overview of this content.",
+        SummaryType.USAGE: "Focus on installation, usage patterns, and key imports.",
+        SummaryType.API: "Focus on classes, functions, signatures, and API surface.",
+        SummaryType.ARCHITECTURE: "Focus on modules, design patterns, and data flow.",
+        SummaryType.EVALUATION: "Evaluate maturity, dependencies, and alternatives.",
+    }
 
-    prompt_instruction = _SUMMARY_PROMPTS.get(summary_type, _SUMMARY_PROMPTS[SummaryType.BRIEF])
+    prompt = focus_prompts.get(summary_type, focus_prompts[SummaryType.BRIEF])
 
-    symbol_context = ""
-    if content.symbol_map:
-        symbol_context = f"\n\nSymbol map:\n```\n{content.symbol_map[:3000]}\n```"
+    # Truncate body for summarization (100,000 chars per spec)
+    max_body = 100000
+    if len(body) > max_body:
+        body = body[:max_body] + "\n\n... (truncated)"
 
-    user_content = f"{prompt_instruction}\n\nContent from {content.url}:\n\n{body}{symbol_context}"
+    user_content = f"{prompt}\n\nContent from {url_content.url}:\n\n{body}"
+    if url_content.symbol_map:
+        user_content += f"\n\nSymbol Map:\n{url_content.symbol_map}"
 
     try:
-        import litellm
         response = litellm.completion(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a technical content summarizer. Be concise and informative."},
+                {"role": "system", "content": "Summarize the following content concisely."},
                 {"role": "user", "content": user_content},
             ],
             stream=False,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        log.warning("Summarization failed for %s: %s", content.url, e)
-        return ""
+        logger.warning(f"Summarization failed for {url_content.url}: {e}")
+        return None
 
-
-# ---------------------------------------------------------------------------
-# URL Service (orchestrator)
-# ---------------------------------------------------------------------------
 
 class URLService:
-    """Orchestrates URL detection, fetching, caching, and summarization.
+    """Manages the lifecycle of URL content: detection, fetching, caching, formatting.
 
-    Exposed via RPC through the LLM service.
+    State:
+        _cache: filesystem cache for fetched content
+        _model: smaller model for summarization
+        _fetched: dict of fetched URLContent objects (in-memory, keyed by URL)
     """
 
-    def __init__(self, cache_config: dict, smaller_model: str = ""):
-        self._cache = URLCache(
-            cache_dir=cache_config.get("path", ""),
-            ttl_hours=cache_config.get("ttl_hours", 24),
-        )
-        self._model = smaller_model
-        # In-memory state for fetched URLs
-        self._fetched: dict[str, URLContent] = {}
+    def __init__(self, cache=None, model=None, symbol_index_cls=None):
+        """Initialize URL service.
 
-    @property
-    def cache(self) -> URLCache:
-        return self._cache
+        Args:
+            cache: URLCache instance (or creates default)
+            model: model name for summarization
+            symbol_index_cls: SymbolIndex class for GitHub repo symbol maps
+        """
+        self._cache = cache
+        self._model = model
+        self._symbol_index_cls = symbol_index_cls
+        self._fetched = {}  # url -> URLContent
 
-    def detect_urls(self, text: str) -> list[dict]:
-        """Find and classify URLs in text."""
+    def detect_urls(self, text):
+        """Find and classify URLs in text.
+
+        Returns list of {url, url_type, display_name} dicts.
+        """
         return detect_urls(text)
 
-    def fetch_url(
-        self,
-        url: str,
-        use_cache: bool = True,
-        summarize: bool = True,
-        user_hint: str = "",
-    ) -> dict:
-        """Fetch URL content with caching and optional summarization.
+    async def fetch_url(self, url, use_cache=True, summarize=True,
+                        summary_type=None, user_text=""):
+        """Fetch URL content, cache, and optionally summarize.
 
-        Returns serialized URLContent dict.
+        Args:
+            url: URL to fetch
+            use_cache: check cache first
+            summarize: generate summary via LLM
+            summary_type: explicit summary type override
+            user_text: user message text for auto-selecting summary type
+
+        Returns:
+            URLContent object
         """
         # Check cache
-        if use_cache:
+        if use_cache and self._cache:
             cached = self._cache.get(url)
             if cached:
                 content = URLContent.from_dict(cached)
-                # If summary requested but not cached, generate it
-                if summarize and not content.summary and self._model:
-                    stype = _select_summary_type(
-                        content.url_type,
-                        bool(content.symbol_map),
-                        user_hint,
-                    )
-                    content.summary = _summarize(content, stype, self._model)
-                    content.summary_type = stype.value
-                    # Update cache with summary
-                    self._cache.set(url, content.to_dict())
-
+                # If cached entry has a summary, or no summary requested, return as-is
+                if content.summary or not summarize:
+                    self._fetched[url] = content
+                    return content
+                # Cached but no summary — generate summary without re-fetching
+                if summarize and self._model and not content.error:
+                    st = summary_type
+                    if st is None:
+                        url_type_enum = URLType(content.url_type) if content.url_type else URLType.GENERIC
+                        st = select_summary_type(
+                            url_type_enum,
+                            has_symbol_map=bool(content.symbol_map),
+                            user_text=user_text,
+                        )
+                    elif isinstance(st, str):
+                        st = SummaryType(st)
+                    summary_text = await _summarize_content(content, st, self._model)
+                    if summary_text:
+                        content.summary = summary_text
+                        content.summary_type = st.value
+                        # Update cache entry in-place
+                        self._cache.set(url, content.to_dict())
+                    self._fetched[url] = content
+                    return content
                 self._fetched[url] = content
-                return content.to_dict()
+                return content
 
         # Classify and fetch
-        url_type, gh_info = classify_url(url)
+        url_type = classify_url(url)
+        github_info = _parse_github_info(url, url_type)
 
-        if url_type == URLType.GITHUB_REPO and gh_info:
-            content = _fetch_github_repo(gh_info)
-        elif url_type == URLType.GITHUB_FILE and gh_info:
-            content = _fetch_github_file(url, gh_info)
-        elif url_type in (URLType.GITHUB_ISSUE, URLType.GITHUB_PR):
-            # Fetch as web page (GitHub renders issues/PRs as HTML)
-            content = _fetch_web_page(url)
-            content.url_type = url_type
-            content.github_info = gh_info
-        elif url_type == URLType.DOCUMENTATION:
-            content = _fetch_web_page(url)
-            content.url_type = URLType.DOCUMENTATION
+        if url_type == URLType.GITHUB_REPO:
+            content = _fetch_github_repo(url, github_info, self._symbol_index_cls)
+        elif url_type == URLType.GITHUB_FILE:
+            content = _fetch_github_file(url, github_info)
         else:
             content = _fetch_web_page(url)
+            content.url_type = url_type.value
 
-        # Ensure URL is set
-        content.url = url
+        # Don't cache errors
+        if content.error:
+            self._fetched[url] = content
+            return content
 
         # Summarize
-        if summarize and not content.error and self._model:
-            stype = _select_summary_type(
-                content.url_type,
-                bool(content.symbol_map),
-                user_hint,
-            )
-            content.summary = _summarize(content, stype, self._model)
-            content.summary_type = stype.value
+        if summarize and self._model and not content.error:
+            st = summary_type
+            if st is None:
+                st = select_summary_type(
+                    url_type,
+                    has_symbol_map=bool(content.symbol_map),
+                    user_text=user_text,
+                )
+            elif isinstance(st, str):
+                st = SummaryType(st)
 
-        # Cache
-        if not content.error:
+            summary = await _summarize_content(content, st, self._model)
+            if summary:
+                content.summary = summary
+                content.summary_type = st.value
+
+        # Cache result
+        if self._cache and not content.error:
             self._cache.set(url, content.to_dict())
 
         self._fetched[url] = content
-        return content.to_dict()
+        return content
 
-    def get_url_content(self, url: str) -> dict:
-        """Get previously fetched content for display."""
+    async def detect_and_fetch(self, text, use_cache=True, summarize=True,
+                               user_text="", max_urls=None):
+        """Detect all URLs in a text block and fetch them sequentially.
+
+        Args:
+            text: text to scan for URLs
+            use_cache: check cache first
+            summarize: generate summary via LLM
+            user_text: user message text for auto-selecting summary type
+            max_urls: maximum number of URLs to fetch (None = all)
+
+        Returns:
+            list of URLContent objects
+        """
+        detected = detect_urls(text)
+        results = []
+        for i, url_info in enumerate(detected):
+            if max_urls is not None and i >= max_urls:
+                break
+            url = url_info["url"]
+            content = await self.fetch_url(
+                url, use_cache=use_cache, summarize=summarize,
+                user_text=user_text,
+            )
+            results.append(content)
+        return results
+
+    def get_url_content(self, url):
+        """Return cached/fetched content for a URL.
+
+        Checks in-memory fetched dict first, then filesystem cache.
+        Returns URLContent or error URLContent if not found anywhere.
+        """
         if url in self._fetched:
-            return self._fetched[url].to_dict()
-        # Try cache
-        cached = self._cache.get(url)
-        if cached:
-            content = URLContent.from_dict(cached)
-            self._fetched[url] = content
-            return content.to_dict()
-        return {"error": f"No content for {url}"}
+            return self._fetched[url]
+        # Fall back to filesystem cache
+        if self._cache:
+            cached = self._cache.get(url)
+            if cached:
+                return URLContent.from_dict(cached)
+        return URLContent(url=url, error="URL not yet fetched")
 
-    def invalidate_url_cache(self, url: str) -> dict:
-        """Remove a URL from the cache."""
-        self._cache.invalidate(url)
+    def invalidate_url_cache(self, url):
+        """Remove URL from cache and fetched dict."""
+        if self._cache:
+            self._cache.invalidate(url)
         self._fetched.pop(url, None)
-        return {"ok": True}
 
-    def clear_url_cache(self) -> dict:
-        """Clear all cached URLs."""
-        self._cache.clear()
+    def clear_url_cache(self):
+        """Clear all cached and fetched URLs."""
+        if self._cache:
+            self._cache.clear()
         self._fetched.clear()
-        return {"ok": True}
 
-    def get_fetched_urls(self) -> list[dict]:
-        """Return all currently fetched URLs."""
-        return [c.to_dict() for c in self._fetched.values()]
+    def get_fetched_urls(self):
+        """List all fetched URLContent objects."""
+        return list(self._fetched.values())
 
-    def remove_fetched(self, url: str):
-        """Remove a URL from the fetched set (not from cache)."""
+    def remove_fetched(self, url):
+        """Remove from in-memory fetched dict."""
         self._fetched.pop(url, None)
 
     def clear_fetched(self):
-        """Clear all fetched URLs (e.g., on conversation clear)."""
+        """Clear in-memory fetched dict."""
         self._fetched.clear()
 
-    def format_url_context(
-        self,
-        urls: list[str],
-        excluded: set[str] | None = None,
-        max_length: int = 4000,
-    ) -> str:
-        """Format fetched URLs for LLM prompt inclusion."""
-        excluded = excluded or set()
+    def format_url_context(self, urls=None, excluded=None, max_length=50000):
+        """Format fetched URLs for prompt injection.
+
+        Args:
+            urls: list of URLs to include (None = all fetched)
+            excluded: set of URLs to exclude
+            max_length: max chars per URL content
+
+        Returns:
+            Formatted string or empty string.
+        """
+        excluded = set(excluded or [])
+        if urls is None:
+            urls = list(self._fetched.keys())
+
         parts = []
         for url in urls:
             if url in excluded:
                 continue
             content = self._fetched.get(url)
-            if content and not content.error:
-                parts.append(content.format_for_prompt(max_length))
+            if content is None or content.error:
+                continue
+            parts.append(content.format_for_prompt(max_length=max_length))
+
         return "\n---\n".join(parts)

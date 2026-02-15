@@ -1,62 +1,57 @@
-"""Symbol cache with mtime-based invalidation."""
+"""Symbol cache — in-memory, per-file, mtime-based invalidation."""
 
-import logging
 import hashlib
-from pathlib import Path
-from typing import Optional
-
-from .models import FileSymbols
-
-log = logging.getLogger(__name__)
+import os
 
 
 class SymbolCache:
-    """In-memory per-file symbol cache with mtime invalidation."""
+    """Cache parsed symbols per file, invalidated by mtime."""
 
     def __init__(self):
-        # file_path -> (mtime, FileSymbols)
-        self._cache: dict[str, tuple[float, FileSymbols]] = {}
-        # file_path -> content_hash (for change detection)
-        self._hashes: dict[str, str] = {}
+        self._cache = {}  # path -> {mtime, file_symbols, content_hash}
 
-    def get(self, file_path: str, mtime: float) -> Optional[FileSymbols]:
+    def get(self, path, mtime):
         """Get cached symbols if mtime matches."""
-        entry = self._cache.get(file_path)
-        if entry and entry[0] == mtime:
-            return entry[1]
+        entry = self._cache.get(path)
+        if entry and entry["mtime"] == mtime:
+            return entry["file_symbols"]
         return None
 
-    def put(self, file_path: str, mtime: float, symbols: FileSymbols):
+    def put(self, path, mtime, file_symbols):
         """Store symbols with mtime."""
-        self._cache[file_path] = (mtime, symbols)
+        content_hash = self._compute_hash(file_symbols)
+        self._cache[path] = {
+            "mtime": mtime,
+            "file_symbols": file_symbols,
+            "content_hash": content_hash,
+        }
 
-    def invalidate(self, file_path: str):
-        """Remove a single file from cache."""
-        self._cache.pop(file_path, None)
-        self._hashes.pop(file_path, None)
+    def get_hash(self, path):
+        """Get content hash for a cached file."""
+        entry = self._cache.get(path)
+        if entry:
+            return entry["content_hash"]
+        return None
 
-    def invalidate_all(self):
-        """Clear entire cache."""
+    def invalidate(self, path):
+        """Remove entry from cache."""
+        self._cache.pop(path, None)
+
+    def clear(self):
+        """Clear all entries."""
         self._cache.clear()
-        self._hashes.clear()
-
-    def has(self, file_path: str) -> bool:
-        return file_path in self._cache
-
-    def get_content_hash(self, file_path: str) -> Optional[str]:
-        """Get stored content hash for change detection."""
-        return self._hashes.get(file_path)
-
-    def set_content_hash(self, file_path: str, content_hash: str):
-        """Store content hash."""
-        self._hashes[file_path] = content_hash
-
-    @staticmethod
-    def compute_hash(content: str) -> str:
-        """Compute SHA256 hash of content."""
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
     @property
-    def cached_files(self) -> set[str]:
-        """Return set of cached file paths."""
+    def cached_files(self):
+        """Set of cached file paths."""
         return set(self._cache.keys())
+
+    def _compute_hash(self, file_symbols):
+        """Compute deterministic hash of symbol signatures."""
+        parts = []
+        for sym in file_symbols.symbols:
+            parts.append(sym.signature_hash_content())
+        for imp in file_symbols.imports:
+            parts.append(f"import:{imp.module}:{','.join(imp.names)}")
+        content = "\n".join(parts)
+        return hashlib.sha256(content.encode()).hexdigest()[:16]

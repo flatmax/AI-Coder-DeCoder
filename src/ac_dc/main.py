@@ -1,327 +1,321 @@
-"""Main entry point: CLI parsing, server startup, browser launch."""
+"""AC⚡DC — AI-assisted code editing tool.
+
+Entry point: CLI parsing, port scanning, service initialization,
+browser launch, and WebSocket server startup.
+"""
 
 import argparse
-import asyncio
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 import webbrowser
 from pathlib import Path
 
-log = logging.getLogger("ac_dc")
+logger = logging.getLogger(__name__)
 
+# HTML page shown when not in a git repo
+NOT_A_REPO_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AC⚡DC — Not a Git Repository</title>
+<style>
+  body {{
+    background: #0d1117; color: #c9d1d9; font-family: -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; margin: 0; padding: 2rem;
+  }}
+  .brand {{ font-size: 4rem; opacity: 0.18; margin-bottom: 2rem; }}
+  .msg {{ font-size: 1.2rem; max-width: 600px; text-align: center; line-height: 1.6; }}
+  .path {{ color: #58a6ff; font-family: monospace; word-break: break-all; }}
+  code {{ background: #161b22; padding: 0.2em 0.5em; border-radius: 4px; color: #7ee787; }}
+</style>
+</head>
+<body>
+  <div class="brand">AC⚡DC</div>
+  <div class="msg">
+    <p>The directory <span class="path">{repo_path}</span> is not a git repository.</p>
+    <p>To get started:</p>
+    <p><code>cd /path/to/your/project</code></p>
+    <p><code>git init</code></p>
+    <p>Then run <code>ac-dc</code> again.</p>
+  </div>
+</body>
+</html>
+"""
 
-def find_available_port(start: int, max_tries: int = 50) -> int:
-    """Find an available port starting from the given number."""
-    for offset in range(max_tries):
-        port = start + offset
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError(f"No available port found starting from {start}")
+# Version detection
+def _get_version():
+    """Detect version from baked VERSION file, git, or fallback.
 
-
-def _is_port_in_use(port: int) -> bool:
-    """Check if a port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _start_vite_dev(webapp_dir: Path, port: int) -> subprocess.Popen | None:
-    """Start the Vite dev server as a subprocess.
-
-    Returns the Popen object, or None if skipped.
+    Priority:
+    1. Baked VERSION file (PyInstaller bundle or source install)
+    2. git rev-parse HEAD
+    3. .git/HEAD direct read
+    4. Fallback: "dev"
     """
-    if _is_port_in_use(port):
-        log.info("Port %d already in use — assuming Vite is running", port)
-        return None
-
-    node_modules = webapp_dir / "node_modules"
-    if not node_modules.is_dir():
-        print(f"\n❌ node_modules not found in {webapp_dir}")
-        print(f"   Run: cd {webapp_dir} && npm install\n")
-        return None
-
-    env = os.environ.copy()
-    env["PORT"] = str(port)
-
-    try:
-        proc = subprocess.Popen(
-            ["npm", "run", "dev"],
-            cwd=str(webapp_dir),
-            env=env,
-        )
-        log.info("Vite dev server started (pid %d) on port %d", proc.pid, port)
-        return proc
-    except FileNotFoundError:
-        print("\n❌ npm not found. Install Node.js to use --dev mode.\n")
-        return None
-    except Exception as e:
-        log.warning("Failed to start Vite dev server: %s", e)
-        return None
-
-
-def get_version() -> str:
-    """Detect version from VERSION file or git.
-
-    Returns a version string like '2025.01.15-14.32-a1b2c3d4' (baked)
-    or 'a1b2c3d4' (git) or 'dev' (fallback).
-    """
-    # Check for baked VERSION file (bundled releases)
-    locations = [Path(__file__).parent / "VERSION"]
-
-    # PyInstaller sets sys.frozen = True on bundled executables
-    if getattr(sys, "frozen", False):
-        bundle_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-        locations.insert(0, bundle_dir / "ac_dc" / "VERSION")
-        locations.insert(1, bundle_dir / "VERSION")
-
-    for version_file in locations:
+    # 1. Baked VERSION file
+    version_file = Path(__file__).parent / "VERSION"
+    if version_file.exists():
         try:
-            if version_file.exists():
-                return version_file.read_text().strip()
-        except (OSError, IOError):
+            return version_file.read_text().strip()
+        except OSError:
             pass
 
-    # Try git
+    # 2. git rev-parse HEAD
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=5,
-            cwd=str(Path(__file__).parent),
         )
         if result.returncode == 0:
             return result.stdout.strip()[:8]
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
-    # Fallback: read .git/HEAD directly
+    # 3. .git/HEAD direct read
     try:
-        git_dir = Path(__file__).parent.parent.parent / ".git"
-        head_file = git_dir / "HEAD"
-        if head_file.exists():
-            head = head_file.read_text().strip()
-            if head.startswith("ref: "):
-                ref_path = git_dir / head[5:]
+        git_head = Path(".git/HEAD")
+        if git_head.exists():
+            content = git_head.read_text().strip()
+            if content.startswith("ref:"):
+                ref_path = Path(".git") / content[5:]
                 if ref_path.exists():
                     return ref_path.read_text().strip()[:8]
-            elif len(head) >= 8:
-                return head[:8]
-    except (OSError, IOError):
+            else:
+                return content[:8]
+    except OSError:
         pass
 
     return "dev"
 
 
-def get_git_sha(short: bool = True) -> str | None:
-    """Get the git SHA for webapp URL matching.
+def _extract_sha(version):
+    """Extract short SHA from version string.
 
-    Extracts the short SHA from the baked version string or git.
+    Formats:
+    - Baked: "2025.01.15-14.32-a1b2c3d4" -> "a1b2c3d4"
+    - Git: "a1b2c3d4..." -> first 8 chars
+    - "dev" -> None
     """
-    version = get_version()
     if version == "dev":
         return None
-
-    # Baked version format: '2025.01.15-14.32-a1b2c3d4' — SHA is the last segment
-    if "." in version and "-" in version:
-        sha = version.rsplit("-", 1)[-1]
-        if len(sha) >= 7:
-            return sha[:8] if short else sha
-        return sha
-
-    # Raw SHA from git
-    return version[:8] if short else version
+    if "-" in version:
+        return version.rsplit("-", 1)[-1]
+    return version[:8]
 
 
-def get_webapp_base_url() -> str:
-    """Get the base URL for the hosted webapp."""
-    return os.environ.get(
-        "AC_WEBAPP_BASE_URL",
-        "https://flatmax.github.io/AI-Coder-DeCoder",
-    )
-
-
-async def run_server(args: argparse.Namespace):
-    """Start the RPC server and run forever."""
-    # Use absolute imports so this works both as a package module
-    # and when run directly by PyInstaller as __main__
-    from ac_dc.config import ConfigManager
-    from ac_dc.repo import Repo
-    from ac_dc.llm_service import LLM
-    from ac_dc.settings import Settings
-
-    repo_root = Path(args.repo_path).resolve()
-
-    # Validate git repo — open browser with branding, print instructions, exit
-    if not (repo_root / ".git").exists():
-        print()
-        print("=" * 60)
-        print("  AC⚡DC")
-        print()
-        print("  Not a git repository:")
-        print(f"  {repo_root}")
-        print()
-        print("  To get started, run one of:")
-        print(f"    git init {repo_root}")
-        print(f"    cd <existing-repo> && ac-dc")
-        print("=" * 60)
-        print()
-
-        if not args.no_browser:
-            import tempfile
-            html_content = f"""\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>AC⚡DC</title>
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{
-    background: #1a1a2e; color: #e0e0e0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh;
-  }}
-  .container {{
-    text-align: center; padding: 48px;
-    background: #16213e; border-radius: 16px;
-    border: 1px solid #2a2a4a; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-    max-width: 520px;
-  }}
-  .brand {{
-    font-size: 4rem; font-weight: 700; letter-spacing: 2px;
-    margin-bottom: 32px; opacity: 0.85;
-  }}
-  .brand .bolt {{ color: #ffd700; }}
-  .error-title {{
-    font-size: 1.2rem; color: #ff6b6b; margin-bottom: 16px; font-weight: 600;
-  }}
-  .path {{
-    font-family: monospace; background: #0f3460; padding: 8px 16px;
-    border-radius: 8px; margin: 16px 0; font-size: 0.9rem;
-    word-break: break-all; color: #a0c4ff;
-  }}
-  .instructions {{
-    text-align: left; margin-top: 24px; padding: 16px 20px;
-    background: #0f3460; border-radius: 8px; line-height: 1.8;
-  }}
-  .instructions .label {{
-    color: #8888aa; font-size: 0.85rem; margin-bottom: 8px;
-  }}
-  code {{
-    background: #1a1a2e; padding: 4px 10px; border-radius: 4px;
-    font-size: 0.9rem; color: #7bed9f; display: inline-block;
-  }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="brand">AC<span class="bolt">⚡</span>DC</div>
-  <div class="error-title">Not a Git Repository</div>
-  <div class="path">{repo_root}</div>
-  <div class="instructions">
-    <div class="label">To get started, run one of:</div>
-    <div><code>git init {repo_root}</code></div>
-    <div style="margin-top:4px"><code>cd &lt;existing-repo&gt; &amp;&amp; ac-dc</code></div>
-  </div>
-</div>
-</body>
-</html>"""
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".html", prefix="ac-dc-", delete=False, mode="w",
-            )
-            tmp.write(html_content)
-            tmp.close()
-            webbrowser.open(f"file://{tmp.name}")
-
-        sys.exit(1)
-
-    # Find ports
-    server_port = find_available_port(args.server_port)
-    webapp_port = find_available_port(args.webapp_port) if args.dev else None
-
-    # Initialize services
-    config = ConfigManager(repo_root, dev_mode=args.dev)
-    repo = Repo(repo_root)
-    llm = LLM(config, repo)
-    settings = Settings(config)
-
-    version = get_version()
-    log.info("ac-dc v%s starting on port %d", version, server_port)
-    log.info("Repository: %s", repo_root)
-
-    # Start RPC server
+def _is_git_repo(path):
+    """Check if path is inside a git repository."""
     try:
-        from jrpc_oo import JRPCServer
-    except ImportError:
-        print("Error: jrpc-oo not installed. Run: pip install jrpc-oo",
-              file=sys.stderr)
-        sys.exit(1)
-
-    server = JRPCServer(server_port, remote_timeout=60)
-    server.add_class(repo)
-    server.add_class(llm)
-    server.add_class(settings)
-
-    print(f"ac-dc v{version}")
-    print(f"RPC server: ws://localhost:{server_port}")
-    print(f"Repository: {repo_root}")
-
-    # Start Vite dev server in dev mode
-    vite_proc = None
-    if args.dev:
-        webapp_dir = Path(__file__).parent.parent.parent / "webapp"
-        loop = asyncio.get_event_loop()
-        vite_proc = await loop.run_in_executor(
-            None, _start_vite_dev, webapp_dir, webapp_port,
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
         )
-        print(f"Webapp: http://localhost:{webapp_port}/?port={server_port}")
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
-    # Open browser
-    if not args.no_browser:
-        if args.dev:
-            url = f"http://localhost:{webapp_port}/?port={server_port}"
-        else:
-            base_url = get_webapp_base_url()
-            sha = get_git_sha(short=True)
-            if sha:
-                url = f"{base_url}/{sha}/?port={server_port}"
-            else:
-                # Fallback: root redirect via versions.json
-                url = f"{base_url}/?port={server_port}"
 
-        print(f"Opening: {url}")
-        webbrowser.open(url)
+def find_available_port(start=18080, max_tries=50):
+    """Find an available port starting from `start`.
 
-    await server.start()
+    Tries binding to 127.0.0.1:{start} through {start+max_tries-1}.
+    Returns the first available port.
+    """
+    for offset in range(max_tries):
+        port = start + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(f"No available port found in range {start}-{start + max_tries - 1}")
 
-    # Run forever
+
+def _build_browser_url(server_port, version, dev_mode=False, webapp_port=None,
+                       base_url_override=None):
+    """Build the browser URL based on running mode.
+
+    Args:
+        server_port: RPC WebSocket server port
+        version: version string
+        dev_mode: if True, use local dev server
+        webapp_port: local webapp port (for dev/preview modes)
+        base_url_override: AC_WEBAPP_BASE_URL env override
+
+    Returns:
+        URL string
+    """
+    if dev_mode and webapp_port:
+        return f"http://localhost:{webapp_port}/?port={server_port}"
+
+    sha = _extract_sha(version)
+    base = base_url_override or "https://flatmax.github.io/AI-Coder-DeCoder"
+
+    if sha:
+        return f"{base}/{sha}/?port={server_port}"
+    else:
+        # dev fallback — root redirect
+        return f"{base}/?port={server_port}"
+
+
+def _handle_not_a_repo(repo_path):
+    """Handle case where repo_path is not a git repository.
+
+    Opens a self-contained HTML page in browser, prints terminal banner, exits.
+    """
+    abs_path = os.path.abspath(repo_path)
+
+    # Write HTML to temp file
+    html = NOT_A_REPO_HTML.format(repo_path=abs_path)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", prefix="ac-dc-", delete=False
+    ) as f:
+        f.write(html)
+        html_path = f.name
+
+    # Open in browser
     try:
-        await asyncio.Future()  # Block until cancelled
-    except asyncio.CancelledError:
+        webbrowser.open(f"file://{html_path}")
+    except Exception:
         pass
-    finally:
-        # Clean up Vite subprocess
-        if vite_proc is not None:
-            log.info("Stopping Vite dev server (pid %d)", vite_proc.pid)
-            vite_proc.terminate()
-            try:
-                vite_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                vite_proc.kill()
-        await server.stop()
+
+    # Print terminal banner
+    print()
+    print("  AC⚡DC")
+    print()
+    print(f"  Not a git repository: {abs_path}")
+    print()
+    print("  To get started:")
+    print(f"    cd {abs_path}")
+    print("    git init")
+    print()
+    print("  Or specify a repo path:")
+    print("    ac-dc --repo-path /path/to/your/project")
+    print()
+
+    sys.exit(1)
 
 
-def parse_args() -> argparse.Namespace:
+def _start_vite_dev_server(webapp_port):
+    """Start Vite dev server as a child process.
+
+    Returns the subprocess.Popen object, or None if port already in use.
+    """
+    # Check if port already in use (assume another instance)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", webapp_port))
+    except OSError:
+        logger.info(f"Vite dev server port {webapp_port} already in use, skipping")
+        return None
+
+    # Resolve AC⚡DC project root (where package.json and webapp/ live)
+    # __file__ = src/ac_dc/main.py → project root is two levels up
+    project_root = Path(__file__).resolve().parent.parent.parent
+    node_modules = project_root / "node_modules"
+
+    # Check prerequisites
+    if not node_modules.exists():
+        print(f"node_modules/ not found in {project_root}. Run: cd {project_root} && npm install")
+        sys.exit(1)
+
+    logger.info(f"Starting Vite dev server on port {webapp_port} (project: {project_root})")
+    try:
+        proc = subprocess.Popen(
+            ["npm", "run", "dev", "--", "--port", str(webapp_port)],
+            cwd=str(project_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give it a moment to start
+        time.sleep(1)
+        return proc
+    except OSError as e:
+        logger.error(f"Failed to start Vite dev server: {e}")
+        return None
+
+
+def _start_vite_preview_server(webapp_port):
+    """Build and start Vite preview server as a child process.
+
+    Returns the subprocess.Popen object, or None if port already in use.
+    """
+    # Check if port already in use
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", webapp_port))
+    except OSError:
+        logger.info(f"Preview server port {webapp_port} already in use, skipping")
+        return None
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    node_modules = project_root / "node_modules"
+
+    if not node_modules.exists():
+        print(f"node_modules/ not found in {project_root}. Run: cd {project_root} && npm install")
+        sys.exit(1)
+
+    # Build first
+    logger.info(f"Building webapp (project: {project_root})")
+    try:
+        build_result = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=120,
+        )
+        if build_result.returncode != 0:
+            logger.error(f"Webapp build failed:\n{build_result.stderr}")
+            print(f"Webapp build failed:\n{build_result.stderr}")
+            sys.exit(1)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.error(f"Webapp build failed: {e}")
+        sys.exit(1)
+
+    # Start preview server
+    logger.info(f"Starting Vite preview server on port {webapp_port}")
+    try:
+        proc = subprocess.Popen(
+            ["npm", "run", "preview", "--", "--port", str(webapp_port)],
+            cwd=str(project_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)
+        return proc
+    except OSError as e:
+        logger.error(f"Failed to start preview server: {e}")
+        return None
+
+
+def _cleanup_vite(proc):
+    """Terminate Vite dev server process."""
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+def parse_args(args=None):
+    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
         prog="ac-dc",
-        description="AI-assisted code editing tool",
+        description="AC⚡DC — AI-assisted code editing tool",
     )
     parser.add_argument(
         "--server-port", type=int, default=18080,
@@ -336,39 +330,171 @@ def parse_args() -> argparse.Namespace:
         help="Don't auto-open browser",
     )
     parser.add_argument(
-        "--repo-path", default=".",
+        "--repo-path", type=str, default=".",
         help="Git repository path (default: current directory)",
     )
     parser.add_argument(
         "--dev", action="store_true",
-        help="Run local dev server",
+        help="Run local Vite dev server",
     )
     parser.add_argument(
         "--preview", action="store_true",
-        help="Build and run preview server",
+        help="Build and preview locally",
     )
     parser.add_argument(
         "--verbose", action="store_true",
         help="Enable debug logging",
     )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
-def main():
-    args = parse_args()
+def main(args=None):
+    """Main entry point."""
+    parsed = parse_args(args)
 
     # Configure logging
-    level = logging.DEBUG if args.verbose else logging.INFO
+    level = logging.DEBUG if parsed.verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
 
+    repo_path = os.path.abspath(parsed.repo_path)
+
+    # Step 1: Validate git repository
+    if not _is_git_repo(repo_path):
+        _handle_not_a_repo(repo_path)
+
+    # Step 2: Find available ports
     try:
-        asyncio.run(run_server(args))
+        server_port = find_available_port(parsed.server_port)
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+    if parsed.dev or parsed.preview:
+        try:
+            webapp_port = find_available_port(parsed.webapp_port)
+        except RuntimeError as e:
+            logger.error(str(e))
+            sys.exit(1)
+    else:
+        webapp_port = parsed.webapp_port
+
+    # Step 3: Initialize services
+    from .config import ConfigManager
+    from .repo import Repo
+    from .settings import Settings
+
+    config = ConfigManager(repo_root=repo_path)
+    repo = Repo(repo_path)
+    settings = Settings(config)
+
+    # Symbol index (optional — may fail if tree-sitter not available)
+    symbol_index = None
+    try:
+        from .symbol_index.index import SymbolIndex
+        symbol_index = SymbolIndex(repo_path)
+        logger.info("Symbol index initialized")
+    except Exception as e:
+        logger.warning(f"Symbol index unavailable: {e}")
+
+    # LLM service
+    from .llm_service import LLMService
+    llm_service = LLMService(
+        config, repo=repo, symbol_index=symbol_index,
+    )
+
+    # Step 4: Start Vite dev/preview server
+    vite_proc = None
+    if parsed.dev:
+        vite_proc = _start_vite_dev_server(webapp_port)
+    elif parsed.preview:
+        vite_proc = _start_vite_preview_server(webapp_port)
+
+    # Step 5: Start RPC WebSocket server
+    try:
+        from jrpc_oo import JRPCServer
+    except ImportError:
+        logger.error("jrpc-oo not installed. Run: pip install jrpc-oo")
+        sys.exit(1)
+
+    import asyncio
+
+    async def _run_server():
+        server = JRPCServer(server_port, remote_timeout=60)
+        server.add_class(repo)
+        server.add_class(llm_service)
+        server.add_class(settings)
+
+        # Wire up callbacks
+        async def chunk_callback(request_id, content):
+            try:
+                call = llm_service.get_call()
+                if call:
+                    await call["AcApp.streamChunk"](request_id, content)
+                else:
+                    logger.warning("chunk_callback: get_call() returned None")
+            except Exception as e:
+                logger.error(f"chunk_callback failed: {e}")
+
+        async def event_callback(event_name, *args):
+            try:
+                call = llm_service.get_call()
+                if call:
+                    await call[f"AcApp.{event_name}"](*args)
+                else:
+                    logger.warning(f"event_callback: get_call() returned None for {event_name}")
+            except Exception as e:
+                logger.error(f"event_callback failed for AcApp.{event_name}: {e}")
+
+        llm_service._chunk_callback = chunk_callback
+        llm_service._event_callback = event_callback
+
+        await server.start()
+
+        version = _get_version()
+        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
+        url = _build_browser_url(
+            server_port, version,
+            dev_mode=(parsed.dev or parsed.preview),
+            webapp_port=webapp_port,
+            base_url_override=base_url,
+        )
+
+        logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
+        logger.info(f"Version: {version}")
+
+        # Step 6: Open browser
+        if not parsed.no_browser:
+            try:
+                webbrowser.open(url)
+                logger.info(f"Opened browser: {url}")
+            except Exception as e:
+                logger.warning(f"Failed to open browser: {e}")
+                print(f"\nOpen in browser: {url}\n")
+
+        # Serve forever
+        try:
+            await asyncio.Future()  # run forever
+        except asyncio.CancelledError:
+            pass
+
+    def _signal_handler(sig, frame):
+        """Handle shutdown signals."""
+        _cleanup_vite(vite_proc)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    try:
+        asyncio.run(_run_server())
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        pass
+    finally:
+        _cleanup_vite(vite_proc)
 
 
 if __name__ == "__main__":

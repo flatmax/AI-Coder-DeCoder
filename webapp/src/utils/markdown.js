@@ -11,7 +11,7 @@ import python from 'highlight.js/lib/languages/python';
 import typescript from 'highlight.js/lib/languages/typescript';
 import json from 'highlight.js/lib/languages/json';
 import bash from 'highlight.js/lib/languages/bash';
-import css from 'highlight.js/lib/languages/css';
+import cssLang from 'highlight.js/lib/languages/css';
 import xml from 'highlight.js/lib/languages/xml';
 import yaml from 'highlight.js/lib/languages/yaml';
 import c from 'highlight.js/lib/languages/c';
@@ -29,7 +29,7 @@ hljs.registerLanguage('json', json);
 hljs.registerLanguage('bash', bash);
 hljs.registerLanguage('sh', bash);
 hljs.registerLanguage('shell', bash);
-hljs.registerLanguage('css', css);
+hljs.registerLanguage('css', cssLang);
 hljs.registerLanguage('html', xml);
 hljs.registerLanguage('xml', xml);
 hljs.registerLanguage('yaml', yaml);
@@ -40,11 +40,28 @@ hljs.registerLanguage('diff', diff);
 hljs.registerLanguage('markdown', markdown);
 hljs.registerLanguage('md', markdown);
 
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 const marked = new Marked({
   gfm: true,
-  breaks: false,
+  breaks: true,
   renderer: {
-    code({ text, lang }) {
+    code(token) {
+      // marked v12: token may be a string or an object with {text, lang}
+      let text, lang;
+      if (typeof token === 'string') {
+        text = token;
+        lang = '';
+      } else {
+        text = token.text || '';
+        lang = (token.lang || '').trim();
+      }
       const language = lang && hljs.getLanguage(lang) ? lang : null;
       let highlighted;
       if (language) {
@@ -54,7 +71,13 @@ const marked = new Marked({
           highlighted = escapeHtml(text);
         }
       } else {
-        highlighted = escapeHtml(text);
+        // No language specified — try auto-detection
+        try {
+          const autoResult = hljs.highlightAuto(text);
+          highlighted = autoResult.value;
+        } catch (_) {
+          highlighted = escapeHtml(text);
+        }
       }
       const langLabel = language ? `<span class="code-lang">${language}</span>` : '';
       const copyBtn = `<button class="code-copy-btn" title="Copy code">📋</button>`;
@@ -63,17 +86,9 @@ const marked = new Marked({
   },
 });
 
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 /**
  * Render markdown to HTML string.
- * Safe for LLM output — no raw HTML passthrough.
+ * Safe for LLM output — uses highlight.js for code blocks.
  */
 export function renderMarkdown(text) {
   if (!text) return '';

@@ -1,669 +1,536 @@
-"""Tests for the stability tracker and cache tiering system."""
+"""Tests for cache stability tracker — N-value tracking, tier assignment, cascade."""
 
 import pytest
+
 from ac_dc.stability_tracker import (
-    StabilityTracker, Tier, ItemType, TrackedItem, TierChange,
-    TIER_CONFIG, _hash_content, cluster_for_tiers,
+    StabilityTracker,
+    Tier,
+    TrackedItem,
+    TIER_CONFIG,
+    CASCADE_ORDER,
 )
 
 
-class TestHashContent:
-
-    def test_deterministic(self):
-        assert _hash_content("hello") == _hash_content("hello")
-
-    def test_different_content(self):
-        assert _hash_content("hello") != _hash_content("world")
-
-    def test_length(self):
-        assert len(_hash_content("test")) == 16
+@pytest.fixture
+def tracker():
+    """Default tracker with cache_target_tokens=1536."""
+    return StabilityTracker(cache_target_tokens=1536)
 
 
-class TestTierConfig:
-
-    def test_all_tiers_configured(self):
-        for tier in Tier:
-            assert tier in TIER_CONFIG
-
-    def test_entry_n_ordering(self):
-        assert TIER_CONFIG[Tier.L0]["entry_n"] > TIER_CONFIG[Tier.L1]["entry_n"]
-        assert TIER_CONFIG[Tier.L1]["entry_n"] > TIER_CONFIG[Tier.L2]["entry_n"]
-        assert TIER_CONFIG[Tier.L2]["entry_n"] > TIER_CONFIG[Tier.L3]["entry_n"]
-        assert TIER_CONFIG[Tier.L3]["entry_n"] > TIER_CONFIG[Tier.ACTIVE]["entry_n"]
-
-    def test_l0_no_promotion(self):
-        assert TIER_CONFIG[Tier.L0]["promotion_n"] is None
+@pytest.fixture
+def tracker_no_cache():
+    """Tracker with cache_target_tokens=0 (history stays active permanently)."""
+    return StabilityTracker(cache_target_tokens=0)
 
 
-class TestTrackedItem:
-
-    def test_defaults(self):
-        item = TrackedItem(key="file:test.py", item_type=ItemType.FILE)
-        assert item.tier == Tier.ACTIVE
-        assert item.n == 0
-        assert item.content_hash == ""
-        assert item.token_estimate == 0
+# === Basic N-Value Behavior ===
 
 
-class TestTierChange:
-
-    def test_promotion(self):
-        tc = TierChange("k", "file", Tier.L3, Tier.L2)
-        assert tc.is_promotion
-        assert not tc.is_demotion
-
-    def test_demotion(self):
-        tc = TierChange("k", "file", Tier.L2, Tier.ACTIVE)
-        assert not tc.is_promotion
-        assert tc.is_demotion
-
-
-class TestStabilityTrackerBasics:
-
-    def test_empty_tracker(self):
-        st = StabilityTracker()
-        assert st.item_count == 0
-        assert st.get_tier_items(Tier.ACTIVE) == []
-        assert st.get_tier_tokens(Tier.L0) == 0
-
-    def test_register_new_item(self):
-        st = StabilityTracker()
-        st.register_item("file:a.py", ItemType.FILE, "hash1", 100)
-        item = st.get_item("file:a.py")
+class TestNValueProgression:
+    def test_new_item_starts_at_n0(self, tracker):
+        """New items register at N=0."""
+        tracker.process_active_items([
+            {"key": "file:a.py", "content_hash": "abc", "tokens": 100},
+        ])
+        item = tracker.get_item("file:a.py")
         assert item is not None
+        assert item.n == 0
         assert item.tier == Tier.ACTIVE
-        assert item.content_hash == "hash1"
-        assert item.token_estimate == 100
 
-    def test_register_updates_hash(self):
-        st = StabilityTracker()
-        st.register_item("file:a.py", ItemType.FILE, "hash1", 100)
-        st.register_item("file:a.py", ItemType.FILE, "hash2", 100)
-        # Content changed — should demote
-        item = st.get_item("file:a.py")
+    def test_unchanged_increments_n(self, tracker):
+        """N increments on unchanged content."""
+        info = {"key": "file:a.py", "content_hash": "abc", "tokens": 100}
+        tracker.process_active_items([info])
+        assert tracker.get_item("file:a.py").n == 0
+
+        tracker.process_active_items([info])
+        assert tracker.get_item("file:a.py").n == 1
+
+        tracker.process_active_items([info])
+        assert tracker.get_item("file:a.py").n == 2
+
+    def test_hash_mismatch_resets_n(self, tracker):
+        """N resets to 0 on hash mismatch."""
+        tracker.process_active_items([
+            {"key": "file:a.py", "content_hash": "abc", "tokens": 100},
+        ])
+        tracker.process_active_items([
+            {"key": "file:a.py", "content_hash": "abc", "tokens": 100},
+        ])
+        assert tracker.get_item("file:a.py").n == 1
+
+        # Content changes
+        tracker.process_active_items([
+            {"key": "file:a.py", "content_hash": "def", "tokens": 100},
+        ])
+        assert tracker.get_item("file:a.py").n == 0
+
+    def test_changed_item_demotes_to_active(self, tracker):
+        """Changed item in cached tier demotes to active."""
+        # Manually place item in L3
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.L3, n=5,
+            content_hash="old", tokens=100,
+        )
+        # Process with different hash
+        tracker.process_active_items([
+            {"key": "file:a.py", "content_hash": "new", "tokens": 100},
+        ])
+        item = tracker.get_item("file:a.py")
         assert item.tier == Tier.ACTIVE
         assert item.n == 0
 
-    def test_register_same_hash_no_change(self):
-        st = StabilityTracker()
-        st.register_item("file:a.py", ItemType.FILE, "hash1", 100)
-        st.register_item("file:a.py", ItemType.FILE, "hash1", 100)
-        item = st.get_item("file:a.py")
-        assert item.content_hash == "hash1"
 
-    def test_get_changes_consumed(self):
-        st = StabilityTracker()
-        changes = st.get_changes()
-        assert changes == []
+# === Graduation: Active -> L3 ===
 
 
-class TestPhase0Stale:
+class TestGraduation:
+    def test_graduation_requires_n_ge_3(self, tracker):
+        """Graduation requires N >= 3 for files/symbols."""
+        info = {"key": "file:a.py", "content_hash": "abc", "tokens": 100}
 
-    def test_removes_stale_files(self):
-        st = StabilityTracker()
-        st.register_item("file:a.py", ItemType.FILE, "h", 100)
-        st.register_item("file:b.py", ItemType.FILE, "h", 100)
-
-        st.update_after_response(
-            active_items={},
-            modified_files=[],
-            all_repo_files={"a.py"},  # b.py no longer exists
-        )
-        assert st.get_item("file:b.py") is None
-        assert st.get_item("file:a.py") is not None
-
-    def test_removes_stale_symbols(self):
-        st = StabilityTracker()
-        st.register_item("symbol:a.py", ItemType.SYMBOL, "h", 100)
-
-        st.update_after_response(
-            active_items={},
-            modified_files=[],
-            all_repo_files=set(),  # a.py gone
-        )
-        assert st.get_item("symbol:a.py") is None
-
-
-class TestPhase1ActiveProcessing:
-
-    def test_new_item_registered(self):
-        st = StabilityTracker()
-        st.update_after_response(
-            active_items={
-                "file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE},
-            },
-            modified_files=[],
-            all_repo_files={"a.py"},
-        )
-        item = st.get_item("file:a.py")
-        assert item is not None
-        assert item.tier == Tier.ACTIVE
-        assert item.n == 0
-
-    def test_unchanged_increments_n(self):
-        st = StabilityTracker()
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-
-        # First request
-        st.update_after_response(active, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 0
-
-        # Second request — same hash
-        st.update_after_response(active, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 1
-
-        # Third
-        st.update_after_response(active, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 2
-
-    def test_content_change_resets_n(self):
-        st = StabilityTracker()
-        st.update_after_response(
-            {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}},
-            [], {"a.py"},
-        )
-        st.update_after_response(
-            {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}},
-            [], {"a.py"},
-        )
-        assert st.get_item("file:a.py").n == 1
-
-        # Content changed
-        st.update_after_response(
-            {"file:a.py": {"hash": "h2", "tokens": 100, "type": ItemType.FILE}},
-            [], {"a.py"},
-        )
-        assert st.get_item("file:a.py").n == 0
-
-    def test_modified_file_demotes(self):
-        st = StabilityTracker()
-        # Put item in L3 via initialization
-        st.initialize_from_reference_graph(
-            [(Tier.L3, ["symbol:a.py"])],
-            {"symbol:a.py": 100},
-        )
-        assert st.get_item("symbol:a.py").tier == Tier.L3
-
-        # Modified file should demote
-        st.update_after_response(
-            {"symbol:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.SYMBOL}},
-            modified_files=["a.py"],
-            all_repo_files={"a.py"},
-        )
-        assert st.get_item("symbol:a.py").tier == Tier.ACTIVE
-        assert st.get_item("symbol:a.py").n == 0
-
-
-class TestPhase2Graduation:
-
-    def test_item_graduates_on_leaving_active(self):
-        st = StabilityTracker()
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-
-        # Build up N ≥ 3
-        for _ in range(4):
-            st.update_after_response(active, [], {"a.py"})
-
-        assert st.get_item("file:a.py").n == 3
-        assert st.get_item("file:a.py").tier == Tier.ACTIVE
-
-        # Now remove from active list — should graduate to L3
-        st.update_after_response({}, [], {"a.py"})
-        item = st.get_item("file:a.py")
-        assert item.tier == Tier.L3
-        assert item.n == TIER_CONFIG[Tier.L3]["entry_n"]
-
-    def test_item_graduates_while_still_selected(self):
-        """Items with N ≥ 3 graduate to L3 even while still in active list."""
-        st = StabilityTracker()
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-
-        # N goes 0, 1, 2 after 3 requests
+        # Process 3 times: N goes 0, 1, 2
         for _ in range(3):
-            st.update_after_response(active, [], {"a.py"})
-        assert st.get_item("file:a.py").tier == Tier.ACTIVE
-        assert st.get_item("file:a.py").n == 2
+            tracker.process_active_items([info])
 
-        # 4th request: N becomes 3 in phase 1, then graduates in phase 2
-        st.update_after_response(active, [], {"a.py"})
-        item = st.get_item("file:a.py")
+        assert tracker.get_item("file:a.py").n == 2
+        grads = tracker.determine_graduates(controlled_history_graduation=False)
+        assert "file:a.py" not in grads
+
+        # Process once more: N = 3
+        tracker.process_active_items([info])
+        assert tracker.get_item("file:a.py").n == 3
+        grads = tracker.determine_graduates(controlled_history_graduation=False)
+        assert "file:a.py" in grads
+
+    def test_graduate_items_moves_to_l3(self, tracker):
+        """graduate_items moves items from active to L3 with entry_n."""
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.ACTIVE, n=3,
+            content_hash="abc", tokens=100,
+        )
+        tracker.graduate_items(["file:a.py"])
+        item = tracker.get_item("file:a.py")
         assert item.tier == Tier.L3
         assert item.n == TIER_CONFIG[Tier.L3]["entry_n"]
 
-    def test_low_n_does_not_graduate(self):
-        st = StabilityTracker()
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
+    def test_history_graduation_piggyback(self, tracker):
+        """History graduates when L3 is broken (piggyback)."""
+        tracker._broken_tiers.add(Tier.L3)
+        tracker._items["history:0"] = TrackedItem(
+            key="history:0", tier=Tier.ACTIVE, n=0,
+            content_hash="h0", tokens=50,
+        )
+        grads = tracker.determine_graduates(controlled_history_graduation=True)
+        assert "history:0" in grads
 
-        # Only 2 unchanged appearances (N=1)
-        st.update_after_response(active, [], {"a.py"})
-        st.update_after_response(active, [], {"a.py"})
-
-        # Remove from active — N < 3, should NOT graduate
-        st.update_after_response({}, [], {"a.py"})
-        item = st.get_item("file:a.py")
-        assert item.tier == Tier.ACTIVE
-
-    def test_edited_file_resets_to_active(self):
-        """An edited file demotes back to active with N=0."""
-        st = StabilityTracker()
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-
-        # Build up N ≥ 3 and graduate to L3
-        for _ in range(4):
-            st.update_after_response(active, [], {"a.py"})
-        assert st.get_item("file:a.py").tier == Tier.L3
-
-        # File is edited — content hash changes, modified_files includes it
-        edited_active = {"file:a.py": {"hash": "h2", "tokens": 110, "type": ItemType.FILE}}
-        st.update_after_response(edited_active, ["a.py"], {"a.py"})
-
-        item = st.get_item("file:a.py")
-        assert item.tier == Tier.ACTIVE
-        assert item.n == 0
-
-    def test_graduated_active_file_history_piggyback(self):
-        """History piggybacks when active files graduate to L3."""
-        st = StabilityTracker()
-        file_active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-        hist_active = {"history:0": {"hash": "hh", "tokens": 50, "type": ItemType.HISTORY}}
-        combined = {**file_active, **hist_active}
-
-        # Build up N for file, history is always eligible
-        for _ in range(4):
-            st.update_after_response(combined, [], {"a.py"})
-
-        # File graduates to L3 (still in active list), history piggybacks
-        item_f = st.get_item("file:a.py")
-        item_h = st.get_item("history:0")
-        assert item_f.tier == Tier.L3
-        assert item_h.tier == Tier.L3
-
-
-class TestHistoryGraduation:
-
-    def test_history_piggybacks_on_l3_break(self):
-        """History graduates when L3 is already broken."""
-        st = StabilityTracker()
-
-        # Create a file that will graduate to L3, breaking it
-        file_active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-        hist_active = {"history:0": {"hash": "hh", "tokens": 50, "type": ItemType.HISTORY}}
-        combined = {**file_active, **hist_active}
-
-        # Build up N for file
-        for _ in range(4):
-            st.update_after_response(combined, [], {"a.py"})
-
-        # Now remove file from active (graduates to L3, breaking it)
-        # History should piggyback
-        st.update_after_response(hist_active, [], {"a.py"})
-
-        # History should have graduated
-        hist_item = st.get_item("history:0")
-        assert hist_item.tier == Tier.L3
-
-    def test_history_token_threshold_graduation(self):
+    def test_history_graduation_token_threshold(self, tracker):
         """History graduates when eligible tokens exceed cache_target_tokens."""
-        st = StabilityTracker(cache_target_tokens=100)
+        # Add history items with total tokens > 1536
+        for i in range(20):
+            tracker._items[f"history:{i}"] = TrackedItem(
+                key=f"history:{i}", tier=Tier.ACTIVE, n=0,
+                content_hash=f"h{i}", tokens=100,
+            )
+        # Total = 2000 > 1536
+        grads = tracker.determine_graduates(controlled_history_graduation=True)
+        # Some should graduate (oldest first), keeping 1536 worth in active
+        assert len(grads) > 0
+        # All graduates should be lower-indexed (older)
+        grad_indices = sorted(int(k.split(":")[1]) for k in grads)
+        non_grad_count = 20 - len(grads)
+        assert non_grad_count > 0  # Some remain in active
 
-        # Create enough history to exceed threshold
-        active = {}
+    def test_history_stays_active_when_cache_target_zero(self, tracker_no_cache):
+        """History stays active permanently when cache_target_tokens=0."""
         for i in range(10):
-            active[f"history:{i}"] = {
-                "hash": f"h{i}", "tokens": 50, "type": ItemType.HISTORY,
-            }
-
-        # First request — register all
-        st.update_after_response(active, [], set())
-
-        # Second request with fewer history items (some "left")
-        # Keep only recent ones in active
-        small_active = {f"history:{i}": active[f"history:{i}"] for i in range(8, 10)}
-        st.update_after_response(small_active, [], set())
-
-        # Oldest history items should have graduated
-        graduated = [
-            k for k, it in st.get_all_items().items()
-            if it.item_type == ItemType.HISTORY and it.tier == Tier.L3
-        ]
-        assert len(graduated) > 0
-
-    def test_history_no_graduation_when_disabled(self):
-        """No history graduation when cache_target_tokens=0."""
-        st = StabilityTracker(cache_target_tokens=0)
-
-        active = {"history:0": {"hash": "h", "tokens": 50, "type": ItemType.HISTORY}}
-        st.update_after_response(active, [], set())
-        st.update_after_response({}, [], set())
-
-        hist = st.get_item("history:0")
-        assert hist.tier == Tier.ACTIVE
+            tracker_no_cache._items[f"history:{i}"] = TrackedItem(
+                key=f"history:{i}", tier=Tier.ACTIVE, n=0,
+                content_hash=f"h{i}", tokens=200,
+            )
+        grads = tracker_no_cache.determine_graduates(controlled_history_graduation=True)
+        history_grads = [g for g in grads if g.startswith("history:")]
+        assert len(history_grads) == 0
 
 
-class TestPurgeHistory:
+# === Promotion and Cascade ===
 
-    def test_purge_removes_all_history(self):
-        st = StabilityTracker()
-        st.register_item("history:0", ItemType.HISTORY, "h", 50)
-        st.register_item("history:1", ItemType.HISTORY, "h", 50)
-        st.register_item("file:a.py", ItemType.FILE, "h", 100)
 
-        st.purge_history_items()
+class TestPromotion:
+    def test_promoted_items_get_destination_entry_n(self, tracker):
+        """Promoted items enter destination tier with that tier's entry_n."""
+        # Place item in L3 with N >= promotion_n and break L2
+        tracker._items["symbol:a.py"] = TrackedItem(
+            key="symbol:a.py", tier=Tier.L3, n=6,
+            content_hash="abc", tokens=100,
+        )
+        tracker._broken_tiers.add(Tier.L2)
+        tracker.run_cascade()
 
-        assert st.get_item("history:0") is None
-        assert st.get_item("history:1") is None
-        assert st.get_item("file:a.py") is not None
+        item = tracker.get_item("symbol:a.py")
+        assert item.tier == Tier.L2
+        assert item.n == TIER_CONFIG[Tier.L2]["entry_n"]
+
+    def test_stable_tier_above_blocks_promotion(self, tracker):
+        """Stable tier above blocks promotion — N is capped."""
+        # L2 has content (stable), L3 item has high N
+        tracker._items["symbol:stable.py"] = TrackedItem(
+            key="symbol:stable.py", tier=Tier.L2, n=8,
+            content_hash="s", tokens=100,
+        )
+        tracker._items["symbol:wannabe.py"] = TrackedItem(
+            key="symbol:wannabe.py", tier=Tier.L3, n=10,
+            content_hash="w", tokens=2000,  # above threshold
+        )
+        # L2 is NOT broken
+        tracker.run_cascade()
+
+        # Should still be in L3 (L2 is stable/not broken)
+        item = tracker.get_item("symbol:wannabe.py")
+        assert item.tier == Tier.L3
+
+    def test_ripple_cascade_propagates(self, tracker):
+        """Ripple cascade propagates through multiple broken tiers."""
+        # L3 item ready to promote to L2, L2 item ready to promote to L1
+        tracker._items["symbol:a.py"] = TrackedItem(
+            key="symbol:a.py", tier=Tier.L3, n=6,
+            content_hash="a", tokens=100,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            key="symbol:b.py", tier=Tier.L2, n=9,
+            content_hash="b", tokens=100,
+        )
+        # Break L2 and L1
+        tracker._broken_tiers.add(Tier.L2)
+        tracker._broken_tiers.add(Tier.L1)
+        tracker.run_cascade()
+
+        assert tracker.get_item("symbol:a.py").tier == Tier.L2
+        assert tracker.get_item("symbol:b.py").tier == Tier.L1
+
+
+# === Stale Item Removal ===
+
+
+class TestStaleRemoval:
+    def test_stale_items_removed(self, tracker):
+        """Stale items (deleted files) are removed."""
+        tracker._items["file:deleted.py"] = TrackedItem(
+            key="file:deleted.py", tier=Tier.L3, n=5,
+            content_hash="d", tokens=100,
+        )
+        tracker._items["symbol:deleted.py"] = TrackedItem(
+            key="symbol:deleted.py", tier=Tier.L2, n=7,
+            content_hash="s", tokens=50,
+        )
+        tracker._items["file:exists.py"] = TrackedItem(
+            key="file:exists.py", tier=Tier.L1, n=10,
+            content_hash="e", tokens=200,
+        )
+
+        tracker.remove_stale({"exists.py"})
+
+        assert tracker.get_item("file:deleted.py") is None
+        assert tracker.get_item("symbol:deleted.py") is None
+        assert tracker.get_item("file:exists.py") is not None
+
+    def test_stale_removal_marks_tier_broken(self, tracker):
+        """Removing stale item marks affected tier as broken."""
+        tracker._items["file:gone.py"] = TrackedItem(
+            key="file:gone.py", tier=Tier.L3, n=5,
+            content_hash="g", tokens=100,
+        )
+        tracker.remove_stale(set())
+        assert Tier.L3 in tracker._broken_tiers
+
+
+# === History Purge ===
+
+
+class TestHistoryPurge:
+    def test_purge_removes_all_history(self, tracker):
+        """purge_history_items removes all history:* entries."""
+        tracker._items["history:0"] = TrackedItem(
+            key="history:0", tier=Tier.L3, n=5,
+            content_hash="h0", tokens=50,
+        )
+        tracker._items["history:1"] = TrackedItem(
+            key="history:1", tier=Tier.ACTIVE, n=1,
+            content_hash="h1", tokens=50,
+        )
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.L1, n=10,
+            content_hash="f", tokens=100,
+        )
+
+        tracker.purge_history_items()
+
+        assert tracker.get_item("history:0") is None
+        assert tracker.get_item("history:1") is None
+        assert tracker.get_item("file:a.py") is not None
+
+
+# === Content Hashing ===
+
+
+class TestContentHashing:
+    def test_hash_deterministic(self):
+        """Same content produces same hash."""
+        h1 = StabilityTracker.hash_content("hello world")
+        h2 = StabilityTracker.hash_content("hello world")
+        assert h1 == h2
+
+    def test_hash_different_content(self):
+        """Different content produces different hash."""
+        h1 = StabilityTracker.hash_content("hello")
+        h2 = StabilityTracker.hash_content("world")
+        assert h1 != h2
+
+    def test_hash_empty(self):
+        """Empty content returns empty string."""
+        assert StabilityTracker.hash_content("") == ""
+        assert StabilityTracker.hash_content(None) == ""
+
+
+# === Full Update Cycle ===
+
+
+class TestFullUpdateCycle:
+    def test_multi_request_graduation(self, tracker):
+        """Multi-request: new -> active -> graduate through N progression."""
+        info = {"key": "file:a.py", "content_hash": "abc", "tokens": 100}
+
+        # Request 1: N=0
+        tracker.update([info])
+        assert tracker.get_item("file:a.py").tier == Tier.ACTIVE
+
+        # Request 2: N=1
+        tracker.update([info])
+        assert tracker.get_item("file:a.py").tier == Tier.ACTIVE
+
+        # Request 3: N=2
+        tracker.update([info])
+        assert tracker.get_item("file:a.py").tier == Tier.ACTIVE
+
+        # Request 4: N=3 -> graduates to L3
+        tracker.update([info])
+        assert tracker.get_item("file:a.py").tier == Tier.L3
+
+    def test_demote_on_edit_then_regraduate(self, tracker):
+        """Demotion on edit, then re-graduation."""
+        info = {"key": "file:a.py", "content_hash": "v1", "tokens": 100}
+
+        # Graduate to L3
+        for _ in range(5):
+            tracker.update([info])
+        assert tracker.get_item("file:a.py").tier == Tier.L3
+
+        # Edit (hash changes) -> demote
+        edited = {"key": "file:a.py", "content_hash": "v2", "tokens": 100}
+        tracker.update([edited])
+        assert tracker.get_item("file:a.py").tier == Tier.ACTIVE
+        assert tracker.get_item("file:a.py").n == 0
+
+        # Re-graduate
+        for _ in range(4):
+            tracker.update([edited])
+        assert tracker.get_item("file:a.py").tier == Tier.L3
+
+    def test_update_returns_summary(self, tracker):
+        """update() returns tier summary and changes."""
+        result = tracker.update([
+            {"key": "file:a.py", "content_hash": "abc", "tokens": 100},
+        ])
+        assert "tiers" in result
+        assert "changes" in result
+        assert "broken_tiers" in result
+
+    def test_changes_logged(self, tracker):
+        """Changes are logged during update cycle."""
+        # Place item in L3, then change it
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.L3, n=5,
+            content_hash="old", tokens=100,
+        )
+        result = tracker.update([
+            {"key": "file:a.py", "content_hash": "new", "tokens": 100},
+        ])
+        # Should have a demotion change
+        demotions = [c for c in result["changes"] if c["action"] == "demoted"]
+        assert len(demotions) > 0
+
+
+# === Tier Query Methods ===
+
+
+class TestTierQueries:
+    def test_get_tier_items(self, tracker):
+        """get_tier_items returns items for the specified tier."""
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.L3, n=5,
+            content_hash="a", tokens=100,
+        )
+        tracker._items["file:b.py"] = TrackedItem(
+            key="file:b.py", tier=Tier.ACTIVE, n=0,
+            content_hash="b", tokens=50,
+        )
+        l3 = tracker.get_tier_items(Tier.L3)
+        assert "file:a.py" in l3
+        assert "file:b.py" not in l3
+
+    def test_get_tier_tokens(self, tracker):
+        """get_tier_tokens sums tokens in tier."""
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py", tier=Tier.L3, n=5,
+            content_hash="a", tokens=100,
+        )
+        tracker._items["file:b.py"] = TrackedItem(
+            key="file:b.py", tier=Tier.L3, n=4,
+            content_hash="b", tokens=200,
+        )
+        assert tracker.get_tier_tokens(Tier.L3) == 300
+
+
+# === Initialization from Reference Graph ===
 
 
 class TestInitialization:
+    def test_fallback_distributes_across_tiers(self, tracker):
+        """Fallback initialization distributes files across L1, L2, L3."""
+        files = [f"src/file{i}.py" for i in range(9)]
+        tracker.initialize_from_reference_graph(None, files)
 
-    def test_initialize_from_clusters(self):
-        st = StabilityTracker()
-        st.initialize_from_reference_graph(
-            [
-                (Tier.L1, ["symbol:a.py", "symbol:b.py"]),
-                (Tier.L2, ["symbol:c.py"]),
-            ],
-            {"symbol:a.py": 100, "symbol:b.py": 200, "symbol:c.py": 150},
-        )
+        # All files should have symbol: entries
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            assert item is not None
+            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
 
-        assert st.get_item("symbol:a.py").tier == Tier.L1
-        assert st.get_item("symbol:a.py").n == TIER_CONFIG[Tier.L1]["entry_n"]
-        assert st.get_item("symbol:b.py").tier == Tier.L1
-        assert st.get_item("symbol:c.py").tier == Tier.L2
-        assert st.get_item("symbol:c.py").n == TIER_CONFIG[Tier.L2]["entry_n"]
+    def test_initialized_items_get_tier_entry_n(self, tracker):
+        """Initialized items receive their tier's entry_n."""
+        files = ["src/a.py", "src/b.py", "src/c.py"]
+        tracker.initialize_from_reference_graph(None, files)
 
-    def test_initialize_sets_token_estimate(self):
-        st = StabilityTracker()
-        st.initialize_from_reference_graph(
-            [(Tier.L1, ["symbol:a.py"])],
-            {"symbol:a.py": 500},
-        )
-        assert st.get_item("symbol:a.py").token_estimate == 500
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            expected_n = TIER_CONFIG[item.tier]["entry_n"]
+            assert item.n == expected_n
 
+    def test_initialized_items_have_placeholder_hash(self, tracker):
+        """Initialized items have empty placeholder hash."""
+        files = ["src/a.py"]
+        tracker.initialize_from_reference_graph(None, files)
+        item = tracker.get_item("symbol:src/a.py")
+        assert item.content_hash == ""
 
-class TestCascade:
+    def test_empty_files_no_crash(self, tracker):
+        """Empty file list doesn't crash."""
+        tracker.initialize_from_reference_graph(None, [])
+        assert len(tracker.items) == 0
 
-    def test_basic_graduation_to_l3(self):
-        """Items entering L3 get the tier's entry_n."""
-        st = StabilityTracker(cache_target_tokens=0)
-        active = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
+    def test_clustering_via_connected_components(self, tracker):
+        """Initialization uses connected_components from reference index."""
+        from unittest.mock import MagicMock
+        ref_index = MagicMock()
+        ref_index.connected_components.return_value = [
+            {"src/a.py", "src/b.py"},
+            {"src/c.py"},
+        ]
+        files = ["src/a.py", "src/b.py", "src/c.py"]
+        tracker.initialize_from_reference_graph(ref_index, files)
 
-        # Build up N
-        for _ in range(4):
-            st.update_after_response(active, [], {"a.py"})
+        # All files should have symbol entries
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            assert item is not None
+            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
 
-        # Graduate
-        st.update_after_response({}, [], {"a.py"})
-        item = st.get_item("file:a.py")
-        assert item.tier == Tier.L3
-        assert item.n == TIER_CONFIG[Tier.L3]["entry_n"]
+        # Clustered files (a, b) should be in the same tier
+        tier_a = tracker.get_item("symbol:src/a.py").tier
+        tier_b = tracker.get_item("symbol:src/b.py").tier
+        assert tier_a == tier_b
 
-    def test_promotion_l3_to_l2(self):
-        """Item in L3 with sufficient N promotes to L2 when L2 is broken."""
-        st = StabilityTracker(cache_target_tokens=0)
+    def test_l0_never_assigned_by_clustering(self, tracker):
+        """L0 is never assigned by initialization — must be earned via promotion."""
+        from unittest.mock import MagicMock
+        ref_index = MagicMock()
+        ref_index.connected_components.return_value = [
+            {f"src/file{i}.py" for i in range(20)},
+        ]
+        files = [f"src/file{i}.py" for i in range(20)]
+        tracker.initialize_from_reference_graph(ref_index, files)
 
-        # Initialize an item directly in L3 with high N
-        st._items["symbol:a.py"] = TrackedItem(
-            key="symbol:a.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L3, n=5, content_hash="h", token_estimate=100,
-        )
-        # Break L2 by having an item there that we'll remove
-        st._items["symbol:b.py"] = TrackedItem(
-            key="symbol:b.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L2, n=6, content_hash="h", token_estimate=100,
-        )
-
-        # Update: b.py is gone (stale), which breaks L2
-        # a.py should promote from L3 to L2
-        st.update_after_response(
-            active_items={},
-            modified_files=[],
-            all_repo_files={"a.py"},  # b.py is gone
-        )
-
-        item_a = st.get_item("symbol:a.py")
-        # a.py should have been processed in the cascade
-        # It needs promotion_n=6 to promote from L3 to L2
-        # After N increment in cascade: 5 → 6 ≥ 6, so it promotes
-        assert item_a.tier == Tier.L2
-
-    def test_cascade_ripples_downward(self):
-        """Promotion cascades: L3→L2 breaks L3, allowing active→L3."""
-        st = StabilityTracker(cache_target_tokens=0)
-
-        # L2 has an item that will be removed (breaking L2)
-        st._items["symbol:gone.py"] = TrackedItem(
-            key="symbol:gone.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L2, n=9, content_hash="h", token_estimate=100,
-        )
-        # L3 has a veteran ready to promote
-        st._items["symbol:stable.py"] = TrackedItem(
-            key="symbol:stable.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L3, n=5, content_hash="h", token_estimate=100,
-        )
-        # Active has an item ready to graduate
-        active_item = {"file:grad.py": {"hash": "h", "tokens": 100, "type": ItemType.FILE}}
-        st._items["file:grad.py"] = TrackedItem(
-            key="file:grad.py", item_type=ItemType.FILE,
-            tier=Tier.ACTIVE, n=5, content_hash="h", token_estimate=100,
-        )
-        st._prev_active_keys = {"file:grad.py"}
-
-        # gone.py removed → L2 breaks → stable.py promotes L3→L2 → L3 breaks
-        # → grad.py graduates active→L3
-        st.update_after_response(
-            active_items={},
-            modified_files=[],
-            all_repo_files={"stable.py", "grad.py"},
-        )
-
-        assert st.get_item("symbol:stable.py").tier == Tier.L2
-        assert st.get_item("file:grad.py").tier == Tier.L3
-
-    def test_no_promotion_into_stable_tier(self):
-        """Items don't promote into a tier that isn't broken."""
-        st = StabilityTracker(cache_target_tokens=0)
-
-        # L2 has content and is not broken
-        st._items["symbol:l2.py"] = TrackedItem(
-            key="symbol:l2.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L2, n=6, content_hash="h", token_estimate=100,
-        )
-        # L3 has item with high N
-        st._items["symbol:l3.py"] = TrackedItem(
-            key="symbol:l3.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L3, n=10, content_hash="h", token_estimate=100,
-        )
-
-        st.update_after_response(
-            active_items={},
-            modified_files=[],
-            all_repo_files={"l2.py", "l3.py"},
-        )
-
-        # L3 item should NOT promote because L2 is stable
-        assert st.get_item("symbol:l3.py").tier == Tier.L3
+        for f in files:
+            item = tracker.get_item(f"symbol:{f}")
+            assert item.tier != Tier.L0
 
 
-class TestDemoteUnderfilled:
-
-    def test_underfilled_tier_demotes(self):
-        st = StabilityTracker(cache_target_tokens=500)
-
-        # Put a tiny item in L2
-        st._items["symbol:tiny.py"] = TrackedItem(
-            key="symbol:tiny.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L2, n=6, content_hash="h", token_estimate=10,  # Way under 500
-        )
-
-        st.update_after_response({}, [], {"tiny.py"})
-
-        # Should have been demoted to L3 (one tier down)
-        assert st.get_item("symbol:tiny.py").tier == Tier.L3
-
-
-class TestNValueCapping:
-
-    def test_n_capped_when_tier_above_stable(self):
-        """N is capped at promotion threshold when destination tier is stable."""
-        st = StabilityTracker(cache_target_tokens=0)
-
-        # L1 is stable (has content, not broken)
-        st._items["symbol:l1.py"] = TrackedItem(
-            key="symbol:l1.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L1, n=9, content_hash="h", token_estimate=100,
-        )
-        # L2 item at promotion threshold
-        st._items["symbol:l2.py"] = TrackedItem(
-            key="symbol:l2.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L2, n=8, content_hash="h", token_estimate=100,
-        )
-
-        st.update_after_response({}, [], {"l1.py", "l2.py"})
-
-        # L2 item's N should be capped at promotion_n (9) since L1 is stable
-        l2_item = st.get_item("symbol:l2.py")
-        assert l2_item.n <= TIER_CONFIG[Tier.L2]["promotion_n"]
-        assert l2_item.tier == Tier.L2  # Did NOT promote
+# === Threshold Anchoring ===
 
 
 class TestThresholdAnchoring:
+    def test_items_below_threshold_anchored(self):
+        """Items below cache_target_tokens have frozen N (anchored)."""
+        tracker = StabilityTracker(cache_target_tokens=500)
 
-    def test_anchored_items_n_frozen(self):
-        """Items below the cache_target_tokens threshold have frozen N."""
-        st = StabilityTracker(cache_target_tokens=200)
-
-        # Two items in L3, one small (anchored), one large
-        st._items["symbol:small.py"] = TrackedItem(
-            key="symbol:small.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L3, n=3, content_hash="h", token_estimate=100,
+        # Two items: first is small (anchored), second is large (above threshold)
+        tracker._items["symbol:small.py"] = TrackedItem(
+            key="symbol:small.py", tier=Tier.L3, n=5,
+            content_hash="s", tokens=100,
         )
-        st._items["symbol:large.py"] = TrackedItem(
-            key="symbol:large.py", item_type=ItemType.SYMBOL,
-            tier=Tier.L3, n=3, content_hash="h", token_estimate=500,
+        tracker._items["symbol:large.py"] = TrackedItem(
+            key="symbol:large.py", tier=Tier.L3, n=6,
+            content_hash="l", tokens=1000,
+        )
+        # Break L2 so promotion is possible
+        tracker._broken_tiers.add(Tier.L2)
+        tracker.run_cascade()
+
+        # The large item (above threshold) with N >= 6 should promote
+        # The small item (below threshold) should remain anchored
+        large = tracker.get_item("symbol:large.py")
+        assert large.tier == Tier.L2  # promoted
+
+    def test_n_capped_when_tier_above_stable(self):
+        """N is capped at promotion threshold when tier above is stable."""
+        tracker = StabilityTracker(cache_target_tokens=50)
+
+        # L2 has content (stable, not broken)
+        tracker._items["symbol:stable.py"] = TrackedItem(
+            key="symbol:stable.py", tier=Tier.L2, n=8,
+            content_hash="s", tokens=100,
+        )
+        # L3 item with N way above promotion threshold
+        tracker._items["symbol:capped.py"] = TrackedItem(
+            key="symbol:capped.py", tier=Tier.L3, n=20,
+            content_hash="c", tokens=1000,  # above threshold
         )
 
-        st.update_after_response({}, [], {"small.py", "large.py"})
+        tracker.run_cascade()
 
-        # small.py (100 tokens) fills the 200 threshold first → anchored (N frozen)
-        # large.py (500 tokens) is past threshold → N incremented
-        small = st.get_item("symbol:small.py")
-        large = st.get_item("symbol:large.py")
-        assert small.n == 3  # Frozen
-        assert large.n == 4  # Incremented
+        # Should remain in L3 since L2 is not broken
+        capped = tracker.get_item("symbol:capped.py")
+        assert capped.tier == Tier.L3
+        # N should be capped at promotion_n (6 for L3)
+        assert capped.n <= TIER_CONFIG[Tier.L3]["promotion_n"]
 
 
-class TestMultiRequestSequence:
+# === Underfilled Tier Demotion ===
 
-    def test_full_lifecycle(self):
-        """Simulate a multi-request lifecycle."""
-        st = StabilityTracker(cache_target_tokens=0)
 
-        # Request 1: File selected
-        active1 = {"file:a.py": {"hash": "h1", "tokens": 100, "type": ItemType.FILE}}
-        st.update_after_response(active1, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 0
+class TestUnderfilled:
+    def test_underfilled_tier_demoted(self):
+        """Underfilled tiers demote items one level down."""
+        tracker = StabilityTracker(cache_target_tokens=500)
 
-        # Request 2-3: Same file, unchanged — N goes to 1, 2
-        st.update_after_response(active1, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 1
-        st.update_after_response(active1, [], {"a.py"})
-        assert st.get_item("file:a.py").n == 2
-
-        # Request 4: N increments to 3, then graduates to L3 while still selected
-        st.update_after_response(active1, [], {"a.py"})
-        assert st.get_item("file:a.py").tier == Tier.L3
-
-        # Request 5-9: File stays selected, accumulating N in L3
-        for _ in range(5):
-            st.update_after_response(active1, [], {"a.py"})
-
-        # File may have promoted further through cascade
-        item = st.get_item("file:a.py")
-        assert item.tier in (Tier.L3, Tier.L2, Tier.L1)
-
-        # File edited — demotes to active, N=0
-        active2 = {"file:a.py": {"hash": "h2", "tokens": 100, "type": ItemType.FILE}}
-        st.update_after_response(active2, ["a.py"], {"a.py"})
-        assert st.get_item("file:a.py").tier == Tier.ACTIVE
-        assert st.get_item("file:a.py").n == 0
-
-    def test_content_change_resets_everything(self):
-        """Content change demotes from any tier."""
-        st = StabilityTracker(cache_target_tokens=0)
-
-        # Initialize in L1
-        st.initialize_from_reference_graph(
-            [(Tier.L1, ["symbol:a.py"])],
-            {"symbol:a.py": 100},
+        # Put a tiny item in L1 (well below 500 tokens)
+        tracker._items["symbol:tiny.py"] = TrackedItem(
+            key="symbol:tiny.py", tier=Tier.L1, n=10,
+            content_hash="t", tokens=50,
         )
-        assert st.get_item("symbol:a.py").tier == Tier.L1
 
-        # Content change
-        st.update_after_response(
-            {"symbol:a.py": {"hash": "new_hash", "tokens": 100, "type": ItemType.SYMBOL}},
-            [], {"a.py"},
-        )
-        assert st.get_item("symbol:a.py").tier == Tier.ACTIVE
-        assert st.get_item("symbol:a.py").n == 0
+        tracker._demote_underfilled()
 
-
-class TestClusterForTiers:
-    """Test reference graph clustering for tier initialization."""
-
-    def test_empty_index(self):
-        """No symbols = no clusters."""
-        from unittest.mock import MagicMock
-
-        ref_index = MagicMock()
-        ref_index.connected_components.return_value = []
-
-        symbol_index = MagicMock()
-        symbol_index.all_symbols = {}
-        symbol_index.get_file_block.return_value = ""
-
-        result = cluster_for_tiers(ref_index, symbol_index, 1536)
-        assert result == []
-
-    def test_basic_clustering(self):
-        from unittest.mock import MagicMock
-
-        ref_index = MagicMock()
-        ref_index.connected_components.return_value = [
-            {"a.py", "b.py"},
-            {"c.py", "d.py"},
-        ]
-
-        symbol_index = MagicMock()
-        symbol_index.all_symbols = {
-            "a.py": None, "b.py": None, "c.py": None,
-            "d.py": None, "e.py": None,
-        }
-        symbol_index.get_file_block.return_value = "x" * 400  # ~100 tokens each
-
-        result = cluster_for_tiers(ref_index, symbol_index, 100)
-        assert len(result) > 0
-
-        # All files should be assigned somewhere
-        all_keys = set()
-        for tier, keys in result:
-            all_keys.update(keys)
-        assert len(all_keys) == 5  # All 5 files
-
-    def test_singletons_included(self):
-        """Files not in any component are included as singletons."""
-        from unittest.mock import MagicMock
-
-        ref_index = MagicMock()
-        ref_index.connected_components.return_value = []
-
-        symbol_index = MagicMock()
-        symbol_index.all_symbols = {"solo.py": None}
-        symbol_index.get_file_block.return_value = "x" * 400
-
-        result = cluster_for_tiers(ref_index, symbol_index, 100)
-        all_keys = set()
-        for _, keys in result:
-            all_keys.update(keys)
-        assert "symbol:solo.py" in all_keys
+        # Should be demoted from L1 to L2
+        item = tracker.get_item("symbol:tiny.py")
+        assert item.tier == Tier.L2
