@@ -383,9 +383,9 @@ def main(args=None):
         webapp_port = parsed.webapp_port
 
     # Step 3: Initialize services
-    from .config import ConfigManager
-    from .repo import Repo
-    from .settings import Settings
+    from ac_dc.config import ConfigManager
+    from ac_dc.repo import Repo
+    from ac_dc.settings import Settings
 
     config = ConfigManager(repo_root=repo_path)
     repo = Repo(repo_path)
@@ -394,14 +394,14 @@ def main(args=None):
     # Symbol index (optional — may fail if tree-sitter not available)
     symbol_index = None
     try:
-        from .symbol_index.index import SymbolIndex
+        from ac_dc.symbol_index.index import SymbolIndex
         symbol_index = SymbolIndex(repo_path)
         logger.info("Symbol index initialized")
     except Exception as e:
         logger.warning(f"Symbol index unavailable: {e}")
 
     # LLM service
-    from .llm_service import LLMService
+    from ac_dc.llm_service import LLMService
     llm_service = LLMService(
         config, repo=repo, symbol_index=symbol_index,
     )
