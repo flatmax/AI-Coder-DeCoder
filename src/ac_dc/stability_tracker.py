@@ -1,750 +1,524 @@
-"""Stability-based cache tier tracker.
+"""Cache stability tracker — N-value tracking, tier assignment, and cascade promotion.
 
-Manages N-value tracking, tier assignment, content hashing, graduation,
-and ripple promotion for the prompt cache tiering system.
+Organizes prompt content into stability-based tiers that align with provider
+cache breakpoints. Content that remains unchanged promotes to higher tiers;
+changed content demotes. This reduces LLM re-ingestion costs.
 
-Items tracked: files, symbol map entries, history messages.
-Each item has an N-value (consecutive unchanged appearances) and a tier.
-Content is hashed to detect changes.  Tiers promote upward when stable;
-demote to active when content changes.
-
-Tier structure (most → least stable):
-    L0 (entry_n=12)  — system prompt, legend, core content
-    L1 (entry_n=9)   — very stable
-    L2 (entry_n=6)   — stable
-    L3 (entry_n=3)   — entry tier for graduated content
-    active (n=0)      — recently changed / new, not cached
+Three categories: files, symbol map entries, and history messages.
 """
 
 import hashlib
 import logging
-from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Tier definitions
-# ──────────────────────────────────────────────────────────────────────
 
 class Tier(IntEnum):
-    """Cache tiers ordered from most stable to least."""
-    L0 = 0
-    L1 = 1
-    L2 = 2
+    """Cache tier levels. Higher = more stable."""
+    ACTIVE = 0
     L3 = 3
-    ACTIVE = 4
+    L2 = 6
+    L1 = 9
+    L0 = 12
 
 
-# Per-tier configuration
+# Tier configuration
 TIER_CONFIG = {
-    Tier.L0: {"entry_n": 12, "promotion_n": None, "name": "L0"},
-    Tier.L1: {"entry_n": 9, "promotion_n": 12, "name": "L1"},
-    Tier.L2: {"entry_n": 6, "promotion_n": 9, "name": "L2"},
-    Tier.L3: {"entry_n": 3, "promotion_n": 6, "name": "L3"},
-    Tier.ACTIVE: {"entry_n": 0, "promotion_n": 3, "name": "active"},
+    Tier.ACTIVE: {"entry_n": 0, "promotion_n": 3, "destination": Tier.L3},
+    Tier.L3: {"entry_n": 3, "promotion_n": 6, "destination": Tier.L2},
+    Tier.L2: {"entry_n": 6, "promotion_n": 9, "destination": Tier.L1},
+    Tier.L1: {"entry_n": 9, "promotion_n": 12, "destination": Tier.L0},
+    Tier.L0: {"entry_n": 12, "promotion_n": None, "destination": None},  # terminal
 }
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Item types
-# ──────────────────────────────────────────────────────────────────────
-
-class ItemType:
-    FILE = "file"
-    SYMBOL = "symbol"
-    HISTORY = "history"
+# Tier processing order (bottom-up for cascade)
+CASCADE_ORDER = [Tier.L3, Tier.L2, Tier.L1, Tier.L0]
 
 
 @dataclass
 class TrackedItem:
-    """A single tracked item in the stability system."""
-    key: str                     # e.g. "file:src/main.py", "symbol:src/main.py", "history:3"
-    item_type: str               # ItemType constant
+    """A tracked item in the stability system."""
+    key: str           # e.g. "file:src/main.py", "symbol:src/main.py", "history:0"
     tier: Tier = Tier.ACTIVE
-    n: int = 0                   # Consecutive unchanged count
-    content_hash: str = ""       # SHA-256 prefix for change detection
-    token_estimate: int = 0      # Approximate token count
+    n: int = 0
+    content_hash: str = ""
+    tokens: int = 0
 
-
-@dataclass
-class TierChange:
-    """Record of a tier change for UI notification."""
-    key: str
-    item_type: str
-    old_tier: Tier
-    new_tier: Tier
-
-    @property
-    def is_promotion(self) -> bool:
-        return self.new_tier.value < self.old_tier.value
-
-    @property
-    def is_demotion(self) -> bool:
-        return self.new_tier.value > self.old_tier.value
-
-
-def _hash_content(content: str) -> str:
-    """Compute a short hash for change detection."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Stability Tracker
-# ──────────────────────────────────────────────────────────────────────
 
 class StabilityTracker:
-    """Tracks item stability across requests and manages tier assignments.
+    """Tracks content stability and manages tier assignments.
 
-    The tracker implements the full cache tiering algorithm:
-    - N-value tracking with content hashing
-    - Graduation from active → L3
-    - Ripple promotion cascade (L3 → L2 → L1 → L0)
-    - Threshold-aware anchoring within tiers
-    - Demotion on content change
-    - Controlled history graduation
+    Items are identified by string keys:
+    - file:{path} — full file content
+    - symbol:{path} — compact symbol block
+    - history:{index} — conversation history message
     """
 
-    def __init__(self, cache_target_tokens: int = 1536):
-        self.cache_target_tokens = cache_target_tokens
+    def __init__(self, cache_target_tokens=1536):
+        self._items = {}  # key -> TrackedItem
+        self._cache_target_tokens = cache_target_tokens
+        self._changes = []  # log of recent changes for frontend
+        self._broken_tiers = set()  # tiers that were modified this cycle
 
-        # Primary state: key → TrackedItem
-        self._items: dict[str, TrackedItem] = {}
-
-        # Previous request's active items list (for graduation detection)
-        self._prev_active_keys: set[str] = set()
-
-        # Tier broken flags (set during cascade)
-        self._tier_broken: dict[Tier, bool] = {t: False for t in Tier}
-
-        # Changes from last update cycle
-        self._changes: list[TierChange] = []
-
-    # ------------------------------------------------------------------
-    # Public API — Querying
-    # ------------------------------------------------------------------
-
-    def get_item(self, key: str) -> Optional[TrackedItem]:
-        return self._items.get(key)
-
-    def get_tier_items(self, tier: Tier) -> list[TrackedItem]:
-        """Get all items in a given tier, sorted by key for stability."""
-        return sorted(
-            [it for it in self._items.values() if it.tier == tier],
-            key=lambda it: it.key,
-        )
-
-    def get_tier_tokens(self, tier: Tier) -> int:
-        """Total token estimate for a tier."""
-        return sum(it.token_estimate for it in self._items.values() if it.tier == tier)
-
-    def get_changes(self) -> list[TierChange]:
-        """Get and consume changes from last update cycle."""
-        changes = list(self._changes)
-        self._changes.clear()
-        return changes
-
-    def get_all_items(self) -> dict[str, TrackedItem]:
+    @property
+    def items(self):
+        """All tracked items."""
         return dict(self._items)
 
     @property
-    def item_count(self) -> int:
-        return len(self._items)
-
-    # ------------------------------------------------------------------
-    # Public API — Initialization
-    # ------------------------------------------------------------------
-
-    def initialize_from_reference_graph(
-        self,
-        clusters: list[tuple[Tier, list[str]]],
-        token_estimates: dict[str, int],
-    ):
-        """Initialize tier assignments from reference graph clustering.
-
-        Args:
-            clusters: list of (tier, [symbol_keys]) from the clustering algorithm
-            token_estimates: key → token count for each item
-        """
-        for tier, keys in clusters:
-            entry_n = TIER_CONFIG[tier]["entry_n"]
-            for key in keys:
-                tokens = token_estimates.get(key, 0)
-                self._items[key] = TrackedItem(
-                    key=key,
-                    item_type=ItemType.SYMBOL,
-                    tier=tier,
-                    n=entry_n,
-                    content_hash="",  # Placeholder — updated on first request
-                    token_estimate=tokens,
-                )
-
-    # ------------------------------------------------------------------
-    # Public API — Per-Request Update
-    # ------------------------------------------------------------------
-
-    def update_after_response(
-        self,
-        active_items: dict[str, dict],
-        modified_files: list[str],
-        all_repo_files: set[str],
-    ) -> list[TierChange]:
-        """Run the full per-request update cycle.
-
-        Args:
-            active_items: key → {"hash": str, "tokens": int, "type": str}
-                          The current active items list.
-            modified_files: files modified by edits this response.
-            all_repo_files: current set of repo-relative file paths.
-
-        Returns:
-            List of tier changes for UI notification.
-        """
-        self._changes.clear()
-        self._tier_broken = {t: False for t in Tier}
-
-        # Phase 0: Remove stale items
-        self._phase0_remove_stale(all_repo_files)
-
-        # Phase 1: Process active items
-        self._phase1_process_active(active_items, modified_files)
-
-        # Phase 2: Determine items entering L3
-        entering_l3 = self._phase2_graduation(active_items)
-
-        # Phase 3: Run cascade
-        self._phase3_cascade(entering_l3)
-
-        # Phase 4: Record
-        self._prev_active_keys = set(active_items.keys())
-
-        if self._changes:
-            log.info(
-                "Stability update: %d items, %d changes",
-                len(self._items), len(self._changes),
-            )
-        else:
-            log.debug(
-                "Stability update: %d items, no changes",
-                len(self._items),
-            )
-
+    def changes(self):
+        """Recent change log."""
         return list(self._changes)
 
-    # ------------------------------------------------------------------
-    # Public API — History Management
-    # ------------------------------------------------------------------
+    def clear_changes(self):
+        """Clear the change log."""
+        self._changes.clear()
 
-    def purge_history_items(self):
-        """Remove all history items (after compaction)."""
-        to_remove = [k for k, it in self._items.items() if it.item_type == ItemType.HISTORY]
-        for k in to_remove:
-            item = self._items.pop(k)
-            if item.tier != Tier.ACTIVE:
-                self._tier_broken[item.tier] = True
+    # === Item Access ===
 
-    def register_item(self, key: str, item_type: str, content_hash: str,
-                      token_estimate: int, tier: Tier = Tier.ACTIVE):
-        """Register or update a single item."""
-        if key in self._items:
-            item = self._items[key]
-            if item.content_hash != content_hash and item.content_hash != "":
-                # Content changed — demote
-                old_tier = item.tier
-                item.tier = Tier.ACTIVE
-                item.n = 0
-                item.content_hash = content_hash
-                item.token_estimate = token_estimate
-                if old_tier != Tier.ACTIVE:
-                    self._tier_broken[old_tier] = True
-                    self._changes.append(TierChange(key, item_type, old_tier, Tier.ACTIVE))
-            else:
-                item.content_hash = content_hash
-                item.token_estimate = token_estimate
-        else:
-            self._items[key] = TrackedItem(
-                key=key,
-                item_type=item_type,
-                tier=tier,
-                n=TIER_CONFIG[tier]["entry_n"],
-                content_hash=content_hash,
-                token_estimate=token_estimate,
-            )
+    def get_item(self, key):
+        """Get a tracked item by key."""
+        return self._items.get(key)
 
-    # ------------------------------------------------------------------
-    # Phase 0: Remove stale items
-    # ------------------------------------------------------------------
+    def get_tier_items(self, tier):
+        """Get all items in a specific tier."""
+        return {k: v for k, v in self._items.items() if v.tier == tier}
 
-    def _phase0_remove_stale(self, all_repo_files: set[str]):
-        """Remove items whose files no longer exist."""
+    def get_tier_tokens(self, tier):
+        """Total tokens in a tier."""
+        return sum(item.tokens for item in self._items.values() if item.tier == tier)
+
+    # === Content Hashing ===
+
+    @staticmethod
+    def hash_content(content):
+        """SHA256 hash of content string."""
+        if not content:
+            return ""
+        return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    # === Phase 0: Remove Stale Items ===
+
+    def remove_stale(self, existing_files):
+        """Remove tracked items whose files no longer exist.
+
+        Args:
+            existing_files: set of file paths that currently exist
+        """
         to_remove = []
         for key, item in self._items.items():
-            if item.item_type in (ItemType.FILE, ItemType.SYMBOL):
-                # Extract path from key like "file:src/main.py" or "symbol:src/main.py"
-                path = key.split(":", 1)[1] if ":" in key else key
-                if path not in all_repo_files:
+            if key.startswith("file:") or key.startswith("symbol:"):
+                path = key.split(":", 1)[1]
+                if path not in existing_files:
                     to_remove.append(key)
 
         for key in to_remove:
-            item = self._items.pop(key)
-            if item.tier != Tier.ACTIVE:
-                self._tier_broken[item.tier] = True
-            log.debug("Removed stale item: %s", key)
+            tier = self._items[key].tier
+            del self._items[key]
+            self._broken_tiers.add(tier)
+            self._changes.append({"action": "removed", "key": key, "reason": "stale"})
 
-    # ------------------------------------------------------------------
-    # Phase 1: Process active items
-    # ------------------------------------------------------------------
+    # === Phase 1: Process Active Items ===
 
-    def _phase1_process_active(
-        self,
-        active_items: dict[str, dict],
-        modified_files: list[str],
-    ):
-        """Process each item in the active items list."""
-        # Build set of modified keys
-        modified_keys = set()
-        for fpath in modified_files:
-            modified_keys.add(f"file:{fpath}")
-            modified_keys.add(f"symbol:{fpath}")
+    def process_active_items(self, active_items):
+        """Process the active items list for this request.
 
-        for key, info in active_items.items():
-            content_hash = info["hash"]
-            tokens = info["tokens"]
-            item_type = info["type"]
+        Args:
+            active_items: list of dicts with {key, content_hash, tokens}
 
-            if key in self._items:
-                item = self._items[key]
-                # Check for content change or explicit modification
-                hash_changed = (
-                    item.content_hash != ""
-                    and item.content_hash != content_hash
-                )
-                # Also treat as changed if hash was placeholder and item is in a cached tier
-                placeholder_in_cached = (
-                    item.content_hash == ""
-                    and item.tier != Tier.ACTIVE
-                )
-                is_modified = key in modified_keys
+        For each item:
+        - New: register at active, N=0
+        - Changed (hash mismatch): N=0, demote to active
+        - Unchanged: N++
+        """
+        for item_info in active_items:
+            key = item_info["key"]
+            new_hash = item_info["content_hash"]
+            tokens = item_info.get("tokens", 0)
 
-                if hash_changed or is_modified or placeholder_in_cached:
-                    # Demote to active, reset N
-                    old_tier = item.tier
-                    if old_tier != Tier.ACTIVE:
-                        self._tier_broken[old_tier] = True
-                        self._changes.append(
-                            TierChange(key, item_type, old_tier, Tier.ACTIVE)
-                        )
-                    item.tier = Tier.ACTIVE
-                    item.n = 0
-                    item.content_hash = content_hash
-                    item.token_estimate = tokens
-                else:
-                    # Content unchanged — increment N
-                    item.n += 1
-                    item.content_hash = content_hash
-                    item.token_estimate = tokens
-            else:
+            existing = self._items.get(key)
+
+            if existing is None:
                 # New item
                 self._items[key] = TrackedItem(
-                    key=key,
-                    item_type=item_type,
-                    tier=Tier.ACTIVE,
-                    n=0,
-                    content_hash=content_hash,
-                    token_estimate=tokens,
+                    key=key, tier=Tier.ACTIVE, n=0,
+                    content_hash=new_hash, tokens=tokens,
                 )
+            elif existing.content_hash != new_hash:
+                # Changed — demote to active
+                old_tier = existing.tier
+                existing.tier = Tier.ACTIVE
+                existing.n = 0
+                existing.content_hash = new_hash
+                existing.tokens = tokens
+                if old_tier != Tier.ACTIVE:
+                    self._broken_tiers.add(old_tier)
+                    self._changes.append({
+                        "action": "demoted", "key": key,
+                        "from": old_tier.name, "to": "ACTIVE",
+                    })
+            else:
+                # Unchanged — increment N
+                existing.n += 1
+                existing.tokens = tokens
 
-    # ------------------------------------------------------------------
-    # Phase 2: Determine items entering L3
-    # ------------------------------------------------------------------
+    # === Phase 2: Determine Items Entering L3 ===
 
-    def _phase2_graduation(self, active_items: dict[str, dict]) -> list[str]:
-        """Determine which items should enter L3.
+    def determine_graduates(self, controlled_history_graduation=True):
+        """Find items eligible to graduate from active to L3.
 
-        Returns list of keys entering L3.
+        Three sources:
+        1. Items leaving active context with N >= 3
+        2. Active items with N >= 3 (still selected)
+        3. Controlled history graduation
+
+        Returns list of keys that should enter L3.
         """
-        entering_l3: list[str] = []
-        current_active_keys = set(active_items.keys())
+        graduates = []
 
-        # Source 1: Items leaving active context
-        # Items that were in the active list last request but aren't now
-        leaving_active = self._prev_active_keys - current_active_keys
-        for key in leaving_active:
-            item = self._items.get(key)
-            if item is None:
-                continue
-            # Only graduate if currently in active tier
+        for key, item in self._items.items():
             if item.tier != Tier.ACTIVE:
                 continue
-            # Files/symbols need N ≥ 3 to graduate
-            if item.item_type in (ItemType.FILE, ItemType.SYMBOL):
-                if item.n >= TIER_CONFIG[Tier.ACTIVE]["promotion_n"]:
-                    entering_l3.append(key)
-            # History is immutable — always eligible (but controlled below)
 
-        # Source 2: Active items with N ≥ 3 still in the active list
-        # These graduate to L3 while remaining in the active items list,
-        # so their content moves from the uncached active section to cached L3.
-        # L3 breaks each time (active content changes), but L0-L2 stay stable.
-        for key in current_active_keys:
-            item = self._items.get(key)
-            if item is None:
+            if key.startswith("history:"):
+                # History graduation is controlled separately
                 continue
-            if item.tier != Tier.ACTIVE:
-                continue
-            if item.item_type in (ItemType.FILE, ItemType.SYMBOL):
-                if item.n >= TIER_CONFIG[Tier.ACTIVE]["promotion_n"]:
-                    entering_l3.append(key)
 
-        # Source 3: Controlled history graduation
-        # If file/symbol entries are about to enter L3, that will break L3 —
-        # pre-set the broken flag so history can piggyback.
-        if entering_l3:
-            self._tier_broken[Tier.L3] = True
+            if item.n >= 3:
+                graduates.append(key)
 
-        history_graduating = self._graduate_history(current_active_keys)
-        entering_l3.extend(history_graduating)
+        # Controlled history graduation
+        if controlled_history_graduation:
+            history_grads = self._determine_history_graduates()
+            graduates.extend(history_grads)
 
-        return entering_l3
+        return graduates
 
-    def _graduate_history(self, current_active_keys: set[str]) -> list[str]:
-        """Determine which history items should graduate to L3.
+    def _determine_history_graduates(self):
+        """Determine which history items should graduate.
 
-        Two conditions for graduation:
-        1. Piggyback: L3 is already broken this cycle — all active-tier history graduates
-        2. Token threshold: eligible history tokens exceed cache_target_tokens
+        Two conditions allow graduation:
+        1. Piggyback: if L3 is already being rebuilt (broken), graduate for free
+        2. Token threshold: if eligible history tokens exceed cache_target_tokens
         """
-        if self.cache_target_tokens <= 0:
-            return []
-
-        # Condition 1: Piggyback on L3 invalidation — ALL active-tier history graduates
-        if self._tier_broken[Tier.L3]:
-            all_history = []
-            for key, item in sorted(self._items.items()):
-                if item.item_type != ItemType.HISTORY:
-                    continue
-                if item.tier != Tier.ACTIVE:
-                    continue
-                all_history.append(key)
-            return all_history
-
-        # Find active-tier history items not in current active list
         eligible = []
-        eligible_tokens = 0
-        for key, item in sorted(self._items.items()):
-            if item.item_type != ItemType.HISTORY:
-                continue
-            if item.tier != Tier.ACTIVE:
-                continue
-            if key in current_active_keys:
-                continue
-            eligible.append((key, item))
-            eligible_tokens += item.token_estimate
+        for key, item in self._items.items():
+            if key.startswith("history:") and item.tier == Tier.ACTIVE:
+                eligible.append(item)
 
         if not eligible:
             return []
 
+        if self._cache_target_tokens == 0:
+            return []  # History stays active permanently
+
+        # Condition 1: Piggyback on L3 invalidation
+        l3_broken = Tier.L3 in self._broken_tiers
+        # Also check if any non-history items are graduating (which would break L3)
+        any_non_history_grads = any(
+            item.n >= 3 and item.tier == Tier.ACTIVE and not item.key.startswith("history:")
+            for item in self._items.values()
+        )
+
+        if l3_broken or any_non_history_grads:
+            return [item.key for item in eligible]
+
         # Condition 2: Token threshold
-        if eligible_tokens <= self.cache_target_tokens:
-            return []
+        total_eligible_tokens = sum(item.tokens for item in eligible)
+        if total_eligible_tokens > self._cache_target_tokens:
+            # Graduate oldest first, keep most recent cache_target_tokens in active
+            eligible.sort(key=lambda i: int(i.key.split(":")[1]))
+            graduates = []
+            remaining_tokens = total_eligible_tokens
+            for item in eligible:
+                if remaining_tokens - item.tokens >= self._cache_target_tokens:
+                    graduates.append(item.key)
+                    remaining_tokens -= item.tokens
+                else:
+                    break
+            return graduates
 
-        # Graduate oldest first, keeping cache_target_tokens worth in active
-        # Sort by key (history:N — N is the message index, so sorted = oldest first)
-        eligible.sort(key=lambda pair: pair[0])
+        return []
 
-        graduating = []
-        remaining_tokens = eligible_tokens
-        for key, item in eligible:
-            if remaining_tokens - item.token_estimate < self.cache_target_tokens:
-                break
-            graduating.append(key)
-            remaining_tokens -= item.token_estimate
+    def graduate_items(self, keys):
+        """Move items from active to L3.
 
-        return graduating
-
-    # ------------------------------------------------------------------
-    # Phase 3: Cascade
-    # ------------------------------------------------------------------
-
-    def _phase3_cascade(self, entering_l3: list[str]):
-        """Run the ripple promotion cascade.
-
-        Bottom-up pass through L3 → L2 → L1 → L0:
-        - Place incoming items with tier's entry_n
-        - Process veterans: threshold anchoring, N increment, promotion check
-        - Repeat until no promotions occur
-        - Post-cascade: demote items from underfilled tiers
+        Args:
+            keys: list of item keys to graduate
         """
-        # Place items entering L3 and mark them as already processed
-        newly_placed: set[str] = set()
-        for key in entering_l3:
+        for key in keys:
             item = self._items.get(key)
-            if item is None:
-                continue
-            old_tier = item.tier
-            item.tier = Tier.L3
-            item.n = TIER_CONFIG[Tier.L3]["entry_n"]
-            self._tier_broken[Tier.L3] = True
-            newly_placed.add(key)
-            if old_tier != Tier.L3:
-                self._changes.append(TierChange(key, item.item_type, old_tier, Tier.L3))
+            if item and item.tier == Tier.ACTIVE:
+                item.tier = Tier.L3
+                item.n = TIER_CONFIG[Tier.L3]["entry_n"]
+                self._broken_tiers.add(Tier.L3)
+                self._changes.append({
+                    "action": "graduated", "key": key,
+                    "to": "L3",
+                })
 
-        # Run cascade passes until stable
-        max_iterations = 10
-        for _ in range(max_iterations):
-            promoted_any = False
-            processed: set[str] = set(newly_placed)
+    # === Phase 3: Run Cascade ===
 
-            # Process tiers bottom-up: L3 → L2 → L1 → L0
-            for tier in [Tier.L3, Tier.L2, Tier.L1, Tier.L0]:
-                dest_tier = Tier(tier.value - 1) if tier != Tier.L0 else None
+    def run_cascade(self):
+        """Bottom-up cascade: place incoming, process veterans, check promotion.
 
-                # Skip if this tier doesn't need processing
-                if not self._tier_broken[tier] and (
-                    dest_tier is None or not self._tier_broken[dest_tier]
-                ):
-                    # Check if there are incoming items (already placed above)
-                    if not any(
-                        it.key not in processed and it.tier == tier
-                        for it in self._items.values()
-                    ):
-                        continue
+        Repeats until no promotions occur.
+        Post-cascade: demote underfilled tiers.
+        """
+        max_iterations = 10  # safety limit
+        iteration = 0
 
-                tier_items = [
-                    it for it in self._items.values()
-                    if it.tier == tier and it.key not in processed
-                ]
-                if not tier_items:
+        while iteration < max_iterations:
+            iteration += 1
+            any_promotion = False
+
+            for tier in CASCADE_ORDER:
+                config = TIER_CONFIG[tier]
+                dest = config["destination"]
+                promo_n = config["promotion_n"]
+
+                if promo_n is None:
+                    continue  # L0 is terminal
+
+                # Check if tier above is broken/empty
+                tier_above_broken = (
+                    dest in self._broken_tiers or
+                    not any(i.tier == dest for i in self._items.values())
+                )
+
+                # Process veterans in this tier
+                veterans = [i for i in self._items.values() if i.tier == tier]
+                if not veterans:
                     continue
 
-                # Mark all as processed
-                for it in tier_items:
-                    processed.add(it.key)
+                # Sort by N ascending for threshold anchoring
+                veterans.sort(key=lambda i: i.n)
 
-                # Determine if tier above is stable (not broken and not empty)
-                tier_above_stable = (
-                    dest_tier is not None
-                    and not self._tier_broken[dest_tier]
-                    and self.get_tier_tokens(dest_tier) > 0
-                ) if dest_tier is not None else True
-
-                promotion_n = TIER_CONFIG[tier]["promotion_n"]
-
-                if self.cache_target_tokens > 0 and tier != Tier.L0:
+                if self._cache_target_tokens > 0:
                     # Threshold-aware processing
-                    tier_items.sort(key=lambda it: it.n)
-                    accumulated_tokens = 0
+                    # Only anchor if the tier has enough content to protect
+                    total_tier_tokens = sum(i.tokens for i in veterans)
+                    do_anchoring = total_tier_tokens > self._cache_target_tokens
 
-                    for it in tier_items:
-                        accumulated_tokens += it.token_estimate
-                        if accumulated_tokens <= self.cache_target_tokens:
-                            # Anchored — N frozen
-                            continue
+                    accumulated = 0
+                    for item in veterans:
+                        if do_anchoring and accumulated + item.tokens <= self._cache_target_tokens:
+                            # Below threshold — anchored (N frozen, cannot promote)
+                            accumulated += item.tokens
+                            item._anchored = True
                         else:
-                            # Past threshold — N++
-                            if tier_above_stable and promotion_n is not None:
-                                # Cap N at promotion threshold
-                                it.n = min(it.n + 1, promotion_n)
-                            else:
-                                it.n += 1
+                            accumulated += item.tokens
+                            item._anchored = False
+                            # Cap N at promotion threshold if tier above is stable
+                            if not tier_above_broken and item.n >= promo_n:
+                                item.n = promo_n  # cap
 
-                            # Check promotion (broken OR empty dest tier)
-                            dest_open = (
-                                dest_tier is not None
-                                and (self._tier_broken[dest_tier]
-                                     or self.get_tier_tokens(dest_tier) == 0)
-                            )
-                            if (
-                                promotion_n is not None
-                                and dest_tier is not None
-                                and it.n >= promotion_n
-                                and dest_open
-                            ):
-                                # Promote!
-                                old_tier = it.tier
-                                it.tier = dest_tier
-                                it.n = TIER_CONFIG[dest_tier]["entry_n"]
-                                self._tier_broken[tier] = True
-                                self._changes.append(
-                                    TierChange(it.key, it.item_type, old_tier, dest_tier)
-                                )
-                                promoted_any = True
-                else:
-                    # No threshold — all veterans get N++
-                    for it in tier_items:
-                        if promotion_n is not None:
-                            if tier_above_stable:
-                                it.n = min(it.n + 1, promotion_n)
-                            else:
-                                it.n += 1
-                        # L0 has no promotion
-                        dest_open = (
-                            dest_tier is not None
-                            and (self._tier_broken[dest_tier]
-                                 or self.get_tier_tokens(dest_tier) == 0)
-                        )
-                        if (
-                            promotion_n is not None
-                            and dest_tier is not None
-                            and it.n >= promotion_n
-                            and dest_open
-                        ):
-                            old_tier = it.tier
-                            it.tier = dest_tier
-                            it.n = TIER_CONFIG[dest_tier]["entry_n"]
-                            self._tier_broken[tier] = True
-                            self._changes.append(
-                                TierChange(it.key, it.item_type, old_tier, dest_tier)
-                            )
-                            promoted_any = True
+                # Check for promotions
+                to_promote = []
+                for item in veterans:
+                    if tier_above_broken and item.n >= promo_n and not getattr(item, '_anchored', False):
+                        to_promote.append(item)
 
-            if not promoted_any:
+                for item in to_promote:
+                    old_tier = item.tier
+                    item.tier = dest
+                    item.n = TIER_CONFIG[dest]["entry_n"]
+                    self._broken_tiers.add(old_tier)
+                    self._broken_tiers.add(dest)
+                    any_promotion = True
+                    self._changes.append({
+                        "action": "promoted", "key": item.key,
+                        "from": old_tier.name, "to": dest.name,
+                    })
+
+            if not any_promotion:
                 break
 
         # Post-cascade: demote underfilled tiers
         self._demote_underfilled()
 
     def _demote_underfilled(self):
-        """Demote items from tiers below cache_target_tokens.
+        """Demote items from tiers below cache_target_tokens to the tier below.
 
-        Only demotes one level per tier. Tiers that receive demoted items
-        are skipped to prevent cascading demotions to active.
+        Each item demotes at most one level per call to avoid cascading
+        double-demotions within a single pass.
+        Skips tiers that were just promoted into this cycle (broken).
         """
-        if self.cache_target_tokens <= 0:
+        if self._cache_target_tokens <= 0:
             return
 
-        received_demotions: set[Tier] = set()
+        demoted_keys = set()
 
-        for tier in [Tier.L1, Tier.L2]:
-            if tier in received_demotions:
+        for tier in reversed(CASCADE_ORDER):
+            if tier == Tier.L3:
+                continue  # L3 items would demote to active, handled differently
+
+            # Skip tiers that received promotions this cycle — they are
+            # intentionally populated and should not be immediately undone
+            if tier in self._broken_tiers:
                 continue
+
             tier_tokens = self.get_tier_tokens(tier)
-            if 0 < tier_tokens < self.cache_target_tokens:
-                # Demote all items one tier down
-                dest = Tier(tier.value + 1)
-                received_demotions.add(dest)
-                for it in list(self._items.values()):
-                    if it.tier == tier:
-                        old_tier = it.tier
-                        it.tier = dest
-                        # Keep current N
-                        self._changes.append(
-                            TierChange(it.key, it.item_type, old_tier, dest)
-                        )
+            if 0 < tier_tokens < self._cache_target_tokens:
+                # Find the tier below
+                below = None
+                for t in CASCADE_ORDER:
+                    if TIER_CONFIG.get(t, {}).get("destination") == tier:
+                        below = t
+                        break
 
+                if below is None:
+                    continue
 
-# ──────────────────────────────────────────────────────────────────────
-# Reference Graph Clustering
-# ──────────────────────────────────────────────────────────────────────
+                # Demote all items one tier down (keeping their N)
+                for item in list(self._items.values()):
+                    if item.tier == tier and item.key not in demoted_keys:
+                        item.tier = below
+                        demoted_keys.add(item.key)
+                        self._broken_tiers.add(tier)
+                        self._changes.append({
+                            "action": "demoted_underfilled", "key": item.key,
+                            "from": tier.name, "to": below.name,
+                        })
 
-def cluster_for_tiers(
-    ref_index,
-    symbol_index,
-    cache_target_tokens: int,
-) -> list[tuple[Tier, list[str]]]:
-    """Cluster symbol entries into L1/L2/L3 from the reference graph.
+    # === Full Update Cycle ===
 
-    Uses bidirectional edge analysis and greedy bin-packing.
+    def update(self, active_items, existing_files=None):
+        """Run the full per-request update cycle.
 
-    Args:
-        ref_index: ReferenceIndex instance
-        symbol_index: SymbolIndex instance
-        cache_target_tokens: minimum tokens per tier
+        Args:
+            active_items: list of {key, content_hash, tokens}
+            existing_files: set of file paths that exist (for stale removal)
 
-    Returns:
-        list of (tier, [symbol_key, ...]) assignments
-    """
-    from .token_counter import TokenCounter
+        Returns:
+            dict with tier assignments and changes
+        """
+        self._broken_tiers.clear()
+        self._changes.clear()
 
-    # Step 1: Get bidirectional components
-    components = ref_index.connected_components()
+        # Phase 0: Remove stale
+        if existing_files is not None:
+            self.remove_stale(existing_files)
 
-    # Step 2: Estimate tokens per component
-    counter = TokenCounter()
-    comp_info: list[tuple[set[str], int]] = []
+        # Phase 1: Process active items
+        self.process_active_items(active_items)
 
-    for component in components:
-        keys = []
-        tokens = 0
-        for fpath in component:
-            key = f"symbol:{fpath}"
-            block = symbol_index.get_file_block(fpath)
-            if block:
-                t = max(1, len(block) // 4)  # Rough estimate
-                tokens += t
-                keys.append(key)
-        if keys:
-            comp_info.append((set(keys), tokens))
+        # Phase 2: Determine graduates
+        graduates = self.determine_graduates()
 
-    # Also include files NOT in any component (singletons)
-    all_in_components = set()
-    for comp in components:
-        all_in_components.update(comp)
+        # Graduate them
+        if graduates:
+            self.graduate_items(graduates)
 
-    all_files = set(symbol_index.all_symbols.keys())
-    singletons = all_files - all_in_components
+        # Phase 3: Run cascade
+        self.run_cascade()
 
-    for fpath in singletons:
-        key = f"symbol:{fpath}"
-        block = symbol_index.get_file_block(fpath)
-        if block:
-            tokens = max(1, len(block) // 4)
-            comp_info.append(({key}, tokens))
+        return {
+            "tiers": self._get_tier_summary(),
+            "changes": list(self._changes),
+            "broken_tiers": [t.name for t in self._broken_tiers],
+        }
 
-    if not comp_info:
-        return []
+    def _get_tier_summary(self):
+        """Summarize items per tier."""
+        summary = {}
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]:
+            items = self.get_tier_items(tier)
+            if items:
+                summary[tier.name] = {
+                    "count": len(items),
+                    "tokens": sum(i.tokens for i in items.values()),
+                    "items": [{"key": k, "n": v.n} for k, v in items.items()],
+                }
+        return summary
 
-    # Step 3: Sort by size descending
-    comp_info.sort(key=lambda x: -x[1])
+    # === History Management ===
 
-    # Step 4: Greedy bin-packing into 3 tiers
-    tier_bins: dict[Tier, list[str]] = {
-        Tier.L1: [],
-        Tier.L2: [],
-        Tier.L3: [],
-    }
-    tier_tokens: dict[Tier, int] = {
-        Tier.L1: 0,
-        Tier.L2: 0,
-        Tier.L3: 0,
-    }
+    def purge_history_items(self):
+        """Remove all history:* entries from the tracker."""
+        to_remove = [k for k in self._items if k.startswith("history:")]
+        for key in to_remove:
+            tier = self._items[key].tier
+            del self._items[key]
+            self._broken_tiers.add(tier)
 
-    for keys, tokens in comp_info:
-        # Assign to tier with fewest tokens
-        target = min(
-            [Tier.L1, Tier.L2, Tier.L3],
-            key=lambda t: tier_tokens[t],
-        )
-        tier_bins[target].extend(keys)
-        tier_tokens[target] += tokens
+    # === Initialization from Reference Graph ===
 
-    # Step 5: Merge underfilled tiers
-    result: list[tuple[Tier, list[str]]] = []
-    for tier in [Tier.L1, Tier.L2, Tier.L3]:
-        if tier_bins[tier] and tier_tokens[tier] >= cache_target_tokens:
-            result.append((tier, tier_bins[tier]))
-        elif tier_bins[tier]:
-            # Underfilled — merge into the smallest other tier
-            smallest = None
-            smallest_tokens = float("inf")
-            for other in [Tier.L1, Tier.L2, Tier.L3]:
-                if other != tier and tier_tokens[other] < smallest_tokens:
-                    smallest = other
-                    smallest_tokens = tier_tokens[other]
-            if smallest is not None:
-                tier_bins[smallest].extend(tier_bins[tier])
-                tier_tokens[smallest] += tier_tokens[tier]
-                tier_bins[tier] = []
-                tier_tokens[tier] = 0
+    def initialize_from_reference_graph(self, ref_index, all_files, counter=None):
+        """Initialize tier assignments from cross-file reference graph.
 
-    # Re-collect after merge
-    if not result:
-        result = []
-        for tier in [Tier.L1, Tier.L2, Tier.L3]:
-            if tier_bins[tier]:
-                result.append((tier, tier_bins[tier]))
+        No persistence — rebuilt fresh each session. Items receive their tier's
+        entry_n and a placeholder content hash.
 
-    return result
+        Args:
+            ref_index: ReferenceIndex instance
+            all_files: list of all source file paths
+            counter: TokenCounter for estimating tokens (optional)
+        """
+        if not all_files:
+            return
+
+        # Try clustering via mutual references (bidirectional edges)
+        if ref_index and hasattr(ref_index, 'connected_components'):
+            components = ref_index.connected_components()
+            if components:
+                self._init_from_clusters(components, counter)
+                return
+
+        # Fallback: sort by reference count descending
+        if ref_index and hasattr(ref_index, 'reference_count'):
+            files_with_refs = [
+                (f, ref_index.reference_count(f))
+                for f in all_files
+            ]
+            files_with_refs.sort(key=lambda x: -x[1])
+        else:
+            files_with_refs = [(f, 0) for f in all_files]
+
+        # Distribute across L1, L2, L3
+        tiers = [Tier.L1, Tier.L2, Tier.L3]
+        tier_idx = 0
+        accumulated = 0
+
+        for path, _refs in files_with_refs:
+            tier = tiers[min(tier_idx, len(tiers) - 1)]
+            key = f"symbol:{path}"
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=tier,
+                n=TIER_CONFIG[tier]["entry_n"],
+                content_hash="",  # placeholder
+                tokens=0,
+            )
+            accumulated += 1
+
+            # Move to next tier when we have enough
+            if self._cache_target_tokens > 0 and tier_idx < len(tiers) - 1:
+                # Simple distribution: roughly equal across tiers
+                if accumulated >= len(files_with_refs) // len(tiers):
+                    tier_idx += 1
+                    accumulated = 0
+
+    def _init_from_clusters(self, components, counter):
+        """Initialize from connected components.
+
+        Greedy bin-packing by cluster size, each cluster stays together.
+        """
+        tiers = [Tier.L1, Tier.L2, Tier.L3]
+        tier_sizes = {t: 0 for t in tiers}
+
+        for component in sorted(components, key=len, reverse=True):
+            # Place in smallest tier
+            target = min(tiers, key=lambda t: tier_sizes[t])
+            for path in component:
+                key = f"symbol:{path}"
+                self._items[key] = TrackedItem(
+                    key=key,
+                    tier=target,
+                    n=TIER_CONFIG[target]["entry_n"],
+                    content_hash="",
+                    tokens=0,
+                )
+                tier_sizes[target] += 1

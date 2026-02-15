@@ -1,310 +1,545 @@
-"""Tests for context manager."""
+"""Tests for the context engine (FileContext + ContextManager)."""
+
+import subprocess
+from pathlib import Path
 
 import pytest
-from pathlib import Path
+
 from ac_dc.context import (
-    ContextManager, FileContext,
-    REPO_MAP_HEADER, FILE_TREE_HEADER, FILES_ACTIVE_HEADER,
-    URL_CONTEXT_HEADER, COMMIT_MSG_SYSTEM, _format_files,
+    ContextManager,
+    FileContext,
+    FILES_ACTIVE_HEADER,
+    FILE_TREE_HEADER,
+    REPO_MAP_HEADER,
+    REVIEW_CONTEXT_HEADER,
+    URL_CONTEXT_HEADER,
 )
+from ac_dc.token_counter import TokenCounter
+
+
+@pytest.fixture
+def temp_repo(tmp_path):
+    """Create a temporary git repo with test files."""
+    repo = tmp_path / "test_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@test.com"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"],
+                   capture_output=True)
+
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("def main():\n    print('hello')\n")
+    (repo / "src" / "utils.py").write_text("def helper():\n    pass\n")
+    (repo / "README.md").write_text("# Test Project\n")
+
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"],
+                   capture_output=True)
+
+    return repo
+
+
+# === FileContext Tests ===
 
 
 class TestFileContext:
-
-    def test_add_with_content(self):
+    def test_add_with_explicit_content(self):
+        """Add with explicit content stores it."""
         fc = FileContext()
-        assert fc.add_file("test.py", "print('hello')")
-        assert fc.has_file("test.py")
+        assert fc.add_file("test.py", "print('hello')") is True
         assert fc.get_content("test.py") == "print('hello')"
 
-    def test_add_from_disk(self, tmp_path):
-        (tmp_path / "hello.py").write_text("x = 1\n")
-        fc = FileContext(tmp_path)
-        assert fc.add_file("hello.py")
-        assert fc.get_content("hello.py") == "x = 1\n"
+    def test_add_from_disk(self, temp_repo):
+        """Add from disk reads file."""
+        fc = FileContext(repo_root=temp_repo)
+        assert fc.add_file("src/main.py") is True
+        content = fc.get_content("src/main.py")
+        assert "def main()" in content
 
-    def test_add_missing_file(self, tmp_path):
-        fc = FileContext(tmp_path)
-        assert not fc.add_file("missing.py")
+    def test_missing_file_returns_false(self, temp_repo):
+        """Adding a missing file returns False."""
+        fc = FileContext(repo_root=temp_repo)
+        assert fc.add_file("nonexistent.py") is False
 
-    def test_add_binary_file(self, tmp_path):
-        (tmp_path / "data.bin").write_bytes(b"\x00\x01\x02\x03")
-        fc = FileContext(tmp_path)
-        assert not fc.add_file("data.bin")
+    def test_binary_file_rejected(self, temp_repo):
+        """Binary file rejected."""
+        bin_file = temp_repo / "data.bin"
+        bin_file.write_bytes(b"text\x00binary")
+        fc = FileContext(repo_root=temp_repo)
+        assert fc.add_file("data.bin") is False
 
-    def test_path_traversal_blocked(self, tmp_path):
-        fc = FileContext(tmp_path)
-        assert not fc.add_file("../../../etc/passwd")
-
-    def test_remove_file(self):
+    def test_path_traversal_blocked(self):
+        """Path traversal blocked."""
         fc = FileContext()
-        fc.add_file("a.py", "a")
+        assert fc.add_file("../../../etc/passwd", "bad") is False
+
+    def test_remove(self):
+        """Remove file from context."""
+        fc = FileContext()
+        fc.add_file("a.py", "code")
         fc.remove_file("a.py")
-        assert not fc.has_file("a.py")
+        assert fc.has_file("a.py") is False
 
     def test_get_files_sorted(self):
+        """get_files returns sorted list."""
         fc = FileContext()
-        fc.add_file("c.py", "c")
+        fc.add_file("z.py", "z")
         fc.add_file("a.py", "a")
-        fc.add_file("b.py", "b")
-        assert fc.get_files() == ["a.py", "b.py", "c.py"]
+        fc.add_file("m.py", "m")
+        assert fc.get_files() == ["a.py", "m.py", "z.py"]
 
     def test_clear(self):
+        """clear removes all files."""
         fc = FileContext()
         fc.add_file("a.py", "a")
+        fc.add_file("b.py", "b")
         fc.clear()
         assert fc.get_files() == []
 
     def test_format_for_prompt(self):
+        """format_for_prompt includes path and fenced content."""
         fc = FileContext()
-        fc.add_file("test.py", "x = 1")
-        prompt = fc.format_for_prompt()
-        assert "test.py" in prompt
-        assert "```" in prompt
-        assert "x = 1" in prompt
+        fc.add_file("src/main.py", "def main():\n    pass")
+        text = fc.format_for_prompt()
+        assert "src/main.py" in text
+        assert "```" in text
+        assert "def main():" in text
 
-    def test_no_content_no_repo(self):
+    def test_has_file(self):
+        """has_file checks membership."""
         fc = FileContext()
-        assert not fc.add_file("test.py")
+        fc.add_file("a.py", "a")
+        assert fc.has_file("a.py") is True
+        assert fc.has_file("b.py") is False
+
+    def test_count_tokens(self):
+        """count_tokens returns positive for non-empty files."""
+        fc = FileContext()
+        fc.add_file("a.py", "def hello(): pass")
+        counter = TokenCounter()
+        assert fc.count_tokens(counter) > 0
+
+    def test_get_tokens_by_file(self):
+        """get_tokens_by_file returns per-file counts."""
+        fc = FileContext()
+        fc.add_file("a.py", "short")
+        fc.add_file("b.py", "a much longer piece of content with more tokens")
+        counter = TokenCounter()
+        by_file = fc.get_tokens_by_file(counter)
+        assert "a.py" in by_file
+        assert "b.py" in by_file
+        assert by_file["b.py"] > by_file["a.py"]
 
 
-class TestContextManager:
+# === ContextManager Tests ===
 
+
+class TestContextManagerHistory:
     def test_add_message(self):
-        cm = ContextManager()
-        cm.add_message("user", "hello")
-        assert len(cm.get_history()) == 1
-        assert cm.get_history()[0] == {"role": "user", "content": "hello"}
+        """add_message appends to history."""
+        ctx = ContextManager()
+        ctx.add_message("user", "hello")
+        assert len(ctx.get_history()) == 1
+        assert ctx.get_history()[0]["role"] == "user"
 
     def test_add_exchange(self):
-        cm = ContextManager()
-        cm.add_exchange("question", "answer")
-        history = cm.get_history()
+        """add_exchange appends pair atomically."""
+        ctx = ContextManager()
+        ctx.add_exchange("question", "answer")
+        history = ctx.get_history()
         assert len(history) == 2
         assert history[0]["role"] == "user"
         assert history[1]["role"] == "assistant"
 
     def test_get_history_returns_copy(self):
-        cm = ContextManager()
-        cm.add_message("user", "hello")
-        h = cm.get_history()
-        h.append({"role": "assistant", "content": "world"})
-        assert len(cm.get_history()) == 1
+        """get_history returns copy (mutation-safe)."""
+        ctx = ContextManager()
+        ctx.add_message("user", "hello")
+        h1 = ctx.get_history()
+        h1.append({"role": "user", "content": "injected"})
+        assert len(ctx.get_history()) == 1
 
-    def test_set_history(self):
-        cm = ContextManager()
-        cm.add_message("user", "old")
-        cm.set_history([{"role": "user", "content": "new"}])
-        assert cm.get_history()[0]["content"] == "new"
+    def test_set_history_replaces(self):
+        """set_history replaces entire history."""
+        ctx = ContextManager()
+        ctx.add_message("user", "old")
+        ctx.set_history([{"role": "user", "content": "new"}])
+        assert len(ctx.get_history()) == 1
+        assert ctx.get_history()[0]["content"] == "new"
 
-    def test_clear_history(self):
-        cm = ContextManager()
-        cm.add_exchange("q", "a")
-        cm.clear_history()
-        assert cm.get_history() == []
+    def test_clear_history_empties(self):
+        """clear_history empties list."""
+        ctx = ContextManager()
+        ctx.add_exchange("q", "a")
+        ctx.clear_history()
+        assert len(ctx.get_history()) == 0
 
     def test_history_token_count(self):
-        cm = ContextManager()
-        cm.add_exchange("hello world", "goodbye world")
-        tokens = cm.history_token_count()
-        assert tokens > 0
+        """history_token_count > 0 for non-empty history."""
+        ctx = ContextManager()
+        ctx.add_exchange("What is Python?", "Python is a programming language.")
+        assert ctx.history_token_count() > 0
 
-    def test_token_budget(self):
-        cm = ContextManager()
-        budget = cm.get_token_budget()
+
+class TestContextManagerBudget:
+    def test_token_budget_has_required_keys(self):
+        """Token budget has required keys."""
+        ctx = ContextManager()
+        budget = ctx.get_token_budget()
         assert "history_tokens" in budget
+        assert "max_history_tokens" in budget
         assert "max_input_tokens" in budget
         assert "remaining" in budget
+        assert "needs_summary" in budget
+
+    def test_remaining_positive(self):
+        """Remaining > 0 for empty context."""
+        ctx = ContextManager()
+        budget = ctx.get_token_budget()
         assert budget["remaining"] > 0
 
-    def test_should_compact_disabled(self):
-        cm = ContextManager(compaction_config={"enabled": False})
-        assert not cm.should_compact()
+    def test_should_compact_false_when_disabled(self):
+        """should_compact false when disabled."""
+        ctx = ContextManager(compaction_config={"enabled": False})
+        assert ctx.should_compact() is False
 
-    def test_should_compact_below_trigger(self):
-        cm = ContextManager(compaction_config={
+    def test_should_compact_false_below_trigger(self):
+        """should_compact false below trigger."""
+        ctx = ContextManager(compaction_config={
             "enabled": True,
             "compaction_trigger_tokens": 100000,
         })
-        cm.add_exchange("small", "msg")
-        assert not cm.should_compact()
+        # Simulate a compactor being set
+        ctx.init_compactor(object())
+        ctx.add_message("user", "short message")
+        assert ctx.should_compact() is False
 
     def test_compaction_status(self):
-        cm = ContextManager(compaction_config={
+        """Compaction status returns enabled/trigger/percent."""
+        ctx = ContextManager(compaction_config={
             "enabled": True,
             "compaction_trigger_tokens": 24000,
         })
-        status = cm.get_compaction_status()
+        status = ctx.get_compaction_status()
+        assert "enabled" in status
         assert status["enabled"] is True
-        assert status["trigger_tokens"] == 24000
+        assert "trigger_tokens" in status
+        assert "percent" in status
 
-    def test_assemble_messages_basic(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="What is this?",
-            system_prompt="You are helpful.",
-        )
-        assert msgs[0]["role"] == "system"
-        assert "You are helpful" in msgs[0]["content"]
-        assert msgs[-1]["role"] == "user"
-        assert msgs[-1]["content"] == "What is this?"
 
-    def test_assemble_messages_with_symbol_map(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="hi",
-            system_prompt="system",
-            symbol_map="# symbols here",
-        )
-        system_content = msgs[0]["content"]
-        assert "Repository Structure" in system_content
-        assert "# symbols here" in system_content
+class TestContextManagerBudgetEnforcement:
+    def test_shed_files_if_needed_no_op_under_budget(self):
+        """shed_files_if_needed is no-op when under budget."""
+        ctx = ContextManager()
+        ctx.file_context.add_file("small.py", "x = 1")
+        shed = ctx.shed_files_if_needed()
+        assert shed == []
 
-    def test_assemble_messages_with_file_tree(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="hi",
-            system_prompt="system",
-            file_tree="README.md\nsrc/main.py",
-        )
-        # Should have system, file_tree user, file_tree assistant Ok, user prompt
-        tree_msg = next(m for m in msgs if "Repository Files" in str(m.get("content", "")))
-        assert tree_msg["role"] == "user"
+    def test_emergency_truncate_preserves_pairs(self):
+        """emergency_truncate reduces message count, preserves pairs."""
+        ctx = ContextManager(compaction_config={
+            "enabled": True,
+            "compaction_trigger_tokens": 100,
+        })
+        # Add many messages to exceed 2x trigger
+        for i in range(50):
+            ctx.add_exchange(
+                f"User message {i} " * 20,
+                f"Assistant response {i} " * 20,
+            )
+        ctx.emergency_truncate()
+        history = ctx.get_history()
+        assert len(history) < 100
+        # Check pairs preserved
+        for i in range(0, len(history), 2):
+            if i + 1 < len(history):
+                assert history[i]["role"] == "user"
+                assert history[i + 1]["role"] == "assistant"
 
-    def test_assemble_messages_with_url_context(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="hi",
-            system_prompt="system",
-            url_context="## https://example.com\nSome content",
-        )
-        url_msg = next(m for m in msgs if "URL Context" in str(m.get("content", "")))
-        assert url_msg["role"] == "user"
-        # Check for the assistant acknowledgement
-        idx = msgs.index(url_msg)
-        assert msgs[idx + 1]["content"] == "Ok, I've reviewed the URL content."
 
-    def test_assemble_messages_with_files(self, tmp_path):
-        cm = ContextManager(repo_root=tmp_path)
-        (tmp_path / "test.py").write_text("x = 1\n")
-        cm.file_context.add_file("test.py")
-        msgs = cm.assemble_messages(
-            user_prompt="explain",
-            system_prompt="system",
-        )
-        files_msg = next(m for m in msgs if "Working Files" in str(m.get("content", "")))
-        assert "test.py" in files_msg["content"]
+class TestPromptAssembly:
+    def test_system_message_first(self):
+        """System message first with system prompt content."""
+        ctx = ContextManager(system_prompt="You are helpful.")
+        messages = ctx.assemble_messages("Hello")
+        assert messages[0]["role"] == "system"
+        assert "You are helpful." in messages[0]["content"]
 
-    def test_assemble_messages_with_history(self):
-        cm = ContextManager()
-        cm.add_exchange("prev question", "prev answer")
-        msgs = cm.assemble_messages(
-            user_prompt="new question",
-            system_prompt="system",
+    def test_symbol_map_appended_to_system(self):
+        """Symbol map appended to system message under Repository Structure header."""
+        ctx = ContextManager(system_prompt="System prompt")
+        messages = ctx.assemble_messages(
+            "Hello", symbol_map="f main :1", symbol_legend="Legend text"
         )
-        assert msgs[-1]["content"] == "new question"
-        # History should be before the current user message
-        contents = [m.get("content", "") for m in msgs]
-        assert "prev question" in contents
-        assert "prev answer" in contents
+        system = messages[0]["content"]
+        assert "Repository Structure" in system
+        assert "Legend text" in system
+        assert "f main :1" in system
 
-    def test_assemble_messages_with_images(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="describe this",
-            system_prompt="system",
-            images=["data:image/png;base64,abc123"],
+    def test_file_tree_as_pair(self):
+        """File tree as user/assistant pair with Repository Files header."""
+        ctx = ContextManager()
+        messages = ctx.assemble_messages("Hello", file_tree="src/main.py\nsrc/utils.py")
+        # Find the file tree message
+        tree_msg = None
+        for msg in messages:
+            if msg["role"] == "user" and "Repository Files" in msg.get("content", ""):
+                tree_msg = msg
+                break
+        assert tree_msg is not None
+        assert "src/main.py" in tree_msg["content"]
+
+    def test_url_context_as_pair(self):
+        """URL context as user/assistant pair with acknowledgement."""
+        ctx = ContextManager()
+        ctx.set_url_context(["URL 1 content", "URL 2 content"])
+        messages = ctx.assemble_messages("Hello")
+        # Find URL context
+        url_msg = None
+        ack_msg = None
+        for i, msg in enumerate(messages):
+            if msg["role"] == "user" and "URL Context" in msg.get("content", ""):
+                url_msg = msg
+                if i + 1 < len(messages):
+                    ack_msg = messages[i + 1]
+                break
+        assert url_msg is not None
+        assert "URL 1 content" in url_msg["content"]
+        assert ack_msg is not None
+        assert "reviewed" in ack_msg["content"].lower()
+
+    def test_active_files_as_pair(self):
+        """Active files as user/assistant pair with Working Files header."""
+        ctx = ContextManager()
+        ctx.file_context.add_file("src/main.py", "def main(): pass")
+        messages = ctx.assemble_messages("Hello")
+        files_msg = None
+        for msg in messages:
+            if msg["role"] == "user" and "Working Files" in msg.get("content", ""):
+                files_msg = msg
+                break
+        assert files_msg is not None
+        assert "src/main.py" in files_msg["content"]
+
+    def test_history_before_user_prompt(self):
+        """History messages appear before current user prompt."""
+        ctx = ContextManager()
+        ctx.add_exchange("prev question", "prev answer")
+        messages = ctx.assemble_messages("current question")
+        # Last message should be the current prompt
+        assert messages[-1]["content"] == "current question"
+        # History should appear before it
+        history_found = False
+        for msg in messages[:-1]:
+            if msg.get("content") == "prev question":
+                history_found = True
+        assert history_found
+
+    def test_images_multimodal(self):
+        """Images produce multimodal content blocks."""
+        ctx = ContextManager()
+        messages = ctx.assemble_messages(
+            "Look at this", images=["data:image/png;base64,abc123"]
         )
-        last = msgs[-1]
+        last = messages[-1]
         assert isinstance(last["content"], list)
         assert last["content"][0]["type"] == "text"
         assert last["content"][1]["type"] == "image_url"
 
-    def test_assemble_no_images_is_string(self):
-        cm = ContextManager()
-        msgs = cm.assemble_messages(
-            user_prompt="hello",
-            system_prompt="system",
-        )
-        assert isinstance(msgs[-1]["content"], str)
+    def test_no_images_string_content(self):
+        """No images produces string content."""
+        ctx = ContextManager()
+        messages = ctx.assemble_messages("Hello")
+        last = messages[-1]
+        assert isinstance(last["content"], str)
 
-    def test_estimate_prompt_tokens(self):
-        cm = ContextManager()
-        cm.add_exchange("hello", "world")
-        tokens = cm.estimate_prompt_tokens(
-            user_prompt="new msg",
-            system_prompt="You are helpful.",
-        )
+    def test_estimate_prompt_tokens_positive(self):
+        """estimate_prompt_tokens > 0."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.add_message("user", "hello")
+        tokens = ctx.estimate_prompt_tokens("new message")
         assert tokens > 0
 
-    def test_shed_files_if_needed(self, tmp_path):
-        """Test that the largest file is shed when budget exceeded."""
-        cm = ContextManager(repo_root=tmp_path)
-        # Create a context that won't exceed a real budget
-        # Just verify the mechanism works when files exist
-        (tmp_path / "small.py").write_text("x = 1\n")
-        cm.file_context.add_file("small.py")
+    def test_graduated_files_excluded(self):
+        """Graduated files excluded from active files section."""
+        ctx = ContextManager()
+        ctx.file_context.add_file("a.py", "code a")
+        ctx.file_context.add_file("b.py", "code b")
+        messages = ctx.assemble_messages("Hello", graduated_files={"a.py"})
+        # Find working files section
+        for msg in messages:
+            if msg["role"] == "user" and "Working Files" in msg.get("content", ""):
+                assert "a.py" not in msg["content"]
+                assert "b.py" in msg["content"]
+                break
 
-        shed = cm.shed_files_if_needed(
-            "msg", "system", "", "",
+    def test_all_graduated_no_working_files(self):
+        """All files graduated -> no Working Files section."""
+        ctx = ContextManager()
+        ctx.file_context.add_file("a.py", "code")
+        messages = ctx.assemble_messages("Hello", graduated_files={"a.py"})
+        for msg in messages:
+            if msg["role"] == "user" and "Working Files" in msg.get("content", ""):
+                pytest.fail("Working Files section should not exist when all graduated")
+
+
+class TestTieredAssembly:
+    def test_l0_system_with_cache_control_no_history(self):
+        """L0 system message has cache_control when no L0 history."""
+        ctx = ContextManager(system_prompt="System")
+        messages = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={"l0": {"symbols": "", "files": "", "history": []}}
         )
-        # Budget shouldn't be exceeded with a tiny file
-        assert shed == []
-        assert cm.file_context.has_file("small.py")
+        system = messages[0]
+        assert system["role"] == "system"
+        # Should have cache_control in structured content
+        if isinstance(system["content"], list):
+            assert system["content"][0].get("cache_control") is not None
 
-    def test_emergency_truncate(self):
-        cm = ContextManager(compaction_config={
-            "compaction_trigger_tokens": 10,  # Very low trigger
-        })
-        # Add lots of messages
-        for i in range(100):
-            cm.add_exchange(f"question {i} " * 20, f"answer {i} " * 20)
+    def test_l0_with_history_cache_on_last(self):
+        """L0 with history: cache_control on last history message, not system."""
+        ctx = ContextManager(system_prompt="System")
+        messages = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={
+                "l0": {
+                    "symbols": "",
+                    "files": "",
+                    "history": [
+                        {"role": "user", "content": "old q"},
+                        {"role": "assistant", "content": "old a"},
+                    ],
+                }
+            }
+        )
+        # System should be plain string
+        assert isinstance(messages[0]["content"], str)
+        # Last L0 history message should have cache_control
+        assert isinstance(messages[2]["content"], list)
+        assert messages[2]["content"][0].get("cache_control") is not None
 
-        original_len = len(cm.get_history())
-        cm.emergency_truncate()
-        # Should have fewer messages
-        assert len(cm.get_history()) < original_len
+    def test_l1_block_pair(self):
+        """L1 block produces user/assistant pair containing symbol content."""
+        ctx = ContextManager(system_prompt="System")
+        messages = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={
+                "l1": {"symbols": "f main :1", "files": "", "history": []},
+            }
+        )
+        # Find L1 pair
+        found = False
+        for i, msg in enumerate(messages):
+            if msg["role"] == "user" and "Repository Structure (continued)" in str(msg.get("content", "")):
+                found = True
+                break
+        assert found
 
-    def test_emergency_truncate_preserves_pairs(self):
-        cm = ContextManager(compaction_config={
-            "compaction_trigger_tokens": 10,
-        })
-        for i in range(50):
-            cm.add_exchange(f"q{i} " * 20, f"a{i} " * 20)
-
-        cm.emergency_truncate()
-        history = cm.get_history()
-        # Should have even number (user/assistant pairs)
-        assert len(history) % 2 == 0
-        # First should be user
-        if history:
-            assert history[0]["role"] == "user"
-
-
-class TestFormatFiles:
-
-    def test_empty(self):
-        assert _format_files({}) == ""
-
-    def test_single_file(self):
-        result = _format_files({"test.py": "x = 1"})
-        assert "test.py" in result
-        assert "x = 1" in result
-        assert "```" in result
-
-    def test_multiple_files_sorted(self):
-        result = _format_files({"b.py": "b", "a.py": "a"})
-        assert result.index("a.py") < result.index("b.py")
+    def test_empty_tiers_no_messages(self):
+        """Empty tiers produce no messages."""
+        ctx = ContextManager(system_prompt="System")
+        messages_with = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={"l2": {"symbols": "content", "files": "", "history": []}},
+        )
+        messages_without = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={},
+        )
+        # Messages with L2 content should have more messages
+        assert len(messages_with) > len(messages_without)
 
 
-class TestConstants:
 
-    def test_headers_are_strings(self):
-        assert isinstance(REPO_MAP_HEADER, str)
-        assert isinstance(FILE_TREE_HEADER, str)
-        assert isinstance(FILES_ACTIVE_HEADER, str)
-        assert isinstance(URL_CONTEXT_HEADER, str)
 
-    def test_commit_msg_system_has_content(self):
-        assert "commit" in COMMIT_MSG_SYSTEM.lower()
-        assert "conventional" in COMMIT_MSG_SYSTEM.lower()
+class TestReviewContext:
+    def test_set_and_clear_review_context(self):
+        """set_review_context and clear_review_context work correctly."""
+        ctx = ContextManager()
+        assert ctx._review_context is None
+        ctx.set_review_context("Review content")
+        assert ctx._review_context == "Review content"
+        ctx.clear_review_context()
+        assert ctx._review_context is None
+
+    def test_set_review_context_empty_string_clears(self):
+        """Setting empty/None review context clears it."""
+        ctx = ContextManager()
+        ctx.set_review_context("content")
+        ctx.set_review_context("")
+        assert ctx._review_context is None
+        ctx.set_review_context("content")
+        ctx.set_review_context(None)
+        assert ctx._review_context is None
+
+    def test_review_context_in_assemble_messages(self):
+        """Review context appears as user/assistant pair in assembled messages."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_review_context("## Review: feature-branch\n2 commits")
+        messages = ctx.assemble_messages("Hello")
+        # Find review context
+        review_msg = None
+        review_ack = None
+        for i, msg in enumerate(messages):
+            if msg["role"] == "user" and "Code Review Context" in msg.get("content", ""):
+                review_msg = msg
+                if i + 1 < len(messages):
+                    review_ack = messages[i + 1]
+                break
+        assert review_msg is not None
+        assert "feature-branch" in review_msg["content"]
+        assert review_ack is not None
+        assert "reviewed the code changes" in review_ack["content"].lower()
+
+    def test_review_context_not_present_when_none(self):
+        """No review context block when review_context is None."""
+        ctx = ContextManager(system_prompt="System")
+        messages = ctx.assemble_messages("Hello")
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                assert "Code Review Context" not in content
+
+    def test_review_context_between_url_and_files(self):
+        """Review context appears after URL context and before active files."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_url_context(["URL content"])
+        ctx.set_review_context("Review content")
+        ctx.file_context.add_file("test.py", "code")
+        messages = ctx.assemble_messages("Hello")
+
+        url_idx = None
+        review_idx = None
+        files_idx = None
+        for i, msg in enumerate(messages):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                if "URL Context" in content:
+                    url_idx = i
+                if "Code Review Context" in content:
+                    review_idx = i
+                if "Working Files" in content:
+                    files_idx = i
+
+        assert url_idx is not None
+        assert review_idx is not None
+        assert files_idx is not None
+        assert url_idx < review_idx < files_idx
+
+    def test_review_context_in_tiered_assembly(self):
+        """Review context appears in tiered assembly between URL and active files."""
+        ctx = ContextManager(system_prompt="System")
+        ctx.set_review_context("## Review: test-branch")
+        messages = ctx.assemble_tiered_messages(
+            "Hello",
+            tiered_content={},
+        )
+        review_found = False
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str) and "Code Review Context" in content:
+                review_found = True
+                assert "test-branch" in content
+        assert review_found

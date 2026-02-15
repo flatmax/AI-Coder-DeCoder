@@ -1,384 +1,452 @@
-"""Context manager — conversation history, file context, token budgets.
+"""Context engine — manages conversation history, file context, token budgets, and prompt assembly.
 
-Central state holder for an LLM session, sitting between the transport
-layer and individual subsystems (stability tracker, compactor, etc.).
+This is the central state holder for an LLM session. It coordinates:
+- In-memory conversation history
+- File context tracking
+- Token budget enforcement
+- Prompt message assembly (non-tiered and tiered)
 """
 
 import logging
+import os
 from pathlib import Path
-from typing import Optional, Union
 
 from .token_counter import TokenCounter
-from .stability_tracker import (
-    StabilityTracker, Tier, ItemType, TierChange,
-    TIER_CONFIG, _hash_content, cluster_for_tiers,
-)
-from .context_builder import TieredContextBuilder
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Prompt assembly constants
-# ---------------------------------------------------------------------------
-
+# Header constants for prompt assembly
 REPO_MAP_HEADER = (
     "# Repository Structure\n\n"
     "Below is a map of the repository showing classes, functions, and their relationships.\n"
     "Use this to understand the codebase structure and find relevant code.\n\n"
 )
-
 FILE_TREE_HEADER = (
     "# Repository Files\n\n"
     "Complete list of files in the repository:\n\n"
 )
-
 URL_CONTEXT_HEADER = (
     "# URL Context\n\n"
     "The following content was fetched from URLs mentioned in the conversation:\n\n"
 )
-
 FILES_ACTIVE_HEADER = (
     "# Working Files\n\n"
     "Here are the files:\n\n"
 )
-
 FILES_L0_HEADER = (
     "# Reference Files (Stable)\n\n"
     "These files are included for reference:\n\n"
 )
-
 FILES_L1_HEADER = (
     "# Reference Files\n\n"
     "These files are included for reference:\n\n"
 )
-
 FILES_L2_HEADER = (
     "# Reference Files (L2)\n\n"
     "These files are included for reference:\n\n"
 )
-
 FILES_L3_HEADER = (
     "# Reference Files (L3)\n\n"
     "These files are included for reference:\n\n"
 )
-
 TIER_SYMBOLS_HEADER = "# Repository Structure (continued)\n\n"
-
-# System reminder — compact edit format reference.
-# Exists as infrastructure for potential mid-conversation reinforcement.
-SYSTEM_REMINDER = """\
-Edit format reminder:
-path/to/file
-<<<< EDIT
-[old text with anchor context]
-==== REPLACE
-[new text with same anchor context]
->>>> EDIT END
-Rules: exact whitespace match, enough context for unique anchor, no placeholders."""
-
-COMMIT_MSG_SYSTEM = """\
-You are an expert software engineer writing git commit messages.
-
-Format: conventional commit style.
-- Type: feat, fix, refactor, docs, test, chore, style, perf, ci, build
-- Subject: imperative mood, max 72 chars, no period
-- Body: wrap at 72 chars, explain what and why (not how)
-
-Output ONLY the commit message. No commentary, no markdown fencing."""
+REVIEW_CONTEXT_HEADER = "# Code Review Context\n\n"
 
 
 class FileContext:
-    """Tracks files included in conversation context."""
+    """Tracks files included in the conversation with their contents.
 
-    def __init__(self, repo_root: Optional[Path] = None):
-        self._repo_root = repo_root
-        self._files: dict[str, str] = {}  # path -> content
+    Paths are normalized relative to repo root. Binary files are rejected.
+    Path traversal (../) is blocked.
+    """
 
-    def add_file(self, path: str, content: Optional[str] = None) -> bool:
-        """Add a file to context. Reads from disk if content not provided."""
+    def __init__(self, repo_root=None):
+        self._repo_root = Path(repo_root) if repo_root else None
+        self._files = {}  # path -> content
+
+    def add_file(self, path, content=None):
+        """Add file to context. Reads from disk if content not provided.
+
+        Returns True on success, False on failure.
+        """
+        path = self._normalize_path(path)
+
+        if ".." in path:
+            logger.warning(f"Path traversal blocked: {path}")
+            return False
+
         if content is not None:
             self._files[path] = content
             return True
+
         if self._repo_root is None:
             return False
-        try:
-            full = self._repo_root / path
-            resolved = full.resolve()
-            if not str(resolved).startswith(str(self._repo_root.resolve())):
-                return False
-            if not full.exists():
-                return False
-            # Binary check
-            with open(full, "rb") as f:
-                if b"\x00" in f.read(8192):
-                    return False
-            self._files[path] = full.read_text(encoding="utf-8", errors="replace")
-            return True
-        except Exception as e:
-            log.warning("Failed to read file %s: %s", path, e)
+
+        abs_path = self._repo_root / path
+        if not abs_path.exists():
             return False
 
-    def remove_file(self, path: str):
-        """Remove a file from context."""
+        # Reject binary files
+        try:
+            with open(abs_path, "rb") as f:
+                chunk = f.read(8192)
+                if b"\x00" in chunk:
+                    return False
+        except OSError:
+            return False
+
+        try:
+            self._files[path] = abs_path.read_text()
+            return True
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    def remove_file(self, path):
+        """Remove from context."""
+        path = self._normalize_path(path)
         self._files.pop(path, None)
 
-    def get_files(self) -> list[str]:
-        """List paths in context."""
+    def get_files(self):
+        """List paths in context, sorted."""
         return sorted(self._files.keys())
 
-    def get_content(self, path: str) -> Optional[str]:
-        """Get content for a specific file."""
+    def get_content(self, path):
+        """Get specific file content."""
+        path = self._normalize_path(path)
         return self._files.get(path)
 
-    def has_file(self, path: str) -> bool:
+    def has_file(self, path):
+        """Check membership."""
+        path = self._normalize_path(path)
         return path in self._files
 
     def clear(self):
+        """Remove all."""
         self._files.clear()
 
-    def format_for_prompt(self) -> str:
+    def format_for_prompt(self):
         """Format all files as fenced code blocks for prompt inclusion."""
-        return _format_files(self._files)
+        parts = []
+        for path in sorted(self._files.keys()):
+            content = self._files[path]
+            parts.append(f"{path}\n```\n{content}\n```")
+        return "\n\n".join(parts)
 
-    def count_tokens(self, counter: TokenCounter) -> int:
+    def count_tokens(self, counter):
         """Total tokens across all files."""
-        if not self._files:
-            return 0
-        return counter.count(self.format_for_prompt())
+        total = 0
+        for content in self._files.values():
+            total += counter.count(content)
+        return total
 
-    def get_tokens_by_file(self, counter: TokenCounter) -> dict[str, int]:
+    def get_tokens_by_file(self, counter):
         """Per-file token counts."""
-        result = {}
-        for path, content in self._files.items():
-            block = f"\n{path}\n```\n{content}\n```\n"
-            result[path] = counter.count(block)
-        return result
+        return {path: counter.count(content) for path, content in self._files.items()}
 
-
-def _format_files(files: dict[str, str]) -> str:
-    """Format file dict as fenced code blocks (no language tags)."""
-    parts = []
-    for path in sorted(files.keys()):
-        content = files[path]
-        parts.append(f"\n{path}\n```\n{content}\n```\n")
-    return "\n".join(parts)
+    def _normalize_path(self, path):
+        """Normalize path separators."""
+        return str(path).replace("\\", "/").strip("/")
 
 
 class ContextManager:
-    """Manages conversation history, file context, and token budgets.
+    """Central state holder for an LLM session.
 
-    This is the central state holder for an LLM session.
+    Manages conversation history, file context, token budgets,
+    and coordinates prompt assembly.
     """
 
-    def __init__(
-        self,
-        model_name: str = "",
-        repo_root: Optional[Path] = None,
-        cache_target_tokens: int = 1536,
-        compaction_config: Optional[dict] = None,
-    ):
-        self.model_name = model_name
-        self.repo_root = repo_root
-        self.cache_target_tokens = cache_target_tokens
+    def __init__(self, model_name=None, repo_root=None,
+                 cache_target_tokens=1536, compaction_config=None,
+                 system_prompt=""):
+        self._model_name = model_name or "anthropic/claude-sonnet-4-20250514"
+        self._repo_root = repo_root
+        self._cache_target_tokens = cache_target_tokens
         self._compaction_config = compaction_config or {}
+        self._system_prompt = system_prompt
 
-        # Sub-components
-        self.counter = TokenCounter(model_name)
-        self.file_context = FileContext(repo_root)
+        # Core components
+        self._counter = TokenCounter(self._model_name)
+        self._file_context = FileContext(repo_root)
+        self._history = []  # list of {role, content} dicts
 
-        # Stability tracker (cache tiering)
-        self.stability = StabilityTracker(cache_target_tokens)
-
-        # Tiered context builder
-        self._builder = TieredContextBuilder(self.stability)
-
-        # History compactor (initialized later via init_compactor)
+        # Stability tracker and compactor (set up later via init methods)
+        self._stability_tracker = None
         self._compactor = None
 
-        # Conversation history — working copy for LLM requests
-        self._messages: list[dict] = []
+        # URL context
+        self._url_context = []  # list of formatted URL strings
 
-    # ------------------------------------------------------------------
-    # History operations
-    # ------------------------------------------------------------------
+        # Review context
+        self._review_context = None  # string or None
 
-    def add_message(self, role: str, content: str):
-        """Append a single message to history."""
-        self._messages.append({"role": role, "content": content})
+    # === Conversation History ===
 
-    def add_exchange(self, user_content: str, assistant_content: str):
-        """Append a user/assistant pair atomically."""
-        self._messages.append({"role": "user", "content": user_content})
-        self._messages.append({"role": "assistant", "content": assistant_content})
+    def add_message(self, role, content):
+        """Append single message to history."""
+        self._history.append({"role": role, "content": content})
 
-    def get_history(self) -> list[dict]:
-        """Return a copy of current history."""
-        return list(self._messages)
+    def add_exchange(self, user_content, assistant_content):
+        """Append user/assistant pair atomically."""
+        self._history.append({"role": "user", "content": user_content})
+        self._history.append({"role": "assistant", "content": assistant_content})
 
-    def set_history(self, messages: list[dict]):
-        """Replace history entirely (e.g. after compaction or session load)."""
-        self._messages = list(messages)
+    def get_history(self):
+        """Return a copy of conversation history."""
+        return [dict(m) for m in self._history]
+
+    def set_history(self, messages):
+        """Replace history entirely (after compaction or session load)."""
+        self._history = [dict(m) for m in messages]
 
     def clear_history(self):
-        """Empty the history."""
-        self._messages.clear()
+        """Empty history and purge stability tracker history entries."""
+        self._history.clear()
+        if self._stability_tracker:
+            self._stability_tracker.purge_history_items()
 
-    def history_token_count(self) -> int:
+    def reregister_history_items(self):
+        """Purge stability entries without clearing history."""
+        if self._stability_tracker:
+            self._stability_tracker.purge_history_items()
+
+    def history_token_count(self):
         """Token count of current history."""
-        return self.counter.count(self._messages)
+        return self._counter.count_messages(self._history)
+
+    # === File Context Delegation ===
 
     @property
-    def max_history_tokens(self) -> int:
-        return self.counter.max_history_tokens
+    def file_context(self):
+        return self._file_context
 
-    # ------------------------------------------------------------------
-    # Token budget
-    # ------------------------------------------------------------------
+    # === Token Budget ===
 
-    def get_token_budget(self) -> dict:
-        """Return token budget breakdown."""
+    @property
+    def counter(self):
+        return self._counter
+
+    def get_token_budget(self):
+        """Token budget report."""
         history_tokens = self.history_token_count()
-        max_history = self.max_history_tokens
-        max_input = self.counter.max_input_tokens
+        max_history = self._counter.max_history_tokens
+        max_input = self._counter.max_input_tokens
+        remaining = max_input - history_tokens - self._file_context.count_tokens(self._counter)
         return {
             "history_tokens": history_tokens,
             "max_history_tokens": max_history,
             "max_input_tokens": max_input,
-            "remaining": max(0, max_input - history_tokens),
+            "remaining": max(0, remaining),
             "needs_summary": self.should_compact(),
         }
 
-    # ------------------------------------------------------------------
-    # Compaction
-    # ------------------------------------------------------------------
-
-    def init_compactor(self, detection_model: str, skill_prompt: str):
-        """Initialize the history compactor with a detection model.
-
-        Called by the LLM service once model info is available.
-        """
-        from .history_compactor import HistoryCompactor
-        self._compactor = HistoryCompactor(
-            counter=self.counter,
-            config=self._compaction_config,
-            detection_model=detection_model,
-            skill_prompt=skill_prompt,
-        )
-
-    def should_compact(self) -> bool:
-        """True if enabled and history tokens exceed trigger."""
-        if hasattr(self, '_compactor') and self._compactor is not None:
-            return self._compactor.should_compact(self._messages)
+    def should_compact(self):
+        """Check if compaction should run."""
         if not self._compaction_config.get("enabled", False):
+            return False
+        if self._compactor is None:
             return False
         trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
         return self.history_token_count() > trigger
 
-    def compact_history_if_needed(self) -> Optional[dict]:
-        """Run compaction if threshold exceeded. Returns result dict or None."""
-        if not hasattr(self, '_compactor') or self._compactor is None:
-            return None
-        if not self._compactor.should_compact(self._messages):
-            return None
-
-        result = self._compactor.compact(self._messages)
-        if result.case == "none":
-            return {"case": "none"}
-
-        # Apply compaction
-        new_messages = self._compactor.apply_compaction(self._messages, result)
-
-        # Replace history
-        old_count = len(self._messages)
-        self._messages = new_messages
-
-        # Purge history entries from stability tracker
-        self.stability.purge_history_items()
-
-        log.info(
-            "Compaction applied: case=%s, %d → %d messages, %d → %d tokens",
-            result.case, result.messages_before, result.messages_after,
-            result.tokens_before, result.tokens_after,
-        )
-
-        return {
-            "case": result.case,
-            "messages_before": result.messages_before,
-            "messages_after": result.messages_after,
-            "tokens_before": result.tokens_before,
-            "tokens_after": result.tokens_after,
-            "summary": result.summary,
-        }
-
-    def get_compaction_status(self) -> dict:
-        """Status dict for UI."""
+    def get_compaction_status(self):
+        """Return compaction status info."""
         trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
-        history_tokens = self.history_token_count()
+        current = self.history_token_count()
         return {
             "enabled": self._compaction_config.get("enabled", False),
-            "history_tokens": history_tokens,
             "trigger_tokens": trigger,
-            "percent": min(100, int(history_tokens / max(1, trigger) * 100)),
+            "current_tokens": current,
+            "percent": round((current / trigger * 100) if trigger > 0 else 0, 1),
         }
 
-    # ------------------------------------------------------------------
-    # Prompt assembly
-    # ------------------------------------------------------------------
+    # === Compactor Integration ===
 
-    def assemble_messages(
-        self,
-        user_prompt: str,
-        system_prompt: str,
-        symbol_map: str = "",
-        file_tree: str = "",
-        url_context: str = "",
-        images: Optional[list[str]] = None,
-    ) -> list[dict]:
-        """Assemble the full message array for an LLM request.
+    def init_compactor(self, compactor):
+        """Attach a history compactor instance."""
+        self._compactor = compactor
 
-        Non-tiered assembly — used when stability tracker has no items.
+    async def compact_history_if_needed(self):
+        """Run compaction if threshold exceeded. Returns compaction result or None."""
+        if not self.should_compact():
+            return None
+
+        result = await self._compactor.compact(self._history)
+        if result and result.get("case") != "none":
+            self.set_history(result["messages"])
+            self.reregister_history_items()
+        return result
+
+    # === Stability Tracker Integration ===
+
+    def set_stability_tracker(self, tracker):
+        """Attach a stability tracker instance."""
+        self._stability_tracker = tracker
+
+    # === System Prompt ===
+
+    def set_system_prompt(self, prompt):
+        """Replace the system prompt (e.g., for review mode swap)."""
+        self._system_prompt = prompt
+
+    def get_system_prompt(self):
+        """Return the current system prompt."""
+        return self._system_prompt
+
+    # === URL Context ===
+
+    def set_url_context(self, url_parts):
+        """Set URL context parts for prompt assembly."""
+        self._url_context = list(url_parts) if url_parts else []
+
+    def clear_url_context(self):
+        """Clear URL context."""
+        self._url_context.clear()
+
+    # === Review Context ===
+
+    def set_review_context(self, review_text):
+        """Set review context string for prompt assembly."""
+        self._review_context = review_text if review_text else None
+
+    def clear_review_context(self):
+        """Clear review context."""
+        self._review_context = None
+
+    # === Budget Enforcement ===
+
+    def shed_files_if_needed(self):
+        """Pre-request shedding: drop largest files if total exceeds 90% of max_input.
+
+        Returns list of shed file paths (empty if none shed).
         """
-        messages: list[dict] = []
+        max_input = self._counter.max_input_tokens
+        threshold = int(max_input * 0.9)
 
-        # 1. System message (L0 equivalent)
-        system_parts = [system_prompt]
-        if symbol_map:
-            system_parts.append(REPO_MAP_HEADER + symbol_map)
-        system_content = "\n\n".join(p for p in system_parts if p)
+        shed = []
+        while True:
+            total = self._estimate_total_tokens()
+            if total <= threshold:
+                break
+
+            files = self._file_context.get_files()
+            if not files:
+                break
+
+            # Find largest file
+            tokens_by_file = self._file_context.get_tokens_by_file(self._counter)
+            if not tokens_by_file:
+                break
+
+            largest = max(tokens_by_file, key=tokens_by_file.get)
+            self._file_context.remove_file(largest)
+            shed.append(largest)
+            logger.warning(f"Shed file from context (budget): {largest}")
+
+        return shed
+
+    def emergency_truncate(self):
+        """Emergency truncation: drop oldest messages if history is way too large.
+
+        Triggers when history > 2x compaction trigger.
+        Preserves user/assistant pairs.
+        """
+        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+        limit = trigger * 2
+
+        if self.history_token_count() <= limit:
+            return
+
+        # Drop pairs from the front until under limit
+        while self.history_token_count() > limit and len(self._history) >= 2:
+            # Remove oldest pair
+            self._history.pop(0)
+            if self._history and self._history[0]["role"] == "assistant":
+                self._history.pop(0)
+
+    def _estimate_total_tokens(self):
+        """Estimate total prompt tokens (system + files + history + overhead)."""
+        total = 0
+        total += self._counter.count(self._system_prompt)
+        total += self._file_context.count_tokens(self._counter)
+        total += self.history_token_count()
+        total += 500  # overhead for headers, formatting
+        return total
+
+    # === Prompt Assembly (Non-Tiered) ===
+
+    def assemble_messages(self, user_prompt, images=None,
+                          symbol_map="", symbol_legend="",
+                          file_tree="", graduated_files=None):
+        """Assemble the complete message array for the LLM.
+
+        Non-tiered assembly (no cache_control markers).
+
+        Args:
+            user_prompt: current user message text
+            images: list of base64-encoded image data URIs
+            symbol_map: compact symbol map text
+            symbol_legend: symbol map legend text
+            file_tree: flat file tree text
+            graduated_files: set of file paths graduated to cached tiers (excluded from active)
+
+        Returns:
+            list of message dicts
+        """
+        graduated = set(graduated_files or [])
+        messages = []
+
+        # [0] System message: system prompt + legend + symbol map
+        system_content = self._system_prompt
+        if symbol_legend or symbol_map:
+            system_content += "\n\n" + REPO_MAP_HEADER
+            if symbol_legend:
+                system_content += symbol_legend + "\n\n"
+            if symbol_map:
+                system_content += symbol_map
+
         messages.append({"role": "system", "content": system_content})
 
-        # 2. File tree
+        # File tree as user/assistant pair
         if file_tree:
             messages.append({"role": "user", "content": FILE_TREE_HEADER + file_tree})
             messages.append({"role": "assistant", "content": "Ok."})
 
-        # 3. URL context
-        if url_context:
-            messages.append({"role": "user", "content": URL_CONTEXT_HEADER + url_context})
-            messages.append({
-                "role": "assistant",
-                "content": "Ok, I've reviewed the URL content.",
-            })
+        # URL context as user/assistant pair
+        if self._url_context:
+            url_text = "\n---\n".join(self._url_context)
+            messages.append({"role": "user", "content": URL_CONTEXT_HEADER + url_text})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
 
-        # 4. Active files
-        file_prompt = self.file_context.format_for_prompt()
-        if file_prompt:
-            messages.append({
-                "role": "user",
-                "content": FILES_ACTIVE_HEADER + file_prompt,
-            })
-            messages.append({"role": "assistant", "content": "Ok."})
+        # Review context as user/assistant pair
+        if self._review_context:
+            messages.append({"role": "user", "content": REVIEW_CONTEXT_HEADER + self._review_context})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the code changes."})
 
-        # 5. History
-        messages.extend(self._messages)
+        # Active files as user/assistant pair
+        active_files = self._file_context.get_files()
+        active_files = [f for f in active_files if f not in graduated]
+        if active_files:
+            parts = []
+            for path in active_files:
+                content = self._file_context.get_content(path)
+                if content is not None:
+                    parts.append(f"{path}\n```\n{content}\n```")
+            if parts:
+                files_text = "\n\n".join(parts)
+                messages.append({"role": "user", "content": FILES_ACTIVE_HEADER + files_text})
+                messages.append({"role": "assistant", "content": "Ok."})
 
-        # 6. Current user message
+        # History messages
+        for msg in self._history:
+            messages.append(dict(msg))
+
+        # Current user prompt
         if images:
-            content_blocks: list[dict] = [{"type": "text", "text": user_prompt}]
+            content_blocks = [{"type": "text", "text": user_prompt}]
             for img in images:
                 content_blocks.append({
                     "type": "image_url",
-                    "image_url": {"url": img},
+                    "image_url": {"url": img}
                 })
             messages.append({"role": "user", "content": content_blocks})
         else:
@@ -386,209 +454,170 @@ class ContextManager:
 
         return messages
 
-    def assemble_tiered_messages(
-        self,
-        user_prompt: str,
-        system_prompt: str,
-        symbol_map_legend: str = "",
-        symbol_blocks: Optional[dict[str, str]] = None,
-        file_contents: Optional[dict[str, str]] = None,
-        file_tree: str = "",
-        url_context: str = "",
-        images: Optional[list[str]] = None,
-    ) -> list[dict]:
-        """Assemble messages with cache tiering.
-
-        Uses the stability tracker to organize content into cached tiers
-        with cache_control breakpoints.
-        """
-        # Build history tier map
-        history_tier_map = self._build_history_tier_map()
-
-        # Active file contents — exclude files that have graduated to cached tiers
-        active_files = {}
-        for path in self.file_context.get_files():
-            file_key = f"file:{path}"
-            item = self.stability.get_item(file_key)
-            if item and item.tier != Tier.ACTIVE:
-                # This file has graduated to a cached tier; its content
-                # is included in that tier's block, not in active files.
-                continue
-            content = self.file_context.get_content(path)
-            if content is not None:
-                active_files[path] = content
-
-        return self._builder.build_messages(
-            system_prompt=system_prompt,
-            symbol_map_legend=symbol_map_legend,
-            symbol_blocks=symbol_blocks or {},
-            file_contents=file_contents or {},
-            history=self._messages,
-            history_tier_map=history_tier_map,
-            file_tree=file_tree,
-            url_context=url_context,
-            active_file_contents=active_files,
+    def estimate_prompt_tokens(self, user_prompt="", images=None,
+                                symbol_map="", symbol_legend="",
+                                file_tree=""):
+        """Estimate total tokens for a prompt assembly."""
+        messages = self.assemble_messages(
             user_prompt=user_prompt,
             images=images,
+            symbol_map=symbol_map,
+            symbol_legend=symbol_legend,
+            file_tree=file_tree,
         )
+        return self._counter.count_messages(messages)
 
-    def _build_history_tier_map(self) -> dict[int, Tier]:
-        """Map each message index to its assigned tier."""
-        tier_map: dict[int, Tier] = {}
-        for idx in range(len(self._messages)):
-            key = f"history:{idx}"
-            item = self.stability.get_item(key)
-            if item is not None:
-                tier_map[idx] = item.tier
-            else:
-                tier_map[idx] = Tier.ACTIVE
-        return tier_map
+    # === Tiered Prompt Assembly ===
 
-    # ------------------------------------------------------------------
-    # Stability integration
-    # ------------------------------------------------------------------
+    def assemble_tiered_messages(self, user_prompt, images=None,
+                                  symbol_map="", symbol_legend="",
+                                  file_tree="",
+                                  tiered_content=None):
+        """Assemble message array with cache tier breakpoints.
 
-    def build_active_items(
-        self,
-        selected_files: list[str],
-        symbol_blocks: Optional[dict[str, str]] = None,
-    ) -> dict[str, dict]:
-        """Build the active items dict for stability tracking.
+        Args:
+            user_prompt: current user message text
+            images: list of base64 image data URIs
+            symbol_map: compact symbol map for active (non-tiered) display
+            symbol_legend: legend text
+            file_tree: flat file tree text
+            tiered_content: dict with keys l0, l1, l2, l3, each containing:
+                {symbols: str, files: str, history: list[{role, content}]}
 
-        Active items are those explicitly in the active (uncached) context:
-        - Selected file paths
-        - Symbol entries for selected files
-        - History messages not yet graduated
+        Returns:
+            list of message dicts with cache_control markers
         """
-        active: dict[str, dict] = {}
+        tiers = tiered_content or {}
+        messages = []
 
-        # Selected files
-        for fpath in selected_files:
-            content = self.file_context.get_content(fpath)
-            if content is not None:
-                file_key = f"file:{fpath}"
-                active[file_key] = {
-                    "hash": _hash_content(content),
-                    "tokens": max(1, len(content) // 4),
-                    "type": ItemType.FILE,
-                }
-                # Symbol entry for selected file (excluded from symbol map)
-                sym_key = f"symbol:{fpath}"
-                sym_block = (symbol_blocks or {}).get(sym_key, "")
-                if sym_block:
-                    active[sym_key] = {
-                        "hash": _hash_content(sym_block),
-                        "tokens": max(1, len(sym_block) // 4),
-                        "type": ItemType.SYMBOL,
+        # L0: System message
+        l0 = tiers.get("l0", {})
+        system_parts = [self._system_prompt]
+        if symbol_legend or symbol_map or l0.get("symbols"):
+            system_parts.append(REPO_MAP_HEADER)
+            if symbol_legend:
+                system_parts.append(symbol_legend)
+            if l0.get("symbols"):
+                system_parts.append(l0["symbols"])
+            elif symbol_map:
+                system_parts.append(symbol_map)
+        if l0.get("files"):
+            system_parts.append(FILES_L0_HEADER + l0["files"])
+
+        system_content = "\n\n".join(p for p in system_parts if p)
+
+        l0_history = l0.get("history", [])
+        if not l0_history:
+            # Cache control on system message itself
+            messages.append({
+                "role": "system",
+                "content": [{"type": "text", "text": system_content,
+                             "cache_control": {"type": "ephemeral"}}]
+            })
+        else:
+            messages.append({"role": "system", "content": system_content})
+            for i, msg in enumerate(l0_history):
+                if i == len(l0_history) - 1:
+                    messages.append({
+                        "role": msg["role"],
+                        "content": [{"type": "text", "text": msg["content"],
+                                     "cache_control": {"type": "ephemeral"}}]
+                    })
+                else:
+                    messages.append(dict(msg))
+
+        # L1, L2, L3 blocks
+        file_headers = {"l1": FILES_L1_HEADER, "l2": FILES_L2_HEADER, "l3": FILES_L3_HEADER}
+        for tier_key in ("l1", "l2", "l3"):
+            tier = tiers.get(tier_key, {})
+            tier_symbols = tier.get("symbols", "")
+            tier_files = tier.get("files", "")
+            tier_history = tier.get("history", [])
+
+            if not tier_symbols and not tier_files and not tier_history:
+                continue
+
+            # Build user content
+            user_parts = []
+            if tier_symbols:
+                user_parts.append(TIER_SYMBOLS_HEADER + tier_symbols)
+            if tier_files:
+                user_parts.append(file_headers[tier_key] + tier_files)
+
+            if user_parts:
+                messages.append({"role": "user", "content": "\n\n".join(user_parts)})
+                messages.append({"role": "assistant", "content": "Ok."})
+
+            # Tier history
+            for msg in tier_history:
+                messages.append(dict(msg))
+
+            # Cache control on last message in tier sequence
+            if messages:
+                last = messages[-1]
+                content = last.get("content", "")
+                if isinstance(content, str):
+                    messages[-1] = {
+                        "role": last["role"],
+                        "content": [{"type": "text", "text": content,
+                                     "cache_control": {"type": "ephemeral"}}]
                     }
 
-        # History messages — register all that aren't already graduated
-        for idx, msg in enumerate(self._messages):
-            key = f"history:{idx}"
-            item = self.stability.get_item(key)
-            if item is None or item.tier == Tier.ACTIVE:
-                content_str = f"{msg.get('role', '')}:{msg.get('content', '')}"
-                active[key] = {
-                    "hash": _hash_content(content_str),
-                    "tokens": self.counter.count(msg),
-                    "type": ItemType.HISTORY,
-                }
-
-        return active
-
-    def initialize_stability(self, symbol_index, ref_index):
-        """Initialize stability tracker from reference graph.
-
-        Called once on startup when the symbol index is first built.
-        """
-        clusters = cluster_for_tiers(
-            ref_index, symbol_index, self.cache_target_tokens,
-        )
-        token_estimates = {}
-        for tier, keys in clusters:
-            for key in keys:
-                path = key.split(":", 1)[1] if ":" in key else key
-                block = symbol_index.get_file_block(path)
-                token_estimates[key] = max(1, len(block) // 4) if block else 0
-
-        self.stability.initialize_from_reference_graph(clusters, token_estimates)
-        log.info(
-            "Stability initialized: %d items across %d clusters",
-            self.stability.item_count, len(clusters),
-        )
-
-    def reregister_history_items(self):
-        """Purge history entries from stability tracker without clearing history."""
-        self.stability.purge_history_items()
-
-    @property
-    def has_tiered_content(self) -> bool:
-        """True if the stability tracker has items in cached tiers."""
-        return self.stability.item_count > 0
-
-    def estimate_prompt_tokens(
-        self,
-        user_prompt: str,
-        system_prompt: str,
-        symbol_map: str = "",
-        file_tree: str = "",
-        url_context: str = "",
-    ) -> int:
-        """Estimate total tokens for a prompt without building the full array."""
-        total = self.counter.count(system_prompt)
-        if symbol_map:
-            total += self.counter.count(REPO_MAP_HEADER + symbol_map)
+        # Uncached sections: file tree, URL context, active files, active history
         if file_tree:
-            total += self.counter.count(FILE_TREE_HEADER + file_tree) + 4
-        if url_context:
-            total += self.counter.count(URL_CONTEXT_HEADER + url_context) + 4
-        total += self.file_context.count_tokens(self.counter)
-        total += self.history_token_count()
-        total += self.counter.count(user_prompt)
-        return total
+            messages.append({"role": "user", "content": FILE_TREE_HEADER + file_tree})
+            messages.append({"role": "assistant", "content": "Ok."})
 
-    def shed_files_if_needed(
-        self,
-        user_prompt: str,
-        system_prompt: str,
-        symbol_map: str = "",
-        file_tree: str = "",
-        url_context: str = "",
-    ) -> list[str]:
-        """Drop largest files if estimated tokens exceed 90% of max.
+        if self._url_context:
+            url_text = "\n---\n".join(self._url_context)
+            messages.append({"role": "user", "content": URL_CONTEXT_HEADER + url_text})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the URL content."})
 
-        Returns list of shed file paths.
-        """
-        max_input = self.counter.max_input_tokens
-        threshold = int(max_input * 0.9)
-        shed: list[str] = []
+        # Review context as user/assistant pair
+        if self._review_context:
+            messages.append({"role": "user", "content": REVIEW_CONTEXT_HEADER + self._review_context})
+            messages.append({"role": "assistant", "content": "Ok, I've reviewed the code changes."})
 
-        while True:
-            est = self.estimate_prompt_tokens(
-                user_prompt, system_prompt, symbol_map, file_tree, url_context,
-            )
-            if est <= threshold:
-                break
-            # Find largest file
-            tokens_by_file = self.file_context.get_tokens_by_file(self.counter)
-            if not tokens_by_file:
-                break
-            largest = max(tokens_by_file, key=tokens_by_file.get)
-            log.warning("Shedding file %s (%d tokens) — budget exceeded", largest, tokens_by_file[largest])
-            self.file_context.remove_file(largest)
-            shed.append(largest)
+        # Active files (non-graduated)
+        graduated = set()
+        if tiered_content:
+            for tk in ("l0", "l1", "l2", "l3"):
+                tier = tiered_content.get(tk, {})
+                graduated.update(tier.get("graduated_files", []))
 
-        return shed
+        active_files = [f for f in self._file_context.get_files() if f not in graduated]
+        if active_files:
+            parts = []
+            for path in active_files:
+                content = self._file_context.get_content(path)
+                if content is not None:
+                    parts.append(f"{path}\n```\n{content}\n```")
+            if parts:
+                files_text = "\n\n".join(parts)
+                messages.append({"role": "user", "content": FILES_ACTIVE_HEADER + files_text})
+                messages.append({"role": "assistant", "content": "Ok."})
 
-    def emergency_truncate(self):
-        """Drop oldest messages if history exceeds 2x compaction trigger.
+        # Active history
+        active_history_indices = set()
+        if tiered_content:
+            for tk in ("l0", "l1", "l2", "l3"):
+                tier = tiered_content.get(tk, {})
+                active_history_indices.update(tier.get("graduated_history_indices", []))
 
-        Layer 2 defense — simple tail truncation.
-        """
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
-        limit = trigger * 2
-        while self.history_token_count() > limit and len(self._messages) > 2:
-            self._messages.pop(0)
-            # Keep pairs aligned — if we removed a user msg, remove next assistant too
-            if self._messages and self._messages[0]["role"] == "assistant":
-                self._messages.pop(0)
+        for i, msg in enumerate(self._history):
+            if i not in active_history_indices:
+                messages.append(dict(msg))
+
+        # Current user prompt
+        if images:
+            content_blocks = [{"type": "text", "text": user_prompt}]
+            for img in images:
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": img}
+                })
+            messages.append({"role": "user", "content": content_blocks})
+        else:
+            messages.append({"role": "user", "content": user_prompt})
+
+        return messages

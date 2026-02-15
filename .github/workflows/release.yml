@@ -41,6 +41,17 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Build webapp
+        run: |
+          npm ci
+          npm run build
+
       - name: Get version info
         id: version
         shell: bash
@@ -76,6 +87,7 @@ jobs:
             --name ac-dc-${{ matrix.name }} \
             --add-data "src/ac_dc/VERSION${SEP}ac_dc" \
             --add-data "src/ac_dc/config${SEP}ac_dc/config" \
+            --add-data "webapp/dist${SEP}ac_dc/webapp_dist" \
             --collect-all=litellm \
             --collect-all=tiktoken \
             --collect-all=tiktoken_ext \

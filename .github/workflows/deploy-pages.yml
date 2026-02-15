@@ -44,11 +44,11 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: source/webapp/package-lock.json
+          cache-dependency-path: source/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: source/webapp
+        working-directory: source
 
       - name: Get short SHA
         id: sha
@@ -59,7 +59,7 @@ jobs:
           REPO_NAME="${{ github.repository }}"
           REPO_NAME="${REPO_NAME#*/}"  # Extract repo name from owner/repo
           npm run build -- --base=/${REPO_NAME}/${{ steps.sha.outputs.short }}/
-        working-directory: source/webapp
+        working-directory: source
 
       - name: Deploy versioned build
         run: |
@@ -70,7 +70,7 @@ jobs:
           rm -rf "${DEPLOY_DIR}"
           
           # Copy new build (has base=/{sha}/)
-          cp -r source/webapp/dist "${DEPLOY_DIR}"
+          cp -r source/webapp/dist/ "${DEPLOY_DIR}"
 
       - name: Update versions.json
         run: |

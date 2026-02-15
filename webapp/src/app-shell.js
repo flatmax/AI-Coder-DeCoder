@@ -1,238 +1,384 @@
+/**
+ * App Shell — root component.
+ *
+ * Extends JRPCClient for WebSocket transport.
+ * Manages connection lifecycle, routes events, hosts dialog and diff viewer.
+ */
+
 import { html, css } from 'lit';
-import { JRPCClient } from '@flatmax/jrpc-oo';
-import { SharedRpc } from './rpc-mixin.js';
-import './dialog/ac-dialog.js';
-import './chat/diff-viewer.js';
-import './chat/toast-container.js';
+import { SharedRpc } from './shared-rpc.js';
+import { theme } from './styles/theme.js';
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
+
+// Import child components so custom elements are registered
+import './components/ac-dialog.js';
+import './components/diff-viewer.js';
+import './components/token-hud.js';
 
 /**
- * Root application shell.
- * Extends JRPCClient (LitElement + WebSocket) from jrpc-oo.
- * Manages the RPC connection, hosts the dialog (foreground)
- * and diff viewer (background).
+ * Extract WebSocket port from URL query parameter ?port=N
  */
+function getPortFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  const port = params.get('port');
+  return port ? parseInt(port, 10) : 18080;
+}
+
 class AcApp extends JRPCClient {
   static properties = {
-    connected: { type: Boolean, state: true },
-    error: { type: String, state: true },
-    _reconnecting: { type: Boolean, state: true },
-    _reconnectAttempt: { type: Number, state: true },
+    _statusBar: { type: String, state: true },
+    _reconnectVisible: { type: Boolean, state: true },
+    _reconnectMsg: { type: String, state: true },
+    _toasts: { type: Array, state: true },
   };
 
-  static get styles() {
-    return css`
-      :host {
-        display: block;
-        width: 100%;
-        height: 100%;
-        position: relative;
-      }
+  static styles = [theme, css`
+    :host {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
 
-      .diff-background {
-        position: fixed;
-        inset: 0;
-        z-index: 0;
-      }
+    .viewport {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
 
-      ac-dialog {
-        /* Positioning managed by ac-dialog itself via :host styles */
-      }
+    /* Diff viewer background */
+    .diff-background {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background: var(--bg-primary);
+    }
 
-      .reconnect-banner {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 32px;
-        background: var(--accent-warning, #ff9800);
-        color: #000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 12px;
-        font-weight: 600;
-        z-index: 9999;
-        gap: 8px;
-      }
+    .diff-background ac-diff-viewer {
+      width: 100%;
+      height: 100%;
+    }
 
-      .reconnect-spinner {
-        display: inline-block;
-        width: 12px;
-        height: 12px;
-        border: 2px solid rgba(0,0,0,0.3);
-        border-top-color: #000;
-        border-radius: 50%;
-        animation: rspin 0.8s linear infinite;
-      }
+    /* Dialog container */
+    .dialog-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 50%;
+      min-width: 400px;
+      height: 100%;
+      z-index: 100;
+    }
 
-      @keyframes rspin { to { transform: rotate(360deg); } }
-    `;
-  }
+    /* Status bar */
+    .status-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      z-index: 10001;
+      transition: opacity 0.5s;
+    }
+    .status-bar.ok { background: var(--accent-green); }
+    .status-bar.error { background: var(--accent-red); }
+    .status-bar.hidden { opacity: 0; pointer-events: none; }
+
+    /* Reconnecting banner */
+    .reconnect-banner {
+      position: fixed;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      z-index: 10001;
+      display: none;
+      box-shadow: var(--shadow-md);
+    }
+    .reconnect-banner.visible { display: block; }
+
+    /* Global toasts */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10002;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    .global-toast {
+      pointer-events: auto;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md, 8px);
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      box-shadow: var(--shadow-md);
+      animation: toast-in 0.25s ease;
+      max-width: 420px;
+      text-align: center;
+    }
+    .global-toast.success { border-color: var(--accent-green); color: var(--accent-green); }
+    .global-toast.error { border-color: var(--accent-red); color: var(--accent-red); }
+    .global-toast.warning { border-color: var(--accent-orange); color: var(--accent-orange); }
+    .global-toast.fading { opacity: 0; transition: opacity 0.3s; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  `];
 
   constructor() {
     super();
-    this.connected = false;
-    this.error = '';
-    this._reconnecting = false;
+    this._port = getPortFromURL();
     this._reconnectAttempt = 0;
     this._reconnectTimer = null;
+    this._statusBar = 'hidden';
+    this._reconnectVisible = false;
+    this._reconnectMsg = '';
+    this._toasts = [];
+    this._toastIdCounter = 0;
+    this._wasConnected = false;
+    this._statusBarTimer = null;
+
+    // Set jrpc-oo connection properties
+    this.serverURI = `ws://localhost:${this._port}`;
     this.remoteTimeout = 60;
 
-    // Extract WebSocket port from URL ?port=N
-    const params = new URLSearchParams(window.location.search);
-    const port = params.get('port') || '18080';
-    this.serverURI = `ws://localhost:${port}`;
-
+    // Bind event handlers
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onFileSave = this._onFileSave.bind(this);
     this._onStreamCompleteForDiff = this._onStreamCompleteForDiff.bind(this);
-    this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onFilesModified = this._onFilesModified.bind(this);
+    this._onSearchNavigate = this._onSearchNavigate.bind(this);
+    this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
+    this._onToastEvent = this._onToastEvent.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
+    console.log(`AC⚡DC connecting to ${this.serverURI}`);
+
+    // Register methods the server can call on us
     this.addClass(this, 'AcApp');
-    this.addEventListener('navigate-file', this._onNavigateFile);
-    this.addEventListener('file-save', this._onFileSave);
-    this.addEventListener('active-file-changed', this._onActiveFileChanged);
+
+    // Listen for events from child components
+    window.addEventListener('navigate-file', this._onNavigateFile);
+    window.addEventListener('file-save', this._onFileSave);
     window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
+    window.addEventListener('files-modified', this._onFilesModified);
+    window.addEventListener('search-navigate', this._onSearchNavigate);
+
+    // Intercept Ctrl+S globally to prevent browser Save dialog
+    window.addEventListener('keydown', this._onGlobalKeyDown);
+
+    // Global toast event listener
+    window.addEventListener('ac-toast', this._onToastEvent);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this.removeEventListener('navigate-file', this._onNavigateFile);
-    this.removeEventListener('file-save', this._onFileSave);
-    this.removeEventListener('active-file-changed', this._onActiveFileChanged);
+    window.removeEventListener('navigate-file', this._onNavigateFile);
+    window.removeEventListener('file-save', this._onFileSave);
     window.removeEventListener('stream-complete', this._onStreamCompleteForDiff);
+    window.removeEventListener('files-modified', this._onFilesModified);
+    window.removeEventListener('search-navigate', this._onSearchNavigate);
+    window.removeEventListener('keydown', this._onGlobalKeyDown);
+    window.removeEventListener('ac-toast', this._onToastEvent);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
 
-  /**
-   * Called by jrpc-oo when the WebSocket connection is established
-   * and the remote method proxy (this.call) is populated.
-   */
-  setupDone() {
-    console.log(`[ac-dc] Connected to ${this.serverURI}`);
-    this.connected = true;
-    this.error = '';
-    this._reconnecting = false;
+  // === jrpc-oo lifecycle callbacks ===
+
+  remoteIsUp() {
+    console.log('WebSocket connected — remote is up');
+    const wasReconnecting = this._reconnectAttempt > 0;
     this._reconnectAttempt = 0;
+    this._reconnectVisible = false;
+    this._reconnectMsg = '';
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
 
-    // Publish the call proxy to all child components via the singleton
+    // Show green status bar briefly
+    this._showStatusBar('ok');
+
+    if (wasReconnecting) {
+      this._showToast('Reconnected', 'success');
+    }
+  }
+
+  setupDone() {
+    console.log('jrpc-oo setup done — call proxy ready');
+    this._wasConnected = true;
+
+    // Publish the call proxy so all child components get RPC access
     SharedRpc.set(this.call);
 
-    // Load initial state
+    // Fetch initial state
     this._loadInitialState();
-
-    // Show reconnection success toast if we were reconnecting
-    if (this._wasDisconnected) {
-      this._wasDisconnected = false;
-      this._dispatchToast('Reconnected to server', 'success');
-    }
   }
 
-  /**
-   * Called by jrpc-oo when connection fails or is lost.
-   */
   setupSkip() {
-    console.warn('[ac-dc] Connection failed or skipped');
-    const wasConnected = this.connected;
-    this.connected = false;
-    this.error = 'Connection failed';
-
-    if (wasConnected) {
-      this._wasDisconnected = true;
-      SharedRpc.reset();
-      this._dispatchToast('Disconnected from server — reconnecting...', 'error');
+    console.warn('jrpc-oo setup skipped — connection failed');
+    // Trigger reconnection if we were previously connected
+    if (this._wasConnected) {
+      this._scheduleReconnect();
     }
-
-    this._scheduleReconnect();
   }
 
-  /**
-   * Called by jrpc-oo when remote disconnects.
-   */
   remoteDisconnected() {
-    console.warn('[ac-dc] Remote disconnected');
-    const wasConnected = this.connected;
-    this.connected = false;
+    console.log('WebSocket disconnected');
+    SharedRpc.clear();
 
-    if (wasConnected) {
-      this._wasDisconnected = true;
-      SharedRpc.reset();
-      this._dispatchToast('Server disconnected — reconnecting...', 'error');
-    }
+    // Show red status bar
+    this._showStatusBar('error', false); // Don't auto-hide while disconnected
 
+    // Notify children
+    window.dispatchEvent(new CustomEvent('rpc-disconnected'));
+
+    // Schedule reconnection
     this._scheduleReconnect();
   }
+
+  // === Reconnection with exponential backoff ===
 
   _scheduleReconnect() {
-    if (this._reconnectTimer) return;
-    this._reconnecting = true;
+    if (this._reconnectTimer) return; // Already scheduled
+
     this._reconnectAttempt++;
-    // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
+    // Exponential backoff: 1s, 2s, 4s, 8s, capped at 15s
     const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempt - 1), 15000);
-    console.log(`[ac-dc] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempt})`);
+    const delaySec = (delay / 1000).toFixed(0);
+
+    this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})... retry in ${delaySec}s`;
+    this._reconnectVisible = true;
+
+    console.log(`Scheduling reconnect attempt ${this._reconnectAttempt} in ${delay}ms`);
+
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
+      this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})...`;
+      this.requestUpdate();
+
+      // jrpc-oo reconnect: re-open the WebSocket
       try {
-        this.open();
+        this.open(this.serverURI);
       } catch (e) {
-        console.warn('[ac-dc] Reconnect attempt failed:', e);
+        console.error('Reconnect failed:', e);
         this._scheduleReconnect();
       }
     }, delay);
   }
 
-  _dispatchToast(message, type = 'info') {
-    window.dispatchEvent(new CustomEvent('ac-toast', {
-      detail: { message, type },
-      bubbles: true,
-    }));
+  // === Status bar ===
+
+  _showStatusBar(state, autoHide = true) {
+    this._statusBar = state;
+    if (this._statusBarTimer) {
+      clearTimeout(this._statusBarTimer);
+      this._statusBarTimer = null;
+    }
+    if (autoHide) {
+      this._statusBarTimer = setTimeout(() => {
+        this._statusBar = 'hidden';
+      }, 3000);
+    }
   }
 
-  /**
-   * Methods the server can call on the client.
-   * These must be class methods (not late-assigned) so jrpc-oo
-   * discovers them during connection setup.
-   */
+  // === Global Toast System ===
+
+  _onToastEvent(e) {
+    const { message, type } = e.detail || {};
+    if (message) {
+      this._showToast(message, type || '');
+    }
+  }
+
+  _showToast(message, type = '') {
+    const id = ++this._toastIdCounter;
+    this._toasts = [...this._toasts, { id, message, type, fading: false }];
+
+    // Auto-dismiss after 3s
+    setTimeout(() => {
+      // Start fade
+      this._toasts = this._toasts.map(t =>
+        t.id === id ? { ...t, fading: true } : t
+      );
+      // Remove after fade
+      setTimeout(() => {
+        this._toasts = this._toasts.filter(t => t.id !== id);
+      }, 300);
+    }, 3000);
+  }
+
+  // === Methods the server can call (registered via addClass) ===
+
   streamChunk(requestId, content) {
-    this._dispatch('stream-chunk', { requestId, content });
+    window.dispatchEvent(new CustomEvent('stream-chunk', {
+      detail: { requestId, content },
+    }));
     return true;
   }
 
   streamComplete(requestId, result) {
-    this._dispatch('stream-complete', { requestId, result });
+    window.dispatchEvent(new CustomEvent('stream-complete', {
+      detail: { requestId, result },
+    }));
     return true;
   }
 
   compactionEvent(requestId, event) {
-    this._dispatch('compaction-event', { requestId, event });
+    window.dispatchEvent(new CustomEvent('compaction-event', {
+      detail: { requestId, event },
+    }));
     return true;
   }
 
   filesChanged(selectedFiles) {
-    this._dispatch('files-changed', { selectedFiles });
+    window.dispatchEvent(new CustomEvent('files-changed', {
+      detail: { selectedFiles },
+    }));
     return true;
   }
 
+  // === Initial state ===
+
   async _loadInitialState() {
     try {
-      const state = await this._extract('LLM.get_current_state');
-      this._dispatch('state-loaded', state);
+      const raw = await this.call['LLMService.get_current_state']();
+      // Unwrap jrpc-oo envelope
+      const state = this._extract(raw);
+      console.log('Initial state loaded:', state);
+
+      // Set browser tab title to ⚡ {repo_name}
+      if (state?.repo_name) {
+        document.title = `${state.repo_name}`;
+      }
+
+      window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
     } catch (e) {
-      console.error('[ac-dc] Failed to load initial state:', e);
+      console.error('Failed to load initial state:', e);
     }
   }
 
   /**
-   * Helper to call and unwrap jrpc-oo response envelope.
+   * Unwrap jrpc-oo response envelope { "method_name": value } → value
    */
-  async _extract(method, ...args) {
-    const result = await this.call[method](...args);
+  _extract(result) {
     if (result && typeof result === 'object') {
       const keys = Object.keys(result);
       if (keys.length === 1) return result[keys[0]];
@@ -240,74 +386,119 @@ class AcApp extends JRPCClient {
     return result;
   }
 
-  _dispatch(name, detail) {
-    window.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
-  }
+  // === Event Routing ===
 
-  // ── Diff viewer event routing ──
-
+  /**
+   * Route navigate-file events from file picker, chat edit blocks, and search
+   * to the diff viewer.
+   */
   _onNavigateFile(e) {
-    const { path, line } = e.detail || {};
-    if (!path) return;
-    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
-    if (diffViewer) {
-      diffViewer.openRepoFile(path, line || null);
-    }
+    const detail = e.detail;
+    if (!detail?.path) return;
+
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (!viewer) return;
+
+    viewer.openFile({
+      path: detail.path,
+      original: detail.original,
+      modified: detail.modified,
+      is_new: detail.is_new,
+      is_read_only: detail.is_read_only,
+      is_config: detail.is_config,
+      config_type: detail.config_type,
+      real_path: detail.real_path,
+      searchText: detail.searchText,
+      line: detail.line,
+    });
   }
 
+  /**
+   * Route search-navigate events to navigate-file format.
+   */
+  _onSearchNavigate(e) {
+    const detail = e.detail;
+    if (!detail?.path) return;
+    this._onNavigateFile({
+      detail: { path: detail.path, line: detail.line },
+    });
+  }
+
+  /**
+   * Route file-save events to Repo or Settings RPC.
+   */
   async _onFileSave(e) {
-    e.stopPropagation();
-    const { path, content, isConfig, configType } = e.detail || {};
+    const { path, content, isConfig, configType } = e.detail;
     if (!path) return;
 
-    if (isConfig && configType) {
-      try {
-        await this._extract('Settings.save_config_content', configType, content);
-      } catch (err) {
-        console.error('Config save failed:', err);
+    try {
+      if (isConfig && configType) {
+        await this.call['Settings.save_config_content'](configType, content);
+      } else {
+        await this.call['Repo.write_file'](path, content);
       }
-    } else {
-      try {
-        await this._extract('Repo.write_file', path, content);
-        try { await this._extract('Repo.stage_files', [path]); } catch {}
-        try { await this._extract('LLM.invalidate_symbol_files', [path]); } catch {}
-        // Notify file tree to refresh
-        this._dispatch('files-changed', {});
-      } catch (err) {
-        console.error('File save failed:', err);
-      }
+    } catch (err) {
+      console.error('File save failed:', err);
+      this._showToast(`Save failed: ${err.message || 'Unknown error'}`, 'error');
     }
   }
 
+  /**
+   * After stream completes with edits, refresh only already-open files.
+   */
   _onStreamCompleteForDiff(e) {
-    const { result } = e.detail || {};
+    const result = e.detail?.result;
     if (!result?.files_modified?.length) return;
-    const diffViewer = this.shadowRoot.querySelector('diff-viewer');
-    if (diffViewer) {
-      diffViewer.openEditResults(result.edit_results, result.files_modified);
+
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer) {
+      viewer.refreshOpenFiles();
     }
   }
 
-  _onActiveFileChanged(e) {
-    // Relay to files-tab via window event so it can highlight in file picker
-    window.dispatchEvent(new CustomEvent('viewer-active-file', {
-      detail: { path: e.detail?.path || '' },
-    }));
+  /**
+   * Handle files-modified events (e.g., from commit, reset).
+   */
+  _onFilesModified(e) {
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer && viewer._files.length > 0) {
+      viewer.refreshOpenFiles();
+    }
+  }
+
+  /**
+   * Intercept Ctrl+S globally to prevent browser Save dialog.
+   */
+  _onGlobalKeyDown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+    }
   }
 
   render() {
     return html`
-      <div class="diff-background">
-        <diff-viewer></diff-viewer>
-      </div>
-      <ac-dialog .connected=${this.connected} .error=${this.error}></ac-dialog>
-      ${this._reconnecting ? html`
-        <div class="reconnect-banner">
-          <span class="reconnect-spinner"></span>
-          Reconnecting${this._reconnectAttempt > 1 ? ` (attempt ${this._reconnectAttempt})` : ''}...
+      <div class="viewport">
+        <div class="diff-background" role="region" aria-label="Code diff viewer">
+          <ac-diff-viewer></ac-diff-viewer>
         </div>
-      ` : ''}
-      <toast-container></toast-container>
+
+        <div class="dialog-container" role="complementary" aria-label="Tools panel">
+          <ac-dialog></ac-dialog>
+        </div>
+      </div>
+
+      <ac-token-hud></ac-token-hud>
+
+      <div class="status-bar ${this._statusBar}" role="status" aria-live="polite"
+           aria-label="${this._statusBar === 'ok' ? 'Connected' : this._statusBar === 'error' ? 'Disconnected' : ''}"></div>
+      <div class="reconnect-banner ${this._reconnectVisible ? 'visible' : ''}"
+           role="alert" aria-live="assertive">${this._reconnectMsg}</div>
+
+      <div class="toast-container" role="status" aria-live="polite" aria-relevant="additions">
+        ${this._toasts.map(t => html`
+          <div class="global-toast ${t.type} ${t.fading ? 'fading' : ''}" role="alert">${t.message}</div>
+        `)}
+      </div>
     `;
   }
 }
