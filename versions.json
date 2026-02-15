@@ -1,6 +1,12 @@
 {
-  "latest": "a7efe9c7",
+  "latest": "f60b853e",
   "versions": [
+    {
+      "sha": "f60b853e",
+      "full_sha": "f60b853e090b08e480285a3305d878c0be90f633",
+      "date": "2026-02-15T07:04:30Z",
+      "branch": "master"
+    },
     {
       "sha": "a7efe9c7",
       "full_sha": "a7efe9c712a1fa7bb87b1660f61e788619d281c3",
@@ -113,12 +119,6 @@
       "sha": "49be88c1",
       "full_sha": "49be88c1630402a6174147c9ff25ed0b3153a499",
       "date": "2026-02-02T09:48:27Z",
-      "branch": "master"
-    },
-    {
-      "sha": "36f52094",
-      "full_sha": "36f520944cb5c5a45d7e2e8d6319af1800fea1d1",
-      "date": "2026-02-02T09:23:29Z",
       "branch": "master"
     }
   ]
