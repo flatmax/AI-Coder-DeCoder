@@ -1,6 +1,12 @@
 {
-  "latest": "cee71baa",
+  "latest": "e7352430",
   "versions": [
+    {
+      "sha": "e7352430",
+      "full_sha": "e7352430c9585c72b4fa785b69ac3b7bcae3fdaa",
+      "date": "2026-02-15T07:33:22Z",
+      "branch": "master"
+    },
     {
       "sha": "cee71baa",
       "full_sha": "cee71baa677d33a9f9efa1f9fa988aacb0fd2f2a",
@@ -113,12 +119,6 @@
       "sha": "da9a6136",
       "full_sha": "da9a6136fc2ec635c710db0e6a89efb29c86841c",
       "date": "2026-02-02T10:39:46Z",
-      "branch": "master"
-    },
-    {
-      "sha": "53c61143",
-      "full_sha": "53c611437af388a9804c3c36a2f3714d3fc94d91",
-      "date": "2026-02-02T10:09:25Z",
       "branch": "master"
     }
   ]
