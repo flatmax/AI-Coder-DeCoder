@@ -117,7 +117,7 @@ jobs:
             --hidden-import=ac_dc.url_cache \
             --hidden-import=ac_dc.symbol_index \
             --hidden-import=jrpc_oo \
-            src/ac_dc/main.py
+            src/ac_dc/__main__.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
