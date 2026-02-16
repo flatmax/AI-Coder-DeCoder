@@ -9,7 +9,7 @@
  */
 
 // Handle radius in SVG units for hit-testing and rendering
-const HANDLE_RADIUS = 5;
+const HANDLE_RADIUS = 6;
 const ENDPOINT_HIT_THRESHOLD = 8;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 40;
@@ -38,7 +38,7 @@ function _getInteractionModel(el) {
     case 'polygon':
       return { drag: true, endpoints: true, resize: false };
     case 'path':
-      return { drag: true, endpoints: false, resize: false };
+      return { drag: true, endpoints: true, resize: false };
     case 'text':
       return { drag: true, endpoints: false, resize: false };
     case 'g':
@@ -49,6 +49,119 @@ function _getInteractionModel(el) {
     default:
       return { drag: false, endpoints: false, resize: false };
   }
+}
+
+/**
+ * Parse a path's `d` attribute into an array of command objects.
+ * Each object: { cmd, args: [numbers...], startIndex, endIndex }
+ * Supports M, L, Q, C, S, T, A, H, V, Z and lowercase variants.
+ */
+function _parsePathData(d) {
+  const commands = [];
+  const re = /([MLHVCSQTAZmlhvcsqtaz])\s*([-\d.,eE\s]*)/g;
+  let m;
+  while ((m = re.exec(d)) !== null) {
+    const cmd = m[1];
+    const argStr = m[2].trim();
+    const args = argStr.length > 0
+      ? argStr.split(/[\s,]+/).map(Number)
+      : [];
+    commands.push({ cmd, args });
+  }
+  return commands;
+}
+
+/**
+ * Serialize parsed path commands back to a `d` attribute string.
+ */
+function _serializePathData(commands) {
+  return commands.map(c => {
+    if (c.args.length === 0) return c.cmd;
+    return c.cmd + ' ' + c.args.map(n => Math.round(n * 1000) / 1000).join(' ');
+  }).join(' ');
+}
+
+/**
+ * Extract draggable control points from parsed path commands.
+ * Returns array of { x, y, cmdIndex, argIndex, type }
+ * where type is 'endpoint' or 'control'.
+ */
+function _extractPathPoints(commands) {
+  const points = [];
+  let curX = 0, curY = 0;
+  let startX = 0, startY = 0;
+
+  for (let ci = 0; ci < commands.length; ci++) {
+    const { cmd, args } = commands[ci];
+    const upper = cmd.toUpperCase();
+    const isRel = cmd !== upper;
+
+    if (upper === 'M') {
+      const x = isRel ? curX + args[0] : args[0];
+      const y = isRel ? curY + args[1] : args[1];
+      points.push({ x, y, cmdIndex: ci, argIndex: 0, type: 'endpoint' });
+      curX = x; curY = y;
+      startX = x; startY = y;
+    } else if (upper === 'L') {
+      const x = isRel ? curX + args[0] : args[0];
+      const y = isRel ? curY + args[1] : args[1];
+      points.push({ x, y, cmdIndex: ci, argIndex: 0, type: 'endpoint' });
+      curX = x; curY = y;
+    } else if (upper === 'H') {
+      const x = isRel ? curX + args[0] : args[0];
+      points.push({ x, y: curY, cmdIndex: ci, argIndex: 0, type: 'endpoint' });
+      curX = x;
+    } else if (upper === 'V') {
+      const y = isRel ? curY + args[0] : args[0];
+      points.push({ x: curX, y, cmdIndex: ci, argIndex: 0, type: 'endpoint' });
+      curY = y;
+    } else if (upper === 'Q') {
+      // Quadratic: control point + endpoint
+      const cpx = isRel ? curX + args[0] : args[0];
+      const cpy = isRel ? curY + args[1] : args[1];
+      const ex = isRel ? curX + args[2] : args[2];
+      const ey = isRel ? curY + args[3] : args[3];
+      points.push({ x: cpx, y: cpy, cmdIndex: ci, argIndex: 0, type: 'control' });
+      points.push({ x: ex, y: ey, cmdIndex: ci, argIndex: 2, type: 'endpoint' });
+      curX = ex; curY = ey;
+    } else if (upper === 'C') {
+      // Cubic: two control points + endpoint
+      const cp1x = isRel ? curX + args[0] : args[0];
+      const cp1y = isRel ? curY + args[1] : args[1];
+      const cp2x = isRel ? curX + args[2] : args[2];
+      const cp2y = isRel ? curY + args[3] : args[3];
+      const ex = isRel ? curX + args[4] : args[4];
+      const ey = isRel ? curY + args[5] : args[5];
+      points.push({ x: cp1x, y: cp1y, cmdIndex: ci, argIndex: 0, type: 'control' });
+      points.push({ x: cp2x, y: cp2y, cmdIndex: ci, argIndex: 2, type: 'control' });
+      points.push({ x: ex, y: ey, cmdIndex: ci, argIndex: 4, type: 'endpoint' });
+      curX = ex; curY = ey;
+    } else if (upper === 'S') {
+      // Smooth cubic: one control point + endpoint
+      const cpx = isRel ? curX + args[0] : args[0];
+      const cpy = isRel ? curY + args[1] : args[1];
+      const ex = isRel ? curX + args[2] : args[2];
+      const ey = isRel ? curY + args[3] : args[3];
+      points.push({ x: cpx, y: cpy, cmdIndex: ci, argIndex: 0, type: 'control' });
+      points.push({ x: ex, y: ey, cmdIndex: ci, argIndex: 2, type: 'endpoint' });
+      curX = ex; curY = ey;
+    } else if (upper === 'T') {
+      // Smooth quadratic: just endpoint
+      const ex = isRel ? curX + args[0] : args[0];
+      const ey = isRel ? curY + args[1] : args[1];
+      points.push({ x: ex, y: ey, cmdIndex: ci, argIndex: 0, type: 'endpoint' });
+      curX = ex; curY = ey;
+    } else if (upper === 'A') {
+      // Arc: endpoint at args[5], args[6]
+      const ex = isRel ? curX + args[5] : args[5];
+      const ey = isRel ? curY + args[6] : args[6];
+      points.push({ x: ex, y: ey, cmdIndex: ci, argIndex: 5, type: 'endpoint' });
+      curX = ex; curY = ey;
+    } else if (upper === 'Z') {
+      curX = startX; curY = startY;
+    }
+  }
+  return points;
 }
 
 /**
@@ -131,6 +244,10 @@ export class SvgEditor {
     this._isPanning = false;     // middle-button / space+drag panning
     this._panStart = null;
 
+    // Text editing state
+    this._textEditEl = null;      // the <text> element being edited
+    this._textEditOverlay = null;  // the <foreignObject> overlay for editing
+
     // Bound handlers
     this._onPointerDown = this._onPointerDown.bind(this);
     this._onPointerMove = this._onPointerMove.bind(this);
@@ -138,9 +255,11 @@ export class SvgEditor {
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onWheel = this._onWheel.bind(this);
     this._onPointerMoveHover = this._onPointerMoveHover.bind(this);
+    this._onDblClick = this._onDblClick.bind(this);
 
     // Attach listeners
     this._svg.addEventListener('pointerdown', this._onPointerDown);
+    this._svg.addEventListener('dblclick', this._onDblClick);
     this._svg.addEventListener('wheel', this._onWheel, { passive: false });
     this._svg.addEventListener('pointermove', this._onPointerMoveHover);
     window.addEventListener('pointermove', this._onPointerMove);
@@ -156,8 +275,10 @@ export class SvgEditor {
 
   /** Clean up all listeners and overlay elements. */
   dispose() {
+    this._commitTextEdit();
     this._removeHandles();
     this._svg.removeEventListener('pointerdown', this._onPointerDown);
+    this._svg.removeEventListener('dblclick', this._onDblClick);
     this._svg.removeEventListener('wheel', this._onWheel);
     this._svg.removeEventListener('pointermove', this._onPointerMoveHover);
     window.removeEventListener('pointermove', this._onPointerMove);
@@ -176,6 +297,8 @@ export class SvgEditor {
 
   /** Returns the serialized SVG content (outerHTML of the root svg). */
   getContent() {
+    // Commit any in-progress text edit
+    this._commitTextEdit();
     // Remove our handle overlays before serializing
     this._removeHandles();
     const content = this._svg.outerHTML;
@@ -402,6 +525,11 @@ export class SvgEditor {
       }
     }
 
+    // Commit any active text edit
+    if (this._textEditEl) {
+      this._commitTextEdit();
+    }
+
     // Second: hit-test for an element
     const target = this._hitTest(screenX, screenY);
 
@@ -426,6 +554,8 @@ export class SvgEditor {
       this._startLineDrag(target, svgPt);
     } else if ((tag === 'polyline' || tag === 'polygon') && model.endpoints) {
       this._startPolyDrag(target, svgPt);
+    } else if (tag === 'path' && model.endpoints) {
+      this._startPathDrag(target, svgPt);
     } else if (model.drag) {
       this._startElementDrag(target, svgPt);
     }
@@ -474,6 +604,9 @@ export class SvgEditor {
       case 'resize':
         this._applyResize(svgPt);
         break;
+      case 'path-point':
+        this._applyPathPoint(svgPt);
+        break;
     }
 
     this._updateHandles();
@@ -503,9 +636,177 @@ export class SvgEditor {
   }
 
   _onKeyDown(e) {
-    if (e.key === 'Escape' && this._selected) {
-      this._deselect();
+    if (e.key === 'Escape') {
+      if (this._textEditEl) {
+        this._commitTextEdit();
+      } else if (this._selected) {
+        this._deselect();
+      }
     }
+  }
+
+  // === Double-click Text Editing ===
+
+  _onDblClick(e) {
+    const screenX = e.clientX;
+    const screenY = e.clientY;
+    const target = this._hitTest(screenX, screenY);
+    if (!target) return;
+
+    const tag = target.tagName.toLowerCase();
+    if (tag === 'text') {
+      e.preventDefault();
+      e.stopPropagation();
+      this._select(target);
+      this._startTextEdit(target);
+    }
+  }
+
+  /**
+   * Open an inline text editor overlaid on the <text> element.
+   * Uses a <foreignObject> with a contenteditable <div> so the user
+   * can type directly in place.
+   */
+  _startTextEdit(textEl) {
+    // Commit any previous edit
+    this._commitTextEdit();
+
+    this._textEditEl = textEl;
+
+    // Get bounding box of the text element in SVG coordinates
+    let bbox;
+    try {
+      bbox = textEl.getBBox();
+    } catch {
+      return; // element not rendered
+    }
+
+    const ns = 'http://www.w3.org/2000/svg';
+    const xhtmlNs = 'http://www.w3.org/1999/xhtml';
+
+    // Create foreignObject sized to cover the text with some padding
+    const pad = 4;
+    const fo = document.createElementNS(ns, 'foreignObject');
+    fo.setAttribute('x', bbox.x - pad);
+    fo.setAttribute('y', bbox.y - pad);
+    fo.setAttribute('width', Math.max(bbox.width + pad * 4, 60));
+    fo.setAttribute('height', bbox.height + pad * 2);
+    fo.classList.add(HANDLE_CLASS); // so hit-testing skips it
+    fo.dataset.handleType = 'text-edit';
+    fo.dataset.handleIndex = '0';
+
+    // Create the editable div
+    const div = document.createElementNS(xhtmlNs, 'div');
+    div.setAttribute('contenteditable', 'true');
+    div.setAttribute('xmlns', xhtmlNs);
+
+    // Try to match the text element's style
+    const computed = window.getComputedStyle(textEl);
+    const fontSize = computed.fontSize || '16px';
+    const fontFamily = computed.fontFamily || 'sans-serif';
+    const fill = computed.fill || textEl.getAttribute('fill') || '#000';
+
+    Object.assign(div.style, {
+      fontSize,
+      fontFamily,
+      color: fill === 'none' ? '#000' : fill,
+      background: 'rgba(30, 30, 30, 0.85)',
+      border: '1px solid #4fc3f7',
+      borderRadius: '2px',
+      padding: `${pad}px`,
+      margin: '0',
+      outline: 'none',
+      whiteSpace: 'pre',
+      minWidth: '40px',
+      lineHeight: 'normal',
+      boxSizing: 'border-box',
+      width: '100%',
+      height: '100%',
+      overflow: 'hidden',
+    });
+
+    // Populate with current text content
+    div.textContent = textEl.textContent;
+
+    fo.appendChild(div);
+    this._svg.appendChild(fo);
+    this._textEditOverlay = fo;
+
+    // Hide the original text while editing
+    textEl.style.opacity = '0';
+
+    // Focus and select all text
+    requestAnimationFrame(() => {
+      div.focus();
+      const range = document.createRange();
+      range.selectNodeContents(div);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+
+    // Listen for blur to commit
+    div.addEventListener('blur', () => this._commitTextEdit());
+
+    // Prevent pointer events from starting drags
+    div.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+
+    // Enter commits (Shift+Enter for newline in multi-line)
+    div.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        this._commitTextEdit();
+      }
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        this._cancelTextEdit();
+      }
+      // Stop propagation so SvgEditor's keydown doesn't fire
+      ev.stopPropagation();
+    });
+  }
+
+  /**
+   * Commit the text edit: apply the new text to the <text> element.
+   */
+  _commitTextEdit() {
+    if (!this._textEditEl || !this._textEditOverlay) return;
+
+    const div = this._textEditOverlay.querySelector('div');
+    const newText = div ? div.textContent : '';
+    const oldText = this._textEditEl.textContent;
+
+    // Restore visibility
+    this._textEditEl.style.opacity = '';
+
+    // Apply new text
+    if (newText !== oldText) {
+      this._textEditEl.textContent = newText;
+      this._markDirty();
+    }
+
+    // Remove overlay
+    this._textEditOverlay.remove();
+    this._textEditOverlay = null;
+    this._textEditEl = null;
+
+    // Refresh handles
+    this._updateHandles();
+  }
+
+  /**
+   * Cancel text edit without applying changes.
+   */
+  _cancelTextEdit() {
+    if (!this._textEditEl || !this._textEditOverlay) return;
+
+    // Restore visibility without changing text
+    this._textEditEl.style.opacity = '';
+
+    // Remove overlay
+    this._textEditOverlay.remove();
+    this._textEditOverlay = null;
+    this._textEditEl = null;
   }
 
   // === Selection ===
@@ -556,6 +857,11 @@ export class SvgEditor {
     const tag = el.tagName.toLowerCase();
     const model = _getInteractionModel(el);
 
+    // Draw a selection bounding box only for non-endpoint elements
+    if (!model.endpoints) {
+      this._renderBoundingBox(g, el);
+    }
+
     if (tag === 'line') {
       this._renderLineHandles(g, el);
     } else if (tag === 'polyline' || tag === 'polygon') {
@@ -566,9 +872,47 @@ export class SvgEditor {
       this._renderCircleHandles(g, el);
     } else if (tag === 'ellipse' && model.resize) {
       this._renderEllipseHandles(g, el);
+    } else if (tag === 'path') {
+      this._renderPathHandles(g, el);
     }
-    // For elements with only drag (path, text, g, etc.), no handles needed
-    // — just the selection highlight
+  }
+
+  /**
+   * Render a dashed bounding-box rectangle around the selected element.
+   * Provides clear visual feedback for any selected element type.
+   */
+  _renderBoundingBox(g, el) {
+    try {
+      const bbox = el.getBBox();
+      if (bbox.width === 0 && bbox.height === 0) return;
+
+      const ns = 'http://www.w3.org/2000/svg';
+      const pad = 3;
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', bbox.x - pad);
+      rect.setAttribute('y', bbox.y - pad);
+      rect.setAttribute('width', bbox.width + pad * 2);
+      rect.setAttribute('height', bbox.height + pad * 2);
+      const sw = this._screenDistToSvgDist(1);
+      const dashOn = this._screenDistToSvgDist(4);
+      const dashOff = this._screenDistToSvgDist(3);
+      const padSvg = this._screenDistToSvgDist(3);
+      rect.setAttribute('x', bbox.x - padSvg);
+      rect.setAttribute('y', bbox.y - padSvg);
+      rect.setAttribute('width', bbox.width + padSvg * 2);
+      rect.setAttribute('height', bbox.height + padSvg * 2);
+      rect.setAttribute('fill', 'none');
+      rect.setAttribute('stroke', '#4fc3f7');
+      rect.setAttribute('stroke-width', sw);
+      rect.setAttribute('stroke-dasharray', `${dashOn} ${dashOff}`);
+      rect.setAttribute('pointer-events', 'none');
+      rect.classList.add(HANDLE_CLASS);
+      rect.dataset.handleType = 'bbox';
+      rect.dataset.handleIndex = '0';
+      g.appendChild(rect);
+    } catch {
+      // getBBox can fail for hidden or zero-size elements
+    }
   }
 
   _updateHandles() {
@@ -576,12 +920,25 @@ export class SvgEditor {
     this._renderHandles();
   }
 
+  /**
+   * Get handle radius in SVG units that corresponds to a fixed screen size.
+   * This ensures handles are always visible regardless of zoom/viewBox.
+   */
+  _getHandleRadius() {
+    return this._screenDistToSvgDist(HANDLE_RADIUS);
+  }
+
   _createHandle(parent, cx, cy, type, index, shape = 'circle') {
     const ns = 'http://www.w3.org/2000/svg';
-    const r = HANDLE_RADIUS;
+    const r = this._getHandleRadius();
 
     let handle;
-    if (shape === 'circle') {
+    if (shape === 'diamond') {
+      // Diamond for control points
+      handle = document.createElementNS(ns, 'polygon');
+      handle.setAttribute('points',
+        `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`);
+    } else if (shape === 'circle') {
       handle = document.createElementNS(ns, 'circle');
       handle.setAttribute('cx', cx);
       handle.setAttribute('cy', cy);
@@ -595,9 +952,12 @@ export class SvgEditor {
       handle.setAttribute('height', r * 2);
     }
 
-    handle.setAttribute('fill', type === 'endpoint' ? '#4fc3f7' : '#f0883e');
+    const sw = this._screenDistToSvgDist(1.5);
+    const color = (type === 'path-control') ? '#f0883e'
+      : (type === 'endpoint' || type === 'path-point') ? '#4fc3f7' : '#f0883e';
+    handle.setAttribute('fill', color);
     handle.setAttribute('stroke', '#fff');
-    handle.setAttribute('stroke-width', '1.5');
+    handle.setAttribute('stroke-width', sw);
     handle.setAttribute('cursor', 'pointer');
     handle.classList.add(HANDLE_CLASS);
     handle.dataset.handleType = type;
@@ -665,6 +1025,58 @@ export class SvgEditor {
     });
   }
 
+  _renderPathHandles(g, el) {
+    const d = el.getAttribute('d') || '';
+    const commands = _parsePathData(d);
+    const points = _extractPathPoints(commands);
+
+    // Draw thin guide lines from control points to their associated endpoints
+    const ns = 'http://www.w3.org/2000/svg';
+    const sw = this._screenDistToSvgDist(0.75);
+    for (let i = 0; i < points.length; i++) {
+      if (points[i].type === 'control') {
+        // Find the adjacent endpoint: previous or next
+        let ep = null;
+        if (i > 0 && points[i - 1].type === 'endpoint') ep = points[i - 1];
+        if (i + 1 < points.length && points[i + 1].type === 'endpoint') ep = points[i + 1];
+        if (!ep) {
+          // For cubic with two controls, link to the nearest endpoint
+          if (i + 2 < points.length && points[i + 2].type === 'endpoint') ep = points[i + 2];
+          if (i >= 2 && points[i - 2].type === 'endpoint') ep = points[i - 2];
+        }
+        if (ep) {
+          const line = document.createElementNS(ns, 'line');
+          line.setAttribute('x1', points[i].x);
+          line.setAttribute('y1', points[i].y);
+          line.setAttribute('x2', ep.x);
+          line.setAttribute('y2', ep.y);
+          line.setAttribute('stroke', '#4fc3f7');
+          line.setAttribute('stroke-width', sw);
+          line.setAttribute('stroke-opacity', '0.4');
+          line.setAttribute('stroke-dasharray', `${this._screenDistToSvgDist(2)} ${this._screenDistToSvgDist(2)}`);
+          line.setAttribute('pointer-events', 'none');
+          line.classList.add(HANDLE_CLASS);
+          line.dataset.handleType = 'guide';
+          line.dataset.handleIndex = '0';
+          g.appendChild(line);
+        }
+      }
+    }
+
+    // Draw handles — endpoints as circles, control points as diamonds
+    points.forEach((p, i) => {
+      const handleType = p.type === 'control' ? 'path-control' : 'path-point';
+      const shape = p.type === 'control' ? 'diamond' : 'circle';
+      this._createHandle(g, p.x, p.y, handleType, i, shape);
+    });
+
+    // Store point metadata on the handle group for drag lookup
+    if (this._handleGroup) {
+      this._handleGroup._pathPoints = points;
+      this._handleGroup._pathCommands = commands;
+    }
+  }
+
   // === Drag Initialization ===
 
   _startElementDrag(el, svgPt) {
@@ -708,69 +1120,44 @@ export class SvgEditor {
     const x1 = _num(el, 'x1'), y1 = _num(el, 'y1');
     const x2 = _num(el, 'x2'), y2 = _num(el, 'y2');
 
-    const dist1 = Math.hypot(svgPt.x - x1, svgPt.y - y1);
-    const dist2 = Math.hypot(svgPt.x - x2, svgPt.y - y2);
-    const threshold = this._screenDistToSvgDist(ENDPOINT_HIT_THRESHOLD * 3);
-
-    if (dist1 < threshold && dist1 < dist2) {
-      // Drag endpoint 1
-      this._dragState = {
-        mode: 'line-endpoint',
-        element: el,
-        startSvg: { ...svgPt },
-        endpointIndex: 0,
-      };
-    } else if (dist2 < threshold && dist2 < dist1) {
-      // Drag endpoint 2
-      this._dragState = {
-        mode: 'line-endpoint',
-        element: el,
-        startSvg: { ...svgPt },
-        endpointIndex: 1,
-      };
-    } else {
-      // Drag whole line
-      this._dragState = {
-        mode: 'line-whole',
-        element: el,
-        startSvg: { ...svgPt },
-        origX1: x1, origY1: y1,
-        origX2: x2, origY2: y2,
-      };
-    }
+    // Always start with whole-line drag on direct element click.
+    // Endpoint dragging is done via the rendered handle overlays.
+    this._dragState = {
+      mode: 'line-whole',
+      element: el,
+      startSvg: { ...svgPt },
+      origX1: x1, origY1: y1,
+      origX2: x2, origY2: y2,
+    };
   }
 
   _startPolyDrag(el, svgPt) {
     const points = _parsePoints(el);
-    const threshold = this._screenDistToSvgDist(ENDPOINT_HIT_THRESHOLD * 3);
 
-    // Find closest vertex
-    let closestIdx = -1;
-    let closestDist = Infinity;
-    for (let i = 0; i < points.length; i++) {
-      const d = Math.hypot(svgPt.x - points[i].x, svgPt.y - points[i].y);
-      if (d < closestDist) {
-        closestDist = d;
-        closestIdx = i;
-      }
-    }
+    // Always whole-shape drag on direct element click.
+    // Vertex dragging happens exclusively via rendered handle overlays.
+    this._dragState = {
+      mode: 'poly-whole',
+      element: el,
+      startSvg: { ...svgPt },
+      origPoints: points.map(p => ({ ...p })),
+    };
+  }
 
-    if (closestDist < threshold) {
-      this._dragState = {
-        mode: 'poly-vertex',
-        element: el,
-        startSvg: { ...svgPt },
-        vertexIndex: closestIdx,
-        origPoints: points.map(p => ({ ...p })),
-      };
-    } else {
-      this._dragState = {
-        mode: 'poly-whole',
-        element: el,
-        startSvg: { ...svgPt },
-        origPoints: points.map(p => ({ ...p })),
-      };
-    }
+  _startPathDrag(el, svgPt) {
+    const d = el.getAttribute('d') || '';
+    const commands = _parsePathData(d);
+
+    // Whole-path drag via translate. Point dragging via handle overlays.
+    const { tx, ty } = _parseTranslate(el);
+    this._dragState = {
+      mode: 'translate',
+      element: el,
+      startSvg: { ...svgPt },
+      attrMode: 'transform',
+      origX: tx,
+      origY: ty,
+    };
   }
 
   _startHandleDrag(handle, svgPt, screenX, screenY) {
@@ -796,6 +1183,21 @@ export class SvgEditor {
           vertexIndex: handle.index,
           origPoints: points.map(p => ({ ...p })),
         };
+      }
+    } else if (handle.type === 'path-point' || handle.type === 'path-control') {
+      const hg = this._handleGroup;
+      if (hg && hg._pathPoints && hg._pathCommands) {
+        const pt = hg._pathPoints[handle.index];
+        if (pt) {
+          this._dragState = {
+            mode: 'path-point',
+            element: el,
+            startSvg: { ...svgPt },
+            pointIndex: handle.index,
+            pathPoints: hg._pathPoints.map(p => ({ ...p })),
+            pathCommands: hg._pathCommands.map(c => ({ cmd: c.cmd, args: [...c.args] })),
+          };
+        }
       }
     } else if (handle.type === 'resize-corner' || handle.type === 'resize-edge') {
       this._dragState = {
@@ -890,6 +1292,34 @@ export class SvgEditor {
     const newPoints = s.origPoints.map(p => ({ ...p }));
     newPoints[s.vertexIndex] = { x: svgPt.x, y: svgPt.y };
     el.setAttribute('points', _serializePoints(newPoints));
+  }
+
+  _applyPathPoint(svgPt) {
+    const s = this._dragState;
+    const el = s.element;
+    const pt = s.pathPoints[s.pointIndex];
+    if (!pt) return;
+
+    // Clone commands and update the specific args
+    const commands = s.pathCommands.map(c => ({ cmd: c.cmd, args: [...c.args] }));
+    const cmd = commands[pt.cmdIndex];
+    if (!cmd) return;
+
+    const isRel = cmd.cmd !== cmd.cmd.toUpperCase();
+    if (isRel) {
+      // For relative commands, compute delta from original absolute position
+      // and apply it relative to the original arg values
+      const origCmd = s.pathCommands[pt.cmdIndex];
+      const dx = svgPt.x - pt.x;
+      const dy = svgPt.y - pt.y;
+      cmd.args[pt.argIndex] = origCmd.args[pt.argIndex] + dx;
+      cmd.args[pt.argIndex + 1] = origCmd.args[pt.argIndex + 1] + dy;
+    } else {
+      cmd.args[pt.argIndex] = svgPt.x;
+      cmd.args[pt.argIndex + 1] = svgPt.y;
+    }
+
+    el.setAttribute('d', _serializePathData(commands));
   }
 
   _applyResize(svgPt) {
