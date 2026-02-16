@@ -101,6 +101,20 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 |------|-------------|
 | [Build and Deployment](6-deployment/build_and_deployment.md) | Build pipeline, CI, versioning, startup sequence, CLI |
 
+### Consolidated References
+
+The [Communication Layer](1-foundation/communication_layer.md) spec contains:
+- **RPC Method Inventory** — complete table of all RPC methods across all three service classes
+- **File Selection Sync** — end-to-end browser↔server file selection flow
+- **Server Initialization Pseudocode** — how services are constructed and registered
+
+The [Prompt Assembly](3-llm-engine/prompt_assembly.md) spec contains:
+- **Tiered Assembly Data Flow** — complete path from stability tracker → content gathering → message assembly
+
+The [Streaming Lifecycle](3-llm-engine/streaming_lifecycle.md) spec contains:
+- **streamComplete Result Schema** — typed schema for all result fields
+- **Active Items Construction** — pseudocode for building the stability tracker input
+
 ## Core Concepts
 
 ### Bidirectional RPC
