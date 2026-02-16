@@ -86,12 +86,9 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 - **File deleted** — both file and symbol entries removed entirely
 - Either causes a cache miss in the affected tier
 
-**Deselected file cleanup** happens at **two points** to avoid a one-request lag:
+**Deselected file cleanup** currently relies on the active items mechanism: when a file is deselected, its `file:*` entry simply stops appearing in the active items list on subsequent requests. The entry persists in whichever tier it earned but receives no N-value updates. Stale entries for files deleted from disk are cleaned up by `remove_stale()` in Phase 0.
 
-1. **At assembly time** (in `_gather_tiered_content`, before the LLM request) — `file:*` entries for files not in the current selected files list are removed immediately
-2. **After the response** (in `_update_stability`) — the same check runs again as part of the normal stability update cycle
-
-Both steps mark the affected tier as broken to trigger cascade rebalancing.
+**Note:** The spec originally described a two-point cleanup (at assembly time and after response) that would immediately remove `file:*` entries for deselected files. The current implementation does not perform this eager cleanup — deselected file entries remain in their tier until the file is deleted from disk. A future improvement could add explicit deselection cleanup in `_update_stability` to mark affected tiers as broken and trigger cascade rebalancing.
 
 ## The Active Items List
 
@@ -120,7 +117,7 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 **L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
 
-**Fallback** (when no reference index is available): sort all files by reference count descending, fill L1 first (to `cache_target_tokens`), then L2, then L3.
+**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. Note: the fallback checks for `reference_count` method but the actual `ReferenceIndex` method is `file_ref_count` — if the `hasattr` check fails, all files are treated as having zero references.
 
 ## Cache Block Structure
 
@@ -157,6 +154,10 @@ Bottom-up pass: place incoming, process veterans, check promotion. Repeat until 
 
 ### Phase 4: Record Changes
 Log promotions/demotions for frontend display. Store current active items for next request.
+
+### Post-Cascade Consolidation Detail
+
+The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
 
 ## Symbol Map Exclusion
 

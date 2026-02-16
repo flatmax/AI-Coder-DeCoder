@@ -201,6 +201,7 @@ tests/test_auth.py:
 - **Test collapsing** — test files show only summary counts
 - **Stable ordering** — files maintain position across regenerations for cache stability
 - **Inherited methods** — only in the parent class; consumers check bases
+- **Instance variables** — listed as `v` lines nested under the class, extracted from `self.x = ...` assignments in `__init__`
 
 ### Chunked Output
 
@@ -227,12 +228,14 @@ Individual file symbol blocks can be generated independently. A stable hash of a
 
 ## LSP Queries
 
-| RPC Method | Description |
+**Note:** LSP methods are implemented directly on `SymbolIndex`, not as delegate methods on `LLMService`. Since `SymbolIndex` is not registered with `add_class()` (only `Repo`, `LLMService`, and `Settings` are registered), these methods are **not currently exposed as RPC endpoints**. The browser-side Monaco providers (`diff-viewer.js`) call `LLMService.lsp_get_hover` etc., but these calls will fail until delegate methods are added to `LLMService`. This is a known gap.
+
+| Method (on SymbolIndex) | Description |
 |------------|-------------|
-| `LLM.lsp_get_hover(path, line, col)` | Symbol signature, parameters, return type |
-| `LLM.lsp_get_definition(path, line, col)` | `{file, range}` via call site or import resolution |
-| `LLM.lsp_get_references(path, line, col)` | `[{file, range}]` from reference index |
-| `LLM.lsp_get_completions(path, line, col)` | `[{label, kind, detail}]` filtered by prefix |
+| `lsp_get_hover(path, line, col)` | Symbol signature, parameters, return type |
+| `lsp_get_definition(path, line, col)` | `{file, range}` via call site or import resolution |
+| `lsp_get_references(path, line, col)` | `[{file, range}]` from reference index |
+| `lsp_get_completions(path, line, col)` | `[{label, kind, detail}]` filtered by prefix |
 
 ### Symbol at Position
 
@@ -254,8 +257,17 @@ Binary search through sorted symbols by line/column range. For nested symbols, r
 ## Caching
 
 - **Symbol cache** — in-memory, per-file, mtime-based invalidation
-- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt on startup and before each LLM request
+- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
 - **Import resolution cache** — cleared when new files are detected
+
+## Indexing Exclusions
+
+The source file walker excludes the following directories:
+- Hidden directories (starting with `.`)
+- `node_modules`, `__pycache__`, `venv`, `.venv`, `dist`, `build`, `.git`
+- `.ac-dc` (the application's working directory)
+
+These directories are skipped during both repository-wide indexing and import resolution file discovery.
 
 ## Testing
 

@@ -56,19 +56,19 @@ Methods the server calls on the client (registered via `addClass`):
 
 **Server:** Validate git repo (if not a repo: open HTML instruction page in browser, print terminal banner, exit). Initialize services. Register classes with JRPCServer. Start WebSocket server. Open browser.
 
-**App Shell:** On `setupDone`: publish call proxy → fetch `LLM.get_current_state()` → dispatch `state-loaded` event (window-level CustomEvent with full state object as detail).
+**App Shell:** On `setupDone`: publish call proxy → fetch `LLMService.get_current_state()` → dispatch `state-loaded` event (window-level CustomEvent with full state object as detail). The state already contains messages from the server's auto-restored last session, so the browser renders the previous conversation immediately.
 
 **Files Tab:** On RPC ready: load snippets, load file tree, load review state. On `state-loaded`: restore messages, selected files, streaming status, sync file picker, scroll chat to bottom.
 
 **RPC Deferral:** Some components defer their first RPC call to the next microtask (`Promise.resolve().then(...)`) in `onRpcReady()`. This ensures the `SharedRpc` call proxy has fully propagated to all listeners before any component issues requests. Without this, a component's `onRpcReady` might fire before sibling components have received the proxy, causing race conditions when calls trigger events that siblings need to handle.
 
-**Dialog:** On RPC ready: sync history bar via `LLM.get_history_status()`. Restore last-used tab from localStorage.
+**Dialog:** On RPC ready: sync history bar via `LLMService.get_history_status()`. Restore last-used tab from localStorage.
 
 ### State Restoration Cascade
 
 The `state-loaded` event triggers a specific cascade with ordering constraints:
 
-1. **App shell** dispatches `state-loaded` on `window` with the full state object (`messages`, `selected_files`, `streaming_active`, `session_id`, `repo_name`)
+1. **App shell** dispatches `state-loaded` on `window` with the full state object (`messages`, `selected_files`, `streaming_active`, `session_id`, `repo_name`). The `repo_name` field is used to set the browser tab title.
 2. **Files tab** listens on `window`, sets `_messages`, `_selectedFiles`, `_streamingActive` from the state
 3. **File picker sync is deferred** via `requestAnimationFrame` — the picker may not have its tree loaded yet (its own `onRpcReady` fires independently via microtask deferral)
 4. **Chat panel** detects bulk message load (empty→non-empty transition in `updated()`) and triggers scroll-to-bottom with double-rAF
@@ -161,7 +161,7 @@ On startup, the dialog restores its last position and size. Undocked positions a
 The review toggle button (👁️) appears in the header actions area on all tabs. When review mode is inactive, clicking it switches to the Files tab and opens the review selector. When review mode is active, the button is visually highlighted (`review-active` class) and clicking it calls `_exitReview()` on the files tab. This provides quick access to review without navigating to the Files tab first.
 
 The dialog tracks review state via `_reviewActive` property, synced from:
-- `onRpcReady`: fetches `LLMService.get_review_state`
+- `onRpcReady`: fetches `LLMService.get_review_state()`
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
@@ -175,7 +175,7 @@ Toggle via header click or Alt+M. Minimized: 48px header only.
 
 3px bar at bottom showing history token usage percentage:
 - Green ≤ 75%, Orange 75–90%, Red > 90%
-- Data from `LLM.get_history_status()`, refreshed on: RPC ready, stream-complete, compaction, state-loaded
+- Data from `LLMService.get_history_status()`, refreshed on: RPC ready, stream-complete, compaction, state-loaded
 
 Event listeners for history bar refresh are registered once (guarded by `_dialogEventsRegistered` flag) to prevent duplicate listeners on reconnect (since `onRpcReady` fires again on each reconnection).
 

@@ -106,7 +106,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method `emergency_truncate()` exists on `ContextManager` but is **not currently called** from the streaming handler or any other code path. This is a known gap — the safety net exists but is not wired into the request flow.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
@@ -164,12 +164,12 @@ This is the schema returned by `list_sessions()` for each session.
 
 | Method | Description |
 |--------|-------------|
-| `LLM.history_search(query, role?, limit?)` | Case-insensitive substring search |
-| `LLM.history_get_session(session_id)` | All messages from a session |
-| `LLM.history_list_sessions(limit?)` | Recent sessions, newest first |
-| `LLM.history_new_session()` | Start new session |
-| `LLM.load_session_into_context(session_id)` | Load into active context |
-| `LLM.get_history_status()` | Token counts, compaction status, session info for history bar |
+| `LLMService.history_search(query, role?, limit?)` | Case-insensitive substring search |
+| `LLMService.history_get_session(session_id)` | All messages from a session |
+| `LLMService.history_list_sessions(limit?)` | Recent sessions, newest first |
+| `LLMService.history_new_session()` | Start new session |
+| `LLMService.load_session_into_context(session_id)` | Load into active context |
+| `LLMService.get_history_status()` | Token counts, compaction status, session info for history bar |
 
 ### Dual Stores
 
@@ -180,6 +180,10 @@ This is the schema returned by `list_sessions()` for each session.
 
 Both are updated on each exchange.
 
+### Search Fallback
+
+`history_search` tries the persistent store first. If the persistent store returns no results (or is unavailable), the search falls back to case-insensitive substring matching against the in-memory context history. This ensures search works even if the JSONL file is inaccessible.
+
 ---
 
 ## History Compaction
@@ -189,13 +193,15 @@ Both are updated on each exchange.
 Compaction runs **after** the assistant response has been delivered — it is background housekeeping. The compacted history takes effect on the **next** request.
 
 ```
-Response delivered → 500ms pause → compaction check
+Response delivered → compaction check
     → if history tokens > trigger:
           detect topic boundary (LLM call)
           apply truncation or summarization
           replace in-memory history
-          notify frontend
+          re-register history items in stability tracker
 ```
+
+**Note:** The original design included a 500ms pause before compaction and frontend notifications (`compaction_start`, `compaction_complete`, `compaction_error`). The current implementation runs compaction immediately after `streamComplete` without delay or frontend notification. See [Frontend Notification](#frontend-notification) below for details.
 
 ### Configuration
 
@@ -255,12 +261,16 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 
 ### Frontend Notification
 
+The spec defines the following event protocol for compaction notifications:
+
 | Event | Behavior |
 |-------|----------|
 | `compaction_start` | Show "Compacting..." message, disable input |
 | `compaction_complete` | Rebuild message display from compacted messages |
 | `compaction_error` | Show error, re-enable input |
 | `case: "none"` | Remove "Compacting..." silently |
+
+**Current status:** These notifications are **not yet implemented**. The `compactionEvent` callback exists and is used for URL fetch progress during streaming, but the post-response compaction path calls `compact_history_if_needed()` directly without notifying the frontend. Compaction runs silently — the browser does not know when compaction occurs or what changed. The frontend handles these events (the chat panel has a `_onCompactionEvent` handler), but the backend never sends them for compaction.
 
 ---
 
@@ -353,7 +363,7 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 ### Session Start
 1. Create Context Manager with model, repo root, config
 2. Stability tracker starts empty — tiers rebuild from reference graph on first request
-3. History is empty
+3. **Auto-restore last session** — on LLM service initialization, the most recent session is loaded from the persistent history store into the context manager. This means `get_current_state()` returns messages from the previous session immediately, allowing the browser to resume where the user left off after a server restart. If no sessions exist or loading fails, history starts empty.
 
 ### During Conversation
 1. Streaming handler calls `add_message()` for each exchange
@@ -368,3 +378,18 @@ Clear history, purge stability tracker history entries, start new persistent ses
 2. Read messages from persistent store (reconstruct images from `image_refs`)
 3. Add each to context manager
 4. Set persistent store's session ID to continue in loaded session
+
+The return value includes both the session metadata and a `messages` array with reconstructed `images` fields (data URIs rebuilt from `image_refs`). This allows the frontend to display image thumbnails in loaded sessions without a separate fetch.
+
+**Key naming:** The history store internally reconstructs images into a `_images` key (underscore prefix) on message dicts. The `load_session_into_context` method on `LLMService` remaps `_images` → `images` for the frontend response. However, `history_get_session` returns raw session messages with `_images` keys — the frontend history browser should handle both `images` and `_images` fields.
+
+### Auto-Restore on Startup
+
+On LLM service initialization (before any client connects), the server automatically loads the most recent session from the persistent store into the context manager:
+
+1. Query `list_sessions(limit=1)` for the newest session
+2. Load its messages via `get_session_messages_for_context`
+3. Add each message to the context manager
+4. Set the current session ID to the loaded session's ID
+
+This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.

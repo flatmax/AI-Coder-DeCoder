@@ -13,6 +13,10 @@ Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
 - Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)
 - Auto-refresh on `stream-complete` and `files-changed` events while visible; mark stale when hidden
 
+### FileContext Sync Before Breakdown
+
+Before computing the breakdown, `get_context_breakdown()` synchronizes the in-memory `FileContext` with the current `_selected_files` list — removing files that are no longer selected and loading files that are newly selected. This ensures the breakdown reflects what the *next* LLM request would look like, not a stale snapshot from the last request. Without this sync, the context viewer would show outdated data when the user changes file selection between requests.
+
 `LLMService.get_context_breakdown()` returns:
 
 ```pseudo
@@ -261,7 +265,7 @@ Cache:         read: 21,640, write: 48,070
 Session total: 182,756
 ```
 
-Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields.
+Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
 
 ### Tier Changes
 

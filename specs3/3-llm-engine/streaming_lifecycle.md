@@ -14,7 +14,7 @@ User clicks Send
     ├─ Start watchdog timer (5 min safety timeout)
     │
     ▼
-Server: LLM.chat_streaming(request_id, message, files, images)
+Server: LLMService.chat_streaming(request_id, message, files, images)
     │
     ├─ Guard: reject if another stream is active
     ├─ Persist user message to history store
@@ -28,7 +28,13 @@ Background task: _stream_chat
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
-    ├─ Assemble tiered message array (→ prompt_assembly.md)
+    │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
+    │       ├─ Notify client: compactionEvent with stage "url_fetch"
+    │       ├─ Fetch, cache, and summarize each URL
+    │       ├─ Notify client: compactionEvent with stage "url_ready"
+    │       └─ Update URL context on context manager (joined as single string)
+    ├─ Build and inject review context (if review mode active)
+    ├─ Assemble message array (non-tiered, no cache_control markers)
     ├─ Run LLM completion (threaded, streaming)
     │       │
     │       ├─ streamChunk callbacks → browser
@@ -52,6 +58,12 @@ Send streamComplete → browser
 Post-response compaction (→ context_and_history.md)
 ```
 
+### Assembly Mode
+
+The current implementation uses **non-tiered assembly** (`assemble_messages`) for all LLM requests. This produces a flat message array without `cache_control` markers. The stability tracker still runs (tracking N-values, graduation, cascade) and its tier data is used for the terminal HUD and frontend context/cache viewers — but the actual LLM request does not use tiered message layout or provider cache breakpoints.
+
+The tiered assembly path (`assemble_tiered_messages`) is implemented in `context.py` but is not called from the streaming handler. Enabling it requires building a `tiered_content` dict from the stability tracker's tier assignments — mapping each tier's items to their symbol blocks, file contents, and history messages — and passing it to `assemble_tiered_messages`. This data flow (tracker → content gathering → tiered assembly) is the missing integration piece.
+
 ## File Context Sync
 
 Before loading files, the streaming handler compares the current FileContext against the incoming selected files list. Files present in the context but absent from the new selection are removed. This ensures deselected files don't linger in the in-memory context across requests.
@@ -74,7 +86,7 @@ This is distinct from the cache tiering deselection cleanup (see [Cache Tiering 
 6. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
 7. Track request — store in pending requests map
 8. Set streaming state (disable input, start watchdog)
-9. RPC call: `LLM.chat_streaming(request_id, message, files, images)`
+9. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
 
 ## LLM Streaming (Worker Thread)
 
@@ -99,7 +111,7 @@ Coalesced per animation frame:
 
 ## Cancellation
 
-During streaming, the Send button transforms into a **Stop button** (⏹). Clicking calls `LLM.cancel_streaming(request_id)`. The server adds the request ID to a cancelled set; the streaming thread checks each iteration and breaks out. Partial content stored with `[stopped]` marker, `streamComplete` sent with `cancelled: true`.
+During streaming, the Send button transforms into a **Stop button** (⏹). Clicking calls `LLMService.cancel_streaming(request_id)`. The server adds the request ID to a cancelled set; the streaming thread checks each iteration and breaks out. Partial content stored with `[stopped]` marker, `streamComplete` sent with `cancelled: true`.
 
 ## Stream Completion
 
@@ -132,6 +144,17 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 8. Refresh repo file list (`get_flat_file_list`) for file mention detection of newly created files
 9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
 
+## URL Fetch Notifications During Streaming
+
+When URLs are detected and fetched during `_stream_chat`, progress is communicated to the browser via `compactionEvent` callbacks reusing the general-purpose progress channel:
+
+| Stage | Message |
+|-------|---------|
+| `url_fetch` | `"Fetching {display_name}..."` — shown as a transient toast |
+| `url_ready` | `"Fetched {display_name}"` — shown as a success toast |
+
+Already-fetched URLs (present in the in-memory fetched dict) are skipped without notification. The URL context is then set on the context manager as a pre-joined string — the `\n---\n` joining happens in `format_url_context()` before being passed to `set_url_context()`.
+
 ## Post-Response Processing
 
 ### Stability Update
@@ -146,9 +169,10 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 
 Runs asynchronously after `streamComplete`:
 1. Check if history exceeds trigger
-2. Wait 500ms for frontend to process
-3. Notify start → run compaction → notify complete
-4. Re-register history items in stability tracker
+2. Run compaction if needed
+3. Re-register history items in stability tracker (done inside `compact_history_if_needed`)
+
+**Note:** The current implementation does **not** include the 500ms delay or frontend notifications (`compaction_start`, `compaction_complete`, `compaction_error`). The compaction runs silently — `compact_history_if_needed()` is called directly after `streamComplete` without notifying the browser. The `compactionEvent` callback infrastructure exists (used for URL fetch notifications during streaming) and could be reused, but this wiring is not yet implemented.
 
 See [Context and History](context_and_history.md) for the compaction algorithm.
 
@@ -213,7 +237,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id
+- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 
 ### Streaming Guards
@@ -236,6 +260,7 @@ Session total: 182,756
 - Uses the smaller model (`smaller_model` config, falling back to primary model)
 - Empty/whitespace diff rejected
 - Mocked LLM returns generated message
+- **Note:** Commit message generation is a synchronous (non-streaming) `litellm.completion` call. Unlike `chat_streaming` which uses `run_in_executor` to avoid blocking the event loop, `generate_commit_message` runs synchronously on the calling coroutine. This may briefly block the server during generation. A future improvement could move this to a thread executor.
 
 ### Tiered Content Deduplication
 - File in cached tier excludes its symbol block

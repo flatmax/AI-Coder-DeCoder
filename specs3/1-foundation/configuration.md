@@ -155,6 +155,9 @@ Only these types are accepted — arbitrary file paths are rejected.
 | `Settings.reload_app_config()` | Hot-reload app config |
 | `Settings.get_config_info()` | Current model names and config paths |
 | `Settings.get_snippets()` | Load prompt snippets |
+| `Settings.get_review_snippets()` | Load review-specific prompt snippets |
+
+**Note:** Snippet loading during active sessions is handled by `LLMService.get_snippets()`, which checks review mode state and delegates to the appropriate config method. The `Settings.get_snippets()` and `Settings.get_review_snippets()` methods provide direct access without mode awareness.
 
 ### Config Editing Flow
 

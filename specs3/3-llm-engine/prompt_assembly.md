@@ -2,7 +2,9 @@
 
 ## Overview
 
-This is the **single source of truth** for how LLM messages are assembled. All prompt content — system prompts, symbol map, files, history, URLs — is organized into a structured message array with cache breakpoints. Other specs reference this document rather than duplicating the format.
+This is the **single source of truth** for how LLM messages are assembled. All prompt content — system prompts, symbol map, files, history, URLs — is organized into a structured message array.
+
+**Implementation status:** The tiered assembly with `cache_control` markers is implemented in `ContextManager.assemble_tiered_messages()` but is **not currently used** by the streaming handler. All LLM requests use `assemble_messages()` (non-tiered, flat message array without cache breakpoints). The stability tracker runs and tracks tiers, but the tier data is only used for HUD/viewer display, not for actual prompt organization. The tiered message structure described below represents the target design — the missing integration is a content-gathering step that maps tracker tier assignments to the `tiered_content` dict expected by `assemble_tiered_messages()`.
 
 ## System Prompt
 

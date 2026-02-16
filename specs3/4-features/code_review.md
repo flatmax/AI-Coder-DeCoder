@@ -87,6 +87,10 @@ If any step in the entry sequence fails (e.g., checkout conflict, invalid commit
 - **During setup completion (steps 5-6):** The LLM service calls the exit sequence (`exit_review_mode`) which performs `git reset --soft {branch_tip_sha}` and `git checkout {original_branch}`, restoring the repository state.
 - The error is reported to the user and review mode is not entered.
 
+### File Selection on Entry
+
+The server clears `selected_files` to an empty list during `start_review()`, independently of the frontend's file selection reset. This ensures that even if the frontend event handling races or fails, the server-side state is clean — preventing stale file selections from before the review from inadvertently including diffs in the first message.
+
 If the process crashes during review mode, the user can manually restore with:
 ```
 git checkout {original_branch}
@@ -258,7 +262,7 @@ get_commit_graph(limit?, offset?) -> {
 }
 ```
 
-Implementation: runs `git log --all --topo-order --parents --format=...` with pagination via `--skip` and `--max-count`. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
+Implementation: runs `git log --all --topo-order --format=...` with `%P` (parent SHAs) embedded in the format string, plus `--skip` and `--max-count` for pagination. The `%P` placeholder produces space-separated parent SHAs within the formatted output, which are then split during parsing. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
 
 The backend post-filters branch results to remove:
 - Symbolic refs: `HEAD`, `origin/HEAD`, entries containing ` -> `
@@ -577,6 +581,8 @@ get_commit_log(base, head?, limit?) -> [
 get_commit_parent(commit) -> {sha, short_sha} | {error}
 
 get_merge_base(ref1, ref2?) -> {sha, short_sha} | {error}
+    # If ref2 is omitted, defaults to "main".
+    # If merge-base with "main" fails, retries with "master" as fallback.
 
 checkout_review_parent(branch, base_commit) -> {
     branch, branch_tip, base_commit, parent_commit,
@@ -611,6 +617,13 @@ check_review_ready() -> {clean: true} | {clean: false, message: string}
     # tree has uncommitted changes. Called when the review selector opens,
     # before rendering the graph.
 
+get_snippets() -> [{icon, tooltip, message}]
+    # Returns snippets appropriate for the current mode.
+    # When review mode is active, returns review-specific snippets
+    # from review-snippets.json. Otherwise returns standard snippets.
+    # The frontend always calls get_snippets() — it does not need to
+    # distinguish between modes.
+
 start_review(branch, base_commit) -> {
     status: "review_active", branch, base_commit,
     commits: [{sha, short_sha, message, author, date}],
@@ -633,6 +646,8 @@ get_review_state() -> {
 get_review_file_diff(path) -> {path, diff}
     # Delegates to repo.get_review_file_diff (git diff --cached -- path)
 ```
+
+**Note:** All LLM service methods above are exposed via jrpc-oo as `LLMService.method_name` (e.g., `LLMService.start_review`).
 
 ### Review State
 

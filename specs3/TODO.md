@@ -151,6 +151,16 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Git repo check** — When started outside a git repo, open a self-contained HTML page in the browser (shows AC⚡DC branding, repo path, and instructions), display terminal banner with `git init` and `cd <repo>` instructions, then exit
 - [x] **Accessibility** — ARIA landmarks/roles on all components, Alt+1-5 tab switching, Alt+M minimize, focus trapping in modals/lightbox, Ctrl+S save in settings editor, aria-live regions for streaming/toasts/status, proper labeling on all interactive elements, keyboard-operable expandable sections, diff-viewer tab navigation, toast notifications with role=alert, URL chips with list semantics
 
+### Phase 9.25: Integration Gaps
+These items represent implemented components that are not yet wired together:
+
+- [ ] **Tiered prompt assembly integration** — `assemble_tiered_messages()` exists but is never called. Need: content-gathering step that maps `StabilityTracker` tier assignments → `tiered_content` dict → `assemble_tiered_messages()`. Currently all requests use flat `assemble_messages()` without `cache_control` markers
+- [ ] **LSP RPC delegation** — `SymbolIndex.lsp_get_*` methods exist but are not exposed via RPC. Need: delegate methods on `LLMService` that forward to `self._symbol_index.lsp_get_*()`. Browser calls `LLMService.lsp_get_hover` etc. but these fail
+- [ ] **Compaction frontend notifications** — `compactionEvent` callback exists (used for URL fetch) but compaction runs silently. Need: wrap `compact_history_if_needed()` with `compaction_start`/`compaction_complete`/`compaction_error` notifications via `_event_callback`, with 500ms delay before starting
+- [ ] **Emergency truncation wiring** — `ContextManager.emergency_truncate()` exists but is never called. Need: call before `assemble_messages()` in `_stream_chat` as a safety net when history exceeds 2× compaction trigger
+- [ ] **Deselected file cleanup in stability tracker** — When files are unchecked, their `file:*` entries persist in cached tiers indefinitely. Need: explicit cleanup in `_update_stability` that removes `file:*` entries not in `_selected_files` and marks affected tiers as broken
+- [ ] **`reference_count` → `file_ref_count` fix** — The initialization fallback in `StabilityTracker.initialize_from_reference_graph` checks for `reference_count` method but the actual `ReferenceIndex` method is `file_ref_count`. The `hasattr` guard prevents a crash but makes this path dead code
+
 ### Phase 9.5: Edit Robustness
 - [x] **Not-in-context edit detection** — Separate edit blocks by context membership, mark NOT_IN_CONTEXT status, auto-add files to selection, broadcast via filesChanged
 - [x] **Edit summary with auto-add prompt** — Amber badge for not-in-context edits, banner message prompting user to retry

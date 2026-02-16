@@ -62,6 +62,21 @@ class LLM:
         await self.call["AcApp.streamChunk"](request_id, content)
 ```
 
+**Event callback abstraction:** The LLM service uses an `_event_callback` function rather than calling `get_call()` directly. This callback is wired up in `main.py` to dispatch to `AcApp.{event_name}(...)`:
+
+```python
+async def event_callback(event_name, *args):
+    call = llm_service.get_call()
+    await call[f"AcApp.{event_name}"](*args)
+```
+
+Different events pass different argument shapes:
+- `streamComplete(request_id, result)` — 2 args
+- `compactionEvent(request_id, event_dict)` — 2 args
+- `filesChanged(selected_files_list)` — 1 arg (no request_id)
+
+The `*args` splat handles this variance, but callers must match the browser method signatures exactly.
+
 **Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key. In practice, many server→browser calls are fire-and-forget notifications where the browser returns `true` as an acknowledgement and the Python side just awaits without inspecting the result.
 
 ### Browser Side (JavaScript)
@@ -87,6 +102,9 @@ class AcApp extends JRPCClient {
 ```javascript
 const raw = await this.call['Repo.get_file_tree']();
 // raw = { "get_file_tree": { tree: {...}, modified: [...] } }
+
+const state = await this.call['LLMService.get_current_state']();
+// raw = { "get_current_state": { messages: [...], ... } }
 ```
 
 **Unwrapping the envelope:**
@@ -200,17 +218,19 @@ All state is **global** across connected clients:
 
 ### Reconnection
 
-On WebSocket reconnect (browser refresh), the client calls `LLM.get_current_state()` which returns current session messages, selected files, streaming status, and session ID. The client rebuilds its UI from this state.
+On WebSocket reconnect (browser refresh), the client calls `LLMService.get_current_state()` which returns current session messages, selected files, streaming status, session ID, and repo name. The client rebuilds its UI from this state. On first connect after server startup, the state already contains messages from the auto-restored last session (see [Context and History — Auto-Restore on Startup](../3-llm-engine/context_and_history.md#auto-restore-on-startup)).
 
 ## Server-Side Class Organization
 
-Three top-level service classes:
+Three top-level service classes, registered via `add_class()`:
 
-| Service | Responsibility |
-|---------|---------------|
-| **Repo** | Git operations, file I/O, tree, search |
-| **LLM** | Chat streaming, context assembly, URL handling, history, symbol index |
-| **Settings** | Config read/write/reload |
+| Class Name | RPC Prefix | Responsibility |
+|------------|------------|---------------|
+| **Repo** | `Repo.*` | Git operations, file I/O, tree, search |
+| **LLMService** | `LLMService.*` | Chat streaming, context assembly, URL handling, history, symbol index |
+| **Settings** | `Settings.*` | Config read/write/reload |
+
+**Note:** The LLM service class is named `LLMService` in code, so all RPC methods are prefixed `LLMService.*` (e.g., `LLMService.chat_streaming`, `LLMService.get_context_breakdown`). Other specs may refer to these methods with the full prefix or the shorthand `LLM.*` — both refer to the same endpoints.
 
 ## Error Handling
 
