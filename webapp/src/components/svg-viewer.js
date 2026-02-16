@@ -886,6 +886,10 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       return;
     }
 
+    // Guard against duplicate injection (updated() and openFile both call this)
+    if (this._injectGeneration == null) this._injectGeneration = 0;
+    const gen = ++this._injectGeneration;
+
     // Dispose everything before replacing content
     this._disposeAll();
 
@@ -901,6 +905,9 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     // Initialize based on mode
     requestAnimationFrame(() => {
+      // Skip if a newer _injectSvgContent call has superseded this one
+      if (gen !== this._injectGeneration) return;
+
       this._initLeftPanZoom();
 
       if (this._mode === 'select') {

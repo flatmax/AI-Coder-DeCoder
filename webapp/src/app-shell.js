@@ -16,6 +16,9 @@ import './components/diff-viewer.js';
 import './components/svg-viewer.js';
 import './components/token-hud.js';
 
+const STORAGE_KEY_LAST_FILE = 'ac-last-open-file';
+const STORAGE_KEY_LAST_VIEWPORT = 'ac-last-viewport';
+
 /**
  * Extract WebSocket port from URL query parameter ?port=N
  */
@@ -181,6 +184,7 @@ class AcApp extends JRPCClient {
     this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
   }
 
   connectedCallback() {
@@ -203,6 +207,9 @@ class AcApp extends JRPCClient {
 
     // Global toast event listener
     window.addEventListener('ac-toast', this._onToastEvent);
+
+    // Save viewport state before page unload
+    window.addEventListener('beforeunload', this._onBeforeUnload);
   }
 
   disconnectedCallback() {
@@ -215,6 +222,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('active-file-changed', this._onActiveFileChanged);
     window.removeEventListener('keydown', this._onGlobalKeyDown);
     window.removeEventListener('ac-toast', this._onToastEvent);
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
@@ -389,6 +397,7 @@ class AcApp extends JRPCClient {
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
+      this._reopenLastFile();
     } catch (e) {
       console.error('Failed to load initial state:', e);
     }
@@ -405,6 +414,76 @@ class AcApp extends JRPCClient {
     return result;
   }
 
+  /**
+   * Re-open the last viewed file after a page refresh.
+   */
+  _reopenLastFile() {
+    try {
+      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      if (!path) return;
+
+      // Read saved viewport before navigating (navigation may overwrite it)
+      const raw = localStorage.getItem(STORAGE_KEY_LAST_VIEWPORT);
+      let viewport = null;
+      if (raw) {
+        viewport = JSON.parse(raw);
+        if (viewport?.path !== path) viewport = null;
+      }
+
+      // For diff files, listen for active-file-changed then restore scroll position
+      if (viewport && viewport.type === 'diff') {
+        const handler = (e) => {
+          if (e.detail?.path !== path) return;
+          window.removeEventListener('active-file-changed', handler);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              this._restoreViewportState(path, viewport);
+            });
+          });
+        };
+        window.addEventListener('active-file-changed', handler);
+        setTimeout(() => window.removeEventListener('active-file-changed', handler), 10000);
+      }
+
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+      }));
+    } catch (_) {}
+  }
+
+  /**
+   * Save the current viewer's viewport state to localStorage.
+   */
+  _saveViewportState() {
+    try {
+      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      if (!path) return;
+
+      // Only save viewport for diff files (SVG zoom restore not yet supported)
+      if (path.toLowerCase().endsWith('.svg')) return;
+
+      const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (diffV) {
+        const diffState = diffV.getViewportState?.() ?? null;
+        if (!diffState) return;
+        const viewport = { path, type: 'diff', diff: diffState };
+        localStorage.setItem(STORAGE_KEY_LAST_VIEWPORT, JSON.stringify(viewport));
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Restore viewport state on a viewer after re-opening a file.
+   */
+  _restoreViewportState(path, viewport) {
+    try {
+      if (viewport.type === 'diff' && viewport.diff) {
+        const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+        if (diffV) diffV.restoreViewportState?.(viewport.diff);
+      }
+    } catch (_) {}
+  }
+
   // === Event Routing ===
 
   /**
@@ -414,6 +493,12 @@ class AcApp extends JRPCClient {
   _onNavigateFile(e) {
     const detail = e.detail;
     if (!detail?.path) return;
+
+    // Save viewport state of the currently-open file before navigating away
+    this._saveViewportState();
+
+    // Remember last opened file for restore on refresh
+    try { localStorage.setItem(STORAGE_KEY_LAST_FILE, detail.path); } catch (_) {}
 
     const isSvg = detail.path.toLowerCase().endsWith('.svg');
 
@@ -544,6 +629,10 @@ class AcApp extends JRPCClient {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
     }
+  }
+
+  _onBeforeUnload() {
+    this._saveViewportState();
   }
 
   render() {
