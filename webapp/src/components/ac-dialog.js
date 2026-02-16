@@ -171,7 +171,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     .history-bar-fill.orange { background: var(--accent-orange); }
     .history-bar-fill.red { background: var(--accent-red); }
 
-    /* Resize handle */
+    /* Resize handle — right edge */
     .resize-handle {
       position: absolute;
       top: 0;
@@ -185,6 +185,39 @@ export class AcDialog extends RpcMixin(LitElement) {
     .resize-handle:active {
       background: var(--accent-primary);
       opacity: 0.3;
+    }
+
+    /* Resize handle — bottom edge */
+    .resize-handle-bottom {
+      position: absolute;
+      bottom: -4px;
+      left: 0;
+      width: 100%;
+      height: 8px;
+      cursor: row-resize;
+      z-index: 10;
+    }
+    .resize-handle-bottom:hover,
+    .resize-handle-bottom:active {
+      background: var(--accent-primary);
+      opacity: 0.3;
+    }
+
+    /* Resize handle — bottom-right corner */
+    .resize-handle-corner {
+      position: absolute;
+      bottom: -4px;
+      right: -4px;
+      width: 14px;
+      height: 14px;
+      cursor: nwse-resize;
+      z-index: 11;
+    }
+    .resize-handle-corner:hover,
+    .resize-handle-corner:active {
+      background: var(--accent-primary);
+      opacity: 0.3;
+      border-radius: 2px;
     }
   `];
 
@@ -377,6 +410,92 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('mouseup', onUp);
   }
 
+  // === Resize (bottom edge) ===
+
+  _onResizeBottomStart(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const container = this._getContainer();
+    if (!container) return;
+
+    if (!this._undocked) {
+      this._undock(container);
+    }
+
+    const startY = e.clientY;
+    const startHeight = container.offsetHeight;
+
+    const onMove = (moveEvent) => {
+      const dy = moveEvent.clientY - startY;
+      const newHeight = Math.max(200, startHeight + dy);
+      container.style.height = `${newHeight}px`;
+    };
+
+    const onUp = () => {
+      this._persistPosition(container);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // === Resize (bottom-right corner) ===
+
+  _onResizeCornerStart(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const container = this._getContainer();
+    if (!container) return;
+
+    if (!this._undocked) {
+      this._undock(container);
+    }
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startWidth = container.offsetWidth;
+    const startHeight = container.offsetHeight;
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      container.style.width = `${Math.max(300, startWidth + dx)}px`;
+      container.style.height = `${Math.max(200, startHeight + dy)}px`;
+    };
+
+    const onUp = () => {
+      this._persistPosition(container);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // === Undock / persist helpers ===
+
+  _undock(container) {
+    const rect = container.getBoundingClientRect();
+    this._undocked = true;
+    container.style.position = 'fixed';
+    container.style.top = `${rect.top}px`;
+    container.style.left = `${rect.left}px`;
+    container.style.width = `${rect.width}px`;
+    container.style.height = `${rect.height}px`;
+    container.style.right = 'auto';
+    container.style.bottom = 'auto';
+  }
+
+  _persistPosition(container) {
+    const r = container.getBoundingClientRect();
+    this._savePref('ac-dc-dialog-pos', JSON.stringify({
+      left: r.left, top: r.top, width: r.width, height: r.height,
+    }));
+  }
+
   // === Drag (header) ===
 
   _onHeaderMouseDown(e) {
@@ -407,14 +526,7 @@ export class AcDialog extends RpcMixin(LitElement) {
 
         // Undock: switch to explicit position so we can move freely
         if (!this._undocked) {
-          this._undocked = true;
-          container.style.position = 'fixed';
-          container.style.top = `${startTop}px`;
-          container.style.left = `${startLeft}px`;
-          container.style.width = `${startWidth}px`;
-          container.style.height = `${startHeight}px`;
-          container.style.right = 'auto';
-          container.style.bottom = 'auto';
+          this._undock(container);
         }
       }
 
@@ -432,11 +544,7 @@ export class AcDialog extends RpcMixin(LitElement) {
         // Click (under 5px threshold) → toggle minimize
         this._toggleMinimize();
       } else if (this._undocked) {
-        // Persist undocked position
-        const r = container.getBoundingClientRect();
-        this._savePref('ac-dc-dialog-pos', JSON.stringify({
-          left: r.left, top: r.top, width: r.width, height: r.height,
-        }));
+        this._persistPosition(container);
       }
     };
 
@@ -594,6 +702,8 @@ export class AcDialog extends RpcMixin(LitElement) {
       </div>
 
       <div class="resize-handle" @mousedown=${this._onResizeStart}></div>
+      <div class="resize-handle-bottom" @mousedown=${this._onResizeBottomStart}></div>
+      <div class="resize-handle-corner" @mousedown=${this._onResizeCornerStart}></div>
     `;
   }
 }
