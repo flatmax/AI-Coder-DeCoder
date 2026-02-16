@@ -1,17 +1,23 @@
 /**
- * SVG Viewer — side-by-side SVG diff viewer with synchronized pan/zoom.
+ * SVG Viewer — side-by-side SVG diff viewer with editing.
  *
- * Left panel: original SVG (read-only).
- * Right panel: modified SVG (read-only).
- * Both panels are synchronized — pan/zoom one and the other follows.
+ * Left panel: original SVG (read-only, svg-pan-zoom for navigation).
+ * Right panel: editable SVG (SvgEditor for drag/resize, synchronized viewport).
+ *
+ * Modes:
+ *   - "select" (default): right panel uses SvgEditor for editing, left uses svg-pan-zoom.
+ *     Viewport sync: left panel drives, viewBox is copied to right panel.
+ *   - "pan": both panels use svg-pan-zoom for navigation only, editing disabled.
  *
  * Uses svg-pan-zoom for native SVG viewBox manipulation (stays crisp at any zoom).
+ * Uses SvgEditor for pointer-based SVG element editing.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import svgPanZoom from 'svg-pan-zoom';
+import { SvgEditor } from './svg-editor.js';
 
 export class AcSvgViewer extends RpcMixin(LitElement) {
   static properties = {
@@ -19,6 +25,8 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     _activeIndex: { type: Number, state: true },
     _dirtySet:    { type: Object, state: true },
     _zoomLevel:   { type: Number, state: true },
+    _mode:        { type: String, state: true },       // 'select' | 'pan'
+    _selectedTag: { type: String, state: true },       // tag name of selected element
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -74,6 +82,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
     .tab-close:hover { opacity: 1; background: var(--bg-tertiary); }
 
+    .tab .dirty-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent-orange, #f0883e);
+      flex-shrink: 0;
+    }
+
     /* Diff container — side by side */
     .diff-container {
       flex: 1;
@@ -127,6 +142,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       height: 100%;
     }
 
+    .svg-left svg {
+      cursor: grab;
+    }
+    .svg-left svg:active {
+      cursor: grabbing;
+    }
+
     /* Toolbar */
     .toolbar {
       display: flex;
@@ -153,12 +175,30 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       background: var(--bg-hover);
       color: var(--text-primary);
     }
+    .toolbar button.active {
+      background: var(--accent-primary);
+      color: var(--bg-primary);
+      border-color: var(--accent-primary);
+    }
 
     .toolbar .zoom-label {
       font-size: 0.7rem;
       color: var(--text-muted);
       min-width: 48px;
       text-align: center;
+    }
+
+    .toolbar .separator {
+      width: 1px;
+      height: 16px;
+      background: var(--border-primary);
+    }
+
+    .toolbar .mode-label {
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     /* Splitter handle */
@@ -203,11 +243,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._activeIndex = -1;
     this._dirtySet = new Set();
     this._zoomLevel = 100;
+    this._mode = 'select';   // 'select' or 'pan'
+    this._selectedTag = '';
 
     this._panZoomLeft = null;
-    this._panZoomRight = null;
+    this._panZoomRight = null;   // only used in 'pan' mode
+    this._svgEditor = null;       // only used in 'select' mode
     this._syncing = false;
     this._resizeObserver = null;
+    this._undoStack = [];         // per-file undo: array of SVG strings
 
     this._onKeyDown = this._onKeyDown.bind(this);
   }
@@ -220,7 +264,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
-    this._disposePanZoom();
+    this._disposeAll();
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
@@ -278,6 +322,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     this._files = [...this._files, fileObj];
     this._activeIndex = this._files.length - 1;
+    this._undoStack = [modified];
 
     await this.updateComplete;
     this._injectSvgContent();
@@ -308,7 +353,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._files = updatedFiles;
       this._dirtySet = new Set();
       await this.updateComplete;
-      this._initPanZoom();
+      this._injectSvgContent();
     }
   }
 
@@ -321,15 +366,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     if (this._files.length === 0) {
       this._activeIndex = -1;
-      this._disposePanZoom();
+      this._disposeAll();
       this._dispatchActiveFileChanged(null);
     } else if (this._activeIndex >= this._files.length) {
       this._activeIndex = this._files.length - 1;
-      this.updateComplete.then(() => this._initPanZoom());
+      this.updateComplete.then(() => this._injectSvgContent());
       this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
     } else if (idx <= this._activeIndex) {
       this._activeIndex = Math.max(0, this._activeIndex - 1);
-      this.updateComplete.then(() => this._initPanZoom());
+      this.updateComplete.then(() => this._injectSvgContent());
       this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
     }
   }
@@ -387,7 +432,42 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
-  // === Pan/Zoom Management ===
+  // === Mode Switching ===
+
+  _setMode(mode) {
+    if (mode === this._mode) return;
+
+    // Capture current modified content from editor before switching
+    this._captureEditorContent();
+
+    this._mode = mode;
+    this._selectedTag = '';
+
+    // Re-inject and re-initialize for the new mode
+    this.updateComplete.then(() => this._injectSvgContent());
+  }
+
+  /**
+   * Capture the current SVG content from the editor (right panel)
+   * back into the file object, so it's preserved across mode switches.
+   */
+  _captureEditorContent() {
+    if (!this._svgEditor) return;
+    const file = this._getActiveFile();
+    if (!file) return;
+
+    const content = this._svgEditor.getContent();
+    if (content && content !== file.modified) {
+      file.modified = content;
+    }
+  }
+
+  // === Dispose Helpers ===
+
+  _disposeAll() {
+    this._disposePanZoom();
+    this._disposeEditor();
+  }
 
   _disposePanZoom() {
     if (this._panZoomLeft) {
@@ -400,78 +480,232 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
-  _initPanZoom() {
-    this._disposePanZoom();
+  _disposeEditor() {
+    if (this._svgEditor) {
+      this._svgEditor.dispose();
+      this._svgEditor = null;
+    }
+  }
+
+  // === Pan/Zoom Management (Left Panel — always active) ===
+
+  _initLeftPanZoom() {
+    if (this._panZoomLeft) {
+      try { this._panZoomLeft.destroy(); } catch {}
+      this._panZoomLeft = null;
+    }
 
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
-    const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
+    if (!leftSvg) return;
 
-    if (!leftSvg && !rightSvg) return;
-
-    const commonOpts = {
-      zoomEnabled: true,
-      panEnabled: true,
-      controlIconsEnabled: false,
-      fit: true,
-      center: true,
-      minZoom: 0.1,
-      maxZoom: 40,
-      zoomScaleSensitivity: 0.3,
-      dblClickZoomEnabled: true,
+    const onUpdate = () => {
+      if (this._syncing) return;
+      this._syncing = true;
+      try {
+        if (this._panZoomLeft) {
+          const zoom = this._panZoomLeft.getZoom();
+          this._zoomLevel = Math.round(zoom * 100);
+          this._syncLeftToRight();
+        }
+      } finally {
+        this._syncing = false;
+      }
     };
 
     try {
-      if (leftSvg) {
-        this._panZoomLeft = svgPanZoom(leftSvg, {
-          ...commonOpts,
-          onZoom: (level) => this._syncFromLeft('zoom', level),
-          onPan: (point) => this._syncFromLeft('pan', point),
-          onUpdatedCTM: () => this._syncFromLeft('ctm'),
-        });
-      }
-
-      if (rightSvg) {
-        this._panZoomRight = svgPanZoom(rightSvg, {
-          ...commonOpts,
-          onZoom: (level) => this._syncFromRight('zoom', level),
-          onPan: (point) => this._syncFromRight('pan', point),
-          onUpdatedCTM: () => this._syncFromRight('ctm'),
-        });
-      }
+      this._panZoomLeft = svgPanZoom(leftSvg, {
+        zoomEnabled: true,
+        panEnabled: true,
+        controlIconsEnabled: false,
+        fit: true,
+        center: true,
+        minZoom: 0.1,
+        maxZoom: 40,
+        zoomScaleSensitivity: 0.3,
+        dblClickZoomEnabled: true,
+        onZoom: onUpdate,
+        onPan: onUpdate,
+        onUpdatedCTM: onUpdate,
+      });
     } catch (e) {
-      console.warn('svg-pan-zoom initialization failed (Shadow DOM?):', e);
-      // SVGs are still visible — just without pan/zoom
+      console.warn('svg-pan-zoom init failed for left panel:', e);
     }
 
     this._zoomLevel = 100;
   }
 
-  _syncFromLeft(type, value) {
-    if (this._syncing || !this._panZoomLeft || !this._panZoomRight) return;
-    this._syncing = true;
+  /**
+   * In 'pan' mode: initialize svg-pan-zoom on the right panel too,
+   * with bidirectional sync.
+   */
+  _initRightPanZoom() {
+    if (this._panZoomRight) {
+      try { this._panZoomRight.destroy(); } catch {}
+      this._panZoomRight = null;
+    }
+
+    const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
+    if (!rightSvg) return;
+
+    const onUpdate = () => {
+      if (this._syncing) return;
+      this._syncing = true;
+      try {
+        if (this._panZoomRight && this._panZoomLeft) {
+          const zoom = this._panZoomRight.getZoom();
+          const pan = this._panZoomRight.getPan();
+          this._panZoomLeft.zoom(zoom);
+          this._panZoomLeft.pan(pan);
+          this._zoomLevel = Math.round(zoom * 100);
+        }
+      } finally {
+        this._syncing = false;
+      }
+    };
+
     try {
+      this._panZoomRight = svgPanZoom(rightSvg, {
+        zoomEnabled: true,
+        panEnabled: true,
+        controlIconsEnabled: false,
+        fit: true,
+        center: true,
+        minZoom: 0.1,
+        maxZoom: 40,
+        zoomScaleSensitivity: 0.3,
+        dblClickZoomEnabled: true,
+        onZoom: onUpdate,
+        onPan: onUpdate,
+        onUpdatedCTM: onUpdate,
+      });
+    } catch (e) {
+      console.warn('svg-pan-zoom init failed for right panel:', e);
+    }
+
+    // Sync initial viewport from left
+    this._syncLeftToRight();
+  }
+
+  /**
+   * In 'select' mode: initialize SvgEditor on the right panel SVG.
+   */
+  _initEditor() {
+    this._disposeEditor();
+
+    const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
+    if (!rightSvg) return;
+
+    const file = this._getActiveFile();
+
+    this._svgEditor = new SvgEditor(rightSvg, {
+      onDirty: () => {
+        if (file) {
+          this._dirtySet.add(file.path);
+          this._dirtySet = new Set(this._dirtySet);
+          // Push undo snapshot
+          const content = this._svgEditor?.getContent();
+          if (content) {
+            this._undoStack.push(content);
+            // Keep undo stack manageable
+            if (this._undoStack.length > 50) this._undoStack.shift();
+          }
+        }
+      },
+      onSelect: (el) => {
+        this._selectedTag = el ? el.tagName.toLowerCase() : '';
+      },
+      onDeselect: () => {
+        this._selectedTag = '';
+      },
+      onZoom: ({ zoom, viewBox }) => {
+        // Sync the right panel's zoom to the left panel
+        this._zoomLevel = Math.round(zoom * 100);
+        this._syncRightToLeft(viewBox);
+      },
+    });
+  }
+
+  /**
+   * Sync the left panel's viewport to the right panel.
+   * In 'select' mode: copies the left viewBox to the right (via SvgEditor).
+   * In 'pan' mode: uses svg-pan-zoom API.
+   */
+  _syncLeftToRight() {
+    if (!this._panZoomLeft) return;
+
+    if (this._mode === 'pan' && this._panZoomRight) {
       const zoom = this._panZoomLeft.getZoom();
       const pan = this._panZoomLeft.getPan();
       this._panZoomRight.zoom(zoom);
       this._panZoomRight.pan(pan);
-      this._zoomLevel = Math.round(zoom * 100);
+    } else if (this._mode === 'select' && this._svgEditor) {
+      // Read the left panel's effective viewBox from svg-pan-zoom and apply to editor
+      const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
+      if (leftSvg) {
+        const vb = leftSvg.getAttribute('viewBox');
+        if (vb) {
+          const parts = vb.split(/[\s,]+/).map(Number);
+          this._svgEditor.setViewBox(parts[0], parts[1], parts[2], parts[3]);
+        }
+      }
+    }
+  }
+
+  /**
+   * Sync the right panel's viewport (from SvgEditor zoom/pan) to the left panel.
+   * Used in 'select' mode when the user zooms/pans in the editor.
+   */
+  _syncRightToLeft(viewBox) {
+    if (!this._panZoomLeft || this._syncing) return;
+    this._syncing = true;
+    try {
+      // svg-pan-zoom doesn't have a direct setViewBox, so we manipulate
+      // the left SVG's internal viewport group to match.
+      // The simplest reliable approach: set the left SVG's viewBox directly
+      // and re-initialize pan-zoom, or use the pan-zoom's zoom/pan API.
+      const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
+      if (!leftSvg) return;
+
+      // Temporarily destroy pan-zoom, set viewBox, reinit
+      // This is expensive, so instead we'll just set the viewBox on the
+      // inner viewport group that svg-pan-zoom creates.
+      const vpGroup = leftSvg.querySelector('.svg-pan-zoom_viewport');
+      if (vpGroup && viewBox) {
+        // Calculate the transform that maps the original viewBox to the new one
+        const origVb = this._getOriginalViewBox(leftSvg);
+        if (origVb) {
+          const scaleX = origVb.w / viewBox.w;
+          const scaleY = origVb.h / viewBox.h;
+          const scale = Math.min(scaleX, scaleY);
+          const tx = -(viewBox.x - origVb.x) * scale;
+          const ty = -(viewBox.y - origVb.y) * scale;
+
+          // Use svg-pan-zoom API
+          this._panZoomLeft.zoom(scale);
+          this._panZoomLeft.pan({ x: tx, y: ty });
+        }
+      }
     } finally {
       this._syncing = false;
     }
   }
 
-  _syncFromRight(type, value) {
-    if (this._syncing || !this._panZoomLeft || !this._panZoomRight) return;
-    this._syncing = true;
-    try {
-      const zoom = this._panZoomRight.getZoom();
-      const pan = this._panZoomRight.getPan();
-      this._panZoomLeft.zoom(zoom);
-      this._panZoomLeft.pan(pan);
-      this._zoomLevel = Math.round(zoom * 100);
-    } finally {
-      this._syncing = false;
+  /**
+   * Get the original viewBox of an SVG element (before svg-pan-zoom modified it).
+   */
+  _getOriginalViewBox(svgEl) {
+    // svg-pan-zoom stores the original viewBox; we can read it from the
+    // svg element's viewBox.baseVal if available, or fall back to attribute
+    const vb = svgEl.viewBox?.baseVal;
+    if (vb && vb.width > 0) {
+      return { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
     }
+    const attr = svgEl.getAttribute('viewBox');
+    if (attr) {
+      const parts = attr.split(/[\s,]+/).map(Number);
+      return { x: parts[0] || 0, y: parts[1] || 0, w: parts[2] || 800, h: parts[3] || 600 };
+    }
+    return { x: 0, y: 0, w: 800, h: 600 };
   }
 
   _handleResize() {
@@ -483,7 +717,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
   _zoomIn() {
     if (this._panZoomLeft) this._panZoomLeft.zoomIn();
-    // Sync will propagate to right via callback
   }
 
   _zoomOut() {
@@ -508,8 +741,48 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     if (this._panZoomLeft) {
       this._zoomLevel = Math.round(this._panZoomLeft.getZoom() * 100);
     }
-    // After fit, sync positions
-    this._syncFromLeft('fit');
+    this._syncLeftToRight();
+  }
+
+  _undo() {
+    if (this._undoStack.length <= 1) return; // nothing to undo (first entry is original)
+    this._undoStack.pop(); // remove current state
+    const prev = this._undoStack[this._undoStack.length - 1];
+    if (!prev) return;
+
+    const file = this._getActiveFile();
+    if (file) {
+      file.modified = prev;
+      // Re-inject and re-init editor
+      this._injectSvgContent();
+    }
+  }
+
+  async _save() {
+    const file = this._getActiveFile();
+    if (!file) return;
+
+    // Capture latest from editor
+    this._captureEditorContent();
+
+    if (!this.rpcConnected) {
+      console.warn('SVG viewer: RPC not connected, cannot save');
+      return;
+    }
+
+    try {
+      await this.rpcCall('Repo.write_file', file.path, file.modified);
+      file.savedContent = file.modified;
+      this._dirtySet.delete(file.path);
+      this._dirtySet = new Set(this._dirtySet);
+
+      this.dispatchEvent(new CustomEvent('file-saved', {
+        bubbles: true, composed: true,
+        detail: { path: file.path, content: file.modified },
+      }));
+    } catch (e) {
+      console.error('Failed to save SVG:', e);
+    }
   }
 
   // === Keyboard ===
@@ -518,8 +791,9 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageDown') {
       e.preventDefault();
       if (this._files.length > 1) {
+        this._captureEditorContent();
         this._activeIndex = (this._activeIndex + 1) % this._files.length;
-        this.updateComplete.then(() => this._initPanZoom());
+        this.updateComplete.then(() => this._injectSvgContent());
         this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
       }
       return;
@@ -527,8 +801,9 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageUp') {
       e.preventDefault();
       if (this._files.length > 1) {
+        this._captureEditorContent();
         this._activeIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
-        this.updateComplete.then(() => this._initPanZoom());
+        this.updateComplete.then(() => this._injectSvgContent());
         this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
       }
       return;
@@ -536,8 +811,22 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
       e.preventDefault();
       if (this._files.length > 0 && this._activeIndex >= 0) {
+        this._captureEditorContent();
         this.closeFile(this._files[this._activeIndex].path);
       }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      this._save();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      if (this._mode === 'select') {
+        e.preventDefault();
+        this._undo();
+      }
+      return;
     }
   }
 
@@ -547,26 +836,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }));
   }
 
-  // === Rendering ===
+  // === Helpers ===
 
-  _renderSvgContent(svgString) {
-    if (!svgString || !svgString.trim()) {
-      return html`<div class="empty-state" style="font-size:1rem;">No content</div>`;
+  _getActiveFile() {
+    if (this._activeIndex >= 0 && this._activeIndex < this._files.length) {
+      return this._files[this._activeIndex];
     }
-
-    // Parse SVG string into DOM — we inject it via innerHTML in updated()
-    // because Lit doesn't natively handle raw SVG injection.
-    // Return a placeholder container; actual SVG is injected in _initPanZoom flow.
-    const template = document.createElement('template');
-    template.innerHTML = svgString.trim();
-    const svgEl = template.content.firstElementChild;
-
-    if (!svgEl || svgEl.tagName.toLowerCase() !== 'svg') {
-      // Content is not SVG — wrap in an SVG foreignObject or show as text
-      return html`<div class="empty-state" style="font-size:0.8rem; padding:1rem; overflow:auto; white-space:pre-wrap;">${svgString.slice(0, 500)}</div>`;
-    }
-
-    return nothing;
+    return null;
   }
 
   _getTabBadge(file) {
@@ -575,76 +851,92 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     return 'same';
   }
 
+  // === Rendering / Injection ===
+
   updated(changedProps) {
     if (changedProps.has('_activeIndex') || changedProps.has('_files')) {
       this._injectSvgContent();
     }
   }
 
+  _prepareSvgElement(container) {
+    const svg = container.querySelector('svg');
+    if (svg) {
+      svg.style.width = '100%';
+      svg.style.height = '100%';
+      if (!svg.getAttribute('viewBox')) {
+        const w = svg.getAttribute('width') || '800';
+        const h = svg.getAttribute('height') || '600';
+        svg.setAttribute('viewBox', `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
+      }
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
+    }
+  }
+
   _injectSvgContent() {
-    const file = this._activeIndex >= 0 && this._activeIndex < this._files.length
-      ? this._files[this._activeIndex]
-      : null;
+    const file = this._getActiveFile();
 
     const leftContainer = this.shadowRoot.querySelector('.svg-left');
     const rightContainer = this.shadowRoot.querySelector('.svg-right');
 
     if (!file) return;
     if (!leftContainer || !rightContainer) {
-      // Containers not yet in DOM — retry after next frame
       requestAnimationFrame(() => this._injectSvgContent());
       return;
     }
 
-    // Dispose existing pan-zoom before replacing content
-    this._disposePanZoom();
+    // Dispose everything before replacing content
+    this._disposeAll();
 
-    // Inject original SVG
+    // Inject original SVG (left, always read-only)
     const originalSvg = file.original || file.modified || '';
     const modifiedSvg = file.modified || '';
 
     leftContainer.innerHTML = originalSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
     rightContainer.innerHTML = modifiedSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
 
-    // Ensure injected SVGs have 100% dimensions for pan-zoom
-    for (const container of [leftContainer, rightContainer]) {
-      const svg = container.querySelector('svg');
-      if (svg) {
-        svg.style.width = '100%';
-        svg.style.height = '100%';
-        // Ensure viewBox exists for pan-zoom to work
-        if (!svg.getAttribute('viewBox')) {
-          const w = svg.getAttribute('width') || '800';
-          const h = svg.getAttribute('height') || '600';
-          svg.setAttribute('viewBox', `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
-        }
-        // Remove fixed width/height so SVG fills container
-        svg.removeAttribute('width');
-        svg.removeAttribute('height');
-      }
-    }
+    this._prepareSvgElement(leftContainer);
+    this._prepareSvgElement(rightContainer);
 
-    // Initialize pan-zoom on the injected SVGs
-    requestAnimationFrame(() => this._initPanZoom());
+    // Initialize based on mode
+    requestAnimationFrame(() => {
+      this._initLeftPanZoom();
+
+      if (this._mode === 'select') {
+        this._initEditor();
+      } else {
+        this._initRightPanZoom();
+      }
+    });
   }
 
   render() {
     const hasFiles = this._files.length > 0;
-    const file = hasFiles && this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    const file = hasFiles ? this._getActiveFile() : null;
+    const isDirty = file && this._dirtySet.has(file.path);
 
     return html`
       ${hasFiles ? html`
         <div class="tab-bar">
           ${this._files.map((f, i) => {
             const badge = this._getTabBadge(f);
+            const dirty = this._dirtySet.has(f.path);
             return html`
               <div
                 class="tab ${i === this._activeIndex ? 'active' : ''}"
-                @click=${() => { this._activeIndex = i; this.updateComplete.then(() => this._initPanZoom()); this._dispatchActiveFileChanged(f.path); }}
+                @click=${() => {
+                  this._captureEditorContent();
+                  this._activeIndex = i;
+                  this._undoStack = [f.modified];
+                  this.updateComplete.then(() => this._injectSvgContent());
+                  this._dispatchActiveFileChanged(f.path);
+                }}
               >
+                ${dirty ? html`<span class="dirty-dot"></span>` : nothing}
                 <span>${f.path.split('/').pop()}</span>
                 <span class="tab-badge ${badge}">${badge === 'same' ? '=' : badge === 'new' ? 'N' : 'Δ'}</span>
-                <button class="tab-close" @click=${(e) => { e.stopPropagation(); this.closeFile(f.path); }}
+                <button class="tab-close" @click=${(e) => { e.stopPropagation(); this._captureEditorContent(); this.closeFile(f.path); }}
                   title="Close" aria-label="Close ${f.path}">✕</button>
               </div>
             `;
@@ -660,7 +952,9 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
           </div>
           <div class="splitter"></div>
           <div class="diff-panel">
-            <div class="panel-header modified">Modified</div>
+            <div class="panel-header modified">
+              Modified${this._mode === 'select' ? ' (editable)' : ''}${this._selectedTag ? ` — <${this._selectedTag}>` : ''}
+            </div>
             <div class="svg-container svg-right"></div>
           </div>
         ` : html`
@@ -672,11 +966,28 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
       ${file ? html`
         <div class="toolbar">
+          <!-- Mode toggle -->
+          <button class="${this._mode === 'select' ? 'active' : ''}"
+            @click=${() => this._setMode('select')} title="Select & edit mode">✦ Select</button>
+          <button class="${this._mode === 'pan' ? 'active' : ''}"
+            @click=${() => this._setMode('pan')} title="Pan & zoom mode">✥ Pan</button>
+
+          <div class="separator"></div>
+
+          <!-- Zoom controls -->
           <button @click=${this._zoomOut} title="Zoom out (−)">−</button>
           <span class="zoom-label">${this._zoomLevel}%</span>
           <button @click=${this._zoomIn} title="Zoom in (+)">+</button>
           <button @click=${this._zoomReset} title="Reset zoom">1:1</button>
           <button @click=${this._fitAll} title="Fit to view">Fit</button>
+
+          <div class="separator"></div>
+
+          <!-- Edit actions -->
+          <button @click=${this._undo} title="Undo (Ctrl+Z)"
+            ?disabled=${this._undoStack.length <= 1}>↩ Undo</button>
+          <button @click=${this._save} title="Save (Ctrl+S)"
+            ?disabled=${!isDirty}>💾 Save</button>
         </div>
       ` : nothing}
     `;
