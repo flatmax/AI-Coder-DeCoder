@@ -45,9 +45,20 @@ Stage all, unstage all, rename (prompt), new file (prompt), new directory (promp
 ### Operation Flow
 1. Close menu → confirm/prompt if needed → execute RPC → refresh tree
 
+### Inline Input for Rename / New File / New Directory
+
+Rename, new file, and new directory operations render an **inline text input** in the tree at the correct indentation level (rather than a browser `prompt()` dialog):
+- The input appears immediately below the target node (for rename) or as a child of the directory (for new file/dir)
+- Enter submits, Escape or blur cancels
+- For rename: input is pre-filled with the current name and auto-selected
+- For new directory: creates a `.gitkeep` file inside the new directory (git does not track empty directories)
+- Auto-focus is applied via `updated()` lifecycle — the component queries for `.inline-input` after each render
+
 ## Auto-Selection
 
 On first load, auto-select modified/staged/untracked files. Auto-expand directories containing changed files.
+
+A `_initialAutoSelect` guard ensures this runs exactly once per component lifetime — subsequent tree reloads (after commits, resets, review entry) do not re-trigger auto-selection. The auto-expansion walks each changed file's path segments and adds all ancestor directories to the expanded set.
 
 ## File Mention Selection
 
@@ -62,7 +73,7 @@ When the LLM attempts to edit files that aren't in the active context, those fil
 
 ## Middle-Click Path Insertion
 
-Middle-click on any row inserts the path into chat input at cursor position (space-padded before and after). The browser's selection-buffer paste is suppressed via a flag on the chat panel to prevent duplicate content.
+Middle-click on any row inserts the path into chat input at cursor position (space-padded before and after). The browser's selection-buffer paste is suppressed via a `_suppressNextPaste` flag on the chat panel — middle-click sets the flag, and the chat panel's paste handler checks and clears it, calling `preventDefault()` to block the selection-buffer paste that the browser would otherwise fire immediately after.
 
 ## Active File Highlight
 
@@ -87,6 +98,46 @@ The review selector (git graph) opens in a separate floating dialog — the file
 2. Tree populates with files, modified/staged/untracked arrays, diff stats
 3. Selection changes fire events, captured by parent to update selected files
 4. File tree refresh compares JSON against previous to avoid unnecessary re-renders; status arrays always update
+
+## Files Tab Orchestration
+
+The `ac-files-tab` component (parent of both file picker and chat panel) serves as the coordination hub for all file-related state:
+
+| Responsibility | Mechanism |
+|---------------|-----------|
+| Selection sync | Receives `selection-changed` from picker, updates server and chat panel directly |
+| File mentions | Receives `file-mention-click` from chat, toggles selection, updates picker and chat panel |
+| Message preservation | Calls `_syncMessagesFromChat()` before selection updates to prevent stale message overwrites |
+| Review lifecycle | Clears selection on review entry, refreshes tree, updates chat panel's review state |
+| Filter bridge | Forwards `filter-from-chat` events (from @-filter) to the picker's `setFilter()` |
+| Path insertion | Routes `insert-path` from picker middle-click to chat textarea |
+| File tree refresh | Forwards `files-modified` from chat to picker's `loadTree()` and re-dispatches on window |
+
+### Direct Update Pattern (Architectural)
+
+When selection changes, the files tab updates both the picker's `selectedFiles` property and the chat panel's `selectedFiles` property **directly** (followed by `requestUpdate()`), rather than relying on Lit's top-down reactive propagation through its own re-render.
+
+**Why this is necessary:** Lit's reactive data flow means changing a property on the parent (`ac-files-tab`) triggers a full re-render of its template, which would re-assign child component properties. For the chat panel, this resets scroll position and disrupts streaming state. For the file picker, it collapses interaction state (context menus, inline inputs, focus).
+
+**The pattern (used consistently across all selection-changing operations):**
+1. Call `_syncMessagesFromChat()` — read `chatPanel.messages` back into the files tab's own `_messages` property, preventing stale data from overwriting the chat panel's current state on any future re-render
+2. Update `this._selectedFiles` on the files tab (its own state record)
+3. Directly set `chatPanel.selectedFiles = newFiles` + `chatPanel.requestUpdate()`
+4. Directly set `picker.selectedFiles = new Set(newFiles)` + `picker.requestUpdate()`
+5. Notify server via `rpcCall('LLMService.set_selected_files', newFiles)`
+
+**Where it's used:** `_onSelectionChanged`, `_onFileMentionClick`, `_onFilesChanged`, `_onReviewStarted`, `_onStateLoaded`
+
+Without `_syncMessagesFromChat()`, the following failure occurs: user sends a message → chat panel updates its `messages` array → user clicks a file mention → files tab re-renders → chat panel receives the files tab's stale `_messages` prop → latest messages are lost.
+
+### Review Entry Flow
+
+When a review starts (via `review-started` event from the review selector):
+1. Set `_reviewState` to active with review details
+2. Clear `_selectedFiles` to empty (review starts with no files selected)
+3. Reset picker's `selectedFiles` to empty `Set`
+4. Refresh picker's file tree (now shows staged changes from soft reset)
+5. Update chat panel's `selectedFiles` and `reviewState`
 
 ## State Persistence
 

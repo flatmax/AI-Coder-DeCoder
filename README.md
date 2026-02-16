@@ -2,8 +2,6 @@
  
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
 
-This project follows in the spirit of [Aider](https://github.com/Aider-AI/aider).
-
 https://github.com/user-attachments/assets/ece86b13-1d6f-4b1e-a029-f358c50ff858
 
 <details><summary>Slow version</summary>
@@ -17,6 +15,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
 - **Structured code edits** with anchor-based matching, validation, and automatic git staging.
 - **Side-by-side diff viewer** — Monaco editor with hover, go-to-definition, references, and completions.
+- **SVG viewer & editor** — pan/zoom SVG files with inline editing: drag elements, reshape paths and curves, resize shapes, edit text in place, and copy/paste/duplicate objects.
 - **File picker** with git status badges, diff stats, context menu, and keyboard navigation.
 - **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
 - **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
@@ -35,6 +34,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Symbol map, not full files** — A compact, reference-annotated map of your codebase gives the LLM structural context without burning tokens on full file contents.
 - **Stability-based caching** — Content that stays unchanged across requests promotes to higher cache tiers, aligning with provider cache breakpoints (e.g., Anthropic's ephemeral caching). You pay to ingest once; subsequent requests hit cache.
 - **Deterministic edits** — The LLM proposes changes using anchored edit blocks with exact context matching. No fuzzy patching, no guessing.
+- **Visual SVG editing** — SVG files open in a dedicated viewer with pan/zoom and a structural editor. Select, drag, reshape, and duplicate elements directly — no external tools needed.
 - **Git-native** — Every applied edit is staged automatically. Commit messages are LLM-generated. The file picker shows git status natively.
 - **Bidirectional RPC** — Terminal and browser are symmetric peers over WebSocket (JSON-RPC 2.0). Either side can call the other.
 
@@ -43,7 +43,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 1. **Start** — Run `ac-dc` in your git repo. Browser opens automatically.
 2. **Select files** — Check files in the picker to add their full content to context.
 3. **Chat** — Ask the LLM to understand, modify, or create code.
-4. **Review edits** — Applied edits appear in the diff viewer with two-level highlighting.
+4. **Review edits** — Applied edits appear in the diff viewer with two-level highlighting. SVG files open in a dedicated viewer with pan/zoom and inline editing.
 5. **Commit** — Click 💾 to stage all, generate an LLM commit message, and commit.
 6. **Iterate** — File context and cache tiers evolve as you work.
 
@@ -63,6 +63,24 @@ https://github.com/user-attachments/assets/d923e278-b3ef-46a4-b19e-0d54099bf3a7
 4. Select files to include their reverse diffs in context.
 5. Chat with the LLM about the changes.
 6. Click **Exit Review** to restore the branch.
+
+### SVG Viewer & Editor
+
+SVG files (`.svg`) open in a dedicated viewer instead of the Monaco diff editor. The viewer provides:
+
+- **Pan & zoom** — scroll wheel to zoom (centered on cursor), middle-click drag to pan.
+- **Side-by-side view** — original (left) and current (right) panels synchronized for zoom and pan.
+- **Edit mode** — switch to the editor to modify SVG elements directly:
+  - **Select** — click any element to select it. A bounding box or control-point handles appear depending on the element type.
+  - **Drag** — move any selected element (rects, circles, text, groups, paths, lines, etc.).
+  - **Reshape paths** — for `<path>` elements (lines, curves, arcs), draggable handles appear at every endpoint (blue circles) and control point (orange diamonds), with guide lines showing the curve structure. Drag any handle to reshape the path.
+  - **Resize shapes** — `<rect>`, `<circle>`, and `<ellipse>` elements show corner/edge handles for resizing.
+  - **Line endpoints** — `<line>`, `<polyline>`, and `<polygon>` elements show vertex handles for individual point dragging.
+  - **Edit text** — double-click a `<text>` element to edit its content inline. Enter commits, Escape cancels.
+  - **Copy/paste** — `Ctrl+C` copies, `Ctrl+V` pastes with an offset, `Ctrl+D` duplicates in place.
+  - **Delete** — `Delete` or `Backspace` removes the selected element.
+- **Undo** — revert to previous states.
+- **Save** — `Ctrl+S` or the save button writes changes back to disk.
 
 ## Quick Start
 
@@ -146,6 +164,18 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `Enter` | Search results | Open match in diff viewer |
 | `Space/Enter` | File picker | Toggle file selection |
 | `↑/↓` | File picker | Navigate tree |
+| `Scroll wheel` | SVG viewer | Zoom in/out (centered on cursor) |
+| `Middle-drag` | SVG viewer | Pan the viewport |
+| `Click` | SVG editor | Select element (shows handles) |
+| `Drag` | SVG editor | Move selected element |
+| `Drag handle` | SVG editor | Move endpoint, vertex, or control point |
+| `Double-click` | SVG editor (text) | Edit text inline |
+| `Enter` | SVG editor (text) | Commit text edit |
+| `Ctrl+C` | SVG editor | Copy selected element |
+| `Ctrl+V` | SVG editor | Paste with offset |
+| `Ctrl+D` | SVG editor | Duplicate in place |
+| `Delete` | SVG editor | Delete selected element |
+| `Escape` | SVG editor | Deselect / cancel text edit |
 
 ## CLI Options
 
@@ -377,6 +407,8 @@ webapp/
             ac-settings-tab.js   # Configuration editor
             chat-panel.js        # Chat messages, streaming, input
             diff-viewer.js       # Monaco diff editor
+            svg-viewer.js        # SVG pan/zoom viewer with side-by-side
+            svg-editor.js        # SVG element editor (drag, resize, path editing)
             file-picker.js       # File tree with git status
             input-history.js     # Input history overlay
             review-selector.js   # Git graph for code review

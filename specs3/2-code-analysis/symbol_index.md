@@ -84,10 +84,9 @@ FileSymbols:
 
 ### Grammar Acquisition
 
-Tree-sitter grammars via individual `tree-sitter-{language}` pip packages. The parser tries three strategies in order:
-1. `tree-sitter-languages` global — smoke test
-2. `tree-sitter-languages` per-language — lazy calls
-3. Plain tree-sitter + individual packages — with parser API auto-detection
+Tree-sitter grammars are provided via individual `tree-sitter-{language}` pip packages. The parser imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. If a package is not installed, that language is silently unavailable.
+
+The parser is a singleton. Language initialization runs once on first use. If some packages are installed and others are not, the parser operates with partial language support — there is no retry mechanism.
 
 ### Adding a New Language
 
@@ -201,6 +200,7 @@ tests/test_auth.py:
 - **Test collapsing** — test files show only summary counts
 - **Stable ordering** — files maintain position across regenerations for cache stability
 - **Inherited methods** — only in the parent class; consumers check bases
+- **Instance variables** — listed as `v` lines nested under the class, extracted from `self.x = ...` assignments in `__init__`. The formatter outputs one line for the symbol followed by indented `v` lines for each instance variable
 
 ### Chunked Output
 
@@ -227,12 +227,14 @@ Individual file symbol blocks can be generated independently. A stable hash of a
 
 ## LSP Queries
 
-| RPC Method | Description |
+LSP methods are implemented on `SymbolIndex` and exposed to the browser via delegate methods on `LLMService` (e.g., `LLMService.lsp_get_hover` forwards to `SymbolIndex.lsp_get_hover`). This is necessary because only `Repo`, `LLMService`, and `Settings` are registered with `add_class()` for RPC.
+
+| Method (on SymbolIndex) | Description |
 |------------|-------------|
-| `LLM.lsp_get_hover(path, line, col)` | Symbol signature, parameters, return type |
-| `LLM.lsp_get_definition(path, line, col)` | `{file, range}` via call site or import resolution |
-| `LLM.lsp_get_references(path, line, col)` | `[{file, range}]` from reference index |
-| `LLM.lsp_get_completions(path, line, col)` | `[{label, kind, detail}]` filtered by prefix |
+| `lsp_get_hover(path, line, col)` | Symbol signature, parameters, return type |
+| `lsp_get_definition(path, line, col)` | `{file, range}` via call site or import resolution |
+| `lsp_get_references(path, line, col)` | `[{file, range}]` from reference index |
+| `lsp_get_completions(path, line, col)` | `[{label, kind, detail}]` filtered by prefix |
 
 ### Symbol at Position
 
@@ -254,8 +256,17 @@ Binary search through sorted symbols by line/column range. For nested symbols, r
 ## Caching
 
 - **Symbol cache** — in-memory, per-file, mtime-based invalidation
-- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt on startup and before each LLM request
+- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
 - **Import resolution cache** — cleared when new files are detected
+
+## Indexing Exclusions
+
+The source file walker excludes the following directories:
+- Hidden directories (starting with `.`)
+- `node_modules`, `__pycache__`, `venv`, `.venv`, `dist`, `build`, `.git`
+- `.ac-dc` (the application's working directory)
+
+These directories are skipped during repository-wide indexing. The import resolver must use the same exclusion list, including `.ac-dc`, to prevent resolving imports to files inside the application's working directory.
 
 ## Testing
 

@@ -74,6 +74,15 @@ Tracks files included in the conversation with their contents.
 
 Paths are normalized relative to repo root. Binary files are rejected. Path traversal (`../`) is blocked.
 
+### Path Normalization
+
+`FileContext` normalizes paths by:
+1. Replacing backslashes with forward slashes
+2. Stripping leading/trailing slashes
+3. Rejecting paths containing `..` (simple substring check)
+
+For full path canonicalization and repo-root validation, the `Repo` layer uses `Path.resolve()`. The `FileContext` normalization is sufficient for its purpose (consistent key lookup) since all paths entering `FileContext` have already been validated by the `Repo` layer.
+
 ---
 
 ## Token Counting
@@ -106,7 +115,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. Called before message assembly in the streaming handler as a safety net.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
@@ -164,12 +173,12 @@ This is the schema returned by `list_sessions()` for each session.
 
 | Method | Description |
 |--------|-------------|
-| `LLM.history_search(query, role?, limit?)` | Case-insensitive substring search |
-| `LLM.history_get_session(session_id)` | All messages from a session |
-| `LLM.history_list_sessions(limit?)` | Recent sessions, newest first |
-| `LLM.history_new_session()` | Start new session |
-| `LLM.load_session_into_context(session_id)` | Load into active context |
-| `LLM.get_history_status()` | Token counts, compaction status, session info for history bar |
+| `LLMService.history_search(query, role?, limit?)` | Case-insensitive substring search |
+| `LLMService.history_get_session(session_id)` | All messages from a session |
+| `LLMService.history_list_sessions(limit?)` | Recent sessions, newest first |
+| `LLMService.history_new_session()` | Start new session |
+| `LLMService.load_session_into_context(session_id)` | Load into active context |
+| `LLMService.get_history_status()` | Token counts, compaction status, session info for history bar |
 
 ### Dual Stores
 
@@ -180,6 +189,25 @@ This is the schema returned by `list_sessions()` for each session.
 
 Both are updated on each exchange.
 
+### Retrieval Path Asymmetry
+
+The two retrieval methods return different data shapes:
+
+| Method | Returns | Used For |
+|--------|---------|----------|
+| `get_session_messages_for_context` | `[{role, content}]` only | Loading into context manager |
+| `get_session_messages` / `history_get_session` | Full message dicts with all metadata | History browser display |
+
+The context retrieval path strips all metadata (`files`, `files_modified`, `edit_results`, `image_refs`) and returns only `{role, content}` plus a reconstructed `_images` field. This means metadata like which files were in context or which edits were applied is not available after a session reload — it exists only in the persistent JSONL records.
+
+### Message Persistence Ordering
+
+The user message is persisted to the JSONL store **before** the LLM call starts, while the assistant message is persisted **after** the full response completes. If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response. This is by design (the user's intent is worth preserving) but means session message counts may be odd and the last message in a crashed session may be a user message with no reply.
+
+### Search Fallback
+
+`history_search` tries the persistent store first. If the persistent store returns no results (or is unavailable), the search falls back to case-insensitive substring matching against the in-memory context history. This ensures search works even if the JSONL file is inaccessible.
+
 ---
 
 ## History Compaction
@@ -189,13 +217,15 @@ Both are updated on each exchange.
 Compaction runs **after** the assistant response has been delivered — it is background housekeeping. The compacted history takes effect on the **next** request.
 
 ```
-Response delivered → 500ms pause → compaction check
+Response delivered → compaction check
     → if history tokens > trigger:
           detect topic boundary (LLM call)
           apply truncation or summarization
           replace in-memory history
-          notify frontend
+          re-register history items in stability tracker
 ```
+
+Compaction runs after a 500ms pause following `streamComplete`. Frontend notifications are sent via the `compactionEvent` callback (see [Frontend Notification](#frontend-notification) below).
 
 ### Configuration
 
@@ -255,12 +285,16 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 
 ### Frontend Notification
 
+Compaction progress is communicated via the `compactionEvent` callback (the same channel used for URL fetch notifications during streaming):
+
 | Event | Behavior |
 |-------|----------|
 | `compaction_start` | Show "Compacting..." message, disable input |
 | `compaction_complete` | Rebuild message display from compacted messages |
 | `compaction_error` | Show error, re-enable input |
 | `case: "none"` | Remove "Compacting..." silently |
+
+The backend wraps `compact_history_if_needed()` with these notifications, sent via `_event_callback("compactionEvent", request_id, event_dict)`. A 500ms delay before `compaction_start` prevents flicker for fast compactions.
 
 ---
 
@@ -353,7 +387,7 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 ### Session Start
 1. Create Context Manager with model, repo root, config
 2. Stability tracker starts empty — tiers rebuild from reference graph on first request
-3. History is empty
+3. **Auto-restore last session** — on LLM service initialization, the most recent session is loaded from the persistent history store into the context manager. This means `get_current_state()` returns messages from the previous session immediately, allowing the browser to resume where the user left off after a server restart. If no sessions exist or loading fails, history starts empty.
 
 ### During Conversation
 1. Streaming handler calls `add_message()` for each exchange
@@ -368,3 +402,20 @@ Clear history, purge stability tracker history entries, start new persistent ses
 2. Read messages from persistent store (reconstruct images from `image_refs`)
 3. Add each to context manager
 4. Set persistent store's session ID to continue in loaded session
+
+The return value includes both the session metadata and a `messages` array with reconstructed `images` fields (data URIs rebuilt from `image_refs`). This allows the frontend to display image thumbnails in loaded sessions without a separate fetch.
+
+The history store reconstructs images into an `images` key on message dicts. Both `load_session_into_context` and `history_get_session` return messages with the `images` key containing reconstructed data URI arrays.
+
+### Auto-Restore on Startup
+
+On LLM service initialization (before any client connects), the server automatically loads the most recent session from the persistent store into the context manager:
+
+1. Query `list_sessions(limit=1)` for the newest session
+2. Load its messages via `get_session_messages_for_context`
+3. Add each message to the context manager
+4. Set the current session ID to the loaded session's ID
+
+This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
+
+**File selection not restored:** Auto-restore recovers conversation messages but does not restore file selection. The browser receives an empty `selected_files` list from `get_current_state()`. Users must re-select files after a server restart.

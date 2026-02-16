@@ -353,6 +353,54 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return [...this._dirtySet];
   }
 
+  // === Viewport State (for restore on refresh) ===
+
+  /**
+   * Return the current scroll position and cursor for persistence.
+   */
+  getViewportState() {
+    if (!this._editor) return null;
+    const modified = this._editor.getModifiedEditor();
+    if (!modified) return null;
+    const pos = modified.getPosition();
+    return {
+      scrollTop: modified.getScrollTop(),
+      scrollLeft: modified.getScrollLeft(),
+      lineNumber: pos?.lineNumber ?? 1,
+      column: pos?.column ?? 1,
+    };
+  }
+
+  /**
+   * Restore scroll position and cursor from saved state.
+   */
+  restoreViewportState(state) {
+    if (!state) return;
+
+    // Poll until the editor is ready (it's created asynchronously after file fetch)
+    const tryRestore = (attempts = 0) => {
+      const editor = this._editor;
+      const modified = editor?.getModifiedEditor?.();
+      if (modified) {
+        requestAnimationFrame(() => {
+          if (state.lineNumber) {
+            modified.setPosition({ lineNumber: state.lineNumber, column: state.column ?? 1 });
+            modified.revealLineInCenter(state.lineNumber);
+          }
+          if (state.scrollTop != null) {
+            modified.setScrollTop(state.scrollTop);
+          }
+          if (state.scrollLeft != null) {
+            modified.setScrollLeft(state.scrollLeft);
+          }
+        });
+      } else if (attempts < 20) {
+        requestAnimationFrame(() => tryRestore(attempts + 1));
+      }
+    };
+    requestAnimationFrame(() => tryRestore());
+  }
+
   // === File Fetching ===
 
   async _fetchFileContent(path) {

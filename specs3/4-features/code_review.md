@@ -51,7 +51,8 @@ Six operations transform the repository into review state. The branch may be a l
 | 4. **Build symbol_map_before** | *(symbol index runs on disk)* | base^ | clean | pre-review |
 | 5. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
 | 6. Soft reset | `git reset --soft {base}^` | base^ (detached) | **all review changes staged** | branch tip |
-| 7. Clear file selection | *(internal)* | — | — | — |
+| 7. Clear file selection | *(frontend-driven)* | — | — | — |
+Step 7 is orchestrated by the frontend: the Files tab receives the `review-started` event, clears the selected files list, resets the file picker checkboxes, refreshes the file tree to show the new staged state, and updates the chat panel's review state. This ensures the review starts with a clean slate and the UI reflects the staged changes from the soft reset.
 
 Step 5 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
 
@@ -85,6 +86,10 @@ If any step in the entry sequence fails (e.g., checkout conflict, invalid commit
 - **During initial checkout (steps 1-3):** The repo module attempts `git checkout {original_branch}` to return to the branch the user was on before review. If that fails, the error is reported as-is.
 - **During setup completion (steps 5-6):** The LLM service calls the exit sequence (`exit_review_mode`) which performs `git reset --soft {branch_tip_sha}` and `git checkout {original_branch}`, restoring the repository state.
 - The error is reported to the user and review mode is not entered.
+
+### File Selection on Entry
+
+The server clears `selected_files` to an empty list during `start_review()`, independently of the frontend's file selection reset. This ensures that even if the frontend event handling races or fails, the server-side state is clean — preventing stale file selections from before the review from inadvertently including diffs in the first message.
 
 If the process crashes during review mode, the user can manually restore with:
 ```
@@ -183,17 +188,16 @@ Legend features:
 
 ### Disambiguation
 
-A commit can be reachable from multiple branches (e.g., a commit on `main` before a feature branch forked). When the user clicks such a commit:
+A commit can be reachable from multiple branches (e.g., a commit on `main` before a feature branch forked). When the user clicks any commit:
 
-1. The system identifies all branches whose tips are descendants of the selected commit
-2. If only one branch → no ambiguity, proceed directly
-3. If multiple branches:
-   - A small dropdown/popover appears at the selected commit node listing the candidate branches
-   - The branch whose tip is closest to the selected commit (fewest commits between selection and tip) is pre-selected
-   - The user selects a branch from the dropdown to confirm
-   - Clicking outside the dropdown cancels the selection
+1. The system performs a **full parent-walk** from each branch tip to determine reachability: starting from the tip SHA, it follows all parents (not just first-parent) using a stack and visited set until the selected commit is found or the walk exhausts
+2. Candidate branches are those whose walk reached the selected commit
+3. A disambiguation popover always appears at the click position listing candidate branches
+4. The branch whose **lane matches** the selected commit's lane is pre-selected (this is the branch the commit visually belongs to, which is correct in the vast majority of cases)
+5. The user clicks a branch from the popover to confirm
+6. Scrolling the graph dismisses the popover
 
-This is usually resolved instantly — the closest-tip heuristic is correct in the vast majority of cases, and the user just confirms with a click.
+If no branches reach the selected commit (edge case), all branches are offered as fallback candidates.
 
 ### Clean Working Tree Check
 
@@ -258,7 +262,7 @@ get_commit_graph(limit?, offset?) -> {
 }
 ```
 
-Implementation: runs `git log --all --topo-order --parents --format=...` with pagination via `--skip` and `--max-count`. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
+Implementation: runs `git log --all --topo-order --format=...` with `%P` (parent SHAs) embedded in the format string, plus `--skip` and `--max-count` for pagination. The `%P` placeholder produces space-separated parent SHAs within the formatted output, which are then split during parsing. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
 
 The backend post-filters branch results to remove:
 - Symbolic refs: `HEAD`, `origin/HEAD`, entries containing ` -> `
@@ -577,6 +581,8 @@ get_commit_log(base, head?, limit?) -> [
 get_commit_parent(commit) -> {sha, short_sha} | {error}
 
 get_merge_base(ref1, ref2?) -> {sha, short_sha} | {error}
+    # If ref2 is omitted, defaults to "main".
+    # If merge-base with "main" fails, retries with "master" as fallback.
 
 checkout_review_parent(branch, base_commit) -> {
     branch, branch_tip, base_commit, parent_commit,
@@ -611,6 +617,13 @@ check_review_ready() -> {clean: true} | {clean: false, message: string}
     # tree has uncommitted changes. Called when the review selector opens,
     # before rendering the graph.
 
+get_snippets() -> [{icon, tooltip, message}]
+    # Returns snippets appropriate for the current mode.
+    # When review mode is active, returns review-specific snippets
+    # from review-snippets.json. Otherwise returns standard snippets.
+    # The frontend always calls get_snippets() — it does not need to
+    # distinguish between modes.
+
 start_review(branch, base_commit) -> {
     status: "review_active", branch, base_commit,
     commits: [{sha, short_sha, message, author, date}],
@@ -633,6 +646,8 @@ get_review_state() -> {
 get_review_file_diff(path) -> {path, diff}
     # Delegates to repo.get_review_file_diff (git diff --cached -- path)
 ```
+
+**Note:** All LLM service methods above are exposed via jrpc-oo as `LLMService.method_name` (e.g., `LLMService.start_review`).
 
 ### Review State
 

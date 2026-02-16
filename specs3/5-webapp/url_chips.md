@@ -44,6 +44,10 @@ Interactive chips below the chat input showing detected and fetched URLs. Backen
 - `raw.githubusercontent.com`: treated as GitHub file type
 - Web: `{hostname}/{path}` (truncated)
 
+## Content Viewing
+
+Clicking a fetched URL chip label dispatches a `view-url-content` event. The chat panel catches this, fetches the full content via `LLMService.get_url_content(url)`, and shows it in a `<ac-url-content-dialog>` in its shadow DOM. See [Chat Interface — URL Content Dialog](../5-webapp/chat_interface.md#url-content-dialog).
+
 ## Message Integration
 
 On send: get fetched URLs not excluded and not errored. Append formatted content to LLM message (not shown in UI).

@@ -73,6 +73,7 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 | `Repo.stage_all()` | `git add -A` |
 | `Repo.commit(message)` | Create commit. Handles repos without HEAD |
 | `Repo.reset_hard()` | `git reset --hard HEAD` |
+| `Repo.search_commits(query, branch?, limit?)` | Search commits by message/SHA/author via `git log --grep` |
 
 ### Commit Flow (UI-Driven)
 

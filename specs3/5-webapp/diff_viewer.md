@@ -2,11 +2,25 @@
 
 ## Overview
 
-Side-by-side diff editor for file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
+Side-by-side diff editor for text file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
+
+For `.svg` files, see [SVG Viewer](svg_viewer.md) — a dedicated side-by-side viewer with synchronized pan/zoom that replaces the Monaco editor for SVG content.
 
 ## Layout
 
-Background layer (`position: fixed; inset: 0`), sibling of the dialog. Empty state shows AC⚡DC watermark. File tab bar appears when files are loaded.
+Background layer (`position: fixed; inset: 0`), sibling of the dialog. Empty state shows AC⚡DC watermark.
+
+### Status LED
+
+Instead of a tab bar, a single floating status LED indicator appears in the top-right corner when a file is open:
+
+| LED State | Color | Behavior |
+|-----------|-------|----------|
+| Clean | Green (steady glow) | File matches saved content |
+| Dirty | Orange (pulsing) | Unsaved changes — click to save |
+| New file | Cyan (steady glow) | File doesn't exist in HEAD |
+
+The LED replaces a traditional tab bar — multiple files are tracked internally but switching between them is keyboard-only (Ctrl+PageUp/PageDown, Ctrl+W to close). The LED tooltip shows the current file path and save hint when dirty.
 
 ## Editor Features
 
@@ -20,19 +34,15 @@ Map of common extensions to language identifiers: `.js`→javascript, `.ts`→ty
 
 ### Worker-Safe Languages
 
-Languages with built-in Monaco worker services (JS, TS, JSON, CSS, SCSS, LESS, HTML) are created as `plaintext` to avoid `$loadForeignModule` crashes under Vite dev server. Backend LSP providers cover the important features.
+Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. These workers may fail in certain build configurations. The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
 
 ### Monaco Shadow DOM Integration
 
-Monaco must render inside a Lit shadow DOM. On editor creation:
-1. `_injectMonacoStyles()` clones Monaco's stylesheet nodes into the shadow root
-2. `_syncAllStyles()` keeps styles synchronized via a `MutationObserver` on `document.head`
-3. The observer watches for added/removed `<style>` and `<link>` nodes and mirrors changes
-4. Styles are cleaned up when the editor is disposed
+Monaco must render inside a Lit shadow DOM. The component clones all `<style>` and `<link>` nodes from `document.head` into its shadow root on editor creation, and watches for dynamically added/removed stylesheets via a `MutationObserver`. Style injection runs once per component lifetime. The observer is disconnected when the component is removed from the DOM.
 
-## File Tabs
+## File Management
 
-Tab bar with: file path, status badge (NEW/MOD), save button (💾) when dirty.
+Multiple files can be open simultaneously, tracked internally as an ordered list. There is no visible tab bar — navigation between open files uses keyboard shortcuts only (Ctrl+PageDown, Ctrl+PageUp, Ctrl+W). The status LED in the top-right reflects the active file's state.
 
 ## Saving
 
@@ -85,10 +95,27 @@ When clicking an edit block's goto icon (↗): open file, search for progressive
 | File picker | Editable |
 | LSP navigation | Add or replace file, scroll to position |
 | Config edit | Config content with special path prefix |
+| Virtual content | Read-only, `virtual://` path prefix (e.g., URL content viewing) |
+
+### Virtual Files
+
+Files with a `virtual://` prefix are not fetched from the repository. Their content is passed directly via the `virtualContent` option and stored in an in-memory map (`_virtualContents`). Virtual files are always read-only with an empty original side. This is used for displaying fetched URL content in the diff viewer without creating actual files. On `closeFile`, the virtual content entry is removed from the map.
 
 ### HEAD vs Working Copy
 
 Fetch committed version (HEAD) and working copy. Original (left) is always read-only. Modified (right) is always editable — the user can make changes and save with Ctrl+S regardless of whether the file has uncommitted changes.
+
+Each RPC call (`get_file_content` with and without `'HEAD'`) is wrapped in its own try/catch. A failure in one (e.g., file doesn't exist in HEAD for new files) doesn't prevent the other from loading. The response is normalized to a string regardless of whether the RPC returns a string or `{content: string}` object.
+
+### File Content Response Normalization
+
+The diff viewer normalizes responses from `Repo.get_file_content` which may return either a plain string or an object with a `content` field. The normalization pattern `headResult?.content ?? headResult ?? ''` handles both formats. This is important because different RPC transports and error paths may return different shapes.
+
+### Editor Reuse
+
+A single `DiffEditor` instance is created and reused for all files. Switching files disposes old models and creates new ones on the existing editor — this prevents memory leaks and avoids the cost of recreating the editor on every tab switch. The editor is only fully disposed when the last file is closed.
+
+When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
 
 ### Post-Edit Refresh
 

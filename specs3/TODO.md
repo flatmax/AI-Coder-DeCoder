@@ -134,6 +134,7 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **LSP integration** — Hover, definition, references, completions providers for Monaco
 - [x] **Token HUD overlay** — Post-response floating overlay with cache stats, auto-hide
 - [x] **Speech to text** — Auto-transcribe toggle using Web Speech API
+- [x] **SVG viewer** — Side-by-side SVG diff viewer with synchronized pan/zoom via `svg-pan-zoom`, file extension routing in app shell, tab management mirroring diff viewer API
 
 ### Phase 9: Polish (partial)
 - [x] **Version-aware config upgrades** — Managed files overwritten on upgrade with backup, user files preserved, `.bundled_version` tracking, sensible default `llm.json`

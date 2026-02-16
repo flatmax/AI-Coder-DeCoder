@@ -151,6 +151,10 @@ The bundled `config/` directory contains sensible defaults:
 
 On first run, all configs are copied to the user config directory. On subsequent releases, managed files (prompts, default settings) are overwritten with backups; user files (`llm.json`, `system_extra.md`) are preserved. See [Configuration — Packaged Builds](../1-foundation/configuration.md#packaged-builds) for details.
 
+## Python Version
+
+The `pyproject.toml` specifies the minimum Python version via `requires-python`. **Note:** The current `pyproject.toml` states `requires-python = ">=3.14"`, which is likely an error — Python 3.14 is not yet released. The intended minimum is Python 3.10 or newer. This should be corrected to `requires-python = ">=3.10"`.
+
 ## Security
 
 | Area | Policy |

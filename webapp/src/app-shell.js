@@ -13,7 +13,11 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 // Import child components so custom elements are registered
 import './components/ac-dialog.js';
 import './components/diff-viewer.js';
+import './components/svg-viewer.js';
 import './components/token-hud.js';
+
+const STORAGE_KEY_LAST_FILE = 'ac-last-open-file';
+const STORAGE_KEY_LAST_VIEWPORT = 'ac-last-viewport';
 
 /**
  * Extract WebSocket port from URL query parameter ?port=N
@@ -46,7 +50,7 @@ class AcApp extends JRPCClient {
       height: 100%;
     }
 
-    /* Diff viewer background */
+    /* Viewer background — diff and SVG viewers stacked */
     .diff-background {
       position: fixed;
       inset: 0;
@@ -54,9 +58,24 @@ class AcApp extends JRPCClient {
       background: var(--bg-primary);
     }
 
-    .diff-background ac-diff-viewer {
+    .diff-background ac-diff-viewer,
+    .diff-background ac-svg-viewer {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
+      transition: opacity 0.15s;
+    }
+
+    .diff-background .viewer-hidden {
+      opacity: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .diff-background .viewer-visible {
+      opacity: 1;
+      pointer-events: auto;
+      z-index: 1;
     }
 
     /* Dialog container */
@@ -164,6 +183,8 @@ class AcApp extends JRPCClient {
     this._onSearchNavigate = this._onSearchNavigate.bind(this);
     this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
     this._onToastEvent = this._onToastEvent.bind(this);
+    this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
   }
 
   connectedCallback() {
@@ -179,12 +200,16 @@ class AcApp extends JRPCClient {
     window.addEventListener('stream-complete', this._onStreamCompleteForDiff);
     window.addEventListener('files-modified', this._onFilesModified);
     window.addEventListener('search-navigate', this._onSearchNavigate);
+    window.addEventListener('active-file-changed', this._onActiveFileChanged);
 
     // Intercept Ctrl+S globally to prevent browser Save dialog
     window.addEventListener('keydown', this._onGlobalKeyDown);
 
     // Global toast event listener
     window.addEventListener('ac-toast', this._onToastEvent);
+
+    // Save viewport state before page unload
+    window.addEventListener('beforeunload', this._onBeforeUnload);
   }
 
   disconnectedCallback() {
@@ -194,8 +219,10 @@ class AcApp extends JRPCClient {
     window.removeEventListener('stream-complete', this._onStreamCompleteForDiff);
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
+    window.removeEventListener('active-file-changed', this._onActiveFileChanged);
     window.removeEventListener('keydown', this._onGlobalKeyDown);
     window.removeEventListener('ac-toast', this._onToastEvent);
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
@@ -370,6 +397,7 @@ class AcApp extends JRPCClient {
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
+      this._reopenLastFile();
     } catch (e) {
       console.error('Failed to load initial state:', e);
     }
@@ -386,31 +414,129 @@ class AcApp extends JRPCClient {
     return result;
   }
 
+  /**
+   * Re-open the last viewed file after a page refresh.
+   */
+  _reopenLastFile() {
+    try {
+      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      if (!path) return;
+
+      // Read saved viewport before navigating (navigation may overwrite it)
+      const raw = localStorage.getItem(STORAGE_KEY_LAST_VIEWPORT);
+      let viewport = null;
+      if (raw) {
+        viewport = JSON.parse(raw);
+        if (viewport?.path !== path) viewport = null;
+      }
+
+      // For diff files, listen for active-file-changed then restore scroll position
+      if (viewport && viewport.type === 'diff') {
+        const handler = (e) => {
+          if (e.detail?.path !== path) return;
+          window.removeEventListener('active-file-changed', handler);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              this._restoreViewportState(path, viewport);
+            });
+          });
+        };
+        window.addEventListener('active-file-changed', handler);
+        setTimeout(() => window.removeEventListener('active-file-changed', handler), 10000);
+      }
+
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+      }));
+    } catch (_) {}
+  }
+
+  /**
+   * Save the current viewer's viewport state to localStorage.
+   */
+  _saveViewportState() {
+    try {
+      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      if (!path) return;
+
+      // Only save viewport for diff files (SVG zoom restore not yet supported)
+      if (path.toLowerCase().endsWith('.svg')) return;
+
+      const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (diffV) {
+        const diffState = diffV.getViewportState?.() ?? null;
+        if (!diffState) return;
+        const viewport = { path, type: 'diff', diff: diffState };
+        localStorage.setItem(STORAGE_KEY_LAST_VIEWPORT, JSON.stringify(viewport));
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Restore viewport state on a viewer after re-opening a file.
+   */
+  _restoreViewportState(path, viewport) {
+    try {
+      if (viewport.type === 'diff' && viewport.diff) {
+        const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+        if (diffV) diffV.restoreViewportState?.(viewport.diff);
+      }
+    } catch (_) {}
+  }
+
   // === Event Routing ===
 
   /**
    * Route navigate-file events from file picker, chat edit blocks, and search
-   * to the diff viewer.
+   * to the appropriate viewer (SVG viewer for .svg files, diff viewer otherwise).
    */
   _onNavigateFile(e) {
     const detail = e.detail;
     if (!detail?.path) return;
 
-    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
-    if (!viewer) return;
+    // Save viewport state of the currently-open file before navigating away
+    this._saveViewportState();
 
-    viewer.openFile({
-      path: detail.path,
-      original: detail.original,
-      modified: detail.modified,
-      is_new: detail.is_new,
-      is_read_only: detail.is_read_only,
-      is_config: detail.is_config,
-      config_type: detail.config_type,
-      real_path: detail.real_path,
-      searchText: detail.searchText,
-      line: detail.line,
-    });
+    // Remember last opened file for restore on refresh
+    try { localStorage.setItem(STORAGE_KEY_LAST_FILE, detail.path); } catch (_) {}
+
+    const isSvg = detail.path.toLowerCase().endsWith('.svg');
+
+    // Show the appropriate viewer layer
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgV = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffV) {
+      diffV.classList.toggle('viewer-visible', !isSvg);
+      diffV.classList.toggle('viewer-hidden', isSvg);
+    }
+    if (svgV) {
+      svgV.classList.toggle('viewer-visible', isSvg);
+      svgV.classList.toggle('viewer-hidden', !isSvg);
+    }
+
+    if (isSvg) {
+      if (!svgV) return;
+      svgV.openFile({
+        path: detail.path,
+        original: detail.original,
+        modified: detail.modified,
+        is_new: detail.is_new,
+      });
+    } else {
+      if (!diffV) return;
+      diffV.openFile({
+        path: detail.path,
+        original: detail.original,
+        modified: detail.modified,
+        is_new: detail.is_new,
+        is_read_only: detail.is_read_only,
+        is_config: detail.is_config,
+        config_type: detail.config_type,
+        real_path: detail.real_path,
+        searchText: detail.searchText,
+        line: detail.line,
+      });
+    }
   }
 
   /**
@@ -450,9 +576,14 @@ class AcApp extends JRPCClient {
     const result = e.detail?.result;
     if (!result?.files_modified?.length) return;
 
-    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
-    if (viewer) {
-      viewer.refreshOpenFiles();
+    const diffViewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (diffViewer) {
+      diffViewer.refreshOpenFiles();
+    }
+
+    const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (svgViewer) {
+      svgViewer.refreshOpenFiles();
     }
   }
 
@@ -460,9 +591,34 @@ class AcApp extends JRPCClient {
    * Handle files-modified events (e.g., from commit, reset).
    */
   _onFilesModified(e) {
-    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
-    if (viewer && viewer._files.length > 0) {
-      viewer.refreshOpenFiles();
+    const diffViewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (diffViewer && diffViewer._files.length > 0) {
+      diffViewer.refreshOpenFiles();
+    }
+
+    const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (svgViewer && svgViewer._files.length > 0) {
+      svgViewer.refreshOpenFiles();
+    }
+  }
+
+  /**
+   * When either viewer switches active file, activate the correct viewer layer.
+   */
+  _onActiveFileChanged(e) {
+    const path = e.detail?.path;
+    if (path) {
+      const isSvg = path.toLowerCase().endsWith('.svg');
+      const diffViewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+      const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (diffViewer) {
+        diffViewer.classList.toggle('viewer-visible', !isSvg);
+        diffViewer.classList.toggle('viewer-hidden', isSvg);
+      }
+      if (svgViewer) {
+        svgViewer.classList.toggle('viewer-visible', isSvg);
+        svgViewer.classList.toggle('viewer-hidden', !isSvg);
+      }
     }
   }
 
@@ -475,11 +631,16 @@ class AcApp extends JRPCClient {
     }
   }
 
+  _onBeforeUnload() {
+    this._saveViewportState();
+  }
+
   render() {
     return html`
       <div class="viewport">
-        <div class="diff-background" role="region" aria-label="Code diff viewer">
-          <ac-diff-viewer></ac-diff-viewer>
+        <div class="diff-background" role="region" aria-label="Code viewer">
+          <ac-diff-viewer class="viewer-visible"></ac-diff-viewer>
+          <ac-svg-viewer class="viewer-hidden"></ac-svg-viewer>
         </div>
 
         <div class="dialog-container" role="complementary" aria-label="Tools panel">

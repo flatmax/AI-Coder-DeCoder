@@ -326,6 +326,30 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _onActiveFileChanged(e) {
     this._activeInViewer = e.detail?.path || '';
+    if (this._activeInViewer) {
+      this._expandToPath(this._activeInViewer);
+    }
+  }
+
+  /**
+   * Expand all ancestor directories so the given file path is visible in the tree.
+   */
+  _expandToPath(filePath) {
+    const parts = filePath.split('/');
+    if (parts.length <= 1) return; // top-level file, root is always expanded
+
+    let changed = false;
+    let current = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      current = current ? `${current}/${parts[i]}` : parts[i];
+      if (!this._expanded.has(current)) {
+        this._expanded.add(current);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._expanded = new Set(this._expanded);
+    }
   }
 
   // === Data Loading ===

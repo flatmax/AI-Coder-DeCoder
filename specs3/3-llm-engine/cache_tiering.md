@@ -76,6 +76,10 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 3. **Check promotion**: if tier above is broken/empty and N exceeds threshold → promote out, mark source tier as broken
 4. **Post-cascade consolidation**: any tier below `cache_target_tokens` has its items demoted one tier down (keeping their current N) to avoid wasting a cache breakpoint
 
+### Anchoring Implementation Detail
+
+Anchoring state is tracked per-item during each cascade pass. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
+
 ## Demotion
 
 Items demote to active (N = 0) when: content hash changes, or file appears in modified-files list.
@@ -86,12 +90,7 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 - **File deleted** — both file and symbol entries removed entirely
 - Either causes a cache miss in the affected tier
 
-**Deselected file cleanup** happens at **two points** to avoid a one-request lag:
-
-1. **At assembly time** (in `_gather_tiered_content`, before the LLM request) — `file:*` entries for files not in the current selected files list are removed immediately
-2. **After the response** (in `_update_stability`) — the same check runs again as part of the normal stability update cycle
-
-Both steps mark the affected tier as broken to trigger cascade rebalancing.
+**Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
 ## The Active Items List
 
@@ -116,11 +115,12 @@ On startup, tier assignments are initialized from the cross-file reference graph
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)
 2. **Find connected components** — naturally produces language separation and subsystem grouping
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
-4. **Respect minimums** — tiers below `cache_target_tokens` merge into the smallest other tier
 
 **L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
 
-**Fallback** (when no reference index is available): sort all files by reference count descending, fill L1 first (to `cache_target_tokens`), then L2, then L3.
+After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
+
+**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
 ## Cache Block Structure
 
@@ -157,6 +157,10 @@ Bottom-up pass: place incoming, process veterans, check promotion. Repeat until 
 
 ### Phase 4: Record Changes
 Log promotions/demotions for frontend display. Store current active items for next request.
+
+### Post-Cascade Consolidation Detail
+
+The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
 
 ## Symbol Map Exclusion
 
