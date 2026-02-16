@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" style="width: 100%; height: 100%; touch-action: none;">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1"></stop>
+      <stop offset="100%" style="stop-color:#16213e;stop-opacity:1"></stop>
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffd700;stop-opacity:1"></stop>
+      <stop offset="100%" style="stop-color:#f0883e;stop-opacity:1"></stop>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"></feGaussianBlur>
+      <feMerge>
+        <feMergeNode in="coloredBlur"></feMergeNode>
+        <feMergeNode in="SourceGraphic"></feMergeNode>
+      </feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"></feDropShadow>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="600" fill="url(#bgGrad)" rx="12"></rect>
+
+  <!-- Grid lines -->
+  <g stroke="#ffffff" stroke-opacity="0.05" stroke-width="1">
+    <line x1="0" y1="100" x2="800" y2="100"></line>
+    <line x1="0" y1="200" x2="800" y2="200"></line>
+    <line x1="0" y1="300" x2="800" y2="300"></line>
+    <line x1="0" y1="400" x2="800" y2="400"></line>
+    <line x1="0" y1="500" x2="800" y2="500"></line>
+    <line x1="200" y1="0" x2="200" y2="600"></line>
+    <line x1="400" y1="0" x2="400" y2="600"></line>
+    <line x1="600" y1="0" x2="600" y2="600"></line>
+  </g>
+
+  <!-- Title -->
+  <text x="400" y="60" text-anchor="middle" font-family="monospace" font-size="28" font-weight="bold" fill="#e0e0e0" filter="url(#shadow)">
+    AC⚡DC Architecture
+  </text>
+
+  <!-- LLM Service box -->
+  <rect x="280" y="100" width="240" height="80" rx="8" fill="#0a3d62" stroke="#4fc3f7" stroke-width="2" filter="url(#shadow)"></rect>
+  <text x="400" y="135" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#4fc3f7">LLM Service</text>
+  <text x="400" y="158" text-anchor="middle" font-family="monospace" font-size="11" fill="#8ec8e8">streaming · edits · review</text>
+
+  <!-- Context Manager box -->
+  <rect x="80" y="240" width="200" height="70" rx="8" fill="#1b4332" stroke="#7ee787" stroke-width="1.5" filter="url(#shadow)"></rect>
+  <text x="190.5428009033203" y="278.873046875" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#7ee787">Context Manager</text>
+  <text x="180" y="292" text-anchor="middle" font-family="monospace" font-size="10" fill="#a8d8b0">history · files · tokens</text>
+
+  <!-- Symbol Index box -->
+  <rect x="520" y="240" width="200" height="70" rx="8" fill="#3b1f2b" stroke="#f78166" stroke-width="1.5" filter="url(#shadow)"></rect>
+  <text x="620" y="272" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#f78166">Symbol Index</text>
+  <text x="620" y="292" text-anchor="middle" font-family="monospace" font-size="10" fill="#f0a88c">tree-sitter · refs · map</text>
+
+  <!-- Stability Tracker box -->
+  <rect x="80" y="380" width="200" height="70" rx="8" fill="#3d2b1f" stroke="#f0883e" stroke-width="1.5" filter="url(#shadow)"></rect>
+  <text x="180" y="412" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#f0883e">Stability Tracker</text>
+  <text x="180" y="432" text-anchor="middle" font-family="monospace" font-size="10" fill="#d4a574">tiers · cascade · budget</text>
+
+  <!-- Repo box -->
+  <rect x="520" y="380" width="200" height="70" rx="8" fill="#1a1a3e" stroke="#b388ff" stroke-width="1.5" filter="url(#shadow)"></rect>
+  <text x="620" y="412" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#b388ff">Repo</text>
+  <text x="620" y="432" text-anchor="middle" font-family="monospace" font-size="10" fill="#c9a8ff">git · files · search</text>
+
+  <!-- Webapp box -->
+  <rect x="280" y="500" width="240" height="70" rx="8" fill="#2d2d2d" stroke="#e0e0e0" stroke-width="1.5" filter="url(#shadow)"></rect>
+  <text x="400" y="532" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#e0e0e0">Webapp</text>
+  <text x="400" y="552" text-anchor="middle" font-family="monospace" font-size="10" fill="#aaa">Lit · Monaco · WebSocket</text>
+
+  <!-- Connecting lines -->
+  <g stroke="#4fc3f7" stroke-width="1.5" stroke-opacity="0.6" fill="none">
+    <!-- LLM → Context -->
+    <path d="M 320 180 Q 250 210 230 240" marker-end="url(#arrow)"></path>
+    <!-- LLM → Symbol Index -->
+    <path d="M 480 180 Q 550 210 570 240" marker-end="url(#arrow)"></path>
+    <!-- Context → Stability -->
+    <path d="M 180 310 L 180 380" marker-end="url(#arrow)"></path>
+    <!-- Symbol Index → Repo -->
+    <path d="M 620 310 L 620 380" marker-end="url(#arrow)"></path>
+    <!-- LLM → Repo (right side) -->
+    <path d="M 520 140 Q 680 140 680 380" stroke="#b388ff" stroke-dasharray="6,3" marker-end="url(#arrowPurple)"></path>
+    <!-- Webapp → LLM -->
+    <path d="M 400 500 L 400 180" stroke="#e0e0e0" stroke-dasharray="4,4" marker-end="url(#arrowWhite)" transform="translate(-15.9903564453125, 9.776229858398438)"></path>
+  </g>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4fc3f7" fill-opacity="0.8"></path>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b388ff" fill-opacity="0.8"></path>
+    </marker>
+    <marker id="arrowWhite" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e0e0e0" fill-opacity="0.6"></path>
+    </marker>
+  </defs>
+
+  <!-- Lightning bolt accent -->
+  <g transform="translate(388, 42)" filter="url(#glow)">
+    <polygon points="-256.1212463378906,-4.836727142333984 -264.1212463378906,7.163272857666016 -258.1212463378906,7.163272857666016 -260.1212463378906,17.163272857666016 -250.12124633789062,4.163272857666016 -257.1212463378906,4.163272857666016 -254.12124633789062,-4.836727142333984" fill="url(#boltGrad)"></polygon>
+  </g>
+
+  <!-- Footer -->
+  <text x="400" y="590" text-anchor="middle" font-family="monospace" font-size="9" fill="#555">
+    AC⚡DC — AI-powered coding assistant
+  </text>
+</svg>

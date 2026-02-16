@@ -149,17 +149,9 @@ URLContent:
         // Append symbol map in code block if present
 ```
 
-### URLResult
+### Fetch Return Value
 
-Wraps URLContent with fetch metadata:
-
-```pseudo
-URLResult:
-    content: URLContent
-    summary: string?
-    summary_type: SummaryType?
-    cached: boolean           // whether result came from cache
-```
+`URLService.fetch_url()` returns `URLContent` directly with summary fields populated on the content object itself. The `to_dict()` method on `URLContent` is used for RPC serialization. There is no separate wrapper — all fields (including `summary` and `summary_type`) live on `URLContent`.
 
 ### GitHubInfo
 
@@ -205,13 +197,13 @@ Known documentation domains include: official language docs (docs.python.org, de
 
 | Method | Description |
 |--------|-------------|
-| `LLM.detect_urls(text)` | Find and classify URLs |
-| `LLM.fetch_url(url, use_cache, summarize, ...)` | Fetch and optionally summarize |
-| `LLM.detect_and_fetch(text, use_cache, summarize)` | Detect and fetch all URLs in text |
-| `LLM.get_url_content(url)` | Get content for modal display; checks in-memory fetched dict first, then filesystem cache |
-| `LLM.remove_fetched_url(url)` | Remove from active context (in-memory) but preserve filesystem cache |
-| `LLM.invalidate_url_cache(url)` | Remove from both filesystem cache and in-memory fetched dict |
-| `LLM.clear_url_cache()` | Clear all cached and fetched URLs |
+| `LLMService.detect_urls(text)` | Find and classify URLs |
+| `LLMService.fetch_url(url, use_cache, summarize, ...)` | Fetch and optionally summarize |
+| `LLMService.detect_and_fetch(text, use_cache, summarize)` | Detect and fetch all URLs in text |
+| `LLMService.get_url_content(url)` | Get content for modal display; checks in-memory fetched dict first, then filesystem cache |
+| `LLMService.remove_fetched_url(url)` | Remove from active context (in-memory) but preserve filesystem cache |
+| `LLMService.invalidate_url_cache(url)` | Remove from both filesystem cache and in-memory fetched dict |
+| `LLMService.clear_url_cache()` | Clear all cached and fetched URLs |
 
 ## Testing
 

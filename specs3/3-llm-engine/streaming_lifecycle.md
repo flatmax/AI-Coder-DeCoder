@@ -14,7 +14,7 @@ User clicks Send
     ├─ Start watchdog timer (5 min safety timeout)
     │
     ▼
-Server: LLM.chat_streaming(request_id, message, files, images)
+Server: LLMService.chat_streaming(request_id, message, files, images)
     │
     ├─ Guard: reject if another stream is active
     ├─ Persist user message to history store
@@ -28,7 +28,14 @@ Background task: _stream_chat
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
-    ├─ Assemble tiered message array (→ prompt_assembly.md)
+    │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
+    │       ├─ Notify client: compactionEvent with stage "url_fetch"
+    │       ├─ Fetch, cache, and summarize each URL
+    │       ├─ Notify client: compactionEvent with stage "url_ready"
+    │       └─ Update URL context on context manager (joined as single string)
+    ├─ Build and inject review context (if review mode active)
+    ├─ Build tiered_content from stability tracker (→ prompt_assembly.md#tiered-assembly-data-flow)
+    ├─ Assemble tiered message array with cache_control markers
     ├─ Run LLM completion (threaded, streaming)
     │       │
     │       ├─ streamChunk callbacks → browser
@@ -52,6 +59,10 @@ Send streamComplete → browser
 Post-response compaction (→ context_and_history.md)
 ```
 
+### Assembly Mode
+
+The streaming handler uses **tiered assembly** (`assemble_tiered_messages`) for LLM requests. This produces a message array with `cache_control` markers at tier boundaries, enabling provider-level prompt caching. The stability tracker's tier assignments drive content placement — see [Prompt Assembly — Tiered Assembly Data Flow](prompt_assembly.md#tiered-assembly-data-flow) for the complete data flow.
+
 ## File Context Sync
 
 Before loading files, the streaming handler compares the current FileContext against the incoming selected files list. Files present in the context but absent from the new selection are removed. This ensures deselected files don't linger in the in-memory context across requests.
@@ -74,7 +85,7 @@ This is distinct from the cache tiering deselection cleanup (see [Cache Tiering 
 6. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
 7. Track request — store in pending requests map
 8. Set streaming state (disable input, start watchdog)
-9. RPC call: `LLM.chat_streaming(request_id, message, files, images)`
+9. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
 
 ## LLM Streaming (Worker Thread)
 
@@ -99,59 +110,130 @@ Coalesced per animation frame:
 
 ## Cancellation
 
-During streaming, the Send button transforms into a **Stop button** (⏹). Clicking calls `LLM.cancel_streaming(request_id)`. The server adds the request ID to a cancelled set; the streaming thread checks each iteration and breaks out. Partial content stored with `[stopped]` marker, `streamComplete` sent with `cancelled: true`.
+During streaming, the Send button transforms into a **Stop button** (⏹). Clicking calls `LLMService.cancel_streaming(request_id)`. The server adds the request ID to a cancelled set; the streaming thread checks each iteration and breaks out. Partial content stored with `[stopped]` marker, `streamComplete` sent with `cancelled: true`.
 
 ## Stream Completion
 
 ### Result Object
 
-| Field | Description |
-|-------|-------------|
-| `response` | Full assistant response text |
-| `token_usage` | Token counts for HUD display |
-| `edit_blocks` | Parsed blocks (preview text) |
-| `shell_commands` | Detected shell suggestions |
-| `passed/failed/skipped` | Edit application results |
-| `files_modified` | Paths of changed files |
-| `edit_results` | Detailed per-edit results |
-| `files_auto_added` | Files added to context for not-in-context edits |
-| `cancelled` | Present if cancelled |
-| `error` | Present if fatal error |
-| `binary_files` | Rejected binary files |
-| `invalid_files` | Not-found files |
+```pseudo
+StreamCompleteResult:
+    response: string                    # Full assistant response text
+    token_usage: TokenUsage             # Token counts for HUD display
+    edit_blocks: [{file, preview}]?     # Parsed blocks (preview text)
+    shell_commands: [string]?           # Detected shell suggestions
+    passed: integer                     # Count of applied edits
+    failed: integer                     # Count of failed edits
+    skipped: integer                    # Count of skipped edits
+    not_in_context: integer             # Count of not-in-context edits
+    files_modified: [string]?           # Paths of changed files
+    edit_results: [EditResult]?         # Detailed per-edit results
+    files_auto_added: [string]?         # Files added to context for not-in-context edits
+    cancelled: boolean?                 # Present if cancelled
+    error: string?                      # Present if fatal error
+    binary_files: [string]?             # Rejected binary files
+    invalid_files: [string]?            # Not-found files
+
+TokenUsage:
+    prompt_tokens: integer
+    completion_tokens: integer
+    cache_read_tokens: integer?         # Provider-reported cached input
+    cache_write_tokens: integer?        # Provider-reported cache write
+
+EditResult:
+    file: string                        # File path
+    status: "applied" | "failed" | "skipped" | "validated" | "not_in_context"
+    message: string?                    # Error/status message
+    old_preview: string?                # Preview of old content
+    new_preview: string?                # Preview of new content
+```
 
 ### Client Processing
 
-1. Flush pending chunks
-2. Clear streaming state, watchdog
-3. Handle errors — auto-deselect binary/invalid files
-4. Finalize message — attach edit results
-5. Refresh file tree if edits applied
-6. Handle auto-added files — update file picker selection for files added due to not-in-context edits
-7. Run file mention detection on assistant message
-8. Show token usage HUD
+1. Flush pending chunks (apply any buffered `_pendingChunk`)
+2. Clear streaming state (`streamingActive = false`, `_currentRequestId = null`)
+3. Handle errors — show error as assistant message with `**Error:**` prefix
+4. Finalize message — build `editResults` map from `edit_results` array (keyed by file path, with status and message), attach aggregate counts (`passed`, `failed`, `skipped`, `not_in_context`, `files_auto_added`) to the message object
+5. Clear `_streamingContent` and `_pendingChunk`
+6. Scroll to bottom if auto-scroll engaged (double-rAF via `updateComplete`)
+7. Refresh file tree if `files_modified` is non-empty — dispatch `files-modified` event and reload repo file list
+8. Refresh repo file list (`get_flat_file_list`) for file mention detection of newly created files
 9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
-10. Focus input for next message
+
+## URL Fetch Notifications During Streaming
+
+When URLs are detected and fetched during `_stream_chat`, progress is communicated to the browser via `compactionEvent` callbacks reusing the general-purpose progress channel:
+
+| Stage | Message |
+|-------|---------|
+| `url_fetch` | `"Fetching {display_name}..."` — shown as a transient toast |
+| `url_ready` | `"Fetched {display_name}"` — shown as a success toast |
+
+Already-fetched URLs (present in the in-memory fetched dict) are skipped without notification. The URL context is then set on the context manager as a pre-joined string — the `\n---\n` joining happens in `format_url_context()` before being passed to `set_url_context()`.
 
 ## Post-Response Processing
 
 ### Stability Update
 
-1. Remove tracked items whose files no longer exist
-2. Process active context items (hash, N increment)
-3. Controlled history graduation
-4. Run cascade (→ [Cache Tiering](cache_tiering.md))
-5. Log tier changes (📈 promotions, 📉 demotions)
+Build the active items list and run the tracker update:
+
+```pseudo
+active_items = {}
+
+# 1. Selected files: full content hash
+for path in selected_files:
+    content = file_context.get_content(path)
+    if content:
+        active_items["file:" + path] = {
+            "hash": sha256(content),
+            "tokens": counter.count(content)
+        }
+
+# 2. Symbol blocks for selected files
+for path in selected_files:
+    block = symbol_index.get_file_symbol_block(path)
+    if block:
+        active_items["symbol:" + path] = {
+            "hash": sha256(block),
+            "tokens": counter.count(block)
+        }
+
+# 3. Non-graduated history messages
+for i, msg in enumerate(history):
+    key = "history:" + str(i)
+    if key not in any cached tier:
+        content = msg["role"] + ":" + msg["content"]
+        active_items[key] = {
+            "hash": sha256(content),
+            "tokens": counter.count_message(msg)
+        }
+
+# 4. Deselected file cleanup: remove file:* entries not in selected_files
+for key in tracker.items:
+    if key starts with "file:" and key.removeprefix("file:") not in selected_files:
+        remove from tier, mark tier as broken
+
+# 5. Run tracker update
+stability_tracker.update(active_items, existing_files=repo.get_flat_file_list())
+```
+
+The tracker then:
+1. Removes tracked items whose files no longer exist (Phase 0)
+2. Processes active items — hash comparison, N increment/reset (Phase 1)
+3. Determines graduates for L3 entry (Phase 2)
+4. Runs cascade — promotion, anchoring, demotion (Phase 3)
+5. Logs tier changes (📈 promotions, 📉 demotions) (Phase 4)
 
 ### Post-Response Compaction
 
-Runs asynchronously after `streamComplete`:
-1. Check if history exceeds trigger
-2. Wait 500ms for frontend to process
-3. Notify start → run compaction → notify complete
+Runs asynchronously after `streamComplete` with a 500ms delay:
+1. Send `compaction_start` notification via `compactionEvent` callback
+2. Check if history exceeds trigger
+3. Run compaction if needed
 4. Re-register history items in stability tracker
+5. Send `compaction_complete` (or `compaction_error` on failure) notification
 
-See [Context and History](context_and_history.md) for the compaction algorithm.
+See [Context and History](context_and_history.md) for the compaction algorithm and frontend notification protocol.
 
 ## Token Usage Extraction
 
@@ -214,7 +296,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id
+- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 
 ### Streaming Guards
@@ -237,6 +319,7 @@ Session total: 182,756
 - Uses the smaller model (`smaller_model` config, falling back to primary model)
 - Empty/whitespace diff rejected
 - Mocked LLM returns generated message
+- Commit message generation uses `run_in_executor` to run the synchronous `litellm.completion` call on a thread pool, avoiding blocking the async event loop
 
 ### Tiered Content Deduplication
 - File in cached tier excludes its symbol block

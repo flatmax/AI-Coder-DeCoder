@@ -14,7 +14,8 @@
     "lit": "^3.1.0",
     "marked": "^12.0.0",
     "highlight.js": "^11.11.0",
-    "monaco-editor": "^0.52.0"
+    "monaco-editor": "^0.52.0",
+    "svg-pan-zoom": "^3.6.1"
   },
   "devDependencies": {
     "vite": "^5.4.0"

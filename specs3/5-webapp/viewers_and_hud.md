@@ -7,11 +7,17 @@ Three components that consume the same backend data (`LLM.get_context_breakdown`
 ## Shared Backend
 
 Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
-- URL content modal (view fetched URL content)
+- URL content modal (view fetched URL content) — each tab renders its own `<ac-url-content-dialog>` instance; see [Chat Interface — URL Content Dialog](chat_interface.md#url-content-dialog) for the dialog spec
 - Symbol map modal (view full symbol map)
 - URL inclusion toggling and removal
 - Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)
 - Auto-refresh on `stream-complete` and `files-changed` events while visible; mark stale when hidden
+
+### FileContext Sync Before Breakdown
+
+Before computing the breakdown, `get_context_breakdown()` synchronizes the in-memory `FileContext` with the current `_selected_files` list — removing files that are no longer selected and loading files that are newly selected. This ensures the breakdown reflects what the *next* LLM request would look like, not a stale snapshot from the last request. Without this sync, the context viewer would show outdated data when the user changes file selection between requests.
+
+**Limitation:** The sync silently skips binary files and files that don't exist (checking `is_binary_file` and `file_exists` before loading). Unlike `_stream_chat`, which reports `binary_files` and `invalid_files` in the stream result, the breakdown sync does not surface these problems. The context viewer may therefore show a clean token budget while the next actual request would produce binary/missing file warnings and exclude those files. The discrepancy is minor (binary/missing files would contribute zero tokens either way) but could be confusing if the user expects the viewer to flag invalid selections.
 
 `LLMService.get_context_breakdown()` returns:
 
@@ -247,6 +253,8 @@ Printed to the terminal after each LLM response (not a UI component). Three sect
 
 Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by the token count and `[cached]`. Active tier shows token count only. Only non-empty tiers are listed. The box width auto-sizes to the widest line. Cache hit percentage is computed as `cached_tokens / total_tokens`.
 
+**L0 special-casing:** The terminal HUD always adds system prompt + legend tokens to L0's display, since these are fixed overhead not tracked by the stability tracker. System + legend tokens appear as a synthetic sub-item. Both the terminal HUD and frontend viewers should include this overhead in L0's total for consistency.
+
 ### Token Usage
 
 ```
@@ -261,7 +269,7 @@ Cache:         read: 21,640, write: 48,070
 Session total: 182,756
 ```
 
-Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields.
+Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
 
 ### Tier Changes
 
