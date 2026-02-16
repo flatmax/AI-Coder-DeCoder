@@ -38,57 +38,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       overflow: hidden;
     }
 
-    /* Tab bar */
-    .tab-bar {
-      display: flex;
-      flex-shrink: 0;
-      background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border-primary);
-      overflow-x: auto;
-      min-height: 32px;
-      align-items: stretch;
-    }
-    .tab-bar::-webkit-scrollbar { height: 3px; }
-
-    .tab {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 12px;
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      border-right: 1px solid var(--border-primary);
-      cursor: pointer;
-      white-space: nowrap;
-      user-select: none;
-      transition: background 0.15s, color 0.15s;
-    }
-    .tab:hover { background: var(--bg-tertiary); }
-    .tab.active {
-      color: var(--text-primary);
-      background: var(--bg-primary);
-      border-bottom: 2px solid var(--accent-primary);
-    }
-
-    .tab-close {
-      font-size: 0.65rem;
-      opacity: 0.5;
-      cursor: pointer;
-      padding: 2px;
-      border-radius: 3px;
-      border: none;
-      background: none;
-      color: inherit;
-    }
-    .tab-close:hover { opacity: 1; background: var(--bg-tertiary); }
-
-    .tab .dirty-dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: var(--accent-orange, #f0883e);
-      flex-shrink: 0;
-    }
-
     /* Diff container — side by side */
     .diff-container {
       flex: 1;
@@ -111,21 +60,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     .diff-panel + .diff-panel {
       border-left: 1px solid var(--border-primary);
     }
-
-    .panel-header {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 4px 8px;
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border-primary);
-      user-select: none;
-      flex-shrink: 0;
-    }
-    .panel-header.modified { color: var(--accent-green); }
-    .panel-header.original { color: var(--text-muted); }
 
     .svg-container {
       flex: 1;
@@ -211,16 +145,40 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
     .splitter:hover { background: var(--accent-primary); opacity: 0.3; }
 
-    /* Status badge on tabs */
-    .tab-badge {
-      font-size: 0.6rem;
-      padding: 1px 4px;
-      border-radius: 3px;
-      font-weight: 600;
+    /* Status LED — floating top-right indicator */
+    .status-led {
+      position: absolute;
+      top: 8px;
+      right: 16px;
+      z-index: 10;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: box-shadow 0.3s, background 0.3s;
+      border: none;
+      padding: 0;
     }
-    .tab-badge.new { background: rgba(79, 195, 247, 0.2); color: var(--accent-primary); }
-    .tab-badge.changed { background: rgba(240, 136, 62, 0.2); color: var(--accent-orange, #f0883e); }
-    .tab-badge.same { background: rgba(126, 231, 135, 0.15); color: var(--accent-green); }
+    .status-led.dirty {
+      background: var(--accent-orange, #f0883e);
+      box-shadow: 0 0 6px 2px rgba(240, 136, 62, 0.6);
+      animation: led-pulse 2s ease-in-out infinite;
+    }
+    .status-led.clean {
+      background: var(--accent-green);
+      box-shadow: 0 0 4px 1px rgba(126, 231, 135, 0.4);
+    }
+    .status-led.new-file {
+      background: var(--accent-primary);
+      box-shadow: 0 0 4px 1px rgba(79, 195, 247, 0.4);
+    }
+    .status-led:hover {
+      transform: scale(1.4);
+    }
+    @keyframes led-pulse {
+      0%, 100% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(240, 136, 62, 0.4); }
+      50% { opacity: 1; box-shadow: 0 0 10px 3px rgba(240, 136, 62, 0.8); }
+    }
 
     /* Empty state */
     .empty-state {
@@ -845,12 +803,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     return null;
   }
 
-  _getTabBadge(file) {
-    if (file.is_new) return 'new';
-    if (file.original !== file.modified) return 'changed';
-    return 'same';
-  }
-
   // === Rendering / Injection ===
 
   updated(changedProps) {
@@ -924,44 +876,19 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const isDirty = file && this._dirtySet.has(file.path);
 
     return html`
-      ${hasFiles ? html`
-        <div class="tab-bar">
-          ${this._files.map((f, i) => {
-            const badge = this._getTabBadge(f);
-            const dirty = this._dirtySet.has(f.path);
-            return html`
-              <div
-                class="tab ${i === this._activeIndex ? 'active' : ''}"
-                @click=${() => {
-                  this._captureEditorContent();
-                  this._activeIndex = i;
-                  this._undoStack = [f.modified];
-                  this.updateComplete.then(() => this._injectSvgContent());
-                  this._dispatchActiveFileChanged(f.path);
-                }}
-              >
-                ${dirty ? html`<span class="dirty-dot"></span>` : nothing}
-                <span>${f.path.split('/').pop()}</span>
-                <span class="tab-badge ${badge}">${badge === 'same' ? '=' : badge === 'new' ? 'N' : 'Δ'}</span>
-                <button class="tab-close" @click=${(e) => { e.stopPropagation(); this._captureEditorContent(); this.closeFile(f.path); }}
-                  title="Close" aria-label="Close ${f.path}">✕</button>
-              </div>
-            `;
-          })}
-        </div>
-      ` : nothing}
-
       <div class="diff-container">
         ${file ? html`
+          <button
+            class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
+            title="${file.path}${isDirty ? ' — unsaved (Ctrl+S to save)' : file.is_new ? ' — new file' : ''}"
+            aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
+            @click=${() => isDirty ? this._save() : null}
+          ></button>
           <div class="diff-panel">
-            <div class="panel-header original">Original${file.is_new ? ' (empty)' : ''}</div>
             <div class="svg-container svg-left"></div>
           </div>
           <div class="splitter"></div>
           <div class="diff-panel">
-            <div class="panel-header modified">
-              Modified${this._mode === 'select' ? ' (editable)' : ''}${this._selectedTag ? ` — <${this._selectedTag}>` : ''}
-            </div>
             <div class="svg-container svg-right"></div>
           </div>
         ` : html`
@@ -978,6 +905,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             @click=${() => this._setMode('select')} title="Select & edit mode">✦ Select</button>
           <button class="${this._mode === 'pan' ? 'active' : ''}"
             @click=${() => this._setMode('pan')} title="Pan & zoom mode">✥ Pan</button>
+          ${this._selectedTag ? html`<span class="mode-label">&lt;${this._selectedTag}&gt;</span>` : nothing}
 
           <div class="separator"></div>
 
