@@ -122,10 +122,10 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
 3. After injection, SVG elements are normalized:
    - `width`/`height` attributes removed (so SVG fills container)
    - `style.width` and `style.height` set to `100%`
-   - `viewBox` attribute added if missing (computed from original width/height attributes)
+   - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
 
-If containers are not yet in the DOM when `_injectSvgContent()` runs (Lit render timing), it retries on the next animation frame.
+**Retry on next frame**: If the `.svg-left` / `.svg-right` containers are not yet in the shadow DOM when `_injectSvgContent()` runs (due to Lit render timing — the method may be called from `updated()` before the template has committed), it schedules a retry via `requestAnimationFrame`. This ensures injection succeeds even when called during the Lit update lifecycle before the DOM reflects the latest template.
 
 ## File Content Fetching
 

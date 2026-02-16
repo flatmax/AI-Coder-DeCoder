@@ -122,16 +122,15 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 
 ### Client Processing
 
-1. Flush pending chunks
-2. Clear streaming state, watchdog
-3. Handle errors — auto-deselect binary/invalid files
-4. Finalize message — attach edit results
-5. Refresh file tree if edits applied
-6. Handle auto-added files — update file picker selection for files added due to not-in-context edits
-7. Run file mention detection on assistant message
-8. Show token usage HUD
+1. Flush pending chunks (apply any buffered `_pendingChunk`)
+2. Clear streaming state (`streamingActive = false`, `_currentRequestId = null`)
+3. Handle errors — show error as assistant message with `**Error:**` prefix
+4. Finalize message — build `editResults` map from `edit_results` array (keyed by file path, with status and message), attach aggregate counts (`passed`, `failed`, `skipped`, `not_in_context`, `files_auto_added`) to the message object
+5. Clear `_streamingContent` and `_pendingChunk`
+6. Scroll to bottom if auto-scroll engaged (double-rAF via `updateComplete`)
+7. Refresh file tree if `files_modified` is non-empty — dispatch `files-modified` event and reload repo file list
+8. Refresh repo file list (`get_flat_file_list`) for file mention detection of newly created files
 9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
-10. Focus input for next message
 
 ## Post-Response Processing
 

@@ -51,7 +51,8 @@ Six operations transform the repository into review state. The branch may be a l
 | 4. **Build symbol_map_before** | *(symbol index runs on disk)* | base^ | clean | pre-review |
 | 5. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
 | 6. Soft reset | `git reset --soft {base}^` | base^ (detached) | **all review changes staged** | branch tip |
-| 7. Clear file selection | *(internal)* | — | — | — |
+| 7. Clear file selection | *(frontend-driven)* | — | — | — |
+Step 7 is orchestrated by the frontend: the Files tab receives the `review-started` event, clears the selected files list, resets the file picker checkboxes, refreshes the file tree to show the new staged state, and updates the chat panel's review state. This ensures the review starts with a clean slate and the UI reflects the staged changes from the soft reset.
 
 Step 5 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
 
@@ -183,17 +184,16 @@ Legend features:
 
 ### Disambiguation
 
-A commit can be reachable from multiple branches (e.g., a commit on `main` before a feature branch forked). When the user clicks such a commit:
+A commit can be reachable from multiple branches (e.g., a commit on `main` before a feature branch forked). When the user clicks any commit:
 
-1. The system identifies all branches whose tips are descendants of the selected commit
-2. If only one branch → no ambiguity, proceed directly
-3. If multiple branches:
-   - A small dropdown/popover appears at the selected commit node listing the candidate branches
-   - The branch whose tip is closest to the selected commit (fewest commits between selection and tip) is pre-selected
-   - The user selects a branch from the dropdown to confirm
-   - Clicking outside the dropdown cancels the selection
+1. The system performs a **full parent-walk** from each branch tip to determine reachability: starting from the tip SHA, it follows all parents (not just first-parent) using a stack and visited set until the selected commit is found or the walk exhausts
+2. Candidate branches are those whose walk reached the selected commit
+3. A disambiguation popover always appears at the click position listing candidate branches
+4. The branch whose **lane matches** the selected commit's lane is pre-selected (this is the branch the commit visually belongs to, which is correct in the vast majority of cases)
+5. The user clicks a branch from the popover to confirm
+6. Scrolling the graph dismisses the popover
 
-This is usually resolved instantly — the closest-tip heuristic is correct in the vast majority of cases, and the user just confirms with a click.
+If no branches reach the selected commit (edge case), all branches are offered as fallback candidates.
 
 ### Clean Working Tree Check
 

@@ -7,7 +7,7 @@ Three components that consume the same backend data (`LLM.get_context_breakdown`
 ## Shared Backend
 
 Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
-- URL content modal (view fetched URL content)
+- URL content modal (view fetched URL content) — each tab renders its own `<ac-url-content-dialog>` instance; see [Chat Interface — URL Content Dialog](chat_interface.md#url-content-dialog) for the dialog spec
 - Symbol map modal (view full symbol map)
 - URL inclusion toggling and removal
 - Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)

@@ -160,6 +160,24 @@ The bidirectional nature enables server-push streaming:
 
 Each chunk/completion is a full JSON-RPC method call from server to client.
 
+### Request ID Generation and Correlation
+
+The browser generates request IDs as `{epoch_ms}-{random_alphanumeric_6}` (e.g., `1736956800000-x7k2m9`). The chat panel stores the current request ID and ignores chunks/completions with non-matching IDs. This correlates callbacks to the correct request and prevents stale callbacks from a previous request from corrupting the current stream.
+
+### `compactionEvent` Dual Purpose
+
+The `compactionEvent` callback serves as a general-purpose progress channel during streaming, not just for compaction:
+
+| Stage | Purpose |
+|-------|---------|
+| `compaction_start` | History compaction beginning |
+| `compaction_complete` | History compaction finished |
+| `compaction_error` | History compaction failed |
+| `url_fetch` | URL fetch in progress (toast notification) |
+| `url_ready` | URL fetch completed (success toast) |
+
+The frontend handles these by stage name — compaction stages update the message display, URL stages show toast notifications.
+
 ## Concurrency
 
 ### Single Active Stream
