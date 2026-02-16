@@ -238,6 +238,7 @@ export class SvgEditor {
     this._dragState = null;      // active drag operation info
     this._handleGroup = null;    // SVG <g> for overlay handles
     this._dirty = false;
+    this._clipboard = null;      // cloned SVG element for copy/paste
     this._zoomLevel = 1;         // current zoom factor
     this._panX = 0;              // current pan offset in SVG units
     this._panY = 0;
@@ -642,7 +643,93 @@ export class SvgEditor {
       } else if (this._selected) {
         this._deselect();
       }
+      return;
     }
+
+    // Copy / Paste / Delete — only when not text-editing
+    if (this._textEditEl) return;
+
+    const mod = e.ctrlKey || e.metaKey;
+
+    if (mod && e.key === 'c' && this._selected) {
+      e.preventDefault();
+      this._copySelected();
+    } else if (mod && e.key === 'v' && this._clipboard) {
+      e.preventDefault();
+      this._pasteClipboard();
+    } else if (mod && e.key === 'd' && this._selected) {
+      // Ctrl+D = duplicate in place (copy + immediate paste)
+      e.preventDefault();
+      this._copySelected();
+      this._pasteClipboard();
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && this._selected) {
+      e.preventDefault();
+      this._deleteSelected();
+    }
+  }
+
+  // === Copy / Paste / Delete ===
+
+  _copySelected() {
+    if (!this._selected) return;
+    // Remove handles before cloning so they aren't included
+    this._removeHandles();
+    this._clipboard = this._selected.cloneNode(true);
+    // Restore handles
+    this._renderHandles();
+  }
+
+  _pasteClipboard() {
+    if (!this._clipboard) return;
+
+    const clone = this._clipboard.cloneNode(true);
+    const offset = this._screenDistToSvgDist(15);
+
+    // Offset the pasted element so it doesn't sit exactly on top
+    const tag = clone.tagName.toLowerCase();
+    if (tag === 'rect' || tag === 'text' || tag === 'image' || tag === 'foreignobject') {
+      clone.setAttribute('x', _num(clone, 'x') + offset);
+      clone.setAttribute('y', _num(clone, 'y') + offset);
+    } else if (tag === 'circle' || tag === 'ellipse') {
+      clone.setAttribute('cx', _num(clone, 'cx') + offset);
+      clone.setAttribute('cy', _num(clone, 'cy') + offset);
+    } else if (tag === 'line') {
+      clone.setAttribute('x1', _num(clone, 'x1') + offset);
+      clone.setAttribute('y1', _num(clone, 'y1') + offset);
+      clone.setAttribute('x2', _num(clone, 'x2') + offset);
+      clone.setAttribute('y2', _num(clone, 'y2') + offset);
+    } else if (tag === 'polyline' || tag === 'polygon') {
+      const points = _parsePoints(clone);
+      const shifted = points.map(p => ({ x: p.x + offset, y: p.y + offset }));
+      clone.setAttribute('points', _serializePoints(shifted));
+    } else if (tag === 'path') {
+      // Offset path via translate
+      const { tx, ty } = _parseTranslate(clone);
+      _setTranslate(clone, tx + offset, ty + offset);
+    } else {
+      // g, use, etc. — offset via translate
+      const { tx, ty } = _parseTranslate(clone);
+      _setTranslate(clone, tx + offset, ty + offset);
+    }
+
+    // Insert after the original (or at end of SVG if no selection context)
+    if (this._selected && this._selected.parentNode) {
+      this._selected.parentNode.insertBefore(clone, this._selected.nextSibling);
+    } else {
+      this._svg.appendChild(clone);
+    }
+
+    // Select the new clone
+    this._select(clone);
+    this._markDirty();
+  }
+
+  _deleteSelected() {
+    if (!this._selected) return;
+    const el = this._selected;
+    this._deselect();
+    el.remove();
+    this._markDirty();
   }
 
   // === Double-click Text Editing ===
