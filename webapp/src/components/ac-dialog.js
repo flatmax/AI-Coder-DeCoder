@@ -181,6 +181,11 @@ export class AcDialog extends RpcMixin(LitElement) {
       cursor: col-resize;
       z-index: 10;
     }
+    :host([minimized]) .resize-handle,
+    :host([minimized]) .resize-handle-bottom,
+    :host([minimized]) .resize-handle-corner {
+      display: none;
+    }
     .resize-handle:hover,
     .resize-handle:active {
       background: var(--accent-primary);
