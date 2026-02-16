@@ -196,6 +196,27 @@ The `compactionEvent` callback serves as a general-purpose progress channel duri
 
 The frontend handles these by stage name — compaction stages update the message display, URL stages show toast notifications.
 
+## File Selection Sync
+
+The file selection state follows this round-trip:
+
+```
+1. Browser: User checks file in picker
+2. Browser: selection-changed event → Files tab
+3. Browser: Files tab calls LLMService.set_selected_files(files) via RPC
+4. Server: LLMService stores _selected_files list
+5. Browser: User sends chat message
+6. Browser: LLMService.chat_streaming(request_id, message, files, images)
+7. Server: _stream_chat reads _selected_files, syncs FileContext, loads content
+8. Server: Files in _selected_files are included in prompt assembly
+```
+
+When the server modifies the selection (e.g., auto-adding files for not-in-context edits), it broadcasts via:
+```
+Server: await call["AcApp.filesChanged"](updated_files_list)
+Browser: files-changed event → Files tab updates picker and chat panel
+```
+
 ## Concurrency
 
 ### Single Active Stream
@@ -232,11 +253,159 @@ Three top-level service classes, registered via `add_class()`:
 
 **Note:** The LLM service class is named `LLMService` in code, so all RPC methods are prefixed `LLMService.*` (e.g., `LLMService.chat_streaming`, `LLMService.get_context_breakdown`). Other specs may refer to these methods with the full prefix or the shorthand `LLM.*` — both refer to the same endpoints.
 
+## RPC Method Inventory
+
+### Repo Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Repo.get_file_content` | `(path, version?) → string` | Read file; optional version (e.g., "HEAD") |
+| `Repo.write_file` | `(path, content) → {status}` | Write content to file |
+| `Repo.create_file` | `(path, content) → {status}` | Create new file (error if exists) |
+| `Repo.file_exists` | `(path) → boolean` | Check file existence |
+| `Repo.is_binary_file` | `(path) → boolean` | Binary detection |
+| `Repo.stage_files` | `(paths) → {status}` | Git add |
+| `Repo.unstage_files` | `(paths) → {status}` | Git reset |
+| `Repo.discard_changes` | `(paths) → {status}` | Restore or delete |
+| `Repo.delete_file` | `(path) → {status}` | Remove from filesystem |
+| `Repo.rename_file` | `(old, new) → {status}` | Git mv or filesystem rename |
+| `Repo.rename_directory` | `(old, new) → {status}` | Directory rename |
+| `Repo.get_file_tree` | `() → {tree, modified, staged, untracked, diff_stats}` | Full tree with git status |
+| `Repo.get_flat_file_list` | `() → string` | Sorted one-per-line file list |
+| `Repo.get_staged_diff` | `() → string` | Git diff --cached |
+| `Repo.get_unstaged_diff` | `() → string` | Git diff |
+| `Repo.stage_all` | `() → {status}` | Git add -A |
+| `Repo.commit` | `(message) → {sha, message}` | Create commit |
+| `Repo.reset_hard` | `() → {status}` | Git reset --hard HEAD |
+| `Repo.search_files` | `(query, whole_word?, use_regex?, ignore_case?, context_lines?) → [{file, matches}]` | Git grep |
+| `Repo.search_commits` | `(query, branch?, limit?) → [{sha, message, author, date}]` | Search commit history |
+| `Repo.get_current_branch` | `() → {branch, sha, detached}` | Current HEAD info |
+| `Repo.list_branches` | `() → {branches, current}` | All branches |
+| `Repo.is_clean` | `() → boolean` | Working tree clean check |
+| `Repo.resolve_ref` | `(ref) → string` | Resolve ref to SHA |
+| `Repo.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | For review selector |
+| `Repo.get_commit_log` | `(base, head?, limit?) → [{sha, message, author, date}]` | Commit log range |
+| `Repo.get_commit_parent` | `(commit) → {sha, short_sha}` | Parent commit |
+| `Repo.get_merge_base` | `(ref1, ref2?) → {sha, short_sha}` | Common ancestor |
+| `Repo.checkout_review_parent` | `(branch, base_commit) → {branch, branch_tip, ...}` | Review entry |
+| `Repo.setup_review_soft_reset` | `(branch_tip, parent_commit) → {status}` | Review setup |
+| `Repo.exit_review_mode` | `(branch_tip, original_branch) → {status}` | Review exit |
+| `Repo.get_review_file_diff` | `(path) → {path, diff}` | Single file review diff |
+| `Repo.get_review_changed_files` | `() → [{path, status, additions, deletions}]` | Changed files in review |
+
+### LLMService Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `LLMService.get_current_state` | `() → {messages, selected_files, streaming_active, session_id, repo_name}` | Full state snapshot |
+| `LLMService.set_selected_files` | `(files) → [string]` | Update file selection |
+| `LLMService.get_selected_files` | `() → [string]` | Current selection |
+| `LLMService.chat_streaming` | `(request_id, message, files?, images?) → {status}` | Start streaming chat |
+| `LLMService.cancel_streaming` | `(request_id) → {status}` | Cancel active stream |
+| `LLMService.new_session` | `() → {session_id}` | Start new session |
+| `LLMService.generate_commit_message` | `(diff_text) → string` | Generate commit message |
+| `LLMService.get_context_breakdown` | `() → {model, total_tokens, blocks, breakdown, ...}` | Token/tier breakdown |
+| `LLMService.check_review_ready` | `() → {clean, message?}` | Check for clean tree |
+| `LLMService.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | Delegates to Repo |
+| `LLMService.start_review` | `(branch, base_commit) → {status, commits, changed_files, stats}` | Enter review mode |
+| `LLMService.end_review` | `() → {status}` | Exit review mode |
+| `LLMService.get_review_state` | `() → {active, branch?, ...}` | Current review state |
+| `LLMService.get_review_file_diff` | `(path) → {path, diff}` | Delegates to Repo |
+| `LLMService.get_snippets` | `() → [{icon, tooltip, message}]` | Mode-aware snippets |
+| `LLMService.history_search` | `(query, role?, limit?) → [{session_id, messages}]` | Search history |
+| `LLMService.history_get_session` | `(session_id) → [message]` | Full session messages |
+| `LLMService.history_list_sessions` | `(limit?) → [SessionSummary]` | Recent sessions |
+| `LLMService.history_new_session` | `() → {session_id}` | Start new history session |
+| `LLMService.load_session_into_context` | `(session_id) → {messages, session_id}` | Load previous session |
+| `LLMService.get_history_status` | `() → {tokens, max, percent, ...}` | History bar data |
+| `LLMService.detect_urls` | `(text) → [{url, type, display_name}]` | URL detection |
+| `LLMService.fetch_url` | `(url, use_cache?, summarize?, summary_type?, user_text?) → URLContent` | Fetch URL |
+| `LLMService.detect_and_fetch` | `(text, use_cache?, summarize?) → [URLContent]` | Detect and fetch all |
+| `LLMService.get_url_content` | `(url) → URLContent` | Get cached/fetched content |
+| `LLMService.invalidate_url_cache` | `(url) → {status}` | Remove from cache+fetched |
+| `LLMService.remove_fetched_url` | `(url) → {status}` | Remove from active context |
+| `LLMService.clear_url_cache` | `() → {status}` | Clear all URL state |
+| `LLMService.lsp_get_hover` | `(path, line, col) → {contents}` | Symbol hover info |
+| `LLMService.lsp_get_definition` | `(path, line, col) → {file, range}` | Go to definition |
+| `LLMService.lsp_get_references` | `(path, line, col) → [{file, range}]` | Find references |
+| `LLMService.lsp_get_completions` | `(path, line, col, prefix?) → [{label, kind, detail}]` | Code completions |
+
+### Settings Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Settings.get_config_content` | `(type) → string` | Read config file |
+| `Settings.save_config_content` | `(type, content) → {status}` | Write config file |
+| `Settings.reload_llm_config` | `() → {status}` | Hot-reload LLM config |
+| `Settings.reload_app_config` | `() → {status}` | Hot-reload app config |
+| `Settings.get_config_info` | `() → {model, smaller_model, config_dir}` | Config info |
+| `Settings.get_snippets` | `() → [{icon, tooltip, message}]` | Direct snippet access |
+| `Settings.get_review_snippets` | `() → [{icon, tooltip, message}]` | Direct review snippet access |
+
+### Browser Methods (Server → Client)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `AcApp.streamChunk` | `(requestId, content) → true` | Streaming content chunk |
+| `AcApp.streamComplete` | `(requestId, result) → true` | Stream finished |
+| `AcApp.compactionEvent` | `(requestId, event) → true` | Progress notification |
+| `AcApp.filesChanged` | `(selectedFiles) → true` | File selection broadcast |
+
 ## Error Handling
 
 - RPC errors follow JSON-RPC 2.0 error format
 - Application-level errors return `{error: "message"}` dicts
 - Connection loss triggers reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
+
+## Server Initialization Pseudocode
+
+The following shows how services are constructed and registered in `main.py`:
+
+```pseudo
+# 1. Initialize services
+config = ConfigManager(repo_root)
+repo = Repo(repo_root)
+symbol_index = SymbolIndex(repo_root)
+
+# 2. Create event callback for server→browser notifications
+async def event_callback(event_name, *args):
+    call = llm_service.get_call()
+    if call:
+        await call[f"AcApp.{event_name}"](*args)
+
+# 3. Create chunk callback for streaming
+async def chunk_callback(request_id, content):
+    call = llm_service.get_call()
+    if call:
+        await call["AcApp.streamChunk"](request_id, content)
+
+# 4. Create LLM service with all dependencies
+llm_service = LLMService(
+    config_manager=config,
+    repo=repo,
+    symbol_index=symbol_index,
+    chunk_callback=chunk_callback,
+    event_callback=event_callback
+)
+
+settings = Settings(config)
+
+# 5. Register with RPC server — public methods become RPC endpoints
+server = JRPCServer(port, remote_timeout=60)
+server.add_class(repo)              # Exposes Repo.get_file_tree, etc.
+server.add_class(llm_service)       # Exposes LLMService.chat_streaming, etc.
+server.add_class(settings)          # Exposes Settings.get_config_content, etc.
+
+# 6. Start server
+await server.start()
+```
+
+**Event callback variance:** Different events pass different argument shapes:
+- `streamComplete(request_id, result)` — 2 args
+- `compactionEvent(request_id, event_dict)` — 2 args
+- `filesChanged(selected_files_list)` — 1 arg (no request_id)
+
+The `*args` splat handles this variance, but callers must match the browser method signatures exactly.
 
 ## Threading Notes
 

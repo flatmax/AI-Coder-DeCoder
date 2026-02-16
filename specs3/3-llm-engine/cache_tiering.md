@@ -78,7 +78,7 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 
 ### Anchoring Implementation Detail
 
-Anchoring state is stored as a dynamic `_anchored` attribute on `TrackedItem` instances (not a declared dataclass field). This attribute is set during each cascade pass but is **not cleaned up between requests** — stale anchoring state from a previous cycle persists on items until the next cascade overwrites it. In practice this is harmless because the cascade always re-evaluates anchoring from scratch, but the lingering attribute is a code hygiene issue, not a behavioral one.
+Anchoring state is tracked per-item during each cascade pass. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
 
 ## Demotion
 
@@ -90,9 +90,7 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 - **File deleted** — both file and symbol entries removed entirely
 - Either causes a cache miss in the affected tier
 
-**Deselected file cleanup** currently relies on the active items mechanism: when a file is deselected, its `file:*` entry simply stops appearing in the active items list on subsequent requests. The entry persists in whichever tier it earned but receives no N-value updates. Stale entries for files deleted from disk are cleaned up by `remove_stale()` in Phase 0.
-
-**Note:** The spec originally described a two-point cleanup (at assembly time and after response) that would immediately remove `file:*` entries for deselected files. The current implementation does not perform this eager cleanup — deselected file entries remain in their tier until the file is deleted from disk. A future improvement could add explicit deselection cleanup in `_update_stability` to mark affected tiers as broken and trigger cascade rebalancing.
+**Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
 ## The Active Items List
 
@@ -120,9 +118,9 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 **L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
 
-**Known gap — minimum tier size not enforced at initialization:** The spec originally required that tiers below `cache_target_tokens` merge into the smallest other tier during initialization. The current implementation distributes by cluster count (or file count in the fallback) without checking token totals against `cache_target_tokens`. This means initialization can produce underfilled tiers that would be immediately demoted by `_demote_underfilled` on the first update cycle. The practical impact is minor — tiers self-correct after the first request — but the startup state may differ from a strict reading of this spec.
+After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
 
-**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. Note: the fallback checks for `reference_count` method but the actual `ReferenceIndex` method is `file_ref_count` — if the `hasattr` check fails, all files are treated as having zero references. This means the fallback path produces a purely count-based even distribution with no reference-aware ordering.
+**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
 ## Cache Block Structure
 

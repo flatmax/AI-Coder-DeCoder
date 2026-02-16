@@ -34,19 +34,11 @@ Map of common extensions to language identifiers: `.js`→javascript, `.ts`→ty
 
 ### Worker-Safe Languages
 
-Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. Under the Vite dev server, these workers fail with `$loadForeignModule` errors because the worker module paths don't resolve correctly.
-
-**Solution:** The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. A no-op worker is a blob URL containing `self.onmessage = function() {}` — it accepts messages silently without crashing. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
+Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. These workers may fail in certain build configurations. The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
 
 ### Monaco Shadow DOM Integration
 
-Monaco must render inside a Lit shadow DOM. On editor creation:
-1. `_injectMonacoStyles()` clones all existing `<style>` and `<link>` nodes from `document.head` into the shadow root, marking each clone with `data-monaco-injected="true"`
-2. A `MutationObserver` on `document.head` watches for `childList` changes:
-   - **Added nodes**: `<style>` or `<link>` elements are cloned and appended to the shadow root
-   - **Removed nodes**: The corresponding clone is found by matching `textContent` and removed
-3. Style injection runs once per component lifetime (guarded by `_monacoStylesInjected` flag)
-4. The observer is disconnected when the component is removed from the DOM
+Monaco must render inside a Lit shadow DOM. The component clones all `<style>` and `<link>` nodes from `document.head` into its shadow root on editor creation, and watches for dynamically added/removed stylesheets via a `MutationObserver`. Style injection runs once per component lifetime. The observer is disconnected when the component is removed from the DOM.
 
 ## File Management
 
@@ -119,17 +111,11 @@ Each RPC call (`get_file_content` with and without `'HEAD'`) is wrapped in its o
 
 The diff viewer normalizes responses from `Repo.get_file_content` which may return either a plain string or an object with a `content` field. The normalization pattern `headResult?.content ?? headResult ?? ''` handles both formats. This is important because different RPC transports and error paths may return different shapes.
 
-### Model Lifecycle
-
-When switching between open files, the editor disposes old models before creating new ones. This explicit disposal prevents memory leaks that break Monaco's diff computation. The sequence is: read old model from editor → dispose original and modified models → create new models with correct language → set on editor.
-
 ### Editor Reuse
 
-A single `DiffEditor` instance is created and reused for all files. Switching files replaces the models on the existing editor rather than destroying and recreating the editor. The editor is only disposed when the last file is closed (`_disposeEditor`). This avoids the cost of re-creating the Monaco editor on every tab switch.
+A single `DiffEditor` instance is created and reused for all files. Switching files disposes old models and creates new ones on the existing editor — this prevents memory leaks and avoids the cost of recreating the editor on every tab switch. The editor is only fully disposed when the last file is closed.
 
-The `_showEditor` method handles both cases:
-- **Editor exists**: dispose old models, create new models with correct language, set on editor, update read-only state
-- **No editor**: create new `DiffEditor` with configuration, create models, attach `onDidChangeModelContent` listener for dirty tracking
+When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
 
 ### Post-Edit Refresh
 

@@ -27,7 +27,7 @@ On **final render only** (not streaming), assistant message HTML is scanned agai
 
 Matches become `<span class="file-mention" data-file="path">` (with `.in-context` if already selected).
 
-**HTML-aware replacement:** The replacement walks through the HTML by locating all tags via regex, then processing only the text segments between tags. A `inPre` flag tracks whether the current position is inside a `<pre>` block — matches inside `<pre>` are skipped. Matches inside inline `<code>` elements **are** replaced (only `<pre>` is excluded). Matches inside HTML tag attributes are never touched since only text between tags is processed.
+**HTML-aware replacement:** The replacement processes only text segments between HTML tags (tag attributes are never touched). Matches inside `<pre>` blocks are skipped to avoid corrupting code blocks. Matches inside inline `<code>` elements are replaced normally.
 
 ### File Summary Section
 
@@ -260,7 +260,7 @@ Off-screen messages use `content-visibility: auto` with `contain: layout style p
 
 ### Paste Suppression for Middle-Click
 
-When the file picker's middle-click inserts a path into the textarea, the chat panel sets a `_suppressNextPaste` flag. The paste handler checks this flag and calls `preventDefault()` to block the browser's selection-buffer paste that would otherwise duplicate the inserted path.
+When the file picker's middle-click inserts a path into the textarea, the browser's selection-buffer paste is suppressed to prevent duplicating the inserted path. The paste handler blocks the next paste event following a programmatic path insertion.
 
 ### @-Filter
 

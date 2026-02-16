@@ -84,12 +84,9 @@ FileSymbols:
 
 ### Grammar Acquisition
 
-Tree-sitter grammars via individual `tree-sitter-{language}` pip packages. The parser was designed to try three strategies in order:
-1. `tree-sitter-languages` global — smoke test
-2. `tree-sitter-languages` per-language — lazy calls
-3. Plain tree-sitter + individual packages — with parser API auto-detection
+Tree-sitter grammars are provided via individual `tree-sitter-{language}` pip packages. The parser imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. If a package is not installed, that language is silently unavailable.
 
-**Current implementation:** Only strategy 3 is implemented. The parser directly imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. The `tree-sitter-languages` strategies (1 and 2) are not implemented — if the individual packages are not installed, the language is silently unavailable. The singleton pattern also means that if `_init_languages` fails partway through (e.g., some packages installed, some not), the parser is marked as initialized with incomplete language support and there is no retry mechanism.
+The parser is a singleton. Language initialization runs once on first use. If some packages are installed and others are not, the parser operates with partial language support — there is no retry mechanism.
 
 ### Adding a New Language
 
@@ -203,9 +200,7 @@ tests/test_auth.py:
 - **Test collapsing** — test files show only summary counts
 - **Stable ordering** — files maintain position across regenerations for cache stability
 - **Inherited methods** — only in the parent class; consumers check bases
-- **Instance variables** — listed as `v` lines nested under the class, extracted from `self.x = ...` assignments in `__init__`
-
-**Known bug in instance variable rendering:** The `_format_symbol` method in the compact formatter has a logic error when a symbol has `instance_vars`. It enters a loop that appends the main symbol line (`parts[0]`) and then overwrites `parts[0]` with the instance var line. This results in the main symbol line being duplicated N times (once per instance var), and only the last instance var line receives the reference/call annotations that should have been on the main line. The intended output is one line for the symbol followed by indented `v` lines for each instance var; the actual output contains duplicate symbol lines interleaved with instance var lines.
+- **Instance variables** — listed as `v` lines nested under the class, extracted from `self.x = ...` assignments in `__init__`. The formatter outputs one line for the symbol followed by indented `v` lines for each instance variable
 
 ### Chunked Output
 
@@ -232,7 +227,7 @@ Individual file symbol blocks can be generated independently. A stable hash of a
 
 ## LSP Queries
 
-**Note:** LSP methods are implemented directly on `SymbolIndex`, not as delegate methods on `LLMService`. Since `SymbolIndex` is not registered with `add_class()` (only `Repo`, `LLMService`, and `Settings` are registered), these methods are **not currently exposed as RPC endpoints**. The browser-side Monaco providers (`diff-viewer.js`) call `LLMService.lsp_get_hover` etc., but these calls will fail until delegate methods are added to `LLMService`. This is a known gap.
+LSP methods are implemented on `SymbolIndex` and exposed to the browser via delegate methods on `LLMService` (e.g., `LLMService.lsp_get_hover` forwards to `SymbolIndex.lsp_get_hover`). This is necessary because only `Repo`, `LLMService`, and `Settings` are registered with `add_class()` for RPC.
 
 | Method (on SymbolIndex) | Description |
 |------------|-------------|
@@ -271,9 +266,7 @@ The source file walker excludes the following directories:
 - `node_modules`, `__pycache__`, `venv`, `.venv`, `dist`, `build`, `.git`
 - `.ac-dc` (the application's working directory)
 
-These directories are skipped during repository-wide indexing. **Note:** The import resolver (`ImportResolver._get_repo_files()`) uses a nearly identical exclusion list but does **not** exclude `.ac-dc`. This means import resolution could resolve imports to files inside `.ac-dc/` (e.g., history scripts, cached data), which is unintended. The symbol index walker and import resolver should share the same exclusion list.
-
-These directories are skipped during repository-wide indexing. **Note:** The import resolver (`ImportResolver._get_repo_files()`) uses a nearly identical exclusion list but does **not** exclude `.ac-dc`. This means import resolution could resolve imports to files inside `.ac-dc/` (e.g., history scripts, cached data), which is unintended. The symbol index walker and import resolver should share the same exclusion list.
+These directories are skipped during repository-wide indexing. The import resolver must use the same exclusion list, including `.ac-dc`, to prevent resolving imports to files inside the application's working directory.
 
 ## Testing
 

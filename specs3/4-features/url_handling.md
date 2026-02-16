@@ -149,19 +149,9 @@ URLContent:
         // Append symbol map in code block if present
 ```
 
-### URLResult
+### Fetch Return Value
 
-The spec defines a `URLResult` wrapper, but the **current implementation does not use it**. `URLService.fetch_url()` returns `URLContent` directly (with summary fields populated on the content object itself). The `cached` boolean is not tracked or returned.
-
-```pseudo
-URLResult (not implemented):
-    content: URLContent
-    summary: string?
-    summary_type: SummaryType?
-    cached: boolean           // whether result came from cache
-```
-
-In practice, the summary and summary_type fields live directly on `URLContent`, and the `to_dict()` method on `URLContent` is used for RPC serialization.
+`URLService.fetch_url()` returns `URLContent` directly with summary fields populated on the content object itself. The `to_dict()` method on `URLContent` is used for RPC serialization. There is no separate wrapper — all fields (including `summary` and `summary_type`) live on `URLContent`.
 
 ### GitHubInfo
 

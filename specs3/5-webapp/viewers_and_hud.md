@@ -253,7 +253,7 @@ Printed to the terminal after each LLM response (not a UI component). Three sect
 
 Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by the token count and `[cached]`. Active tier shows token count only. Only non-empty tiers are listed. The box width auto-sizes to the widest line. Cache hit percentage is computed as `cached_tokens / total_tokens`.
 
-**L0 special-casing:** The terminal HUD always adds system prompt + legend tokens to L0's display, even when those tokens are not tracked by the stability tracker. If L0 has tracked items, their tokens are summed and system/legend tokens are added on top as a synthetic "System + Legend" sub-item. If L0 has no tracked items but system/legend tokens are non-zero, L0 still appears in the output. This means the L0 token count in the terminal HUD is **not** the same as `get_tier_tokens(Tier.L0)` — it includes untracked overhead. The frontend context/cache viewers do not perform this adjustment, so L0 token counts may differ between the terminal and browser displays.
+**L0 special-casing:** The terminal HUD always adds system prompt + legend tokens to L0's display, since these are fixed overhead not tracked by the stability tracker. System + legend tokens appear as a synthetic sub-item. Both the terminal HUD and frontend viewers should include this overhead in L0's total for consistency.
 
 ### Token Usage
 

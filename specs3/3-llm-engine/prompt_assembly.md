@@ -2,11 +2,13 @@
 
 ## Overview
 
-This is the **single source of truth** for how LLM messages are assembled. All prompt content — system prompts, symbol map, files, history, URLs — is organized into a structured message array.
+This is the **single source of truth** for how LLM messages are assembled. All prompt content — system prompts, symbol map, files, history, URLs — is organized into a structured message array with stability-based cache tier placement.
 
-**Implementation status:** The tiered assembly with `cache_control` markers is implemented in `ContextManager.assemble_tiered_messages()` but is **not currently used** by the streaming handler. All LLM requests use `assemble_messages()` (non-tiered, flat message array without cache breakpoints). The stability tracker runs and tracks tiers, but the tier data is only used for HUD/viewer display, not for actual prompt organization. The tiered message structure described below represents the target design — the missing integration is a content-gathering step that maps tracker tier assignments to the `tiered_content` dict expected by `assemble_tiered_messages()`.
+The assembly system supports two modes:
+- **Tiered assembly** (`assemble_tiered_messages`) — organizes content into L0–L3 cached blocks with `cache_control` markers. This is the primary mode.
+- **Flat assembly** (`assemble_messages`) — produces a flat message array without cache breakpoints. Used as a fallback or during development.
 
-**Graduated files in non-tiered mode:** The non-tiered `assemble_messages()` accepts an optional `graduated_files` set. Files in this set are excluded from the "Working Files" active section. However, since the non-tiered path does not produce any cached tier blocks, graduated files are simply **omitted from the prompt entirely** — they are excluded from active but not placed anywhere else. In practice this parameter is not currently populated (the caller passes `None` or omits it), so no files are lost. But if graduated files were passed to the non-tiered path, the LLM would silently lose access to those files' content. This is a design asymmetry between the tiered and non-tiered assembly paths.
+The streaming handler uses tiered assembly, passing a `tiered_content` dict built from the stability tracker's tier assignments (see [Tiered Assembly Data Flow](#tiered-assembly-data-flow) below).
 
 ## System Prompt
 
@@ -26,13 +28,16 @@ The main prompt covers:
 5. **Failure Recovery** — Steps for retrying failed edits
 6. **Context Trust** — Only trust file content shown in context
 
+### Prompt Concatenation
+
+System prompt assembly concatenates `system.md` + `system_extra.md` at assembly time (each request). This means edits to either file take effect on the next LLM request without restart. The `system_extra.md` file is optional — if missing, only `system.md` is used.
+
 ### Other Prompts
 
 | Prompt | Used For |
 |--------|----------|
 | **Commit message prompt** | Inline constant for generating git commit messages. Role: expert software engineer. Rules: conventional commit style with type prefix, imperative mood, 50-char subject line limit, 72-char body wrap, no commentary — output the commit message only |
 | **Compaction skill prompt** | Loaded by topic detector for history compaction LLM calls |
-| **System reminder** | Compact edit format reference defined as a code constant (not loaded from file). Exists as infrastructure for potential mid-conversation reinforcement if the LLM drifts from the edit format. Not currently injected into streaming assembly |
 
 ## Message Array Structure
 
@@ -252,3 +257,109 @@ Providers typically allow 4 breakpoints per request. Blocks under the provider m
 ## Cache Hit Reporting
 
 Cache hit statistics are **read from the LLM provider's response**, not computed locally. The provider reports cache read tokens and cache write tokens. The application requests usage reporting via `stream_options: {"include_usage": true}`.
+
+## Tiered Assembly Data Flow
+
+This section specifies how the streaming handler builds the `tiered_content` dict from stability tracker state and passes it to `assemble_tiered_messages()`.
+
+### Step 1: Gather Tier Assignments
+
+```pseudo
+for tier in [L0, L1, L2, L3]:
+    tier_items = stability_tracker.get_tier_items(tier)
+    # tier_items = {key: TrackedItem} where key is "file:{path}", "symbol:{path}", or "history:{N}"
+```
+
+### Step 2: Build Content for Each Tier
+
+For each tier, separate items by type and gather their content:
+
+```pseudo
+tiered_content = {}
+for tier in [L0, L1, L2, L3]:
+    tier_items = tracker.get_tier_items(tier)
+    symbols_text = ""
+    files_text = ""
+    history_messages = []
+
+    for key, item in tier_items:
+        if key starts with "symbol:":
+            path = key.removeprefix("symbol:")
+            block = symbol_index.get_file_symbol_block(path)
+            if block:
+                symbols_text += block + "\n"
+
+        elif key starts with "file:":
+            path = key.removeprefix("file:")
+            content = file_context.get_content(path)
+            if content:
+                files_text += format_as_fenced_block(path, content) + "\n\n"
+
+        elif key starts with "history:":
+            index = int(key.removeprefix("history:"))
+            # Collect history message pairs by index
+            history_messages.append(history[index])
+
+    tiered_content[tier] = {
+        "symbols": symbols_text,
+        "files": files_text,
+        "history": history_messages
+    }
+```
+
+### Step 3: Determine Exclusions
+
+Files in any cached tier must be excluded from the active "Working Files" section and from the symbol map output:
+
+```pseudo
+graduated_files = set()
+symbol_map_exclude = set()
+
+for tier in [L0, L1, L2, L3]:
+    for key in tracker.get_tier_items(tier):
+        if key starts with "file:":
+            path = key.removeprefix("file:")
+            graduated_files.add(path)
+            symbol_map_exclude.add(path)  # full content present, no need for symbol block
+        elif key starts with "symbol:":
+            path = key.removeprefix("symbol:")
+            symbol_map_exclude.add(path)  # symbol block in tier, exclude from main map
+
+# Also exclude selected files whose symbol blocks are in active
+for path in selected_files:
+    symbol_map_exclude.add(path)  # full content in active, symbol block redundant
+```
+
+### Step 4: Assemble
+
+```pseudo
+symbol_map = symbol_index.get_symbol_map(exclude_files=symbol_map_exclude)
+legend = symbol_index.get_legend()
+
+messages = context_manager.assemble_tiered_messages(
+    user_prompt=user_message,
+    images=images,
+    symbol_map=symbol_map,
+    symbol_legend=legend,
+    file_tree=file_tree,
+    tiered_content=tiered_content
+)
+```
+
+### Content Gathering Rules
+
+| Item Type | Content Source | Exclusion Effect |
+|-----------|--------------|------------------|
+| `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; symbol block excluded from main map |
+| `symbol:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
+| `history:{N}` in tier | `ContextManager.get_history()[N]` | Excluded from active history messages |
+| `file:{path}` in active | `FileContext.get_content(path)` | Symbol block excluded from main map (full content present) |
+| `symbol:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
+
+### A File Never Appears Twice
+
+A file's content is present in exactly one location:
+- **Full content** in a cached tier block (graduated) — symbol block excluded from all maps
+- **Full content** in the active Working Files section — symbol block excluded from main map
+- **Symbol block only** in a cached tier — when full content is not selected
+- **Symbol block only** in the main symbol map — default for unselected, non-graduated files

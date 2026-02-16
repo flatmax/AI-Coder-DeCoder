@@ -110,8 +110,19 @@ Users who customized managed files directly (instead of using `system_extra.md`)
 
 - **App config** — loaded once and cached in memory; force-reload available
 - **LLM config** — read on init and on explicit reload; env vars applied on load
-- **System prompts** — read fresh from files; concatenated at assembly time
+- **System prompts** — read fresh from files; concatenated at assembly time (each request). Edits take effect on the next LLM request without restart
 - **Snippets** — loaded on request with two-location fallback: `{repo_root}/.ac-dc/snippets.json` first, then app config directory `snippets.json`
+
+## Token Counter Data Sources
+
+The token counter uses `litellm`'s model registry to determine model-specific limits:
+
+| Property | Source | Fallback |
+|----------|--------|----------|
+| Tokenizer | `tiktoken.get_encoding()` for the configured model | ~4 characters per token estimate |
+| `max_input_tokens` | `litellm` model info based on model name | Hardcoded defaults by model family |
+| `max_output_tokens` | `litellm` model info | Hardcoded defaults by model family |
+| `max_history_tokens` | Computed: `max_input_tokens / 16` | — |
 
 ## Settings Service (RPC)
 

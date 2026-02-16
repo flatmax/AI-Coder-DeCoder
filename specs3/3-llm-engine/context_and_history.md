@@ -74,14 +74,14 @@ Tracks files included in the conversation with their contents.
 
 Paths are normalized relative to repo root. Binary files are rejected. Path traversal (`../`) is blocked.
 
-### Path Normalization Limitations
+### Path Normalization
 
-`FileContext` normalizes paths by replacing backslashes with forward slashes and stripping leading/trailing slashes. It does **not** resolve `.` components or collapse relative segments — the `..` check is a simple substring match (`".." in path`), not a proper path resolution. This means:
-- `foo/./bar` and `foo/bar` are treated as different paths (potential duplicate entries)
-- `foo/bar/..` is blocked by the `..` check even though it resolves within the repo
-- Only `Repo._resolve_path` performs proper `Path.resolve()` validation against the repo root
+`FileContext` normalizes paths by:
+1. Replacing backslashes with forward slashes
+2. Stripping leading/trailing slashes
+3. Rejecting paths containing `..` (simple substring check)
 
-This is distinct from the `Repo` layer's path handling, which uses `Path.resolve()` to fully canonicalize paths and verify they remain under the repo root.
+For full path canonicalization and repo-root validation, the `Repo` layer uses `Path.resolve()`. The `FileContext` normalization is sufficient for its purpose (consistent key lookup) since all paths entering `FileContext` have already been validated by the `Repo` layer.
 
 ---
 
@@ -115,7 +115,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method `emergency_truncate()` exists on `ContextManager` but is **not currently called** from the streaming handler or any other code path. This is a known gap — the safety net exists but is not wired into the request flow.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. Called before message assembly in the streaming handler as a safety net.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
@@ -225,7 +225,7 @@ Response delivered → compaction check
           re-register history items in stability tracker
 ```
 
-**Note:** The original design included a 500ms pause before compaction and frontend notifications (`compaction_start`, `compaction_complete`, `compaction_error`). The current implementation runs compaction immediately after `streamComplete` without delay or frontend notification. See [Frontend Notification](#frontend-notification) below for details.
+Compaction runs after a 500ms pause following `streamComplete`. Frontend notifications are sent via the `compactionEvent` callback (see [Frontend Notification](#frontend-notification) below).
 
 ### Configuration
 
@@ -285,7 +285,7 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 
 ### Frontend Notification
 
-The spec defines the following event protocol for compaction notifications:
+Compaction progress is communicated via the `compactionEvent` callback (the same channel used for URL fetch notifications during streaming):
 
 | Event | Behavior |
 |-------|----------|
@@ -294,7 +294,7 @@ The spec defines the following event protocol for compaction notifications:
 | `compaction_error` | Show error, re-enable input |
 | `case: "none"` | Remove "Compacting..." silently |
 
-**Current status:** These notifications are **not yet implemented**. The `compactionEvent` callback exists and is used for URL fetch progress during streaming, but the post-response compaction path calls `compact_history_if_needed()` directly without notifying the frontend. Compaction runs silently — the browser does not know when compaction occurs or what changed. The frontend handles these events (the chat panel has a `_onCompactionEvent` handler), but the backend never sends them for compaction.
+The backend wraps `compact_history_if_needed()` with these notifications, sent via `_event_callback("compactionEvent", request_id, event_dict)`. A 500ms delay before `compaction_start` prevents flicker for fast compactions.
 
 ---
 
@@ -405,7 +405,7 @@ Clear history, purge stability tracker history entries, start new persistent ses
 
 The return value includes both the session metadata and a `messages` array with reconstructed `images` fields (data URIs rebuilt from `image_refs`). This allows the frontend to display image thumbnails in loaded sessions without a separate fetch.
 
-**Key naming:** The history store internally reconstructs images into a `_images` key (underscore prefix) on message dicts. The `load_session_into_context` method on `LLMService` remaps `_images` → `images` for the frontend response. However, `history_get_session` returns raw session messages with `_images` keys — the frontend history browser should handle both `images` and `_images` fields.
+The history store reconstructs images into an `images` key on message dicts. Both `load_session_into_context` and `history_get_session` return messages with the `images` key containing reconstructed data URI arrays.
 
 ### Auto-Restore on Startup
 
@@ -418,4 +418,4 @@ On LLM service initialization (before any client connects), the server automatic
 
 This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
 
-**Limitation — file selection not restored:** Auto-restore recovers conversation messages but does **not** restore `_selected_files`. The browser receives an empty `selected_files` list from `get_current_state()` even though the previous session's user messages contain `files` arrays indicating which files were in context. The browser's `state-loaded` handler applies this empty list, effectively deselecting all files. Users must re-select files after a server restart. A future enhancement could recover file selection from the most recent user message's `files` metadata, but this is not currently implemented.
+**File selection not restored:** Auto-restore recovers conversation messages but does not restore file selection. The browser receives an empty `selected_files` list from `get_current_state()`. Users must re-select files after a server restart.

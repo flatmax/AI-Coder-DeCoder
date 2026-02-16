@@ -131,10 +131,6 @@ Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change 
 - Min width: 300px (enforced during resize)
 - Once undocked, position is persisted to localStorage as JSON (`ac-dc-dialog-pos`: left, top, width, height)
 
-### Dialog Container Access
-
-The dialog component accesses its container (the `.dialog-container` div in the app shell's shadow DOM) via `this.parentElement`. This works because `<ac-dialog>` is a direct child element within the app shell's shadow root — `this.parentElement` returns the containing div, not a shadow root boundary. Resize and undocking operations modify the container's inline styles directly (width, height, left, top, position).
-
 ### Tab Restoration
 
 On RPC ready (not on construction), the dialog restores the last-used tab from localStorage (`ac-dc-active-tab`). This is deferred to `onRpcReady()` rather than `connectedCallback()` so that lazy-loaded tab components can fetch data immediately when activated. The default tab is `files` if no saved preference exists.
@@ -177,7 +173,7 @@ Toggle via header click or Alt+M. Minimized: 48px header only.
 - Green ≤ 75%, Orange 75–90%, Red > 90%
 - Data from `LLMService.get_history_status()`, refreshed on: RPC ready, stream-complete, compaction, state-loaded
 
-Event listeners for history bar refresh are registered once (guarded by `_dialogEventsRegistered` flag) to prevent duplicate listeners on reconnect (since `onRpcReady` fires again on each reconnection).
+Event listeners for history bar refresh are registered once (guarded to prevent duplicate listeners on reconnect, since `onRpcReady` fires again on each reconnection).
 
 ## Viewer Background
 
