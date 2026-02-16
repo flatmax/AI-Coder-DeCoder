@@ -17,6 +17,8 @@ Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
 
 Before computing the breakdown, `get_context_breakdown()` synchronizes the in-memory `FileContext` with the current `_selected_files` list — removing files that are no longer selected and loading files that are newly selected. This ensures the breakdown reflects what the *next* LLM request would look like, not a stale snapshot from the last request. Without this sync, the context viewer would show outdated data when the user changes file selection between requests.
 
+**Limitation:** The sync silently skips binary files and files that don't exist (checking `is_binary_file` and `file_exists` before loading). Unlike `_stream_chat`, which reports `binary_files` and `invalid_files` in the stream result, the breakdown sync does not surface these problems. The context viewer may therefore show a clean token budget while the next actual request would produce binary/missing file warnings and exclude those files. The discrepancy is minor (binary/missing files would contribute zero tokens either way) but could be confusing if the user expects the viewer to flag invalid selections.
+
 `LLMService.get_context_breakdown()` returns:
 
 ```pseudo
@@ -250,6 +252,8 @@ Printed to the terminal after each LLM response (not a UI component). Three sect
 ```
 
 Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by the token count and `[cached]`. Active tier shows token count only. Only non-empty tiers are listed. The box width auto-sizes to the widest line. Cache hit percentage is computed as `cached_tokens / total_tokens`.
+
+**L0 special-casing:** The terminal HUD always adds system prompt + legend tokens to L0's display, even when those tokens are not tracked by the stability tracker. If L0 has tracked items, their tokens are summed and system/legend tokens are added on top as a synthetic "System + Legend" sub-item. If L0 has no tracked items but system/legend tokens are non-zero, L0 still appears in the output. This means the L0 token count in the terminal HUD is **not** the same as `get_tier_tokens(Tier.L0)` — it includes untracked overhead. The frontend context/cache viewers do not perform this adjustment, so L0 token counts may differ between the terminal and browser displays.
 
 ### Token Usage
 

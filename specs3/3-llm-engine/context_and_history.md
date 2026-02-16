@@ -74,6 +74,15 @@ Tracks files included in the conversation with their contents.
 
 Paths are normalized relative to repo root. Binary files are rejected. Path traversal (`../`) is blocked.
 
+### Path Normalization Limitations
+
+`FileContext` normalizes paths by replacing backslashes with forward slashes and stripping leading/trailing slashes. It does **not** resolve `.` components or collapse relative segments — the `..` check is a simple substring match (`".." in path`), not a proper path resolution. This means:
+- `foo/./bar` and `foo/bar` are treated as different paths (potential duplicate entries)
+- `foo/bar/..` is blocked by the `..` check even though it resolves within the repo
+- Only `Repo._resolve_path` performs proper `Path.resolve()` validation against the repo root
+
+This is distinct from the `Repo` layer's path handling, which uses `Path.resolve()` to fully canonicalize paths and verify they remain under the repo root.
+
 ---
 
 ## Token Counting
@@ -179,6 +188,21 @@ This is the schema returned by `list_sessions()` for each session.
 | Persistent store (JSONL) | Cross-session persistence, browsing, search (append-only file) |
 
 Both are updated on each exchange.
+
+### Retrieval Path Asymmetry
+
+The two retrieval methods return different data shapes:
+
+| Method | Returns | Used For |
+|--------|---------|----------|
+| `get_session_messages_for_context` | `[{role, content}]` only | Loading into context manager |
+| `get_session_messages` / `history_get_session` | Full message dicts with all metadata | History browser display |
+
+The context retrieval path strips all metadata (`files`, `files_modified`, `edit_results`, `image_refs`) and returns only `{role, content}` plus a reconstructed `_images` field. This means metadata like which files were in context or which edits were applied is not available after a session reload — it exists only in the persistent JSONL records.
+
+### Message Persistence Ordering
+
+The user message is persisted to the JSONL store **before** the LLM call starts, while the assistant message is persisted **after** the full response completes. If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response. This is by design (the user's intent is worth preserving) but means session message counts may be odd and the last message in a crashed session may be a user message with no reply.
 
 ### Search Fallback
 
@@ -393,3 +417,5 @@ On LLM service initialization (before any client connects), the server automatic
 4. Set the current session ID to the loaded session's ID
 
 This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
+
+**Limitation — file selection not restored:** Auto-restore recovers conversation messages but does **not** restore `_selected_files`. The browser receives an empty `selected_files` list from `get_current_state()` even though the previous session's user messages contain `files` arrays indicating which files were in context. The browser's `state-loaded` handler applies this empty list, effectively deselecting all files. Users must re-select files after a server restart. A future enhancement could recover file selection from the most recent user message's `files` metadata, but this is not currently implemented.

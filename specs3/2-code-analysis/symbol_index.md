@@ -84,10 +84,12 @@ FileSymbols:
 
 ### Grammar Acquisition
 
-Tree-sitter grammars via individual `tree-sitter-{language}` pip packages. The parser tries three strategies in order:
+Tree-sitter grammars via individual `tree-sitter-{language}` pip packages. The parser was designed to try three strategies in order:
 1. `tree-sitter-languages` global — smoke test
 2. `tree-sitter-languages` per-language — lazy calls
 3. Plain tree-sitter + individual packages — with parser API auto-detection
+
+**Current implementation:** Only strategy 3 is implemented. The parser directly imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. The `tree-sitter-languages` strategies (1 and 2) are not implemented — if the individual packages are not installed, the language is silently unavailable. The singleton pattern also means that if `_init_languages` fails partway through (e.g., some packages installed, some not), the parser is marked as initialized with incomplete language support and there is no retry mechanism.
 
 ### Adding a New Language
 
@@ -203,6 +205,8 @@ tests/test_auth.py:
 - **Inherited methods** — only in the parent class; consumers check bases
 - **Instance variables** — listed as `v` lines nested under the class, extracted from `self.x = ...` assignments in `__init__`
 
+**Known bug in instance variable rendering:** The `_format_symbol` method in the compact formatter has a logic error when a symbol has `instance_vars`. It enters a loop that appends the main symbol line (`parts[0]`) and then overwrites `parts[0]` with the instance var line. This results in the main symbol line being duplicated N times (once per instance var), and only the last instance var line receives the reference/call annotations that should have been on the main line. The intended output is one line for the symbol followed by indented `v` lines for each instance var; the actual output contains duplicate symbol lines interleaved with instance var lines.
+
 ### Chunked Output
 
 The symbol map can be split into chunks for cache tier distribution.
@@ -267,7 +271,9 @@ The source file walker excludes the following directories:
 - `node_modules`, `__pycache__`, `venv`, `.venv`, `dist`, `build`, `.git`
 - `.ac-dc` (the application's working directory)
 
-These directories are skipped during both repository-wide indexing and import resolution file discovery.
+These directories are skipped during repository-wide indexing. **Note:** The import resolver (`ImportResolver._get_repo_files()`) uses a nearly identical exclusion list but does **not** exclude `.ac-dc`. This means import resolution could resolve imports to files inside `.ac-dc/` (e.g., history scripts, cached data), which is unintended. The symbol index walker and import resolver should share the same exclusion list.
+
+These directories are skipped during repository-wide indexing. **Note:** The import resolver (`ImportResolver._get_repo_files()`) uses a nearly identical exclusion list but does **not** exclude `.ac-dc`. This means import resolution could resolve imports to files inside `.ac-dc/` (e.g., history scripts, cached data), which is unintended. The symbol index walker and import resolver should share the same exclusion list.
 
 ## Testing
 

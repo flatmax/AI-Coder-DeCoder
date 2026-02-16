@@ -76,6 +76,10 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 3. **Check promotion**: if tier above is broken/empty and N exceeds threshold → promote out, mark source tier as broken
 4. **Post-cascade consolidation**: any tier below `cache_target_tokens` has its items demoted one tier down (keeping their current N) to avoid wasting a cache breakpoint
 
+### Anchoring Implementation Detail
+
+Anchoring state is stored as a dynamic `_anchored` attribute on `TrackedItem` instances (not a declared dataclass field). This attribute is set during each cascade pass but is **not cleaned up between requests** — stale anchoring state from a previous cycle persists on items until the next cascade overwrites it. In practice this is harmless because the cascade always re-evaluates anchoring from scratch, but the lingering attribute is a code hygiene issue, not a behavioral one.
+
 ## Demotion
 
 Items demote to active (N = 0) when: content hash changes, or file appears in modified-files list.
@@ -113,11 +117,12 @@ On startup, tier assignments are initialized from the cross-file reference graph
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)
 2. **Find connected components** — naturally produces language separation and subsystem grouping
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
-4. **Respect minimums** — tiers below `cache_target_tokens` merge into the smallest other tier
 
 **L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
 
-**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. Note: the fallback checks for `reference_count` method but the actual `ReferenceIndex` method is `file_ref_count` — if the `hasattr` check fails, all files are treated as having zero references.
+**Known gap — minimum tier size not enforced at initialization:** The spec originally required that tiers below `cache_target_tokens` merge into the smallest other tier during initialization. The current implementation distributes by cluster count (or file count in the fallback) without checking token totals against `cache_target_tokens`. This means initialization can produce underfilled tiers that would be immediately demoted by `_demote_underfilled` on the first update cycle. The practical impact is minor — tiers self-correct after the first request — but the startup state may differ from a strict reading of this spec.
+
+**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. Note: the fallback checks for `reference_count` method but the actual `ReferenceIndex` method is `file_ref_count` — if the `hasattr` check fails, all files are treated as having zero references. This means the fallback path produces a purely count-based even distribution with no reference-aware ordering.
 
 ## Cache Block Structure
 

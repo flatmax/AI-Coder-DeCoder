@@ -64,6 +64,8 @@ The current implementation uses **non-tiered assembly** (`assemble_messages`) fo
 
 The tiered assembly path (`assemble_tiered_messages`) is implemented in `context.py` but is not called from the streaming handler. Enabling it requires building a `tiered_content` dict from the stability tracker's tier assignments — mapping each tier's items to their symbol blocks, file contents, and history messages — and passing it to `assemble_tiered_messages`. This data flow (tracker → content gathering → tiered assembly) is the missing integration piece.
 
+**Important:** Because the non-tiered path is used, the `graduated_files` parameter of `assemble_messages()` is currently unused (passed as `None`). If it were populated while still using the non-tiered path, graduated files would be excluded from the "Working Files" section but not placed in any cached tier block — effectively dropping them from the prompt. See [Prompt Assembly — Graduated files in non-tiered mode](prompt_assembly.md#overview) for details.
+
 ## File Context Sync
 
 Before loading files, the streaming handler compares the current FileContext against the incoming selected files list. Files present in the context but absent from the new selection are removed. This ensures deselected files don't linger in the in-memory context across requests.
@@ -154,6 +156,10 @@ When URLs are detected and fetched during `_stream_chat`, progress is communicat
 | `url_ready` | `"Fetched {display_name}"` — shown as a success toast |
 
 Already-fetched URLs (present in the in-memory fetched dict) are skipped without notification. The URL context is then set on the context manager as a pre-joined string — the `\n---\n` joining happens in `format_url_context()` before being passed to `set_url_context()`.
+
+### URL Context Join Location
+
+The `\n---\n` joining of multiple URL contents happens in `URLService.format_url_context()`, which returns a single pre-joined string. This string is then wrapped in a single-element list and passed to `ContextManager.set_url_context()`. During assembly, `assemble_messages()` calls `"\n---\n".join(self._url_context)` — but since the list always has exactly one element (the pre-joined string), this join is a no-op. The spec's description of "Multiple URLs joined with `\n---\n`" in the prompt assembly section is accurate in terms of the final output, but the join actually happens in the URL service layer, not during message assembly.
 
 ## Post-Response Processing
 
@@ -260,7 +266,7 @@ Session total: 182,756
 - Uses the smaller model (`smaller_model` config, falling back to primary model)
 - Empty/whitespace diff rejected
 - Mocked LLM returns generated message
-- **Note:** Commit message generation is a synchronous (non-streaming) `litellm.completion` call. Unlike `chat_streaming` which uses `run_in_executor` to avoid blocking the event loop, `generate_commit_message` runs synchronously on the calling coroutine. This may briefly block the server during generation. A future improvement could move this to a thread executor.
+- **Note:** Commit message generation is a synchronous (non-streaming) `litellm.completion` call. Unlike `chat_streaming` which uses `run_in_executor` to avoid blocking the event loop, `generate_commit_message` is a regular (non-async) method called directly via RPC. Since jrpc-oo dispatches RPC calls on the async event loop, this synchronous `litellm.completion` call **blocks the event loop** for the duration of the LLM request (typically 1-5 seconds). During this time, all other RPC calls, streaming chunks, and WebSocket messages are queued. This is an active problem, not just theoretical — the user experiences a brief UI freeze. A future improvement should wrap the call in `run_in_executor` like `_stream_chat` does.
 
 ### Tiered Content Deduplication
 - File in cached tier excludes its symbol block

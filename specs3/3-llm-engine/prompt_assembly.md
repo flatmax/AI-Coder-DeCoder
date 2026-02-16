@@ -6,6 +6,8 @@ This is the **single source of truth** for how LLM messages are assembled. All p
 
 **Implementation status:** The tiered assembly with `cache_control` markers is implemented in `ContextManager.assemble_tiered_messages()` but is **not currently used** by the streaming handler. All LLM requests use `assemble_messages()` (non-tiered, flat message array without cache breakpoints). The stability tracker runs and tracks tiers, but the tier data is only used for HUD/viewer display, not for actual prompt organization. The tiered message structure described below represents the target design — the missing integration is a content-gathering step that maps tracker tier assignments to the `tiered_content` dict expected by `assemble_tiered_messages()`.
 
+**Graduated files in non-tiered mode:** The non-tiered `assemble_messages()` accepts an optional `graduated_files` set. Files in this set are excluded from the "Working Files" active section. However, since the non-tiered path does not produce any cached tier blocks, graduated files are simply **omitted from the prompt entirely** — they are excluded from active but not placed anywhere else. In practice this parameter is not currently populated (the caller passes `None` or omits it), so no files are lost. But if graduated files were passed to the non-tiered path, the LLM would silently lose access to those files' content. This is a design asymmetry between the tiered and non-tiered assembly paths.
+
 ## System Prompt
 
 ### Assembly
