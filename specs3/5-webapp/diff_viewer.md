@@ -2,7 +2,9 @@
 
 ## Overview
 
-Side-by-side diff editor for file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
+Side-by-side diff editor for text file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
+
+For `.svg` files, see [SVG Viewer](svg_viewer.md) — a dedicated side-by-side viewer with synchronized pan/zoom that replaces the Monaco editor for SVG content.
 
 ## Layout
 

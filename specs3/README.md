@@ -89,6 +89,7 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 | [Chat Interface](5-webapp/chat_interface.md) | Messages, streaming display, scrolling, input, file mentions |
 | [File Picker](5-webapp/file_picker.md) | Tree view, selection, git status, context menu |
 | [Diff Viewer](5-webapp/diff_viewer.md) | Monaco editor, tabs, save flow, LSP integration |
+| [SVG Viewer](5-webapp/svg_viewer.md) | Side-by-side SVG diff with synchronized pan/zoom |
 | [Viewers and HUD](5-webapp/viewers_and_hud.md) | Context viewer, cache viewer, token HUD |
 | [Search and Settings](5-webapp/search_and_settings.md) | Search tab, settings tab |
 | [URL Chips](5-webapp/url_chips.md) | URL detection display, fetch triggers, inclusion toggles |

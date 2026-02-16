@@ -8,9 +8,13 @@ The webapp is a single-page application built with **Lit** (LitElement web compo
 
 ```
 AppShell (root, extends JRPCClient)
-    ├── DiffViewer (background, fills viewport)
-    │   ├── Tab bar (open files)
-    │   └── Monaco diff editor
+    ├── Viewer Background (fills viewport)
+    │   ├── DiffViewer (text files)
+    │   │   ├── Tab bar (open files)
+    │   │   └── Monaco diff editor
+    │   └── SvgViewer (.svg files)
+    │       ├── Tab bar (open SVG files)
+    │       └── Side-by-side SVG panels with synchronized pan/zoom
     ├── TokenHUD (floating overlay, fixed positioning)
     └── Dialog (foreground, left-docked)
         ├── Header Bar (tabs, actions, minimize)
@@ -112,15 +116,22 @@ Toggle via header click or Alt+M. Minimized: 48px header only.
 - Green ≤ 75%, Orange 75–90%, Red > 90%
 - Data from `LLM.get_history_status()`, refreshed on: RPC ready, stream-complete, compaction, state-loaded, session-reset
 
-## Diff Viewer (Background)
+## Viewer Background
 
-- `position: fixed; inset: 0; z-index: 0` — always behind dialog
-- Empty state: AC⚡DC watermark (8rem, 18% opacity, 75% horizontal)
-- File tab bar at top when files loaded
-- Monaco diff editor fills remaining space
-- Only reloads already-open files on post-edit refresh; does not auto-open new tabs
+The background layer (`position: fixed; inset: 0; z-index: 0`) hosts two viewer components as absolutely positioned siblings:
 
-See [Diff Viewer](diff_viewer.md) for full editor details.
+| Viewer | Files | Component |
+|--------|-------|-----------|
+| Diff Viewer | All text files | `<ac-diff-viewer>` |
+| SVG Viewer | `.svg` files | `<ac-svg-viewer>` |
+
+Only one viewer is visible at a time. CSS classes `viewer-visible` / `viewer-hidden` toggle `opacity` and `pointer-events` with a 150ms transition. The app shell routes `navigate-file` events by file extension and toggles visibility on `active-file-changed`.
+
+Both viewers share the same empty state: AC⚡DC watermark (8rem, 18% opacity). Both maintain independent tab state — switching between an open `.svg` and an open `.js` file toggles the viewer layer without closing either tab.
+
+Post-edit refresh (`stream-complete` with `files_modified`, or `files-modified` events) calls `refreshOpenFiles()` on both viewers. Neither viewer auto-opens new tabs on refresh.
+
+See [Diff Viewer](diff_viewer.md) for the Monaco editor and [SVG Viewer](svg_viewer.md) for the SVG diff viewer.
 
 ## Graceful Degradation
 
