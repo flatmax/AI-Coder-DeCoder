@@ -96,11 +96,13 @@ Each chunk carries full accumulated content (not deltas). First chunk sets `stre
 
 ### Markdown Rendering
 
-Assistant messages are rendered via a configured `Marked` instance with `highlight.js` for syntax highlighting.
+Assistant messages are rendered via `renderMarkdown()` from `webapp/src/utils/markdown.js`, which uses a dedicated `Marked` instance (`markedChat`) with `highlight.js` for syntax highlighting. This is a **separate instance** from the one used by the diff viewer's Markdown preview (`markedSourceMap`) — the two do not share any renderer state.
+
+**Chat renderer overrides:** Only the `code()` renderer method is overridden. All other block elements (headings, paragraphs, lists, tables, blockquotes) use marked's built-in defaults. This keeps the chat renderer simple and immune to regressions from preview-specific logic.
 
 **Configuration:** GFM enabled, `breaks: true` (newlines become `<br>`).
 
-**Syntax highlighting:** The `Marked` renderer's `code()` method uses `highlight.js` with explicit language registration. Registered languages: `javascript`/`js`, `python`/`py`, `typescript`/`ts`, `json`, `bash`/`sh`/`shell`, `css`, `html`/`xml`, `yaml`/`yml`, `c`, `cpp`, `diff`, `markdown`/`md`. When a language is specified on a fenced code block and recognized, it is highlighted directly. When no language is specified, `highlightAuto` attempts auto-detection. Unrecognized languages fall back to HTML-escaped plain text.
+**Syntax highlighting:** The `code()` renderer uses `highlight.js` with explicit language registration. Registered languages: `javascript`/`js`, `python`/`py`, `typescript`/`ts`, `json`, `bash`/`sh`/`shell`, `css`, `html`/`xml`, `yaml`/`yml`, `c`, `cpp`, `diff`, `markdown`/`md`. When a language is specified on a fenced code block and recognized, it is highlighted directly. When no language is specified, `highlightAuto` attempts auto-detection. Unrecognized languages fall back to HTML-escaped plain text.
 
 **Code block output:** Each fenced code block renders as `<pre class="code-block">` containing a language label (`<span class="code-lang">`), a copy button, and `<code class="hljs">` with highlighted markup.
 
