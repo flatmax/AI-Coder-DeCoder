@@ -700,13 +700,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   // === Monaco Shadow DOM Style Injection ===
 
   _injectMonacoStyles() {
-    if (this._monacoStylesInjected) return;
-    this._monacoStylesInjected = true;
-
     const shadowRoot = this.shadowRoot;
 
-    // Clone existing Monaco styles from document.head into shadow root
+    // Re-sync all styles every time an editor is created — Monaco may have
+    // added new <style> elements synchronously during editor construction.
     this._syncAllStyles(shadowRoot);
+
+    // The MutationObserver only needs to be set up once — it catches styles
+    // that Monaco adds asynchronously after editor creation.
+    if (this._monacoStylesInjected) return;
+    this._monacoStylesInjected = true;
 
     // Watch for new styles being added/removed from document.head
     this._styleObserver = new MutationObserver((mutations) => {
@@ -736,6 +739,13 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _syncAllStyles(shadowRoot) {
+    // Remove previously-cloned styles to avoid duplicates
+    const old = shadowRoot.querySelectorAll('[data-monaco-injected]');
+    for (const el of old) {
+      el.remove();
+    }
+
+    // Clone all current styles from document.head into the shadow root
     const styles = document.head.querySelectorAll('style, link[rel="stylesheet"]');
     for (const style of styles) {
       const clone = style.cloneNode(true);
