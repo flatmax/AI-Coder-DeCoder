@@ -43,6 +43,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
       border-right: 1px solid var(--border-primary);
       overflow: hidden;
+      pointer-events: auto;
     }
     :host([minimized]) {
       height: auto;
