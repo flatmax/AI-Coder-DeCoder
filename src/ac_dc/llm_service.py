@@ -153,6 +153,7 @@ class LLMService:
                 model=config_manager.model,
                 detection_model=config_manager.smaller_model,
                 compaction_prompt=config_manager.get_compaction_prompt(),
+                config_manager=config_manager,
             )
             self._context.init_compactor(compactor)
 

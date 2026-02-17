@@ -240,25 +240,23 @@ class ContextManager:
         }
 
     def should_compact(self):
-        """Check if compaction should run."""
-        if not self._compaction_config.get("enabled", False):
-            logger.debug("Compaction check: disabled in config")
-            return False
+        """Check if compaction should run. Delegates to compactor."""
         if self._compactor is None:
             logger.debug("Compaction check: no compactor instance")
             return False
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
-        current = self.history_token_count()
-        needs = current > trigger
-        logger.info(f"Compaction check: {current:,} / {trigger:,} tokens ({current/trigger*100:.0f}%) → {'TRIGGER' if needs else 'skip'}")
-        return needs
+        return self._compactor.should_compact(self._history)
 
     def get_compaction_status(self):
         """Return compaction status info."""
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+        if self._compactor:
+            trigger = self._compactor.trigger_tokens
+            enabled = self._compactor.enabled
+        else:
+            trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+            enabled = self._compaction_config.get("enabled", False)
         current = self.history_token_count()
         return {
-            "enabled": self._compaction_config.get("enabled", False),
+            "enabled": enabled,
             "trigger_tokens": trigger,
             "current_tokens": current,
             "percent": round((current / trigger * 100) if trigger > 0 else 0, 1),
@@ -360,7 +358,10 @@ class ContextManager:
         Triggers when history > 2x compaction trigger.
         Preserves user/assistant pairs.
         """
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+        if self._compactor:
+            trigger = self._compactor.trigger_tokens
+        else:
+            trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
         limit = trigger * 2
 
         if self.history_token_count() <= limit:

@@ -262,13 +262,15 @@ class ConfigManager:
 
     @property
     def compaction_config(self):
-        return self._app_config.get("history_compaction", {
+        config = self._app_config.get("history_compaction", {
             "enabled": True,
             "compaction_trigger_tokens": 24000,
             "verbatim_window_tokens": 4000,
             "summary_budget_tokens": 500,
             "min_verbatim_exchanges": 2,
         })
+        logger.info(f"ConfigManager.compaction_config: trigger_tokens={config.get('compaction_trigger_tokens', '?')}")
+        return config
 
     @property
     def url_cache_config(self):

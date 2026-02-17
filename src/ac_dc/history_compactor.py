@@ -28,40 +28,51 @@ class HistoryCompactor:
     """
 
     def __init__(self, config, model=None, detection_model=None,
-                 compaction_prompt=None):
+                 compaction_prompt=None, config_manager=None):
         """Initialize compactor.
 
         Args:
-            config: compaction config dict
+            config: compaction config dict (used as fallback)
             model: primary model name (for token counting)
             detection_model: smaller model for topic detection
             compaction_prompt: system prompt for topic detector
+            config_manager: live ConfigManager for hot-reloaded values
         """
+
         self._config = config or {}
+        self._config_manager = config_manager
         self._model = model
         self._detection_model = detection_model or config.get("detection_model")
         self._compaction_prompt = compaction_prompt
         self._counter = TokenCounter(model)
+        logger.info(f"HistoryCompactor.__init__: trigger_tokens={self._active_config.get('compaction_trigger_tokens', '?')}")
+
+    @property
+    def _active_config(self):
+        """Return live config from ConfigManager if available, else snapshot."""
+        if self._config_manager:
+            return self._config_manager.compaction_config
+        return self._config
 
     @property
     def enabled(self):
-        return self._config.get("enabled", False)
+        return self._active_config.get("enabled", False)
 
     @property
     def trigger_tokens(self):
-        return self._config.get("compaction_trigger_tokens", 24000)
+        return self._active_config.get("compaction_trigger_tokens", 24000)
 
     @property
     def verbatim_window_tokens(self):
-        return self._config.get("verbatim_window_tokens", 4000)
+        return self._active_config.get("verbatim_window_tokens", 4000)
 
     @property
     def summary_budget_tokens(self):
-        return self._config.get("summary_budget_tokens", 500)
+        return self._active_config.get("summary_budget_tokens", 500)
 
     @property
     def min_verbatim_exchanges(self):
-        return self._config.get("min_verbatim_exchanges", 2)
+        return self._active_config.get("min_verbatim_exchanges", 2)
 
     def should_compact(self, messages):
         """Check if compaction should run.
@@ -72,8 +83,9 @@ class HistoryCompactor:
             logger.debug("HistoryCompactor.should_compact: disabled")
             return False
         tokens = self._counter.count_messages(messages)
-        needs = tokens > self.trigger_tokens
-        logger.info(f"HistoryCompactor.should_compact: {tokens:,} / {self.trigger_tokens:,} tokens → {needs}")
+        trigger = self.trigger_tokens
+        needs = tokens > trigger
+        logger.info(f"HistoryCompactor.should_compact: {tokens:,} / {trigger:,} tokens → {needs} (config id={id(self._config):#x})")
         return needs
 
     async def compact(self, messages):
