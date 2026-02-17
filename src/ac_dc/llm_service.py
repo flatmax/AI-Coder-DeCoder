@@ -26,6 +26,7 @@ from .edit_parser import (
     detect_shell_commands,
     parse_edit_blocks,
 )
+from .history_compactor import HistoryCompactor
 from .history_store import HistoryStore
 from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier
 from .token_counter import TokenCounter
@@ -163,6 +164,17 @@ class LLMService:
         )
         self._context.set_stability_tracker(self._stability_tracker)
         self._stability_initialized = False
+
+        # History compactor
+        compaction_config = config_manager.compaction_config or {}
+        if compaction_config.get("enabled", False):
+            compactor = HistoryCompactor(
+                config=compaction_config,
+                model=config_manager.model,
+                detection_model=config_manager.smaller_model,
+                compaction_prompt=config_manager.get_compaction_prompt(),
+            )
+            self._context.init_compactor(compactor)
 
         # URL service
         self._url_service = self._init_url_service()
