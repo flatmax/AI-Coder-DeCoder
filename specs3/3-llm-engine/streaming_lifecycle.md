@@ -34,6 +34,7 @@ Background task: _stream_chat
     │       ├─ Notify client: compactionEvent with stage "url_ready"
     │       └─ Update URL context on context manager (joined as single string)
     ├─ Build and inject review context (if review mode active)
+    ├─ Append system reminder to user prompt (from config `system_reminder.md`)
     ├─ Build tiered_content from stability tracker (→ prompt_assembly.md#tiered-assembly-data-flow)
     ├─ Assemble tiered message array with cache_control markers
     ├─ Run LLM completion (threaded, streaming)
@@ -317,6 +318,7 @@ Session total: 182,756
 
 ### Commit Message
 - Uses the smaller model (`smaller_model` config, falling back to primary model)
+- Commit prompt loaded from `commit.md` config file (not hardcoded)
 - Empty/whitespace diff rejected
 - Mocked LLM returns generated message
 - Commit message generation uses `run_in_executor` to run the synchronous `litellm.completion` call on a thread pool, avoiding blocking the async event loop

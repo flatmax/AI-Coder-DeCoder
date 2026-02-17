@@ -35,27 +35,6 @@ from .url_handler import URLService
 
 logger = logging.getLogger(__name__)
 
-# Commit message system prompt
-COMMIT_PROMPT = (
-    "You are an expert software engineer. Generate a git commit message for the "
-    "following diff. Use conventional commit style with a type prefix (feat, fix, "
-    "refactor, docs, test, chore, etc.). Use imperative mood. Subject line max 50 "
-    "characters, body wrap at 72 characters. Output ONLY the commit message, no "
-    "commentary or explanation."
-)
-
-# System reminder for edit format reinforcement — appended to user prompt
-# so it sits at the very end of context, closest to where the model generates.
-SYSTEM_REMINDER = (
-    "\n\n---\n"
-    "**Reminder:** Edit block rules:\n"
-    "- Close every block with `»»» EDIT END` (not `»»» EDIT`)\n"
-    "- Copy old text character-for-character from the file — never type from memory\n"
-    "- Include enough unique context lines for an unambiguous anchor match\n"
-    "- Keep blocks small — split large changes into multiple edits\n"
-    "- Never use `...` or placeholders inside edit blocks\n"
-)
-
 
 def _extract_token_usage(response_or_chunk):
     """Extract token usage from LLM response, handling multiple provider formats.
@@ -430,7 +409,7 @@ class LLMService:
 
             # Append edit-format reminder to user prompt so it's the last
             # thing in context before the model generates its response.
-            augmented_message = message + SYSTEM_REMINDER
+            augmented_message = message + self._config.get_system_reminder()
 
             # Assemble messages
             assembled = self._context.assemble_messages(
@@ -761,10 +740,11 @@ class LLMService:
 
         try:
             model = self._config.smaller_model or self._config.model
+            commit_prompt = self._config.get_commit_prompt()
             response = litellm.completion(
                 model=model,
                 messages=[
-                    {"role": "system", "content": COMMIT_PROMPT},
+                    {"role": "system", "content": commit_prompt},
                     {"role": "user", "content": diff_text},
                 ],
                 stream=False,

@@ -119,3 +119,19 @@ def test_compaction_prompt():
     config = ConfigManager()
     prompt = config.get_compaction_prompt()
     assert len(prompt) > 0
+
+
+def test_commit_prompt():
+    """Commit prompt loads from commit.md."""
+    config = ConfigManager()
+    prompt = config.get_commit_prompt()
+    assert len(prompt) > 0
+    assert "commit" in prompt.lower()
+
+
+def test_system_reminder():
+    """System reminder loads from system_reminder.md."""
+    config = ConfigManager()
+    reminder = config.get_system_reminder()
+    assert len(reminder) > 0
+    assert "edit" in reminder.lower() or "Edit" in reminder
