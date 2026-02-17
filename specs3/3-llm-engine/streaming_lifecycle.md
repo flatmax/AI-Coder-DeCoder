@@ -27,6 +27,7 @@ Background task: _stream_chat
     ├─ Remove deselected files from context
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
+    ├─ Initialize stability tracker from reference graph (if not already done at startup)
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
     │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
@@ -63,6 +64,12 @@ Post-response compaction (→ context_and_history.md)
 ### Assembly Mode
 
 The streaming handler uses **tiered assembly** (`assemble_tiered_messages`) for LLM requests. This produces a message array with `cache_control` markers at tier boundaries, enabling provider-level prompt caching. The stability tracker's tier assignments drive content placement — see [Prompt Assembly — Tiered Assembly Data Flow](prompt_assembly.md#tiered-assembly-data-flow) for the complete data flow.
+
+### Stability Tracker Initialization
+
+The stability tracker is initialized **eagerly at server startup** (`_try_initialize_stability` in LLMService's constructor) when the symbol index and repo are available. This runs `index_repo()`, builds the reference graph, initializes tier assignments, seeds L0, and prints a startup HUD — all before any client connects.
+
+If eager initialization fails (e.g., no symbol index or repo), a **fallback lazy initialization** occurs on the first chat request inside `_stream_chat`. Once initialized (by either path), the `_stability_initialized` flag prevents re-initialization. The lazy path also seeds `system:prompt` into L0 after `index_repo()` to ensure the legend reflects final content.
 
 ## File Context Sync
 

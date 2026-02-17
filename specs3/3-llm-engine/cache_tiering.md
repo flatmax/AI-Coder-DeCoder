@@ -68,16 +68,6 @@ When a tier's cache block is invalidated, veterans from the tier below may promo
 
 N is reset to the destination tier's `entry_n` on promotion.
 
-### Promotion Thresholds
-
-| Source Tier | Promotion N | Destination |
-|-------------|-------------|-------------|
-| L3 | 6 | L2 |
-| L2 | 9 | L1 |
-| L1 | 12 | L0 |
-
-N is reset to the destination tier's `entry_n` on promotion.
-
 ## Threshold-Aware Promotion (Per-Tier Algorithm)
 
 The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until no promotions occur.
@@ -106,8 +96,6 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 **Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
-**Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
-
 ## The Active Items List
 
 On each request, the system builds an active items list — the set of items explicitly in active (uncached) context:
@@ -124,25 +112,20 @@ When a selected file graduates to L3, its full content moves from the "Working F
 
 On startup, tier assignments are initialized from the cross-file reference graph. **No persistence** — rebuilt fresh each session. Initialized items receive their tier's `entry_n` as their starting N value and a placeholder content hash.
 
-**Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
-
 ### L0 Seeding
 
 L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet the provider's minimum cache size (default: 1024 tokens). Symbols are selected by reference count descending (most-referenced first) from the reference index. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
-
-**Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
 
 ### Clustering Algorithm
 
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)
 2. **Find connected components** — naturally produces language separation and subsystem grouping
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
+4. **Distribute orphan files** — files not in any connected component (no mutual references) are distributed into the smallest tier via the same greedy bin-packing. This is critical because `connected_components()` only returns files with bidirectional references — files with only one-way references or no references at all would otherwise be untracked at initialization, causing them to register as new active items on every request and never stabilize.
 
-**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by reference count descending) to meet the provider's minimum cache size (e.g., 1024 tokens for Anthropic). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active).
+**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by `file_ref_count` descending) to meet the provider's minimum cache size (e.g., 1024 tokens for Anthropic). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active). **L0-seeded symbols are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
 
 After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
-
-**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
 **Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
@@ -181,10 +164,6 @@ Bottom-up pass: place incoming, process veterans, check promotion. Repeat until 
 
 ### Phase 4: Record Changes
 Log promotions/demotions for frontend display. Store current active items for next request.
-
-### Post-Cascade Consolidation Detail
-
-The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
 
 ### Post-Cascade Consolidation Detail
 
