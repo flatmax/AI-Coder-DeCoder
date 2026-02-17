@@ -1327,11 +1327,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onCompactionEvent(e) {
     const { requestId, event } = e.detail || {};
-    if (requestId !== this._currentRequestId) return;
+    // Accept events for current stream OR just-finished stream (compaction runs after streamComplete)
+    if (requestId !== this._currentRequestId && requestId !== this._lastRequestId) return;
     const stage = event?.stage || '';
     const message = event?.message || '';
     if (stage === 'url_fetch' || stage === 'url_ready') {
       this._showToast(message, stage === 'url_ready' ? 'success' : '');
+    } else if (stage === 'compacting') {
+      this._showToast(message || '🗜️ Compacting history...', '');
+    } else if (stage === 'compacted') {
+      // History was compacted — replace messages with compacted version
+      if (event?.messages && Array.isArray(event.messages)) {
+        this.messages = event.messages.map(m => ({ role: m.role, content: m.content }));
+      }
+      this._showToast(message || 'History compacted', 'success');
     }
   }
 
@@ -1509,6 +1518,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this._currentRequestId = requestId;
+    this._lastRequestId = requestId;
     const images = this._images.length > 0 ? [...this._images] : null;
     const files = this.selectedFiles?.length > 0 ? [...this.selectedFiles] : null;
 

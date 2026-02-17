@@ -672,9 +672,50 @@ class LLMService:
 
             # Post-response compaction
             try:
-                await self._context.compact_history_if_needed()
+                logger.info(f"Post-response compaction check — history: {len(self._context.get_history())} messages")
+                # Notify UI that compaction is starting — best-effort
+                if self._context.should_compact() and self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", request_id,
+                            {
+                                "stage": "compacting",
+                                "message": f"🗜️ Compacting history ({self._context.history_token_count():,} tokens)...",
+                            },
+                        )
+                    except Exception as e:
+                        logger.debug(f"Compacting notification failed (non-critical): {e}")
+
+                compaction_result = await self._context.compact_history_if_needed()
+                if compaction_result and compaction_result.get("case") != "none":
+                    logger.info(f"Compaction complete: case={compaction_result.get('case')}")
+                    # Notify UI that history was compacted — retry-tolerant
+                    for attempt in range(3):
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {
+                                        "stage": "compacted",
+                                        "case": compaction_result.get("case"),
+                                        "message": f"History compacted ({compaction_result.get('case')}): "
+                                                   f"{len(self._context.get_history())} messages, "
+                                                   f"{self._context.history_token_count():,} tokens",
+                                        "messages": self._context.get_history(),
+                                    },
+                                )
+                                break  # success
+                            except Exception as e:
+                                logger.warning(f"Failed to send compaction event (attempt {attempt + 1}): {e}")
+                                if attempt < 2:
+                                    await asyncio.sleep(1)
+                elif compaction_result:
+                    logger.debug("Compaction returned 'none'")
+                else:
+                    logger.debug("Compaction not needed")
             except Exception as e:
                 logger.warning(f"Compaction failed: {e}")
+                logger.debug(traceback.format_exc())
 
     async def _run_llm_stream(self, request_id, messages):
         """Run LLM completion with streaming in a thread pool.

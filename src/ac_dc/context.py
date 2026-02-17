@@ -242,11 +242,16 @@ class ContextManager:
     def should_compact(self):
         """Check if compaction should run."""
         if not self._compaction_config.get("enabled", False):
+            logger.debug("Compaction check: disabled in config")
             return False
         if self._compactor is None:
+            logger.debug("Compaction check: no compactor instance")
             return False
         trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
-        return self.history_token_count() > trigger
+        current = self.history_token_count()
+        needs = current > trigger
+        logger.info(f"Compaction check: {current:,} / {trigger:,} tokens ({current/trigger*100:.0f}%) → {'TRIGGER' if needs else 'skip'}")
+        return needs
 
     def get_compaction_status(self):
         """Return compaction status info."""
@@ -270,10 +275,15 @@ class ContextManager:
         if not self.should_compact():
             return None
 
+        logger.info(f"🗜️  Compaction starting — {len(self._history)} messages, {self.history_token_count():,} tokens")
         result = await self._compactor.compact(self._history)
+        case = result.get("case", "?") if result else "null"
+        msg_count = len(result.get("messages", [])) if result else 0
+        logger.info(f"🗜️  Compaction result: case={case}, messages: {len(self._history)} → {msg_count}")
         if result and result.get("case") != "none":
             self.set_history(result["messages"])
             self.reregister_history_items()
+            logger.info(f"🗜️  History replaced — now {len(self._history)} messages, {self.history_token_count():,} tokens")
         return result
 
     # === Stability Tracker Integration ===

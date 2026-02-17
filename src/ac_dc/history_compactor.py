@@ -69,9 +69,12 @@ class HistoryCompactor:
         Returns True if enabled and history tokens exceed trigger.
         """
         if not self.enabled:
+            logger.debug("HistoryCompactor.should_compact: disabled")
             return False
         tokens = self._counter.count_messages(messages)
-        return tokens > self.trigger_tokens
+        needs = tokens > self.trigger_tokens
+        logger.info(f"HistoryCompactor.should_compact: {tokens:,} / {self.trigger_tokens:,} tokens → {needs}")
+        return needs
 
     async def compact(self, messages):
         """Run compaction on message history.
@@ -90,8 +93,11 @@ class HistoryCompactor:
 
         # Find verbatim window start
         verbatim_start = self._find_verbatim_start(messages)
+        logger.info(f"Compaction: {len(messages)} messages, verbatim_start={verbatim_start}")
 
         # Detect topic boundary
+        logger.info(f"Detecting topic boundary with model={self._detection_model}, "
+                     f"analyzing messages[:{verbatim_start}]")
         boundary = await detect_topic_boundary(
             messages[:verbatim_start] if verbatim_start > 0 else messages,
             model=self._detection_model,
@@ -100,12 +106,17 @@ class HistoryCompactor:
 
         boundary_index = boundary.get("boundary_index")
         confidence = boundary.get("confidence", 0.0)
+        summary = boundary.get("summary", "")[:100]
+        logger.info(f"Topic boundary: index={boundary_index}, confidence={confidence:.2f}, "
+                     f"reason={boundary.get('boundary_reason', '?')}, "
+                     f"summary_preview={summary!r}")
 
         # Decide strategy
         if (boundary_index is not None
                 and boundary_index >= verbatim_start
                 and confidence >= 0.5):
             # Truncate: boundary is in or after verbatim window
+            logger.info(f"Strategy: TRUNCATE (boundary {boundary_index} >= verbatim_start {verbatim_start}, confidence {confidence:.2f})")
             result = self._apply_truncate(messages, boundary_index)
             result["boundary"] = boundary
             return result
@@ -113,11 +124,13 @@ class HistoryCompactor:
               and boundary_index < verbatim_start
               and confidence >= 0.5):
             # Summarize: boundary is before verbatim window
+            logger.info(f"Strategy: SUMMARIZE (boundary {boundary_index} < verbatim_start {verbatim_start}, confidence {confidence:.2f})")
             result = self._apply_summarize(messages, verbatim_start, boundary)
             result["boundary"] = boundary
             return result
         else:
             # Low confidence or no boundary: summarize as fallback
+            logger.info(f"Strategy: SUMMARIZE/fallback (boundary={boundary_index}, confidence={confidence:.2f})")
             result = self._apply_summarize(messages, verbatim_start, boundary)
             result["boundary"] = boundary
             return result
