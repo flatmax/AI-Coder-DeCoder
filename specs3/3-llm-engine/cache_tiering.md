@@ -1,5 +1,5 @@
 # Cache Tiering System
-
+ 
 ## Overview
 
 The cache tiering system organizes LLM prompt content into stability-based tiers that align with provider cache breakpoints (e.g., Anthropic's `cache_control: {"type": "ephemeral"}`). Content that remains unchanged across requests promotes to higher tiers; changed content demotes. This reduces re-ingestion costs.
@@ -34,6 +34,10 @@ Every tracked item has an **N value** measuring consecutive unchanged appearance
 
 SHA256 hash of: file content (for files), compact symbol block (for symbols), or role+content string (for history).
 
+**Symbol blocks** use a signature hash derived from the raw symbol data (names, types, parameters) rather than the formatted compact output. This avoids spurious hash mismatches when path aliases or exclusion sets change between requests.
+
+**System prompt** is hashed from the prompt text alone, excluding the symbol legend. The legend includes path aliases that change when file selections change; including it would cause the system prompt to appear "changed" on every selection update, preventing it from stabilizing in L0.
+
 ## Graduation: Active → L3
 
 Files/symbols with N ≥ 3 graduate to L3 **regardless of whether they're still in the active items list**. Still-selected files have their content move from the uncached "Working Files" section to the cached L3 block.
@@ -53,6 +57,16 @@ The `cache_target_tokens` = `cache_min_tokens × buffer_multiplier` (default: 10
 When a tier's cache block is invalidated, veterans from the tier below may promote upward. This cascades downward through the tier stack.
 
 **Critical rule:** Only promote into broken tiers. If a tier is stable, nothing promotes into it and tiers below remain cached.
+
+### Promotion Thresholds
+
+| Source Tier | Promotion N | Destination |
+|-------------|-------------|-------------|
+| L3 | 6 | L2 |
+| L2 | 9 | L1 |
+| L1 | 12 | L0 |
+
+N is reset to the destination tier's `entry_n` on promotion.
 
 ### Promotion Thresholds
 
@@ -92,6 +106,8 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 **Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
+**Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
+
 ## The Active Items List
 
 On each request, the system builds an active items list — the set of items explicitly in active (uncached) context:
@@ -110,15 +126,23 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 **Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
 
+### L0 Seeding
+
+L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet the provider's minimum cache size (default: 1024 tokens). Symbols are selected by reference count descending (most-referenced first) from the reference index. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
+
+**Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
+
 ### Clustering Algorithm
 
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)
 2. **Find connected components** — naturally produces language separation and subsystem grouping
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
 
-**L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
+**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by reference count descending) to meet the provider's minimum cache size (e.g., 1024 tokens for Anthropic). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active).
 
 After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
+
+**Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
 **Fallback** (when no reference index or no connected components): sort all files by reference count descending (via `file_ref_count`), distribute roughly evenly across L1, L2, L3. If no reference index is available, all files are treated as having zero references and distributed by count alone.
 
@@ -157,6 +181,10 @@ Bottom-up pass: place incoming, process veterans, check promotion. Repeat until 
 
 ### Phase 4: Record Changes
 Log promotions/demotions for frontend display. Store current active items for next request.
+
+### Post-Cascade Consolidation Detail
+
+The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
 
 ### Post-Cascade Consolidation Detail
 

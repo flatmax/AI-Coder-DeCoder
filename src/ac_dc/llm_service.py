@@ -28,7 +28,7 @@ from .edit_parser import (
 )
 from .history_compactor import HistoryCompactor
 from .history_store import HistoryStore
-from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier
+from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier, TrackedItem
 from .token_counter import TokenCounter
 from .url_cache import URLCache
 from .url_handler import URLService
@@ -162,6 +162,9 @@ class LLMService:
         # Auto-restore last session into context
         self._restore_last_session()
 
+        # Initialize stability tracker eagerly if symbol index is available
+        self._try_initialize_stability()
+
         # Session totals
         self._session_totals = {
             "input_tokens": 0,
@@ -212,6 +215,55 @@ class LLMService:
             logger.info(f"Restored session {session_id} with {len(msgs)} messages")
         except Exception as e:
             logger.warning(f"Failed to restore last session: {e}")
+
+    def _try_initialize_stability(self):
+        """Eagerly initialize stability tracker at startup if symbol index is ready.
+
+        Runs index_repo, builds reference graph, and initializes tier assignments
+        so the cache is primed before the first chat request.
+        """
+        if self._stability_initialized:
+            return
+        if not self._symbol_index or not self._repo:
+            return
+
+        try:
+            # Index the repo to populate _all_symbols and reference index
+            file_list = self._repo.get_flat_file_list()
+            self._symbol_index.index_repo(file_list)
+
+            ref_index = self._symbol_index.reference_index
+            all_files = list(self._symbol_index._all_symbols.keys())
+            self._stability_tracker.initialize_from_reference_graph(
+                ref_index, all_files, counter=self._context.counter,
+            )
+            self._stability_initialized = True
+            logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
+
+            # Seed system:prompt into L0
+            # Hash only the system prompt text (not legend) for stability —
+            # the legend includes path aliases that change when exclude_files
+            # changes, which would cause spurious hash mismatches.
+            try:
+                sys_prompt = self._config.get_system_prompt() or ""
+                sys_legend = self._symbol_index.get_legend() or ""
+                sys_content = sys_prompt + sys_legend
+                if sys_content:
+                    self._stability_tracker._items["system:prompt"] = TrackedItem(
+                        key="system:prompt",
+                        tier=Tier.L0,
+                        n=TIER_CONFIG[Tier.L0]["entry_n"],
+                        content_hash=StabilityTracker.hash_content(sys_prompt),
+                        tokens=self._context.counter.count(sys_content),
+                    )
+                    logger.info("Seeded system:prompt into L0")
+            except Exception as e:
+                logger.warning(f"Failed to seed system prompt: {e}")
+
+            self._print_init_hud()
+
+        except Exception as e:
+            logger.warning(f"Eager stability initialization failed: {e}")
 
     # === State Management (RPC) ===
 
@@ -324,6 +376,25 @@ class LLMService:
                         )
                         self._stability_initialized = True
                         logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
+                        self._print_init_hud()
+
+                        # Seed system:prompt into L0 — always present, always stable.
+                        # Must be after index_repo so get_legend() returns final content.
+                        try:
+                            sys_prompt = self._config.get_system_prompt() or ""
+                            sys_legend = self._symbol_index.get_legend() or ""
+                            sys_content = sys_prompt + sys_legend
+                            if sys_content:
+                                self._stability_tracker._items["system:prompt"] = TrackedItem(
+                                    key="system:prompt",
+                                    tier=Tier.L0,
+                                    n=TIER_CONFIG[Tier.L0]["entry_n"],
+                                    content_hash=StabilityTracker.hash_content(sys_content),
+                                    tokens=self._context.counter.count(sys_content),
+                                )
+                                logger.info("Seeded system:prompt into L0")
+                        except Exception as e:
+                            logger.warning(f"Failed to seed system prompt: {e}")
                     except Exception as e:
                         logger.warning(f"Failed to initialize stability tracker: {e}")
                         self._stability_initialized = True  # don't retry
@@ -664,12 +735,53 @@ class LLMService:
 
         Builds the active items list and calls tracker.update() to drive
         N-value progression, graduation, and cascade.
+
+        Per the cache tiering spec:
+        - system:prompt is always active (stabilizes to L0)
+        - symbol:{path} for ALL indexed files (not just selected)
+        - file:{path} for selected files only
+        - history:{N} for conversation messages
+        - When a file is selected, its symbol:{path} stays tracked but
+          the symbol map excludes it (full content replaces it in prompt)
         """
         if not self._stability_tracker:
             return
 
         counter = self._context.counter
         active_items = []
+
+        # System prompt + legend — always present, should stabilize to L0
+        # Hash only the system prompt text (not legend) for stability —
+        # the legend includes path aliases that change with exclude_files,
+        # causing spurious hash mismatches. Token count includes both.
+        system_prompt = self._config.get_system_prompt() or ""
+        if system_prompt:
+            legend = self._symbol_index.get_legend() or "" if self._symbol_index else ""
+            system_content = system_prompt + legend
+            active_items.append({
+                "key": "system:prompt",
+                "content_hash": StabilityTracker.hash_content(system_prompt),
+                "tokens": counter.count(system_content),
+            })
+
+        # Per-file symbol entries for ALL indexed files
+        # Selected files still get symbol entries tracked (for tier persistence)
+        # but are excluded from the symbol map prompt output
+        if self._symbol_index:
+            selected_set = set(self._selected_files)
+            for path in self._symbol_index._all_symbols:
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    # Use signature hash (based on raw symbol data) rather than
+                    # hashing the formatted block — the formatted output changes
+                    # when path aliases or exclude_files change, causing spurious
+                    # hash mismatches and mass demotions.
+                    sig_hash = self._symbol_index.get_signature_hash(path)
+                    active_items.append({
+                        "key": f"symbol:{path}",
+                        "content_hash": sig_hash or StabilityTracker.hash_content(block),
+                        "tokens": counter.count(block),
+                    })
 
         # File entries for selected files
         for path in self._selected_files:
@@ -680,17 +792,6 @@ class LLMService:
                     "content_hash": StabilityTracker.hash_content(content),
                     "tokens": counter.count(content),
                 })
-
-        # Symbol entries for selected files
-        if self._symbol_index:
-            for path in self._selected_files:
-                block = self._symbol_index.get_file_symbol_block(path)
-                if block:
-                    active_items.append({
-                        "key": f"symbol:{path}",
-                        "content_hash": StabilityTracker.hash_content(block),
-                        "tokens": counter.count(block),
-                    })
 
         # History entries
         history = self._context.get_history()
@@ -765,7 +866,11 @@ class LLMService:
         """
         contents = []
         for key, item in tier_items.items():
-            if key.startswith("file:"):
+            if key.startswith("system:"):
+                item_type = "system"
+                path = None
+                name = "System + Legend"
+            elif key.startswith("file:"):
                 item_type = "files"
                 path = key.split(":", 1)[1]
                 name = path
@@ -776,11 +881,18 @@ class LLMService:
             elif key.startswith("history:"):
                 item_type = "history"
                 path = None
-                name = f"Message {key.split(':', 1)[1]}"
+                idx = key.split(":", 1)[1]
+                # Store numeric index for sorting
+                try:
+                    sort_idx = int(idx)
+                except ValueError:
+                    sort_idx = 0
+                name = f"Message {idx}"
             else:
                 item_type = "other"
                 path = None
                 name = key
+                sort_idx = 0
 
             # Get promotion threshold for this item's tier
             tier_config = TIER_CONFIG.get(item.tier)
@@ -793,11 +905,16 @@ class LLMService:
                 "tokens": item.tokens,
                 "n": item.n,
                 "threshold": threshold,
+                "_sort_idx": sort_idx if item_type == "history" else 0,
             })
 
-        # Sort: symbols first, then files, then history, then other; within each by name
-        type_order = {"symbols": 0, "files": 1, "history": 2, "other": 3}
-        contents.sort(key=lambda c: (type_order.get(c["type"], 99), c["name"] or ""))
+        # Sort: system first, then symbols, files, history (numerically), other
+        type_order = {"system": 0, "symbols": 1, "files": 2, "history": 3, "other": 4}
+        contents.sort(key=lambda c: (
+            type_order.get(c["type"], 99),
+            c["_sort_idx"],
+            c["name"] or "",
+        ))
         return contents
 
     def get_context_breakdown(self):
@@ -833,37 +950,12 @@ class LLMService:
                 legend_tokens = counter.count(legend)
 
         symbol_map_tokens = 0
-        symbol_map_chunks = []
         if self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
-            # Get chunked symbol map for per-chunk detail breakdown
-            try:
-                sm_chunks_raw = self._symbol_index.get_symbol_map(
-                    exclude_files=set(self._selected_files),
-                    chunks=4,
-                )
-                if sm_chunks_raw and isinstance(sm_chunks_raw, list):
-                    for i, chunk in enumerate(sm_chunks_raw):
-                        if not chunk:
-                            continue
-                        chunk_tokens = counter.count(chunk)
-                        # Estimate file count from path-like lines
-                        lines = chunk.strip().split('\n')
-                        file_count = sum(
-                            1 for line in lines
-                            if line and not line.startswith(' ') and not line.startswith('#')
-                            and ':' in line
-                        )
-                        symbol_map_chunks.append({
-                            "name": f"Chunk {i + 1} ({file_count} files)",
-                            "tokens": chunk_tokens,
-                        })
-            except Exception as e:
-                logger.debug(f"Symbol map chunking failed: {e}")
 
         # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
@@ -907,26 +999,28 @@ class LLMService:
             for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
                 tier_items = tracker.get_tier_items(tier)
                 if tier_items:
-                    tier_tokens = sum(i.tokens for i in tier_items.values())
                     contents = self._tier_content_breakdown(tier_items)
+                    # Use sum from contents (excludes 0-token items)
+                    tier_tokens = sum(c["tokens"] for c in contents)
                     blocks.append({
                         "name": tier.name,
                         "tier": tier.name,
                         "tokens": tier_tokens,
-                        "count": len(tier_items),
-                        "cached": True,
+                        "count": len(contents),
+                        "cached": tier_tokens > 0,
                         "contents": contents,
                     })
-                    cached_tokens += tier_tokens
+                    if tier_tokens > 0:
+                        cached_tokens += tier_tokens
             active_items = tracker.get_tier_items(Tier.ACTIVE)
             if active_items:
-                active_tokens = sum(i.tokens for i in active_items.values())
                 contents = self._tier_content_breakdown(active_items)
+                active_tokens = sum(c["tokens"] for c in contents)
                 blocks.append({
                     "name": "active",
                     "tier": "active",
                     "tokens": active_tokens,
-                    "count": len(active_items),
+                    "count": len(contents),
                     "cached": False,
                     "contents": contents,
                 })
@@ -1013,8 +1107,6 @@ class LLMService:
                 "system": system_tokens,
                 "legend": legend_tokens,
                 "symbol_map": symbol_map_tokens,
-                "symbol_map_chunks": symbol_map_chunks,
-                "symbol_map_files": len(tokens_by_file),
                 "files": file_tokens,
                 "file_count": len(file_details),
                 "file_details": file_details,
@@ -1061,37 +1153,17 @@ class LLMService:
             for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
                 tier_items = tracker.get_tier_items(tier)
                 if tier_items:
-                    tier_tokens = sum(i.tokens for i in tier_items.values())
                     contents = self._tier_content_breakdown(tier_items)
-                    # For L0, add system + legend as a special sub-item
-                    if tier == Tier.L0:
-                        contents.insert(0, {
-                            "type": "system",
-                            "name": "System + Legend",
-                            "path": None,
-                            "tokens": system_tokens + legend_tokens,
-                            "n": None,
-                            "threshold": None,
-                        })
-                        tier_tokens += system_tokens + legend_tokens
-                    tier_data.append((tier.name, tier_tokens, True, contents))
-                    cached_tokens += tier_tokens
+                    tier_tokens = sum(c["tokens"] for c in contents)
+                    tier_data.append((tier.name, tier_tokens, tier_tokens > 0, contents))
+                    if tier_tokens > 0:
+                        cached_tokens += tier_tokens
                     total += tier_tokens
-                elif tier == Tier.L0:
-                    # L0 always has system prompt even without tracked items
-                    sys_tok = system_tokens + legend_tokens
-                    if sys_tok > 0:
-                        contents = [{"type": "system", "name": "System + Legend",
-                                     "path": None, "tokens": sys_tok,
-                                     "n": None, "threshold": None}]
-                        tier_data.append((tier.name, sys_tok, True, contents))
-                        cached_tokens += sys_tok
-                        total += sys_tok
 
             active_items = tracker.get_tier_items(Tier.ACTIVE)
             if active_items:
-                active_tokens = sum(i.tokens for i in active_items.values())
                 contents = self._tier_content_breakdown(active_items)
+                active_tokens = sum(c["tokens"] for c in contents)
                 tier_data.append(("active", active_tokens, False, contents))
                 total += active_tokens
         else:
@@ -1204,6 +1276,27 @@ class LLMService:
             # Print promotions first, then demotions
             for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
+
+    def _print_init_hud(self):
+        """Print tier distribution after initialization."""
+        tracker = self._stability_tracker
+        if not tracker:
+            return
+
+        lines = ["╭─ Initial Tier Distribution ─╮"]
+        total = 0
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]:
+            items = tracker.get_tier_items(tier)
+            if items:
+                count = len(items)
+                total += count
+                lines.append(f"│ {tier.name:<6} {count:>4} items")
+        lines.append(f"├─────────────────────────────┤")
+        lines.append(f"│ Total: {total} items")
+        lines.append(f"╰─────────────────────────────╯")
+
+        for line in lines:
+            logger.info(line)
 
     # === Review Mode (RPC) ===
 
