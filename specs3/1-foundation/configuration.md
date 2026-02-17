@@ -14,6 +14,8 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 | Extra prompt | Additional instructions appended to system prompt | Markdown |
 | Prompt snippets | Quick-insert buttons for the UI | JSON |
 | Compaction skill prompt | Template for history compaction summarization | Markdown |
+| Commit message prompt | System instructions for commit message generation | Markdown |
+| System reminder | Edit-format reinforcement appended to each user prompt | Markdown |
 | Review system prompt | System instructions for code review mode | Markdown |
 | Review snippets | Quick-insert buttons for review mode UI | JSON |
 
@@ -83,7 +85,7 @@ Config directory relative to the application source.
 
 | Category | Files | Upgrade Behavior |
 |----------|-------|-----------------|
-| **Managed** | `system.md`, `compaction.md`, `review.md`, `app.json`, `snippets.json`, `review-snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
+| **Managed** | `system.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json`, `review-snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
 | **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
 
 ### Version-Aware Upgrade
@@ -150,6 +152,8 @@ Only these types are accepted — arbitrary file paths are rejected.
 - Cache target tokens computed from defaults (1024 × 1.5 = 1536)
 - Snippets fallback returns non-empty list
 - System prompt assembly returns non-empty string
+- Commit prompt loads from commit.md and contains expected content
+- System reminder loads from system_reminder.md and contains expected content
 - Managed files overwritten on version mismatch; user files preserved
 - Backup created before overwriting managed files
 - `.bundled_version` marker written after upgrade

@@ -222,7 +222,9 @@ Instead, the system:
 5. **Broadcasts the file change** via the `filesChanged` callback so the browser file picker updates
 6. **Includes a system note** in the `streamComplete` result listing which files were auto-added and advising the user to send a follow-up message to retry the edits
 
-The user then sends a follow-up (e.g., "please retry the edits for those files") and the LLM regenerates the edit blocks with full file content in context.
+The user then sends a follow-up and the LLM regenerates the edit blocks with full file content in context.
+
+**Auto-populated retry prompt:** When not-in-context edits are detected, the system auto-populates the chat textarea with a retry prompt naming the added files (e.g., "The file helpers.js has been added to context. Please retry the edit for: ..."). The prompt is not auto-sent — the user reviews and sends when ready. This parallels the ambiguous anchor retry prompt behavior.
 
 #### Why Not Auto-Retry
 

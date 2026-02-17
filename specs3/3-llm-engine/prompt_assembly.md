@@ -36,8 +36,9 @@ System prompt assembly concatenates `system.md` + `system_extra.md` at assembly 
 
 | Prompt | Used For |
 |--------|----------|
-| **Commit message prompt** | Inline constant for generating git commit messages. Role: expert software engineer. Rules: conventional commit style with type prefix, imperative mood, 50-char subject line limit, 72-char body wrap, no commentary — output the commit message only |
+| **Commit message prompt** (`commit.md`) | Loaded from config for generating git commit messages. Role: expert software engineer. Rules: conventional commit style with type prefix, imperative mood, 50-char subject line limit, 72-char body wrap, no commentary — output the commit message only |
 | **Compaction skill prompt** | Loaded by topic detector for history compaction LLM calls |
+| **System reminder** (`system_reminder.md`) | Loaded from config and appended to each user prompt. Edit-format reinforcement rules (close blocks properly, copy text exactly, use unique anchors, keep blocks small, no placeholders). Sits at the end of context, closest to where the model generates |
 
 ## Message Array Structure
 
@@ -203,11 +204,15 @@ Here are the files:
 
 Native `{role, content}` message dicts inserted directly — no wrapping.
 
+### System Reminder
+
+The system reminder (`system_reminder.md`) is appended to the user's message text before assembly, so it appears at the very end of context — closest to where the model generates its response. This is an edit-format reinforcement that reminds the LLM of critical edit block rules on every request. Loaded via `config.get_system_reminder()` which prepends `\n\n` to the file content.
+
 ### Current User Message
 
 ```pseudo
 // Without images:
-{"role": "user", "content": user_prompt}
+{"role": "user", "content": user_prompt + system_reminder}
 
 // With images:
 {"role": "user", "content": [

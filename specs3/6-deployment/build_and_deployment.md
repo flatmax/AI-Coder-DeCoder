@@ -146,7 +146,7 @@ Platforms: Linux, Windows, macOS (ARM).
 
 The bundled `config/` directory contains sensible defaults:
 - `llm.json` — defaults to `anthropic/claude-sonnet-4-20250514` with empty env (no provider-specific settings)
-- `system.md`, `compaction.md`, `review.md` — current prompts
+- `system.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md` — current prompts
 - `app.json`, `snippets.json`, `review-snippets.json` — default application settings
 
 On first run, all configs are copied to the user config directory. On subsequent releases, managed files (prompts, default settings) are overwritten with backups; user files (`llm.json`, `system_extra.md`) are preserved. See [Configuration — Packaged Builds](../1-foundation/configuration.md#packaged-builds) for details.

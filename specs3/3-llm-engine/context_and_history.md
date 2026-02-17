@@ -386,7 +386,7 @@ The backend wraps `compact_history_if_needed()` with these notifications, sent v
 
 ### Session Start
 1. Create Context Manager with model, repo root, config
-2. Stability tracker starts empty — tiers rebuild from reference graph on first request
+2. **Eager stability initialization** — if the symbol index and repo are available at construction time, the stability tracker runs `index_repo()`, builds the reference graph, initializes tier assignments (including L0 seeding), and prints a startup HUD showing per-tier item counts. This means cache tiers are primed before the first client connects or the first chat request. If initialization fails, it falls back to lazy initialization on the first request.
 3. **Auto-restore last session** — on LLM service initialization, the most recent session is loaded from the persistent history store into the context manager. This means `get_current_state()` returns messages from the previous session immediately, allowing the browser to resume where the user left off after a server restart. If no sessions exist or loading fails, history starts empty.
 
 ### During Conversation

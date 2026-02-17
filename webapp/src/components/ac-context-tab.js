@@ -42,7 +42,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       height: 100%;
-      overflow-y: auto;
+      overflow: hidden;
     }
 
     /* Budget section */
@@ -303,6 +303,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
       background: var(--bg-tertiary);
       font-size: 0.82rem;
       color: var(--text-secondary);
+      flex-shrink: 0;
     }
 
     .session-section .label {
@@ -663,20 +664,24 @@ export class AcContextTab extends RpcMixin(LitElement) {
         <div class="label">Session Totals</div>
         <div class="session-grid">
           <div class="session-item">
+            <span>Total</span>
+            <span class="session-value">${formatTokens(s.total)}</span>
+          </div>
+          <div class="session-item">
             <span>Prompt In</span>
             <span class="session-value">${formatTokens(s.prompt)}</span>
+          </div>
+          <div class="session-item">
+            <span>Cache Read</span>
+            <span class="session-value" style="color: ${s.cache_hit > 0 ? 'var(--accent-green)' : 'inherit'}">${formatTokens(s.cache_hit)}</span>
           </div>
           <div class="session-item">
             <span>Completion Out</span>
             <span class="session-value">${formatTokens(s.completion)}</span>
           </div>
           <div class="session-item">
-            <span>Total</span>
-            <span class="session-value">${formatTokens(s.total)}</span>
-          </div>
-          <div class="session-item">
-            <span>Cache Hit</span>
-            <span class="session-value">${formatTokens(s.cache_hit)}</span>
+            <span>Cache Write</span>
+            <span class="session-value" style="color: ${s.cache_write > 0 ? 'var(--accent-yellow)' : 'inherit'}">${formatTokens(s.cache_write)}</span>
           </div>
         </div>
       </div>
@@ -695,6 +700,8 @@ export class AcContextTab extends RpcMixin(LitElement) {
           aria-label="Refresh context breakdown">↻ Refresh</button>
       </div>
 
+      ${this._renderSessionTotals()}
+
       ${this._loading && !this._data ? html`
         <div class="loading-indicator">Loading context breakdown...</div>
       ` : html`
@@ -702,14 +709,16 @@ export class AcContextTab extends RpcMixin(LitElement) {
         ${this._data ? html`
           <div class="model-info">
             <span>Model: ${this._data.model || '—'}</span>
-            ${this._data.cache_hit_rate != null ? html`
-              <span>Cache: ${(this._data.cache_hit_rate * 100).toFixed(0)}% hit</span>
-            ` : nothing}
+            ${(() => {
+              const rate = this._data.provider_cache_rate ?? this._data.cache_hit_rate;
+              return rate != null ? html`
+                <span>Cache: ${Math.min(100, Math.max(0, rate * 100)).toFixed(0)}% hit</span>
+              ` : nothing;
+            })()}
           </div>
         ` : nothing}
         ${this._renderStackedBar()}
         ${this._renderCategories()}
-        ${this._renderSessionTotals()}
       `}
 
       <ac-url-content-dialog></ac-url-content-dialog>

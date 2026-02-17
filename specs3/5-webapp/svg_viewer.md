@@ -50,10 +50,9 @@ Both viewers maintain independent tab state. Switching between an open `.svg` ta
 
 ### Panels
 
-- **Left panel**: Original SVG (HEAD version). Header: "Original" (or "Original (empty)" for new files)
-- **Right panel**: Modified SVG (working copy). Header: "Modified"
+- **Left panel**: Original SVG (HEAD version). Always read-only, uses `svg-pan-zoom` for navigation
+- **Right panel**: Modified SVG (working copy). Editable in "Select" mode via `SvgEditor`, read-only navigation in "Pan" mode
 - A 4px splitter handle separates the panels (hover highlights with accent color)
-- Both panels are read-only — SVGs are not editable in-place
 
 ### Empty State
 
@@ -76,42 +75,117 @@ Tab bar matching the diff viewer style:
 | Δ (changed) | Original content differs from modified |
 | = (same) | Original and modified are identical |
 
+## Interaction Modes
+
+The viewer has two modes, toggled via toolbar buttons:
+
+| Mode | Left Panel | Right Panel | Purpose |
+|------|-----------|-------------|---------|
+| **Select** (default) | `svg-pan-zoom` (read-only navigation) | `SvgEditor` (visual editing) | Edit SVG elements by dragging, resizing, and typing |
+| **Pan** | `svg-pan-zoom` (navigation) | `svg-pan-zoom` (navigation) | Navigate both panels without editing |
+
+Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches.
+
 ## Synchronized Pan/Zoom
 
-Both panels use `svg-pan-zoom` with synchronized state:
+Both panels maintain synchronized viewports:
 
 | Feature | Detail |
 |---------|--------|
 | Mouse wheel | Zoom in/out |
-| Click-drag | Pan |
-| Double-click | Zoom in at point |
+| Click-drag | Pan (Pan mode) or move elements (Select mode) |
+| Double-click | Zoom in at point (Pan mode) or edit text (Select mode) |
 | Pinch gesture | Zoom (touch devices) |
 | Min zoom | 0.1× |
 | Max zoom | 40× |
 
 ### Synchronization
 
-When the user interacts with either panel:
-1. The source panel's zoom level and pan position are read
-2. The other panel is updated to match
-3. A guard flag (`_syncing`) prevents infinite callback loops
-4. The toolbar zoom percentage label updates
+In **Pan mode**, both panels use `svg-pan-zoom` with bidirectional sync — interacting with either panel updates the other via zoom/pan API calls.
+
+In **Select mode**, the left panel's `svg-pan-zoom` viewport drives synchronization. When the left panel is panned/zoomed, its viewBox is read and applied to the right panel's `SvgEditor` via `setViewBox()`. When the user zooms in the editor (mouse wheel), the editor's `onZoom` callback syncs back to the left panel by computing the equivalent `svg-pan-zoom` transform.
+
+A guard flag (`_syncing`) prevents infinite callback loops. The toolbar zoom percentage label updates from whichever panel initiated the change.
 
 ### Shadow DOM Compatibility
 
 `svg-pan-zoom` operates on SVG elements obtained via `shadowRoot.querySelector()`. Initialization is wrapped in a try/catch — if `svg-pan-zoom` fails (e.g., Shadow DOM isolation issues), the SVGs are still visible and scrollable, just without interactive pan/zoom.
 
+## SVG Editing (Select Mode)
+
+When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual editor for SVG elements. The left panel remains read-only for reference.
+
+### Element Selection
+
+Click an SVG element to select it. A bounding box with handles appears around the selected element. The toolbar shows the selected element's tag name (e.g., `<rect>`, `<circle>`). Click empty space or press Escape to deselect.
+
+### Supported Operations
+
+| Operation | Interaction | Supported Elements |
+|-----------|------------|-------------------|
+| **Move** | Drag selected element | All visible elements (`rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`, `text`, `g`) |
+| **Resize** | Drag corner/edge handles | `rect`, `circle`, `ellipse` |
+| **Vertex edit** | Drag individual vertex handles | `polyline`, `polygon`, `path` |
+| **Line endpoint edit** | Drag endpoint handles | `line` |
+| **Inline text edit** | Double-click a `<text>` element | `text` |
+| **Copy** | Ctrl+C | Any selected element |
+| **Paste** | Ctrl+V | Pastes with slight offset |
+| **Delete** | Delete or Backspace key | Any selected element |
+| **Zoom** | Mouse wheel | Manipulates SVG viewBox directly |
+| **Pan** | Drag on empty space | Translates SVG viewBox |
+
+### Inline Text Editing
+
+Double-clicking a `<text>` element opens a `<foreignObject>` textarea overlay positioned at the text's bounding box. The textarea matches the text's font size and color. Enter confirms the edit (updating the `<text>` element's content), Escape cancels. Only one text edit can be active at a time — starting a new edit commits the previous one.
+
+### Handles
+
+Selection handles are rendered as a dedicated SVG `<g>` group overlaid on the selected element:
+- **Bounding box**: A dashed rectangle showing the element's bounds
+- **Corner handles**: Small circles at corners for resize (rect, circle, ellipse)
+- **Vertex handles**: Small circles at each vertex for point editing (polyline, polygon)
+- **Path handles**: Circles at each command endpoint, with dotted lines to control points for cubic/quadratic curves
+- Handle radius scales inversely with zoom level to maintain a consistent screen size
+
+### Interaction Model
+
+The editor determines interaction behavior from the element type:
+
+| Element | Drag Behavior | Handle Behavior |
+|---------|--------------|-----------------|
+| `rect` | Translate (x, y) | Resize (width, height) |
+| `circle` | Translate (cx, cy) | Resize (r) |
+| `ellipse` | Translate (cx, cy) | Resize (rx, ry) |
+| `line` | Translate both endpoints | Move individual endpoints |
+| `polyline`, `polygon` | Translate all points | Move individual vertices |
+| `path` | Translate via transform | Move individual path points |
+| `text` | Translate (x, y or transform) | — (double-click to edit) |
+| `g` (group) | Translate via transform | — |
+
+### Dirty Tracking and Undo
+
+Each edit marks the file as dirty (orange pulsing status LED). An **undo stack** captures SVG snapshots after each edit operation (up to 50 entries). Ctrl+Z pops the stack and restores the previous state by re-injecting the SVG content and reinitializing the editor.
+
+### Save
+
+Ctrl+S (or clicking the dirty status LED) saves the modified SVG content to disk via `Repo.write_file`. The `SvgEditor.getContent()` method commits any active text edit, removes selection handles, serializes the SVG, then re-renders handles — ensuring saved content is clean.
+
 ## Toolbar
 
-A bottom toolbar with zoom controls:
+A bottom toolbar with mode toggle, zoom controls, and edit actions:
 
 | Button | Action |
 |--------|--------|
+| ✦ Select | Switch to Select (edit) mode |
+| ✥ Pan | Switch to Pan (navigate) mode |
+| `<tag>` | Shows selected element's tag name (Select mode only) |
 | − | Zoom out (propagates via sync callback) |
 | % label | Current zoom percentage (read-only) |
 | + | Zoom in |
 | 1:1 | Reset to 100% zoom and center position |
 | Fit | Fit SVG to panel dimensions |
+| ↩ Undo | Undo last edit (Ctrl+Z). Disabled when nothing to undo |
+| 💾 Save | Save modified SVG (Ctrl+S). Disabled when not dirty |
 
 ## SVG Content Injection
 
@@ -168,6 +242,12 @@ If `original` and `modified` are not provided, content is fetched via RPC. If th
 | Ctrl+PageDown | Next tab |
 | Ctrl+PageUp | Previous tab |
 | Ctrl+W | Close active tab |
+| Ctrl+S | Save modified SVG |
+| Ctrl+Z | Undo last edit (Select mode) |
+| Ctrl+C | Copy selected element (Select mode) |
+| Ctrl+V | Paste copied element (Select mode) |
+| Delete / Backspace | Delete selected element (Select mode) |
+| Escape | Deselect current element / cancel text edit |
 
 ## Resize Handling
 
@@ -178,6 +258,8 @@ A `ResizeObserver` on the diff container calls `svg-pan-zoom.resize()` on both p
 | Package | Version | Purpose |
 |---------|---------|---------|
 | `svg-pan-zoom` | ^3.6.1 | Native SVG viewBox pan/zoom with mouse, touch, and wheel support |
+
+`SvgEditor` is a custom class (`svg-editor.js`) with no external dependencies — it operates directly on SVG DOM elements using pointer events, `getScreenCTM()`, and `createSVGPoint()` for coordinate transforms.
 
 ## Integration with Existing Systems
 
@@ -212,9 +294,9 @@ A translucent overlay mode showing both SVGs superimposed with difference highli
 
 Click on an SVG element to see its attributes, path data, and position in the SVG DOM tree.
 
-### Inline Editing
+### Source Editor Panel
 
-Allow editing the SVG source in a Monaco editor panel alongside the rendered view, with live preview updates.
+A split view with a Monaco text editor showing the SVG source alongside the rendered view, with live preview updates on keystroke.
 
 ### Export
 

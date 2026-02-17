@@ -111,7 +111,7 @@ Categories with zero tokens or no detail items show no toggle.
 
 ### Session Totals
 
-Fixed footer below categories: 2×2 grid showing cumulative session totals (prompt in, completion out, total, cache hit).
+Fixed footer below categories: grid showing cumulative session totals (total, prompt in, completion out, cache read, cache write). Cache read highlighted green when non-zero; cache write highlighted yellow when non-zero.
 
 ---
 
@@ -235,7 +235,28 @@ Floating overlay on the diff viewer background, appearing after each LLM respons
 
 ## Terminal HUD
 
-Printed to the terminal after each LLM response (not a UI component). Three sections:
+Printed to the terminal after each LLM response (not a UI component). Additionally, a one-time startup HUD is printed when the stability tracker initializes.
+
+### Startup Init HUD
+
+Printed once during server startup after stability tracker initialization completes (either eagerly at construction or lazily on the first request):
+
+```
+╭─ Initial Tier Distribution ─╮
+│ L0       12 items            │
+│ L1       18 items            │
+│ L2       17 items            │
+│ L3       17 items            │
+├─────────────────────────────┤
+│ Total: 64 items              │
+╰─────────────────────────────╯
+```
+
+Shows per-tier item counts for all non-empty tiers (L0, L1, L2, L3, active). Box auto-sizes. Provides immediate visibility into how the reference graph was distributed.
+
+### Post-Response HUD
+
+Three sections printed after each LLM response:
 
 ### Cache Blocks (Boxed)
 

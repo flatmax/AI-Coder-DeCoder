@@ -56,7 +56,7 @@ Methods the server calls on the client (registered via `addClass`):
 
 **Server:** Validate git repo (if not a repo: open HTML instruction page in browser, print terminal banner, exit). Initialize services. Register classes with JRPCServer. Start WebSocket server. Open browser.
 
-**App Shell:** On `setupDone`: publish call proxy → fetch `LLMService.get_current_state()` → dispatch `state-loaded` event (window-level CustomEvent with full state object as detail). The state already contains messages from the server's auto-restored last session, so the browser renders the previous conversation immediately.
+**App Shell:** On `setupDone`: publish call proxy → fetch `LLMService.get_current_state()` → dispatch `state-loaded` event (window-level CustomEvent with full state object as detail). The state already contains messages from the server's auto-restored last session, so the browser renders the previous conversation immediately. After state is loaded, the app shell re-opens the last viewed file and restores its viewport state (see [File and Viewport Persistence](#file-and-viewport-persistence)).
 
 **Files Tab:** On RPC ready: load snippets, load file tree, load review state. On `state-loaded`: restore messages, selected files, streaming status, sync file picker, scroll chat to bottom.
 
@@ -126,9 +126,9 @@ Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change 
 ### Dragging & Resizing
 
 - Header drag with 5px threshold (under = click → toggle minimize)
-- Right edge resizable via dedicated handle element (4px wide, absolute positioned at right: -4px)
-- Undocking: on first drag beyond threshold, dialog switches from docked layout (top/left/height: 100%) to explicit fixed positioning with pixel coordinates
-- Min width: 300px (enforced during resize)
+- Three resize handles: right edge, bottom edge, and bottom-right corner (see [Resize Handles](#resize-handles))
+- Undocking: on first drag beyond threshold (or first bottom/corner resize), dialog switches from docked layout (top/left/height: 100%) to explicit fixed positioning with pixel coordinates
+- Min width: 300px, min height: 200px (enforced during resize)
 - Once undocked, position is persisted to localStorage as JSON (`ac-dc-dialog-pos`: left, top, width, height)
 
 ### Tab Restoration
@@ -145,6 +145,18 @@ On RPC ready (not on construction), the dialog restores the last-used tab from l
 | Active tab | Yes | `ac-dc-active-tab` |
 
 On startup, the dialog restores its last position and size. Undocked positions are bounds-checked against the current viewport (at least 100px must remain visible). If the dialog was never undocked, it starts in the default left-docked layout at 50% viewport width.
+
+### Resize Handles
+
+The dialog supports three resize interactions:
+
+| Handle | Location | Behavior |
+|--------|----------|----------|
+| Right edge | 8px wide, absolute at right: -4px | Resize width only. Works in both docked and undocked modes |
+| Bottom edge | 8px tall, absolute at bottom: -4px | Resize height only. Auto-undocks if still docked |
+| Bottom-right corner | 14px × 14px at the bottom-right corner | Resize width and height simultaneously. Auto-undocks if still docked |
+
+All handles show an accent-colored highlight on hover. All three are hidden when the dialog is minimized. The right edge handle enforces a minimum width of 300px. The bottom edge handle enforces a minimum height of 200px.
 
 ### Header Sections
 
@@ -192,12 +204,44 @@ Post-edit refresh (`stream-complete` with `files_modified`, or `files-modified` 
 
 See [Diff Viewer](diff_viewer.md) for the Monaco editor and [SVG Viewer](svg_viewer.md) for the SVG diff viewer.
 
+## File and Viewport Persistence
+
+The app shell persists the last-opened file and its viewport state to localStorage, restoring them on page refresh for seamless continuity.
+
+### Storage Keys
+
+| Key | Content | Lifecycle |
+|-----|---------|-----------|
+| `ac-last-open-file` | File path of the last opened/navigated file | Written on every `navigate-file` event |
+| `ac-last-viewport` | JSON: `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}}` | Written on `beforeunload` and before navigating to a different file |
+
+### Save Triggers
+
+- **File path**: saved on every `navigate-file` event, immediately before routing to the viewer
+- **Viewport state**: saved on `beforeunload` (page refresh/close) and before navigating away from the current file. SVG files are excluded (SVG zoom restore is not yet supported)
+- The diff viewer's `getViewportState()` returns the modified editor's `scrollTop`, `scrollLeft`, cursor `lineNumber`, and `column`
+
+### Restore Flow
+
+On startup, after `state-loaded` completes:
+
+1. Read `ac-last-open-file` from localStorage
+2. If a path exists, read `ac-last-viewport` and verify the viewport's `path` matches
+3. Dispatch a `navigate-file` event to re-open the file
+4. For diff files with saved viewport state:
+   - Register a one-shot `active-file-changed` listener filtered to the target path
+   - When the file opens, use double-rAF to wait for the editor to be ready
+   - Call `restoreViewportState()` which sets cursor position, reveals the line, and restores scroll offsets
+5. `restoreViewportState()` polls up to 20 animation frames for the Monaco editor to be ready (it's created asynchronously after the file content fetch completes)
+6. A 10-second timeout removes the listener if the file never opens (e.g., file was deleted)
+
 ## Local Storage Persistence Pattern
 
 Multiple components persist UI preferences to localStorage using a duplicated `_loadBool`/`_saveBool` pattern (load via `getItem(key) === 'true'`, save via `setItem(key, String(value))`). This is intentionally duplicated per-component rather than extracted to a shared utility — each component manages its own keys independently.
 
 | Component | Keys |
 |-----------|------|
+| App shell | `ac-last-open-file`, `ac-last-viewport` |
 | Dialog | `ac-dc-dialog-width`, `ac-dc-dialog-pos`, `ac-dc-minimized`, `ac-dc-active-tab` |
 | File picker | `ac-dc-picker-width`, `ac-dc-picker-collapsed` |
 | Search tab | `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |

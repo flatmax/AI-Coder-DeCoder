@@ -234,16 +234,22 @@ export class SvgEditor {
     this._onZoom = onZoom || (() => {});
 
     // State
-    this._selected = null;       // currently selected SVG element
+    this._selected = null;       // currently selected SVG element (primary)
+    this._multiSelected = new Set(); // all selected elements (including primary)
     this._dragState = null;      // active drag operation info
     this._handleGroup = null;    // SVG <g> for overlay handles
     this._dirty = false;
-    this._clipboard = null;      // cloned SVG element for copy/paste
+    this._clipboard = null;      // cloned SVG element(s) for copy/paste
     this._zoomLevel = 1;         // current zoom factor
     this._panX = 0;              // current pan offset in SVG units
     this._panY = 0;
     this._isPanning = false;     // middle-button / space+drag panning
     this._panStart = null;
+
+    // Marquee (rubber-band) selection state
+    this._marqueeRect = null;    // the visible SVG <rect> overlay
+    this._marqueeStart = null;   // { x, y } in SVG coords
+    this._marqueeActive = false;
 
     // Text editing state
     this._textEditEl = null;      // the <text> element being edited
@@ -277,6 +283,7 @@ export class SvgEditor {
   /** Clean up all listeners and overlay elements. */
   dispose() {
     this._commitTextEdit();
+    this._cancelMarquee();
     this._removeHandles();
     this._svg.removeEventListener('pointerdown', this._onPointerDown);
     this._svg.removeEventListener('dblclick', this._onDblClick);
@@ -287,6 +294,7 @@ export class SvgEditor {
     window.removeEventListener('keydown', this._onKeyDown);
     this._svg.style.cursor = '';
     this._selected = null;
+    this._multiSelected.clear();
     this._dragState = null;
   }
 
@@ -303,8 +311,8 @@ export class SvgEditor {
     // Remove our handle overlays before serializing
     this._removeHandles();
     const content = this._svg.outerHTML;
-    // Restore handles if element is still selected
-    if (this._selected) this._renderHandles();
+    // Restore handles if element(s) still selected
+    if (this._selected || this._multiSelected.size > 0) this._renderHandles();
     return content;
   }
 
@@ -424,7 +432,11 @@ export class SvgEditor {
     // Check elements
     const target = this._hitTest(screenX, screenY);
     if (target) {
-      const tag = target.tagName.toLowerCase();
+      // If hovering over a multi-selected element, show move cursor
+      if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
+        this._svg.style.cursor = 'move';
+        return;
+      }
       const model = _getInteractionModel(target);
       if (model.endpoints) {
         // Lines, polylines, polygons — check if near an endpoint
@@ -514,9 +526,10 @@ export class SvgEditor {
     const screenX = e.clientX;
     const screenY = e.clientY;
     const svgPt = this._screenToSvg(screenX, screenY);
+    const isShift = e.shiftKey;
 
-    // First: check if we hit a handle on the current selection
-    if (this._selected) {
+    // First: check if we hit a handle on the current selection (only in single-select)
+    if (this._selected && !isShift && this._multiSelected.size <= 1) {
       const handle = this._hitTestHandle(screenX, screenY);
       if (handle) {
         e.preventDefault();
@@ -535,7 +548,14 @@ export class SvgEditor {
     const target = this._hitTest(screenX, screenY);
 
     if (!target) {
-      // Clicked on empty space — deselect
+      if (isShift) {
+        // Shift+click on empty space — start marquee selection
+        e.preventDefault();
+        e.stopPropagation();
+        this._startMarquee(svgPt);
+        return;
+      }
+      // Clicked on empty space — deselect all
       this._deselect();
       return;
     }
@@ -543,7 +563,41 @@ export class SvgEditor {
     e.preventDefault();
     e.stopPropagation();
 
-    // Select the element
+    if (isShift) {
+      // Shift+click: toggle element in/out of multi-selection
+      if (this._multiSelected.has(target)) {
+        this._multiSelected.delete(target);
+        if (this._selected === target) {
+          // Pick another element as primary, or null
+          const remaining = [...this._multiSelected];
+          this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+        }
+        if (this._multiSelected.size === 0) {
+          this._deselect();
+          return;
+        }
+        this._renderHandles();
+        this._onSelect(this._selected);
+      } else {
+        // Add to multi-selection
+        if (!this._selected) {
+          // Nothing selected yet — make this the primary
+          this._selected = target;
+        }
+        this._multiSelected.add(target);
+        this._renderHandles();
+        this._onSelect(this._selected);
+      }
+
+      // Start multi-drag if clicking on any selected element
+      if (this._multiSelected.has(target) && this._multiSelected.size > 1) {
+        this._svg.style.cursor = 'grabbing';
+        this._startMultiDrag(svgPt);
+      }
+      return;
+    }
+
+    // Normal click (no Shift): single-select
     this._select(target);
     this._svg.style.cursor = 'grabbing';
 
@@ -558,11 +612,24 @@ export class SvgEditor {
     } else if (tag === 'path' && model.endpoints) {
       this._startPathDrag(target, svgPt);
     } else if (model.drag) {
-      this._startElementDrag(target, svgPt);
+      // If we're clicking an element that's part of a multi-selection, do multi-drag
+      if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
+        this._startMultiDrag(svgPt);
+      } else {
+        this._startElementDrag(target, svgPt);
+      }
     }
   }
 
   _onPointerMove(e) {
+    // Handle marquee drag
+    if (this._marqueeActive) {
+      e.preventDefault();
+      const svgPt = this._screenToSvg(e.clientX, e.clientY);
+      this._updateMarquee(svgPt);
+      return;
+    }
+
     // Handle middle-button panning
     if (this._isPanning && this._panStart) {
       e.preventDefault();
@@ -590,6 +657,9 @@ export class SvgEditor {
       case 'translate':
         this._applyTranslate(dx, dy);
         break;
+      case 'multi-translate':
+        this._applyMultiTranslate(dx, dy);
+        break;
       case 'line-whole':
         this._applyLineWhole(dx, dy);
         break;
@@ -614,6 +684,13 @@ export class SvgEditor {
   }
 
   _onPointerUp(e) {
+    // End marquee selection
+    if (this._marqueeActive) {
+      const svgPt = this._screenToSvg(e.clientX, e.clientY);
+      this._finishMarquee(svgPt);
+      return;
+    }
+
     // End middle-button panning
     if (this._isPanning) {
       this._isPanning = false;
@@ -638,9 +715,11 @@ export class SvgEditor {
 
   _onKeyDown(e) {
     if (e.key === 'Escape') {
-      if (this._textEditEl) {
+      if (this._marqueeActive) {
+        this._cancelMarquee();
+      } else if (this._textEditEl) {
         this._commitTextEdit();
-      } else if (this._selected) {
+      } else if (this._selected || this._multiSelected.size > 0) {
         this._deselect();
       }
       return;
@@ -650,19 +729,20 @@ export class SvgEditor {
     if (this._textEditEl) return;
 
     const mod = e.ctrlKey || e.metaKey;
+    const hasSelection = this._selected || this._multiSelected.size > 0;
 
-    if (mod && e.key === 'c' && this._selected) {
+    if (mod && e.key === 'c' && hasSelection) {
       e.preventDefault();
       this._copySelected();
-    } else if (mod && e.key === 'v' && this._clipboard) {
+    } else if (mod && e.key === 'v' && this._clipboard && this._clipboard.length > 0) {
       e.preventDefault();
       this._pasteClipboard();
-    } else if (mod && e.key === 'd' && this._selected) {
+    } else if (mod && e.key === 'd' && hasSelection) {
       // Ctrl+D = duplicate in place (copy + immediate paste)
       e.preventDefault();
       this._copySelected();
       this._pasteClipboard();
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && this._selected) {
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && hasSelection) {
       e.preventDefault();
       this._deleteSelected();
     }
@@ -671,64 +751,70 @@ export class SvgEditor {
   // === Copy / Paste / Delete ===
 
   _copySelected() {
-    if (!this._selected) return;
+    if (this._multiSelected.size === 0) return;
     // Remove handles before cloning so they aren't included
     this._removeHandles();
-    this._clipboard = this._selected.cloneNode(true);
+    this._clipboard = [...this._multiSelected].map(el => el.cloneNode(true));
     // Restore handles
     this._renderHandles();
   }
 
   _pasteClipboard() {
-    if (!this._clipboard) return;
+    if (!this._clipboard || this._clipboard.length === 0) return;
 
-    const clone = this._clipboard.cloneNode(true);
     const offset = this._screenDistToSvgDist(15);
+    const clones = [];
 
-    // Offset the pasted element so it doesn't sit exactly on top
-    const tag = clone.tagName.toLowerCase();
-    if (tag === 'rect' || tag === 'text' || tag === 'image' || tag === 'foreignobject') {
-      clone.setAttribute('x', _num(clone, 'x') + offset);
-      clone.setAttribute('y', _num(clone, 'y') + offset);
-    } else if (tag === 'circle' || tag === 'ellipse') {
-      clone.setAttribute('cx', _num(clone, 'cx') + offset);
-      clone.setAttribute('cy', _num(clone, 'cy') + offset);
-    } else if (tag === 'line') {
-      clone.setAttribute('x1', _num(clone, 'x1') + offset);
-      clone.setAttribute('y1', _num(clone, 'y1') + offset);
-      clone.setAttribute('x2', _num(clone, 'x2') + offset);
-      clone.setAttribute('y2', _num(clone, 'y2') + offset);
-    } else if (tag === 'polyline' || tag === 'polygon') {
-      const points = _parsePoints(clone);
-      const shifted = points.map(p => ({ x: p.x + offset, y: p.y + offset }));
-      clone.setAttribute('points', _serializePoints(shifted));
-    } else if (tag === 'path') {
-      // Offset path via translate
-      const { tx, ty } = _parseTranslate(clone);
-      _setTranslate(clone, tx + offset, ty + offset);
-    } else {
-      // g, use, etc. — offset via translate
-      const { tx, ty } = _parseTranslate(clone);
-      _setTranslate(clone, tx + offset, ty + offset);
-    }
+    for (const orig of this._clipboard) {
+      const clone = orig.cloneNode(true);
 
-    // Insert after the original (or at end of SVG if no selection context)
-    if (this._selected && this._selected.parentNode) {
-      this._selected.parentNode.insertBefore(clone, this._selected.nextSibling);
-    } else {
+      // Offset the pasted element so it doesn't sit exactly on top
+      const tag = clone.tagName.toLowerCase();
+      if (tag === 'rect' || tag === 'text' || tag === 'image' || tag === 'foreignobject') {
+        clone.setAttribute('x', _num(clone, 'x') + offset);
+        clone.setAttribute('y', _num(clone, 'y') + offset);
+      } else if (tag === 'circle' || tag === 'ellipse') {
+        clone.setAttribute('cx', _num(clone, 'cx') + offset);
+        clone.setAttribute('cy', _num(clone, 'cy') + offset);
+      } else if (tag === 'line') {
+        clone.setAttribute('x1', _num(clone, 'x1') + offset);
+        clone.setAttribute('y1', _num(clone, 'y1') + offset);
+        clone.setAttribute('x2', _num(clone, 'x2') + offset);
+        clone.setAttribute('y2', _num(clone, 'y2') + offset);
+      } else if (tag === 'polyline' || tag === 'polygon') {
+        const points = _parsePoints(clone);
+        const shifted = points.map(p => ({ x: p.x + offset, y: p.y + offset }));
+        clone.setAttribute('points', _serializePoints(shifted));
+      } else if (tag === 'path') {
+        const { tx, ty } = _parseTranslate(clone);
+        _setTranslate(clone, tx + offset, ty + offset);
+      } else {
+        const { tx, ty } = _parseTranslate(clone);
+        _setTranslate(clone, tx + offset, ty + offset);
+      }
+
       this._svg.appendChild(clone);
+      clones.push(clone);
     }
 
-    // Select the new clone
-    this._select(clone);
+    // Select all pasted clones
+    this._deselect();
+    if (clones.length > 0) {
+      this._selected = clones[clones.length - 1];
+      this._multiSelected = new Set(clones);
+      this._renderHandles();
+      this._onSelect(this._selected);
+    }
     this._markDirty();
   }
 
   _deleteSelected() {
-    if (!this._selected) return;
-    const el = this._selected;
+    if (this._multiSelected.size === 0) return;
+    const elements = [...this._multiSelected];
     this._deselect();
-    el.remove();
+    for (const el of elements) {
+      el.remove();
+    }
     this._markDirty();
   }
 
@@ -896,20 +982,191 @@ export class SvgEditor {
     this._textEditEl = null;
   }
 
+  // === Marquee (Rubber-Band) Selection ===
+
+  /**
+   * Start drawing a selection rectangle from the given SVG point.
+   */
+  _startMarquee(svgPt) {
+    this._marqueeStart = { x: svgPt.x, y: svgPt.y };
+    this._marqueeActive = true;
+
+    // Create the visible rectangle overlay
+    const ns = 'http://www.w3.org/2000/svg';
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('x', svgPt.x);
+    rect.setAttribute('y', svgPt.y);
+    rect.setAttribute('width', 0);
+    rect.setAttribute('height', 0);
+    rect.setAttribute('fill', 'rgba(79, 195, 247, 0.1)');
+    const sw = this._screenDistToSvgDist(1);
+    const dashOn = this._screenDistToSvgDist(4);
+    const dashOff = this._screenDistToSvgDist(3);
+    rect.setAttribute('stroke', '#4fc3f7');
+    rect.setAttribute('stroke-width', sw);
+    rect.setAttribute('stroke-dasharray', `${dashOn} ${dashOff}`);
+    rect.setAttribute('pointer-events', 'none');
+    rect.classList.add(HANDLE_CLASS);
+    rect.dataset.handleType = 'marquee';
+    rect.dataset.handleIndex = '0';
+    this._svg.appendChild(rect);
+    this._marqueeRect = rect;
+
+    this._svg.style.cursor = 'crosshair';
+  }
+
+  /**
+   * Update the marquee rectangle as the pointer moves.
+   */
+  _updateMarquee(svgPt) {
+    if (!this._marqueeRect || !this._marqueeStart) return;
+
+    const x = Math.min(this._marqueeStart.x, svgPt.x);
+    const y = Math.min(this._marqueeStart.y, svgPt.y);
+    const w = Math.abs(svgPt.x - this._marqueeStart.x);
+    const h = Math.abs(svgPt.y - this._marqueeStart.y);
+
+    this._marqueeRect.setAttribute('x', x);
+    this._marqueeRect.setAttribute('y', y);
+    this._marqueeRect.setAttribute('width', w);
+    this._marqueeRect.setAttribute('height', h);
+  }
+
+  /**
+   * Finish the marquee: find all elements whose bounding boxes intersect
+   * the selection rectangle, and add them to the multi-selection.
+   */
+  _finishMarquee(svgPt) {
+    const start = this._marqueeStart;
+    if (!start) {
+      this._cancelMarquee();
+      return;
+    }
+
+    // Compute the marquee bounds in SVG coords
+    const mx1 = Math.min(start.x, svgPt.x);
+    const my1 = Math.min(start.y, svgPt.y);
+    const mx2 = Math.max(start.x, svgPt.x);
+    const my2 = Math.max(start.y, svgPt.y);
+
+    // Remove the visual marquee rect
+    this._cancelMarquee();
+
+    // Minimum drag distance to count as a marquee (prevent accidental tiny drags)
+    const minSize = this._screenDistToSvgDist(5);
+    if ((mx2 - mx1) < minSize && (my2 - my1) < minSize) {
+      return;
+    }
+
+    // Find all editable elements whose bounding boxes overlap the marquee
+    const hits = [];
+    const children = this._svg.children;
+    for (let i = 0; i < children.length; i++) {
+      const el = children[i];
+      // Skip our overlays
+      if (el.classList && el.classList.contains(HANDLE_CLASS)) continue;
+      if (el.id === HANDLE_GROUP_ID) continue;
+      // Skip non-editable elements
+      const tag = el.tagName.toLowerCase();
+      if (['defs', 'style', 'metadata', 'title', 'desc'].includes(tag)) continue;
+      const model = _getInteractionModel(el);
+      if (!model.drag) continue;
+
+      // Check bounding box overlap
+      try {
+        const bbox = el.getBBox();
+        if (bbox.width === 0 && bbox.height === 0) continue;
+
+        const bx1 = bbox.x;
+        const by1 = bbox.y;
+        const bx2 = bbox.x + bbox.width;
+        const by2 = bbox.y + bbox.height;
+
+        // AABB intersection test
+        if (bx1 <= mx2 && bx2 >= mx1 && by1 <= my2 && by2 >= my1) {
+          hits.push(el);
+        }
+      } catch {
+        // getBBox can fail for hidden elements
+      }
+    }
+
+    // Also check nested elements inside <g> groups (one level deep)
+    for (let i = 0; i < children.length; i++) {
+      const el = children[i];
+      if (el.tagName.toLowerCase() !== 'g') continue;
+      if (el.classList && el.classList.contains(HANDLE_CLASS)) continue;
+      if (el.id === HANDLE_GROUP_ID) continue;
+
+      for (let j = 0; j < el.children.length; j++) {
+        const child = el.children[j];
+        const childModel = _getInteractionModel(child);
+        if (!childModel.drag) continue;
+
+        try {
+          const bbox = child.getBBox();
+          if (bbox.width === 0 && bbox.height === 0) continue;
+
+          const bx1 = bbox.x;
+          const by1 = bbox.y;
+          const bx2 = bbox.x + bbox.width;
+          const by2 = bbox.y + bbox.height;
+
+          if (bx1 <= mx2 && bx2 >= mx1 && by1 <= my2 && by2 >= my1) {
+            hits.push(child);
+          }
+        } catch {
+          // skip
+        }
+      }
+    }
+
+    if (hits.length === 0) return;
+
+    // Add hits to multi-selection (Shift means additive)
+    for (const el of hits) {
+      this._multiSelected.add(el);
+    }
+
+    // Ensure we have a primary selection
+    if (!this._selected || !this._multiSelected.has(this._selected)) {
+      this._selected = hits[hits.length - 1];
+    }
+
+    this._renderHandles();
+    this._onSelect(this._selected);
+  }
+
+  /**
+   * Remove the visual marquee overlay and reset state.
+   */
+  _cancelMarquee() {
+    if (this._marqueeRect) {
+      this._marqueeRect.remove();
+      this._marqueeRect = null;
+    }
+    this._marqueeStart = null;
+    this._marqueeActive = false;
+    this._svg.style.cursor = '';
+  }
+
   // === Selection ===
 
   _select(el) {
-    if (this._selected === el) return;
+    if (this._selected === el && this._multiSelected.size <= 1) return;
     this._deselect();
     this._selected = el;
+    this._multiSelected.clear();
+    this._multiSelected.add(el);
     this._renderHandles();
     this._onSelect(el);
   }
 
   _deselect() {
-    if (!this._selected) return;
+    if (!this._selected && this._multiSelected.size === 0) return;
     this._removeHandles();
     this._selected = null;
+    this._multiSelected.clear();
     this._onDeselect();
   }
 
@@ -931,7 +1188,7 @@ export class SvgEditor {
 
   _renderHandles() {
     this._removeHandles();
-    if (!this._selected) return;
+    if (!this._selected && this._multiSelected.size === 0) return;
 
     const ns = 'http://www.w3.org/2000/svg';
     const g = document.createElementNS(ns, 'g');
@@ -940,27 +1197,32 @@ export class SvgEditor {
     this._svg.appendChild(g);
     this._handleGroup = g;
 
-    const el = this._selected;
-    const tag = el.tagName.toLowerCase();
-    const model = _getInteractionModel(el);
+    const isMulti = this._multiSelected.size > 1;
 
-    // Draw a selection bounding box only for non-endpoint elements
-    if (!model.endpoints) {
+    // Draw bounding boxes for all selected elements
+    for (const el of this._multiSelected) {
       this._renderBoundingBox(g, el);
     }
 
-    if (tag === 'line') {
-      this._renderLineHandles(g, el);
-    } else if (tag === 'polyline' || tag === 'polygon') {
-      this._renderPolyHandles(g, el);
-    } else if (tag === 'rect' && model.resize) {
-      this._renderRectHandles(g, el);
-    } else if (tag === 'circle' && model.resize) {
-      this._renderCircleHandles(g, el);
-    } else if (tag === 'ellipse' && model.resize) {
-      this._renderEllipseHandles(g, el);
-    } else if (tag === 'path') {
-      this._renderPathHandles(g, el);
+    // In single-select mode, also draw detailed drag/resize handles
+    if (!isMulti && this._selected) {
+      const el = this._selected;
+      const tag = el.tagName.toLowerCase();
+      const model = _getInteractionModel(el);
+
+      if (tag === 'line') {
+        this._renderLineHandles(g, el);
+      } else if (tag === 'polyline' || tag === 'polygon') {
+        this._renderPolyHandles(g, el);
+      } else if (tag === 'rect' && model.resize) {
+        this._renderRectHandles(g, el);
+      } else if (tag === 'circle' && model.resize) {
+        this._renderCircleHandles(g, el);
+      } else if (tag === 'ellipse' && model.resize) {
+        this._renderEllipseHandles(g, el);
+      } else if (tag === 'path') {
+        this._renderPathHandles(g, el);
+      }
     }
   }
 
@@ -1245,6 +1507,90 @@ export class SvgEditor {
       origX: tx,
       origY: ty,
     };
+  }
+
+  /**
+   * Start a multi-element drag. Snapshots geometry for every selected element
+   * so they all move together as a group.
+   */
+  _startMultiDrag(svgPt) {
+    const snapshots = [];
+    for (const el of this._multiSelected) {
+      const tag = el.tagName.toLowerCase();
+      const model = _getInteractionModel(el);
+      if (!model.drag) continue;
+
+      if (tag === 'line') {
+        snapshots.push({
+          el,
+          kind: 'line',
+          origX1: _num(el, 'x1'), origY1: _num(el, 'y1'),
+          origX2: _num(el, 'x2'), origY2: _num(el, 'y2'),
+        });
+      } else if (tag === 'polyline' || tag === 'polygon') {
+        snapshots.push({
+          el,
+          kind: 'poly',
+          origPoints: _parsePoints(el).map(p => ({ ...p })),
+        });
+      } else if (['rect', 'text', 'image', 'foreignobject'].includes(tag)) {
+        snapshots.push({
+          el,
+          kind: 'xy',
+          origX: _num(el, 'x'),
+          origY: _num(el, 'y'),
+        });
+      } else if (tag === 'circle' || tag === 'ellipse') {
+        snapshots.push({
+          el,
+          kind: 'cxcy',
+          origX: _num(el, 'cx'),
+          origY: _num(el, 'cy'),
+        });
+      } else {
+        // g, path, use, etc. — translate transform
+        const { tx, ty } = _parseTranslate(el);
+        snapshots.push({
+          el,
+          kind: 'transform',
+          origX: tx,
+          origY: ty,
+        });
+      }
+    }
+
+    this._dragState = {
+      mode: 'multi-translate',
+      startSvg: { ...svgPt },
+      snapshots,
+    };
+  }
+
+  /**
+   * Apply translation delta to all elements in a multi-drag.
+   */
+  _applyMultiTranslate(dx, dy) {
+    const s = this._dragState;
+    for (const snap of s.snapshots) {
+      const el = snap.el;
+      if (snap.kind === 'xy') {
+        el.setAttribute('x', snap.origX + dx);
+        el.setAttribute('y', snap.origY + dy);
+      } else if (snap.kind === 'cxcy') {
+        el.setAttribute('cx', snap.origX + dx);
+        el.setAttribute('cy', snap.origY + dy);
+      } else if (snap.kind === 'transform') {
+        _setTranslate(el, snap.origX + dx, snap.origY + dy);
+      } else if (snap.kind === 'line') {
+        el.setAttribute('x1', snap.origX1 + dx);
+        el.setAttribute('y1', snap.origY1 + dy);
+        el.setAttribute('x2', snap.origX2 + dx);
+        el.setAttribute('y2', snap.origY2 + dy);
+      } else if (snap.kind === 'poly') {
+        const newPoints = snap.origPoints.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        el.setAttribute('points', _serializePoints(newPoints));
+      }
+    }
   }
 
   _startHandleDrag(handle, svgPt, screenX, screenY) {

@@ -147,18 +147,24 @@ class StabilityTracker:
                     content_hash=new_hash, tokens=tokens,
                 )
             elif existing.content_hash != new_hash:
-                # Changed — demote to active
-                old_tier = existing.tier
-                existing.tier = Tier.ACTIVE
-                existing.n = 0
-                existing.content_hash = new_hash
-                existing.tokens = tokens
-                if old_tier != Tier.ACTIVE:
-                    self._broken_tiers.add(old_tier)
-                    self._changes.append({
-                        "action": "demoted", "key": key,
-                        "from": old_tier.name, "to": "ACTIVE",
-                    })
+                if existing.content_hash == "":
+                    # First measurement — item was pre-seeded with no hash.
+                    # Accept the hash without demoting; keep tier and N.
+                    existing.content_hash = new_hash
+                    existing.tokens = tokens
+                else:
+                    # Changed — demote to active
+                    old_tier = existing.tier
+                    existing.tier = Tier.ACTIVE
+                    existing.n = 0
+                    existing.content_hash = new_hash
+                    existing.tokens = tokens
+                    if old_tier != Tier.ACTIVE:
+                        self._broken_tiers.add(old_tier)
+                        self._changes.append({
+                            "action": "demoted", "key": key,
+                            "from": old_tier.name, "to": "ACTIVE",
+                        })
             else:
                 # Unchanged — increment N
                 existing.n += 1
@@ -345,6 +351,7 @@ class StabilityTracker:
         Each item demotes at most one level per call to avoid cascading
         double-demotions within a single pass.
         Skips tiers that were just promoted into this cycle (broken).
+        Skips L0 (terminal tier) and L3 (would demote to active).
         """
         if self._cache_target_tokens <= 0:
             return
@@ -352,6 +359,8 @@ class StabilityTracker:
         demoted_keys = set()
 
         for tier in reversed(CASCADE_ORDER):
+            if tier == Tier.L0:
+                continue  # L0 is terminal — never demote from most-stable tier
             if tier == Tier.L3:
                 continue  # L3 items would demote to active, handled differently
 
@@ -460,11 +469,17 @@ class StabilityTracker:
         if not all_files:
             return
 
+        # Seed L0 with high-connectivity symbols to meet provider cache minimum.
+        # System prompt is seeded separately by LLMService; here we add symbols.
+        l0_seeded = set()
+        if ref_index and hasattr(ref_index, 'file_ref_count'):
+            l0_seeded = self._seed_l0_symbols(ref_index, all_files, counter)
+
         # Try clustering via mutual references (bidirectional edges)
         if ref_index and hasattr(ref_index, 'connected_components'):
             components = ref_index.connected_components()
             if components:
-                self._init_from_clusters(components, counter)
+                self._init_from_clusters(components, counter, all_files, exclude=l0_seeded)
                 return
 
         # Fallback: sort by reference count descending
@@ -472,10 +487,11 @@ class StabilityTracker:
             files_with_refs = [
                 (f, ref_index.reference_count(f))
                 for f in all_files
+                if f not in l0_seeded
             ]
             files_with_refs.sort(key=lambda x: -x[1])
         else:
-            files_with_refs = [(f, 0) for f in all_files]
+            files_with_refs = [(f, 0) for f in all_files if f not in l0_seeded]
 
         # Distribute across L1, L2, L3
         tiers = [Tier.L1, Tier.L2, Tier.L3]
@@ -501,18 +517,71 @@ class StabilityTracker:
                     tier_idx += 1
                     accumulated = 0
 
-    def _init_from_clusters(self, components, counter):
+    def _seed_l0_symbols(self, ref_index, all_files, counter):
+        """Seed L0 with high-connectivity symbols to meet provider cache minimum.
+
+        Selects symbols by reference count descending until L0 reaches
+        cache_target_tokens. System prompt is seeded separately by LLMService.
+
+        Returns set of paths placed in L0.
+        """
+        MIN_L0_TOKENS = 1024  # provider cache minimum
+
+        # Get current L0 tokens (system:prompt may already be seeded)
+        l0_tokens = self.get_tier_tokens(Tier.L0)
+        if l0_tokens >= MIN_L0_TOKENS:
+            return set()
+
+        # Rank files by reference count descending
+        ranked = sorted(
+            all_files,
+            key=lambda f: ref_index.file_ref_count(f),
+            reverse=True,
+        )
+
+        seeded = set()
+        for path in ranked:
+            if l0_tokens >= MIN_L0_TOKENS:
+                break
+            key = f"symbol:{path}"
+            # Estimate tokens — use counter if available, else rough estimate
+            tokens = 0
+            if counter:
+                # We don't have the block content yet (not indexed), but we
+                # can use a rough estimate; tokens will be corrected on first update
+                tokens = 50  # placeholder per symbol
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=Tier.L0,
+                n=TIER_CONFIG[Tier.L0]["entry_n"],
+                content_hash="",
+                tokens=tokens,
+            )
+            l0_tokens += tokens
+            seeded.add(path)
+
+        if seeded:
+            logger.info(f"Seeded {len(seeded)} symbols into L0 for cache minimum")
+
+        return seeded
+
+    def _init_from_clusters(self, components, counter, all_files=None, exclude=None):
         """Initialize from connected components.
 
         Greedy bin-packing by cluster size, each cluster stays together.
+        Files not in any component (no mutual references) are distributed
+        into the smallest tier so they aren't left untracked.
         """
         tiers = [Tier.L1, Tier.L2, Tier.L3]
         tier_sizes = {t: 0 for t in tiers}
+        placed = set(exclude or set())
 
         for component in sorted(components, key=len, reverse=True):
             # Place in smallest tier
             target = min(tiers, key=lambda t: tier_sizes[t])
             for path in component:
+                if path in placed:
+                    continue
                 key = f"symbol:{path}"
                 self._items[key] = TrackedItem(
                     key=key,
@@ -522,3 +591,27 @@ class StabilityTracker:
                     tokens=0,
                 )
                 tier_sizes[target] += 1
+                placed.add(path)
+
+        # Distribute orphan files (no mutual references) into smallest tiers
+        if all_files:
+            for path in all_files:
+                if path not in placed:
+                    target = min(tiers, key=lambda t: tier_sizes[t])
+                    key = f"symbol:{path}"
+                    self._items[key] = TrackedItem(
+                        key=key,
+                        tier=target,
+                        n=TIER_CONFIG[target]["entry_n"],
+                        content_hash="",
+                        tokens=0,
+                    )
+                    tier_sizes[target] += 1
+                    placed.add(path)
+
+        l0_count = len(exclude or set())
+        logger.info(
+            f"Tier init: {l0_count} L0, {tier_sizes[Tier.L1]} L1, {tier_sizes[Tier.L2]} L2, "
+            f"{tier_sizes[Tier.L3]} L3 ({len(placed)} total, "
+            f"{len(placed) - l0_count - sum(len(c) for c in components)} orphans)"
+        )

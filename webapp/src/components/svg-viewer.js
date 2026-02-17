@@ -570,7 +570,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         }
       },
       onSelect: (el) => {
-        this._selectedTag = el ? el.tagName.toLowerCase() : '';
+        if (this._svgEditor && this._svgEditor._multiSelected.size > 1) {
+          this._selectedTag = `${this._svgEditor._multiSelected.size} elements`;
+        } else {
+          this._selectedTag = el ? `<${el.tagName.toLowerCase()}>` : '';
+        }
       },
       onDeselect: () => {
         this._selectedTag = '';
@@ -905,7 +909,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             @click=${() => this._setMode('select')} title="Select & edit mode">✦ Select</button>
           <button class="${this._mode === 'pan' ? 'active' : ''}"
             @click=${() => this._setMode('pan')} title="Pan & zoom mode">✥ Pan</button>
-          ${this._selectedTag ? html`<span class="mode-label">&lt;${this._selectedTag}&gt;</span>` : nothing}
+          ${this._selectedTag ? html`<span class="mode-label">${this._selectedTag}</span>` : nothing}
 
           <div class="separator"></div>
 

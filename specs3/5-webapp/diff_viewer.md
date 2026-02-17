@@ -73,6 +73,37 @@ Registered when editor and RPC are both ready:
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
 
+## Markdown Preview
+
+For `.md` and `.markdown` files, a **Preview** button appears in the top-right corner (next to the status LED). Toggling it switches from the standard side-by-side diff layout to a split editor+preview layout.
+
+### Split Layout
+
+| Pane | Content |
+|------|---------|
+| Left | Monaco editor (inline diff mode, word wrap enabled) |
+| Right | Live-rendered Markdown preview |
+
+When preview mode is active, the Monaco diff editor switches to **inline mode** (not side-by-side) so the editor fits in half the viewport. Word wrap is enabled for comfortable editing. The preview pane renders the modified editor's content using `renderMarkdownWithSourceMap()`, which injects `data-source-line` attributes into the HTML output for scroll synchronization.
+
+### Live Update
+
+The preview updates on every keystroke — the editor's `onDidChangeModelContent` event triggers `_updatePreview()`, which re-renders the Markdown and triggers a Lit update.
+
+### Bidirectional Scroll Sync
+
+Editor and preview scroll positions are synchronized:
+
+**Editor → Preview:** When the editor scrolls, the top visible line is computed from `scrollTop / lineHeight`. The preview pane's `data-source-line` anchors are scanned to find the element at or just before that line. Linear interpolation between adjacent anchors provides smooth sub-element scrolling.
+
+**Preview → Editor:** When the preview pane scrolls, the reverse mapping finds which source line corresponds to the current scroll offset. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning.
+
+**Scroll lock:** A mutex mechanism prevents infinite feedback loops. When one side initiates a scroll, it sets `_scrollLock` to `'editor'` or `'preview'`. The other side's scroll handler checks the lock and skips if the other side owns it. The lock auto-releases after 120ms.
+
+### Toggle Behavior
+
+Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). The editor container reference is updated after the Lit template re-renders, and the `ResizeObserver` is reattached.
+
 ## Event Routing
 
 | Source | Event Path |

@@ -179,7 +179,16 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 
 ### Edit Summary
 
-Banner **after** all edit blocks (at the end of the assistant message, not the top): counts of applied/failed/skipped/not-in-context with color-coded stat badges (green/red/orange/amber). When not-in-context edits are present, the banner includes a prompt: "N files were added to context. Send a follow-up to retry those edits." Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
+Banner **after** all edit blocks (at the end of the assistant message, not the top): counts of applied/failed/skipped/not-in-context with color-coded stat badges (green/red/orange/amber). When not-in-context edits are present, the banner includes a note about the auto-populated retry prompt. Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
+
+### Not-In-Context Retry Prompt
+
+When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt:
+
+- **Single file**: "The file {name} has been added to context. Please retry the edit for: ..."
+- **Multiple files**: "The files {name1}, {name2} have been added to context. Please retry the edits for: ..."
+
+The prompt lists each file's full path. It is placed into the textarea (auto-resized, focused) but **not auto-sent** — the user reviews and sends when ready. This parallels the ambiguous anchor retry prompt behavior.
 
 ### Ambiguous Anchor Retry Prompt
 
