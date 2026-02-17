@@ -17,7 +17,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
-import { renderMarkdown } from '../utils/markdown.js';
+import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
 import * as monaco from 'monaco-editor';
 
 // Configure Monaco workers — use editor worker for diff computation,
@@ -71,6 +71,28 @@ function detectLanguage(filePath) {
   if (lastDot === -1) return 'plaintext';
   const ext = filePath.slice(lastDot).toLowerCase();
   return LANG_MAP[ext] || 'plaintext';
+}
+
+/**
+ * Module-level helper — collects data-source-line anchors from a preview pane.
+ * Defined outside the class so Monaco scroll callbacks can invoke it without
+ * depending on `this` binding (Problem 3 fix).
+ *
+ * @param {HTMLElement} previewPane
+ * @returns {Array<{line: number, offsetTop: number}>} sorted by source line
+ */
+function _getPreviewAnchors(previewPane) {
+  if (!previewPane) return [];
+  const els = previewPane.querySelectorAll('[data-source-line]');
+  const anchors = [];
+  for (const el of els) {
+    const line = parseInt(el.getAttribute('data-source-line'), 10);
+    if (!isNaN(line)) {
+      anchors.push({ line, offsetTop: el.offsetTop });
+    }
+  }
+  anchors.sort((a, b) => a.line - b.line);
+  return anchors;
 }
 
 export class AcDiffViewer extends RpcMixin(LitElement) {
@@ -292,6 +314,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._highlightDecorations = [];
     this._lspRegistered = false;
     this._virtualContents = {};
+    this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
+    this._scrollLockTimer = null;  // Timer to release the lock
+    this._editorScrollDisposable = null; // Monaco scroll listener disposable
 
     this._onKeyDown = this._onKeyDown.bind(this);
   }
@@ -312,6 +337,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if (this._styleObserver) {
       this._styleObserver.disconnect();
       this._styleObserver = null;
+    }
+    if (this._scrollLockTimer) {
+      clearTimeout(this._scrollLockTimer);
+      this._scrollLockTimer = null;
     }
   }
 
@@ -661,6 +690,25 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       });
     }
 
+    // Problem 6 fix: listen on only the modified editor (not both) to
+    // avoid double-firing scroll events in inline diff mode.
+    if (this._editorScrollDisposable) {
+      this._editorScrollDisposable.dispose();
+      this._editorScrollDisposable = null;
+    }
+    if (this._previewMode) {
+      const modifiedEditor = this._editor.getModifiedEditor();
+      // Arrow function preserves `this` for the class, but calls the
+      // module-level _getPreviewAnchors (Problem 3 fix).
+      this._editorScrollDisposable = modifiedEditor.onDidScrollChange(() => {
+        if (this._scrollLock === 'preview') return;
+        this._scrollLock = 'editor';
+        clearTimeout(this._scrollLockTimer);
+        this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+        this._scrollPreviewToEditorLine();
+      });
+    }
+
     this._editor.layout();
 
     if (this._previewMode) {
@@ -669,15 +717,21 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _disposeEditor() {
+    // Dispose the scroll listener first
+    if (this._editorScrollDisposable) {
+      this._editorScrollDisposable.dispose();
+      this._editorScrollDisposable = null;
+    }
     if (this._editor) {
-      // Dispose models
+      // Problem 2 fix: dispose the diff editor FIRST (releases its hold on
+      // the models), then dispose the text models afterward.
       const model = this._editor.getModel();
+      this._editor.dispose();
+      this._editor = null;
       if (model) {
         if (model.original) model.original.dispose();
         if (model.modified) model.modified.dispose();
       }
-      this._editor.dispose();
-      this._editor = null;
     }
     this._highlightDecorations = [];
   }
@@ -1116,12 +1170,92 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   _updatePreview() {
     if (!this._editor) {
       const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-      this._previewContent = file ? renderMarkdown(file.modified) : '';
+      this._previewContent = file ? renderMarkdownWithSourceMap(file.modified) : '';
     } else {
       const content = this._editor.getModifiedEditor()?.getValue() ?? '';
-      this._previewContent = renderMarkdown(content);
+      this._previewContent = renderMarkdownWithSourceMap(content);
     }
     this.requestUpdate();
+  }
+
+  // === Preview ↔ Editor Scroll Sync ===
+
+  /**
+   * Editor → Preview: find which source line is at the top of the editor
+   * viewport and scroll the preview pane to the corresponding element.
+   *
+   * Problem 4 fix: no artificial offsets — symmetric in both directions.
+   * Problem 5 fix: uses pixel-precise setScrollTop instead of revealLine.
+   */
+  _scrollPreviewToEditorLine() {
+    const previewPane = this.shadowRoot?.querySelector('.preview-pane');
+    if (!previewPane || !this._editor) return;
+
+    const modifiedEditor = this._editor.getModifiedEditor();
+    const scrollTop = modifiedEditor.getScrollTop();
+    const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    const topLine = Math.floor(scrollTop / lineHeight) + 1;
+
+    const anchors = _getPreviewAnchors(previewPane);
+    if (anchors.length === 0) return;
+
+    // Find the anchor at or just before topLine
+    let target = anchors[0];
+    for (const a of anchors) {
+      if (a.line <= topLine) target = a;
+      else break;
+    }
+
+    // Interpolate between this anchor and the next for smooth scrolling
+    const idx = anchors.indexOf(target);
+    const next = anchors[idx + 1];
+    let scrollTarget = target.offsetTop;
+    if (next && next.line > target.line) {
+      const fraction = (topLine - target.line) / (next.line - target.line);
+      scrollTarget += fraction * (next.offsetTop - target.offsetTop);
+    }
+
+    previewPane.scrollTop = scrollTarget;
+  }
+
+  /**
+   * Preview → Editor: find which data-source-line element is at the top of
+   * the preview viewport and scroll the editor to that line.
+   */
+  _scrollEditorToPreviewLine() {
+    if (!this._editor) return;
+    const previewPane = this.shadowRoot?.querySelector('.preview-pane');
+    if (!previewPane) return;
+
+    if (this._scrollLock === 'editor') return;
+    this._scrollLock = 'preview';
+    clearTimeout(this._scrollLockTimer);
+    this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+
+    const scrollTop = previewPane.scrollTop;
+    const anchors = _getPreviewAnchors(previewPane);
+    if (anchors.length === 0) return;
+
+    // Find the anchor at or just before current scroll position
+    let target = anchors[0];
+    for (const a of anchors) {
+      if (a.offsetTop <= scrollTop) target = a;
+      else break;
+    }
+
+    // Interpolate for sub-anchor precision
+    const idx = anchors.indexOf(target);
+    const next = anchors[idx + 1];
+    let targetLine = target.line;
+    if (next && next.offsetTop > target.offsetTop) {
+      const fraction = (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop);
+      targetLine += fraction * (next.line - target.line);
+    }
+
+    // Problem 5 fix: pixel-precise positioning instead of revealLine
+    const modifiedEditor = this._editor.getModifiedEditor();
+    const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    modifiedEditor.setScrollTop((targetLine - 1) * lineHeight);
   }
 
   // === Rendering ===
@@ -1138,7 +1272,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
           <div class="editor-pane">
             ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
           </div>
-          <div class="preview-pane">
+          <div class="preview-pane"
+               @scroll=${() => this._scrollEditorToPreviewLine()}>
             ${unsafeHTML(this._previewContent)}
           </div>
         </div>
