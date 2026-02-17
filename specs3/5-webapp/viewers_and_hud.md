@@ -111,7 +111,7 @@ Categories with zero tokens or no detail items show no toggle.
 
 ### Session Totals
 
-Fixed footer below categories: 2×2 grid showing cumulative session totals (prompt in, completion out, total, cache hit).
+Fixed footer below categories: grid showing cumulative session totals (total, prompt in, completion out, cache read, cache write). Cache read highlighted green when non-zero; cache write highlighted yellow when non-zero.
 
 ---
 

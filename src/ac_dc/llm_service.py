@@ -482,14 +482,28 @@ class LLMService:
             # thing in context before the model generates its response.
             augmented_message = message + self._config.get_system_reminder()
 
-            # Assemble messages
-            assembled = self._context.assemble_messages(
-                user_prompt=augmented_message,
-                images=images if images else None,
+            # Assemble messages — use tiered assembly if stability tracker is ready
+            tiered_content = self._build_tiered_content(
                 symbol_map=symbol_map,
                 symbol_legend=symbol_legend,
-                file_tree=file_tree,
             )
+            if tiered_content:
+                assembled = self._context.assemble_tiered_messages(
+                    user_prompt=augmented_message,
+                    images=images if images else None,
+                    symbol_map=symbol_map,
+                    symbol_legend=symbol_legend,
+                    file_tree=file_tree,
+                    tiered_content=tiered_content,
+                )
+            else:
+                assembled = self._context.assemble_messages(
+                    user_prompt=augmented_message,
+                    images=images if images else None,
+                    symbol_map=symbol_map,
+                    symbol_legend=symbol_legend,
+                    file_tree=file_tree,
+                )
 
             # Stream LLM completion
             full_content, was_cancelled, usage = await self._run_llm_stream(
@@ -823,6 +837,74 @@ class LLMService:
             elif action in ("demoted", "demoted_underfilled"):
                 logger.info(f"📉 {change.get('from', '?')} → {change.get('to', '?')}: {key}")
 
+    def _build_tiered_content(self, symbol_map="", symbol_legend=""):
+        """Build tiered_content dict from stability tracker for cache-aware prompt assembly.
+
+        Returns dict with l0/l1/l2/l3 keys, or None if tracker not ready.
+        Each tier contains: symbols, files, history, graduated_files, graduated_history_indices.
+        """
+        tracker = self._stability_tracker
+        if not tracker or not self._stability_initialized:
+            return None
+
+        history = self._context.get_history()
+        tiered = {}
+
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+            tier_key = tier.name.lower()
+            tier_items = tracker.get_tier_items(tier)
+            if not tier_items:
+                tiered[tier_key] = {
+                    "symbols": "",
+                    "files": "",
+                    "history": [],
+                    "graduated_files": [],
+                    "graduated_history_indices": [],
+                }
+                continue
+
+            # Collect symbols, files, and history for this tier
+            symbol_parts = []
+            file_parts = []
+            tier_history = []
+            graduated_files = []
+            graduated_history_indices = []
+
+            for key, item in tier_items.items():
+                if key.startswith("system:"):
+                    # System prompt handled separately by assemble_tiered_messages
+                    continue
+                elif key.startswith("symbol:"):
+                    path = key.split(":", 1)[1]
+                    if self._symbol_index:
+                        block = self._symbol_index.get_file_symbol_block(path)
+                        if block:
+                            symbol_parts.append(block)
+                elif key.startswith("file:"):
+                    path = key.split(":", 1)[1]
+                    content = self._context.file_context.get_content(path)
+                    if content is not None:
+                        file_parts.append(f"{path}\n```\n{content}\n```")
+                        graduated_files.append(path)
+                elif key.startswith("history:"):
+                    try:
+                        idx = int(key.split(":", 1)[1])
+                        if 0 <= idx < len(history):
+                            tier_history.append(dict(history[idx]))
+                            graduated_history_indices.append(idx)
+                    except (ValueError, IndexError):
+                        pass
+
+            tiered[tier_key] = {
+                "symbols": "\n".join(symbol_parts),
+                "files": "\n\n".join(file_parts),
+                "history": tier_history,
+                "graduated_files": graduated_files,
+                "graduated_history_indices": graduated_history_indices,
+            }
+
+        return tiered
+
     # === Commit Message Generation (RPC) ===
 
     def generate_commit_message(self, diff_text):
@@ -1064,7 +1146,11 @@ class LLMService:
                 "contents": contents,
             })
 
-        cache_hit_rate = cached_tokens / total if total > 0 else 0
+        # Compute total from tier blocks (the actual prompt content) rather than
+        # from the breakdown categories, which don't account for graduated
+        # files/symbols/history in cached tiers.
+        tier_total = sum(b["tokens"] for b in blocks)
+        cache_hit_rate = cached_tokens / tier_total if tier_total > 0 else 0
 
         # Tier changes — group by direction
         promotions = []
@@ -1097,11 +1183,21 @@ class LLMService:
             "cache_write": st["cache_write_tokens"],
         }
 
+        # Provider-reported cache hit rate (from cumulative session data)
+        # More accurate than tier-based estimate since it reflects actual LLM behavior
+        provider_input = st["input_tokens"]
+        provider_cache_read = st["cache_read_tokens"]
+        provider_cache_rate = (
+            provider_cache_read / provider_input
+            if provider_input > 0 else None
+        )
+
         return {
             "model": counter.model_name,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
             "cache_hit_rate": cache_hit_rate,
+            "provider_cache_rate": provider_cache_rate,
             "blocks": blocks,
             "breakdown": {
                 "system": system_tokens,
@@ -1245,8 +1341,27 @@ class LLMService:
         for line in hud_lines:
             logger.info(line)
 
-        # --- Token Usage (compact) ---
+        # --- Token Usage ---
         logger.info(f"Model: {counter.model_name}")
+
+        # Category breakdown
+        symbol_map_tokens = 0
+        if self._symbol_index:
+            sm = self._symbol_index.get_symbol_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+        file_tokens = self._context.file_context.count_tokens(counter)
+        history_tokens = self._context.history_token_count()
+        max_tokens = counter.max_input_tokens
+
+        logger.info(f"System:      {system_tokens + legend_tokens:>8,}")
+        logger.info(f"Symbol Map:  {symbol_map_tokens:>8,}")
+        logger.info(f"Files:       {file_tokens:>8,}")
+        logger.info(f"History:     {history_tokens:>8,}")
+        logger.info(f"Total:       {total:>8,} / {max_tokens:,}")
+
         if input_tokens or output_tokens:
             logger.info(f"Last request: {input_tokens:,} in, {output_tokens:,} out")
         if cache_read or cache_write:
@@ -1256,9 +1371,13 @@ class LLMService:
             if cache_write:
                 parts.append(f"write: {cache_write:,}")
             logger.info(f"Cache: {', '.join(parts)}")
-        session_total = sum(self._session_totals.values())
+
+        st = self._session_totals
+        session_total = sum(st.values())
         if session_total:
-            logger.info(f"Session total: {session_total:,}")
+            logger.info(f"Session: {session_total:,} (in: {st['input_tokens']:,}, out: {st['output_tokens']:,})")
+            if st['cache_read_tokens'] or st['cache_write_tokens']:
+                logger.info(f"  cache read: {st['cache_read_tokens']:,}, write: {st['cache_write_tokens']:,}")
 
         # --- Tier Changes (grouped) ---
         if tracker:

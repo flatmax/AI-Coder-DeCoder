@@ -428,7 +428,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
 
   _getCacheBadge(rate) {
     if (rate == null) return nothing;
-    const pct = (rate * 100).toFixed(0);
+    const pct = Math.min(100, Math.max(0, rate * 100)).toFixed(0);
     let cls = 'low';
     if (rate >= 0.5) cls = 'good';
     else if (rate >= 0.2) cls = 'ok';
@@ -444,7 +444,7 @@ export class AcTokenHud extends RpcMixin(LitElement) {
   _renderHeader() {
     const d = this._data;
     const model = d?.model || '—';
-    const cacheRate = d?.cache_hit_rate;
+    const cacheRate = d?.provider_cache_rate ?? d?.cache_hit_rate;
 
     return html`
       <div class="hud-header">
@@ -553,18 +553,14 @@ export class AcTokenHud extends RpcMixin(LitElement) {
             <span class="stat-label">Completion</span>
             <span class="stat-value">${formatTokens(completion)}</span>
           </div>
-          ${cacheRead > 0 ? html`
-            <div class="stat-row">
-              <span class="stat-label">Cache Read</span>
-              <span class="stat-value green">${formatTokens(cacheRead)}</span>
-            </div>
-          ` : nothing}
-          ${cacheWrite > 0 ? html`
-            <div class="stat-row">
-              <span class="stat-label">Cache Write</span>
-              <span class="stat-value yellow">${formatTokens(cacheWrite)}</span>
-            </div>
-          ` : nothing}
+          <div class="stat-row">
+            <span class="stat-label">Cache Read</span>
+            <span class="stat-value ${cacheRead > 0 ? 'green' : ''}">${formatTokens(cacheRead)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Cache Write</span>
+            <span class="stat-value ${cacheWrite > 0 ? 'yellow' : ''}">${formatTokens(cacheWrite)}</span>
+          </div>
         </div>
       </div>
     `;
@@ -668,18 +664,14 @@ export class AcTokenHud extends RpcMixin(LitElement) {
             <span class="stat-label">Total</span>
             <span class="stat-value">${formatTokens(s.total)}</span>
           </div>
-          ${s.cache_hit > 0 ? html`
-            <div class="stat-row">
-              <span class="stat-label">Cache Saved</span>
-              <span class="stat-value green">${formatTokens(s.cache_hit)}</span>
-            </div>
-          ` : nothing}
-          ${s.cache_write > 0 ? html`
-            <div class="stat-row">
-              <span class="stat-label">Cache Written</span>
-              <span class="stat-value yellow">${formatTokens(s.cache_write)}</span>
-            </div>
-          ` : nothing}
+          <div class="stat-row">
+            <span class="stat-label">Cache Read</span>
+            <span class="stat-value ${s.cache_hit > 0 ? 'green' : ''}">${formatTokens(s.cache_hit)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Cache Write</span>
+            <span class="stat-value ${s.cache_write > 0 ? 'yellow' : ''}">${formatTokens(s.cache_write)}</span>
+          </div>
         </div>
       </div>
     `;
@@ -694,11 +686,11 @@ export class AcTokenHud extends RpcMixin(LitElement) {
         @mouseleave=${this._onMouseLeave}
       >
         ${this._renderHeader()}
-        ${this._renderCacheTiers()}
         ${this._renderThisRequest()}
-        ${this._renderHistoryBudget()}
-        ${this._renderTierChanges()}
         ${this._renderSessionTotals()}
+        ${this._renderHistoryBudget()}
+        ${this._renderCacheTiers()}
+        ${this._renderTierChanges()}
       </div>
     `;
   }

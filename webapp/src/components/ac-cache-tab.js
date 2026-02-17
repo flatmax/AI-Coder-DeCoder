@@ -440,10 +440,8 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     const d = this._data;
     if (!d) return nothing;
 
-    const cached = d.cached_tokens || 0;
-    const total = d.total_tokens || 1;
-    const hitRate = d.cache_hit_rate != null ? d.cache_hit_rate : (cached / total);
-    const pct = (hitRate * 100).toFixed(0);
+    const hitRate = d.provider_cache_rate ?? d.cache_hit_rate ?? 0;
+    const pct = Math.min(100, Math.max(0, hitRate * 100)).toFixed(0);
 
     return html`
       <div class="perf-section">
@@ -452,7 +450,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           <span class="perf-value">${pct}% hit rate</span>
         </div>
         <div class="perf-bar">
-          <div class="perf-bar-fill" style="width: ${Math.min(100, hitRate * 100)}%"></div>
+          <div class="perf-bar-fill" style="width: ${Math.min(100, Math.max(0, hitRate * 100))}%"></div>
         </div>
       </div>
     `;
