@@ -33,7 +33,7 @@ const TIER_LABELS = {
 const TYPE_ICONS = {
   system: '⚙️',
   legend: '📖',
-  symbols: '📦',
+  symbols: '🗺️',
   files: '📄',
   urls: '🔗',
   history: '💬',
@@ -440,10 +440,8 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     const d = this._data;
     if (!d) return nothing;
 
-    const cached = d.cached_tokens || 0;
-    const total = d.total_tokens || 1;
-    const hitRate = d.cache_hit_rate != null ? d.cache_hit_rate : (cached / total);
-    const pct = (hitRate * 100).toFixed(0);
+    const hitRate = d.provider_cache_rate ?? d.cache_hit_rate ?? 0;
+    const pct = Math.min(100, Math.max(0, hitRate * 100)).toFixed(0);
 
     return html`
       <div class="perf-section">
@@ -452,7 +450,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           <span class="perf-value">${pct}% hit rate</span>
         </div>
         <div class="perf-bar">
-          <div class="perf-bar-fill" style="width: ${Math.min(100, hitRate * 100)}%"></div>
+          <div class="perf-bar-fill" style="width: ${Math.min(100, Math.max(0, hitRate * 100))}%"></div>
         </div>
       </div>
     `;
@@ -507,38 +505,51 @@ export class AcCacheTab extends RpcMixin(LitElement) {
              @keydown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleTier(tier); }}}>
           <span class="tier-toggle" aria-hidden="true">${expanded ? '▼' : '▶'}</span>
           <span class="tier-dot" style="background: ${color}" aria-hidden="true"></span>
-          <span class="tier-name">${label}</span>
+          <span class="tier-name">${label} (${contents.length})</span>
           <span class="tier-tokens">${formatTokens(tokens)}</span>
           ${cached ? html`<span class="tier-cached-badge" aria-label="Cached">🔒</span>` : nothing}
         </div>
         <div class="tier-contents ${expanded ? 'expanded' : ''}">
-          ${contents.map(item => {
-            const icon = TYPE_ICONS[item.type] || '📄';
-            const name = item.name || item.path || '—';
-            const itemTokens = item.tokens || 0;
-            const n = item.n != null ? item.n : null;
-            const threshold = item.threshold || block.threshold;
-            const barPct = (n != null && threshold) ? Math.min(100, (n / threshold) * 100) : 0;
-
+          ${(() => {
+            const measured = contents.filter(i => i.tokens > 0);
+            const unmeasured = contents.filter(i => !i.tokens);
             return html`
-              <div class="tier-item">
-                <span class="item-icon">${icon}</span>
-                <span class="item-name" title="${name}">${name}</span>
-                ${n != null ? html`
-                  <span class="item-n" title="N=${n}/${threshold || '?'}">${n}/${threshold || '?'}</span>
-                  <div class="stability-bar" title="N=${n}/${threshold || '?'}">
-                    <div class="stability-bar-fill" style="width: ${barPct}%; background: ${color}"></div>
+              ${measured.map(item => {
+                const icon = TYPE_ICONS[item.type] || '📄';
+                const name = item.name || item.path || '—';
+                const itemTokens = item.tokens || 0;
+                const n = item.n != null ? item.n : null;
+                const threshold = item.threshold || block.threshold;
+                const barPct = (n != null && threshold) ? Math.min(100, (n / threshold) * 100) : 0;
+
+                return html`
+                  <div class="tier-item">
+                    <span class="item-icon">${icon}</span>
+                    <span class="item-name" title="${name}">${name}</span>
+                    <span class="item-tokens">${formatTokens(itemTokens)}</span>
+                    ${n != null ? html`
+                      <div class="stability-bar" title="N=${n}/${threshold || '?'}">
+                        <div class="stability-bar-fill" style="width: ${barPct}%; background: ${color}"></div>
+                      </div>
+                      <span class="item-n" title="N=${n}/${threshold || '?'}">${n}/${threshold || '?'}</span>
+                    ` : nothing}
                   </div>
-                ` : nothing}
-                <span class="item-tokens">${formatTokens(itemTokens)}</span>
-              </div>
+                `;
+              })}
+              ${unmeasured.length > 0 ? html`
+                <div class="tier-item">
+                  <span class="item-icon">📦</span>
+                  <span class="item-name" style="color: var(--text-muted); font-style: italic;"
+                    >${unmeasured.length} pre-indexed symbols (awaiting measurement)</span>
+                </div>
+              ` : nothing}
+              ${contents.length === 0 ? html`
+                <div class="tier-item">
+                  <span class="item-name" style="color: var(--text-muted); font-style: italic;">Empty</span>
+                </div>
+              ` : nothing}
             `;
-          })}
-          ${contents.length === 0 ? html`
-            <div class="tier-item">
-              <span class="item-name" style="color: var(--text-muted); font-style: italic;">Empty</span>
-            </div>
-          ` : nothing}
+          })()}
         </div>
       </div>
     `;
@@ -586,12 +597,11 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           aria-label="Refresh cache data">↻</button>
       </div>
 
-      ${this._renderChanges()}
-
       ${this._loading && !this._data ? html`
         <div class="loading-indicator">Loading cache data...</div>
       ` : html`
         ${this._renderTiers()}
+        ${this._renderChanges()}
         ${this._renderFooter()}
       `}
     `;

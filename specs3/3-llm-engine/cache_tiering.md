@@ -1,5 +1,5 @@
 # Cache Tiering System
-
+ 
 ## Overview
 
 The cache tiering system organizes LLM prompt content into stability-based tiers that align with provider cache breakpoints (e.g., Anthropic's `cache_control: {"type": "ephemeral"}`). Content that remains unchanged across requests promotes to higher tiers; changed content demotes. This reduces re-ingestion costs.
@@ -33,6 +33,10 @@ Every tracked item has an **N value** measuring consecutive unchanged appearance
 ### Content Hashing
 
 SHA256 hash of: file content (for files), compact symbol block (for symbols), or role+content string (for history).
+
+**Symbol blocks** use a signature hash derived from the raw symbol data (names, types, parameters) rather than the formatted compact output. This avoids spurious hash mismatches when path aliases or exclusion sets change between requests.
+
+**System prompt** is hashed from the prompt text alone, excluding the symbol legend. The legend includes path aliases that change when file selections change; including it would cause the system prompt to appear "changed" on every selection update, preventing it from stabilizing in L0.
 
 ## Graduation: Active → L3
 
@@ -108,15 +112,18 @@ When a selected file graduates to L3, its full content moves from the "Working F
 
 On startup, tier assignments are initialized from the cross-file reference graph. **No persistence** — rebuilt fresh each session. Initialized items receive their tier's `entry_n` as their starting N value and a placeholder content hash.
 
-**Threshold anchoring does NOT apply during initialization.** Anchoring only runs during the cascade (Phase 3), which first executes after the first response.
+### L0 Seeding
+
+L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet the provider's minimum cache size (default: 1024 tokens). Symbols are selected by reference count descending (most-referenced first) from the reference index. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
 
 ### Clustering Algorithm
 
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)
 2. **Find connected components** — naturally produces language separation and subsystem grouping
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
+4. **Distribute orphan files** — files not in any connected component (no mutual references) are distributed into the smallest tier via the same greedy bin-packing. This is critical because `connected_components()` only returns files with bidirectional references — files with only one-way references or no references at all would otherwise be untracked at initialization, causing them to register as new active items on every request and never stabilize.
 
-**L0 is never assigned by clustering** — content must be earned through promotion. Only symbol entries are initialized (file entries start in active).
+**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by `file_ref_count` descending) to meet the provider's minimum cache size (e.g., 1024 tokens for Anthropic). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active). **L0-seeded symbols are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
 
 After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
 

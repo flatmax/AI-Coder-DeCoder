@@ -14,8 +14,10 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
+import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
 import * as monaco from 'monaco-editor';
 
 // Configure Monaco workers — use editor worker for diff computation,
@@ -71,11 +73,34 @@ function detectLanguage(filePath) {
   return LANG_MAP[ext] || 'plaintext';
 }
 
+/**
+ * Module-level helper — collects data-source-line anchors from a preview pane.
+ * Defined outside the class so Monaco scroll callbacks can invoke it without
+ * depending on `this` binding (Problem 3 fix).
+ *
+ * @param {HTMLElement} previewPane
+ * @returns {Array<{line: number, offsetTop: number}>} sorted by source line
+ */
+function _getPreviewAnchors(previewPane) {
+  if (!previewPane) return [];
+  const els = previewPane.querySelectorAll('[data-source-line]');
+  const anchors = [];
+  for (const el of els) {
+    const line = parseInt(el.getAttribute('data-source-line'), 10);
+    if (!isNaN(line)) {
+      anchors.push({ line, offsetTop: el.offsetTop });
+    }
+  }
+  anchors.sort((a, b) => a.line - b.line);
+  return anchors;
+}
+
 export class AcDiffViewer extends RpcMixin(LitElement) {
   static properties = {
     _files: { type: Array, state: true },
     _activeIndex: { type: Number, state: true },
     _dirtySet: { type: Object, state: true },
+    _previewMode: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -144,6 +169,128 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       user-select: none;
     }
 
+    /* Preview button — top-right, next to status LED */
+    .preview-btn {
+      position: absolute;
+      top: 6px;
+      right: 36px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border: 1px solid var(--border, #444);
+      border-radius: 4px;
+      background: var(--bg-secondary, #1e1e1e);
+      color: var(--text-muted, #999);
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .preview-btn:hover {
+      background: var(--bg-tertiary, #2a2a2a);
+      color: var(--text-primary, #e0e0e0);
+      border-color: var(--text-muted, #666);
+    }
+    .preview-btn.active {
+      background: var(--accent-primary-dim, rgba(79, 195, 247, 0.15));
+      color: var(--accent-primary, #4fc3f7);
+      border-color: var(--accent-primary, #4fc3f7);
+    }
+    .preview-btn .preview-icon {
+      width: 12px;
+      height: 10px;
+      border: 1.5px solid currentColor;
+      border-radius: 2px;
+    }
+
+    /* Split layout for preview mode */
+    .split-container {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .split-container .editor-pane {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .split-container .preview-pane {
+      flex: 1;
+      min-width: 0;
+      overflow-y: auto;
+      padding: 24px 32px;
+      background: var(--bg-primary, #0d1117);
+      border-left: 1px solid var(--border, #333);
+      font-size: 0.9rem;
+      line-height: 1.6;
+      color: var(--text-primary, #e0e0e0);
+    }
+
+    /* Markdown preview content styling */
+    .preview-pane h1, .preview-pane h2, .preview-pane h3,
+    .preview-pane h4, .preview-pane h5, .preview-pane h6 {
+      color: var(--text-primary, #e0e0e0);
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid var(--border, #333);
+      padding-bottom: 0.3em;
+    }
+    .preview-pane h1 { font-size: 1.8em; }
+    .preview-pane h2 { font-size: 1.4em; }
+    .preview-pane h3 { font-size: 1.15em; }
+    .preview-pane p { margin: 0.6em 0; }
+    .preview-pane a { color: var(--accent-primary, #4fc3f7); }
+    .preview-pane code {
+      background: var(--bg-tertiary, #161b22);
+      padding: 0.15em 0.4em;
+      border-radius: 3px;
+      font-size: 0.88em;
+    }
+    .preview-pane pre {
+      background: var(--bg-tertiary, #161b22);
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+    }
+    .preview-pane pre code {
+      background: none;
+      padding: 0;
+    }
+    .preview-pane blockquote {
+      border-left: 3px solid var(--accent-primary, #4fc3f7);
+      padding-left: 12px;
+      margin-left: 0;
+      color: var(--text-muted, #999);
+    }
+    .preview-pane ul, .preview-pane ol {
+      padding-left: 1.5em;
+    }
+    .preview-pane li { margin: 0.25em 0; }
+    .preview-pane table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.8em 0;
+    }
+    .preview-pane th, .preview-pane td {
+      border: 1px solid var(--border, #333);
+      padding: 6px 12px;
+      text-align: left;
+    }
+    .preview-pane th {
+      background: var(--bg-secondary, #1e1e1e);
+    }
+    .preview-pane img {
+      max-width: 100%;
+    }
+    .preview-pane hr {
+      border: none;
+      border-top: 1px solid var(--border, #333);
+      margin: 1.5em 0;
+    }
+
     /* Highlight animation for scroll-to-edit */
     .highlight-decoration {
       background: rgba(79, 195, 247, 0.2);
@@ -156,6 +303,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._files = [];
     this._activeIndex = -1;
     this._dirtySet = new Set();
+    this._previewMode = false;
+    this._previewContent = '';
     this._editor = null;
     this._editorContainer = null;
     this._resizeObserver = null;
@@ -165,6 +314,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._highlightDecorations = [];
     this._lspRegistered = false;
     this._virtualContents = {};
+    this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
+    this._scrollLockTimer = null;  // Timer to release the lock
+    this._editorScrollDisposable = null; // Monaco scroll listener disposable
 
     this._onKeyDown = this._onKeyDown.bind(this);
   }
@@ -186,10 +338,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       this._styleObserver.disconnect();
       this._styleObserver = null;
     }
+    if (this._scrollLockTimer) {
+      clearTimeout(this._scrollLockTimer);
+      this._scrollLockTimer = null;
+    }
   }
 
   firstUpdated() {
-    this._editorContainer = this.shadowRoot.querySelector('.editor-container');
+    this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
+                             this.shadowRoot.querySelector('.editor-container');
     if (this._editorContainer) {
       this._resizeObserver = new ResizeObserver(() => {
         if (this._editor) {
@@ -464,6 +621,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
 
     const language = detectLanguage(file.path);
 
+    const renderSideBySide = !this._previewMode;
+
     if (this._editor) {
       // Dispose old models before creating new ones to prevent leaks
       // that break diff computation
@@ -472,6 +631,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         if (oldModel.original) oldModel.original.dispose();
         if (oldModel.modified) oldModel.modified.dispose();
       }
+
+      // Switch between side-by-side and inline mode
+      this._editor.updateOptions({ renderSideBySide });
 
       // Update models in existing editor
       const originalModel = monaco.editor.createModel(file.original, language);
@@ -492,7 +654,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         theme: 'vs-dark',
         automaticLayout: false,
         minimap: { enabled: false },
-        renderSideBySide: true,
+        renderSideBySide,
         readOnly: false,
         originalEditable: false,
         scrollBeyondLastLine: false,
@@ -500,7 +662,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         lineNumbers: 'on',
         glyphMargin: false,
         folding: true,
-        wordWrap: 'off',
+        wordWrap: this._previewMode ? 'on' : 'off',
         renderWhitespace: 'selection',
         contextmenu: true,
         scrollbar: {
@@ -524,22 +686,52 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Track dirty state on modified editor
       this._editor.getModifiedEditor().onDidChangeModelContent(() => {
         this._checkDirty();
+        if (this._previewMode) this._updatePreview();
+      });
+    }
+
+    // Problem 6 fix: listen on only the modified editor (not both) to
+    // avoid double-firing scroll events in inline diff mode.
+    if (this._editorScrollDisposable) {
+      this._editorScrollDisposable.dispose();
+      this._editorScrollDisposable = null;
+    }
+    if (this._previewMode) {
+      const modifiedEditor = this._editor.getModifiedEditor();
+      // Arrow function preserves `this` for the class, but calls the
+      // module-level _getPreviewAnchors (Problem 3 fix).
+      this._editorScrollDisposable = modifiedEditor.onDidScrollChange(() => {
+        if (this._scrollLock === 'preview') return;
+        this._scrollLock = 'editor';
+        clearTimeout(this._scrollLockTimer);
+        this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+        this._scrollPreviewToEditorLine();
       });
     }
 
     this._editor.layout();
+
+    if (this._previewMode) {
+      this._updatePreview();
+    }
   }
 
   _disposeEditor() {
+    // Dispose the scroll listener first
+    if (this._editorScrollDisposable) {
+      this._editorScrollDisposable.dispose();
+      this._editorScrollDisposable = null;
+    }
     if (this._editor) {
-      // Dispose models
+      // Problem 2 fix: dispose the diff editor FIRST (releases its hold on
+      // the models), then dispose the text models afterward.
       const model = this._editor.getModel();
+      this._editor.dispose();
+      this._editor = null;
       if (model) {
         if (model.original) model.original.dispose();
         if (model.modified) model.modified.dispose();
       }
-      this._editor.dispose();
-      this._editor = null;
     }
     this._highlightDecorations = [];
   }
@@ -562,13 +754,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   // === Monaco Shadow DOM Style Injection ===
 
   _injectMonacoStyles() {
-    if (this._monacoStylesInjected) return;
-    this._monacoStylesInjected = true;
-
     const shadowRoot = this.shadowRoot;
 
-    // Clone existing Monaco styles from document.head into shadow root
+    // Re-sync all styles every time an editor is created — Monaco may have
+    // added new <style> elements synchronously during editor construction.
     this._syncAllStyles(shadowRoot);
+
+    // The MutationObserver only needs to be set up once — it catches styles
+    // that Monaco adds asynchronously after editor creation.
+    if (this._monacoStylesInjected) return;
+    this._monacoStylesInjected = true;
 
     // Watch for new styles being added/removed from document.head
     this._styleObserver = new MutationObserver((mutations) => {
@@ -598,6 +793,13 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _syncAllStyles(shadowRoot) {
+    // Remove previously-cloned styles to avoid duplicates
+    const old = shadowRoot.querySelectorAll('[data-monaco-injected]');
+    for (const el of old) {
+      el.remove();
+    }
+
+    // Clone all current styles from document.head into the shadow root
     const styles = document.head.querySelectorAll('style, link[rel="stylesheet"]');
     for (const style of styles) {
       const clone = style.cloneNode(true);
@@ -936,30 +1138,179 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return map[kind] || monaco.languages.CompletionItemKind.Text;
   }
 
+  // === Preview ===
+
+  _isMarkdownFile(path) {
+    if (!path) return false;
+    const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+    return ext === '.md' || ext === '.markdown';
+  }
+
+  _togglePreview() {
+    this._previewMode = !this._previewMode;
+    if (this._previewMode) {
+      this._updatePreview();
+    }
+    // Re-create editor with new layout mode
+    this._disposeEditor();
+    this.updateComplete.then(() => {
+      this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
+                               this.shadowRoot.querySelector('.editor-container');
+      if (this._editorContainer) {
+        if (this._resizeObserver) this._resizeObserver.disconnect();
+        this._resizeObserver = new ResizeObserver(() => {
+          if (this._editor) this._editor.layout();
+        });
+        this._resizeObserver.observe(this._editorContainer);
+      }
+      this._showEditor();
+    });
+  }
+
+  _updatePreview() {
+    if (!this._editor) {
+      const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+      this._previewContent = file ? renderMarkdownWithSourceMap(file.modified) : '';
+    } else {
+      const content = this._editor.getModifiedEditor()?.getValue() ?? '';
+      this._previewContent = renderMarkdownWithSourceMap(content);
+    }
+    this.requestUpdate();
+  }
+
+  // === Preview ↔ Editor Scroll Sync ===
+
+  /**
+   * Editor → Preview: find which source line is at the top of the editor
+   * viewport and scroll the preview pane to the corresponding element.
+   *
+   * Problem 4 fix: no artificial offsets — symmetric in both directions.
+   * Problem 5 fix: uses pixel-precise setScrollTop instead of revealLine.
+   */
+  _scrollPreviewToEditorLine() {
+    const previewPane = this.shadowRoot?.querySelector('.preview-pane');
+    if (!previewPane || !this._editor) return;
+
+    const modifiedEditor = this._editor.getModifiedEditor();
+    const scrollTop = modifiedEditor.getScrollTop();
+    const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    const topLine = Math.floor(scrollTop / lineHeight) + 1;
+
+    const anchors = _getPreviewAnchors(previewPane);
+    if (anchors.length === 0) return;
+
+    // Find the anchor at or just before topLine
+    let target = anchors[0];
+    for (const a of anchors) {
+      if (a.line <= topLine) target = a;
+      else break;
+    }
+
+    // Interpolate between this anchor and the next for smooth scrolling
+    const idx = anchors.indexOf(target);
+    const next = anchors[idx + 1];
+    let scrollTarget = target.offsetTop;
+    if (next && next.line > target.line) {
+      const fraction = (topLine - target.line) / (next.line - target.line);
+      scrollTarget += fraction * (next.offsetTop - target.offsetTop);
+    }
+
+    previewPane.scrollTop = scrollTarget;
+  }
+
+  /**
+   * Preview → Editor: find which data-source-line element is at the top of
+   * the preview viewport and scroll the editor to that line.
+   */
+  _scrollEditorToPreviewLine() {
+    if (!this._editor) return;
+    const previewPane = this.shadowRoot?.querySelector('.preview-pane');
+    if (!previewPane) return;
+
+    if (this._scrollLock === 'editor') return;
+    this._scrollLock = 'preview';
+    clearTimeout(this._scrollLockTimer);
+    this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+
+    const scrollTop = previewPane.scrollTop;
+    const anchors = _getPreviewAnchors(previewPane);
+    if (anchors.length === 0) return;
+
+    // Find the anchor at or just before current scroll position
+    let target = anchors[0];
+    for (const a of anchors) {
+      if (a.offsetTop <= scrollTop) target = a;
+      else break;
+    }
+
+    // Interpolate for sub-anchor precision
+    const idx = anchors.indexOf(target);
+    const next = anchors[idx + 1];
+    let targetLine = target.line;
+    if (next && next.offsetTop > target.offsetTop) {
+      const fraction = (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop);
+      targetLine += fraction * (next.line - target.line);
+    }
+
+    // Problem 5 fix: pixel-precise positioning instead of revealLine
+    const modifiedEditor = this._editor.getModifiedEditor();
+    const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    modifiedEditor.setScrollTop((targetLine - 1) * lineHeight);
+  }
+
   // === Rendering ===
 
   render() {
     const hasFiles = this._files.length > 0;
     const file = hasFiles && this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
     const isDirty = file ? this._dirtySet.has(file.path) : false;
-    const hasDiff = file ? (file.is_new || file.original !== file.savedContent) : false;
+    const showPreviewBtn = file && this._isMarkdownFile(file.path);
+
+    if (this._previewMode && file) {
+      return html`
+        <div class="split-container">
+          <div class="editor-pane">
+            ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
+          </div>
+          <div class="preview-pane"
+               @scroll=${() => this._scrollEditorToPreviewLine()}>
+            ${unsafeHTML(this._previewContent)}
+          </div>
+        </div>
+      `;
+    }
 
     return html`
       <div class="editor-container">
-        ${file ? html`
-          <button
-            class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
-            title="${file.path}${isDirty ? ' — unsaved (Ctrl+S to save)' : file.is_new ? ' — new file' : ''}"
-            aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
-            @click=${() => isDirty ? this._saveActiveFile() : null}
-          ></button>
-        ` : nothing}
+        ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
         ${!hasFiles ? html`
           <div class="empty-state">
             <div class="watermark">AC⚡DC</div>
           </div>
         ` : nothing}
       </div>
+    `;
+  }
+
+  _renderOverlayButtons(file, isDirty, showPreviewBtn) {
+    if (!file) return nothing;
+    return html`
+      ${showPreviewBtn ? html`
+        <button
+          class="preview-btn ${this._previewMode ? 'active' : ''}"
+          title="Toggle Markdown preview"
+          @click=${() => this._togglePreview()}
+        >
+          <span class="preview-icon"></span>
+          Preview
+        </button>
+      ` : nothing}
+      <button
+        class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
+        title="${file.path}${isDirty ? ' — unsaved (Ctrl+S to save)' : file.is_new ? ' — new file' : ''}"
+        aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
+        @click=${() => isDirty ? this._saveActiveFile() : null}
+      ></button>
     `;
   }
 }

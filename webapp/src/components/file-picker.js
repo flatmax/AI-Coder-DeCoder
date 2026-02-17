@@ -811,7 +811,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <input
             class="inline-input"
             .value=${this._contextInput.value}
-            @keydown=${(e) => { this._submitContextInput(e); this._cancelContextInput(e); }}
+            @keydown=${(e) => { e.stopPropagation(); this._submitContextInput(e); this._cancelContextInput(e); }}
             @blur=${() => { this._contextInput = null; }}
           />
         </div>
@@ -823,7 +823,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <input
             class="inline-input"
             placeholder="${this._contextInput.type === 'new-file' ? 'filename' : 'dirname'}"
-            @keydown=${(e) => { this._submitContextInput(e); this._cancelContextInput(e); }}
+            @keydown=${(e) => { e.stopPropagation(); this._submitContextInput(e); this._cancelContextInput(e); }}
             @blur=${() => { this._contextInput = null; }}
           />
         </div>

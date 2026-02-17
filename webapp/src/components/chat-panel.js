@@ -1318,6 +1318,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         this._populateAmbiguousRetryPrompt(ambiguousFailures);
       }
     }
+
+    // Auto-populate retry prompt for files that were not in context
+    if (result?.files_auto_added?.length > 0) {
+      this._populateNotInContextRetryPrompt(result.files_auto_added);
+    }
   }
 
   _onCompactionEvent(e) {
@@ -1344,6 +1349,26 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       'distinctive preceding line (like a function name, class definition, or unique comment) ' +
       'to disambiguate:\n\n' +
       lines.join('\n');
+
+    this._inputValue = prompt;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      textarea.value = prompt;
+      this._autoResize(textarea);
+      textarea.focus();
+    }
+  }
+
+  /**
+   * Auto-populate chat input with a retry prompt for not-in-context edits.
+   * Lists the file names that were auto-added so the user can send to retry.
+   */
+  _populateNotInContextRetryPrompt(filesAdded) {
+    const names = filesAdded.map(f => f.split('/').pop());
+    const fileList = filesAdded.map(f => `- ${f}`).join('\n');
+    const prompt = filesAdded.length === 1
+      ? `The file ${names[0]} has been added to context. Please retry the edit for:\n\n${fileList}`
+      : `The files ${names.join(', ')} have been added to context. Please retry the edits for:\n\n${fileList}`;
 
     this._inputValue = prompt;
     const textarea = this.shadowRoot?.querySelector('.input-textarea');
@@ -2172,16 +2197,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ${msg.files_auto_added.length} file${msg.files_auto_added.length > 1 ? 's were' : ' was'} added to context. Send a follow-up to retry those edits.
         </div>`
       : nothing;
-    // Check for ambiguous anchor failures in edit results
-    const hasAmbiguous = msg.editResults && Object.values(msg.editResults).some(
-      er => er.status === 'failed' && er.message && er.message.includes('Ambiguous anchor')
+    // Check for edit failures — show retry hint
+    const hasFailures = msg.editResults && Object.values(msg.editResults).some(
+      er => er.status === 'failed'
     );
-    const ambiguousNote = hasAmbiguous
+    const failureNote = hasFailures
       ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
           A retry prompt has been prepared in the input below.
         </div>`
       : nothing;
-    return html`<div class="edit-summary">${parts}${autoAddNote}${ambiguousNote}</div>`;
+    return html`<div class="edit-summary">${parts}${autoAddNote}${failureNote}</div>`;
   }
 
   _renderMsgActions(msg) {

@@ -43,6 +43,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
       border-right: 1px solid var(--border-primary);
       overflow: hidden;
+      pointer-events: auto;
     }
     :host([minimized]) {
       height: auto;
@@ -266,6 +267,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('stream-complete', () => this._refreshHistoryBar());
       window.addEventListener('compaction-event', () => this._refreshHistoryBar());
       window.addEventListener('state-loaded', () => this._refreshHistoryBar());
+      window.addEventListener('session-loaded', () => this._refreshHistoryBar());
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
     }

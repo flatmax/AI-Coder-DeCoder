@@ -87,6 +87,7 @@ class AcApp extends JRPCClient {
       min-width: 400px;
       height: 100%;
       z-index: 100;
+      pointer-events: none;
     }
 
     /* Status bar */

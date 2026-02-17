@@ -305,6 +305,17 @@ class ConfigManager:
         """Load compaction skill prompt."""
         return self._load_text("compaction.md")
 
+    def get_commit_prompt(self):
+        """Load commit message generation prompt from commit.md."""
+        return self._load_text("commit.md") or ""
+
+    def get_system_reminder(self):
+        """Load edit-format reminder from system_reminder.md."""
+        content = self._load_text("system_reminder.md")
+        if content:
+            return "\n\n" + content
+        return ""
+
     def get_snippets(self):
         """Load prompt snippets with two-location fallback."""
         # Try repo-local first
