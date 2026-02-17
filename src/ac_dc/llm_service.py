@@ -44,15 +44,16 @@ COMMIT_PROMPT = (
     "commentary or explanation."
 )
 
-# System reminder for edit format reinforcement (code constant, not loaded from file)
+# System reminder for edit format reinforcement — appended to user prompt
+# so it sits at the very end of context, closest to where the model generates.
 SYSTEM_REMINDER = (
-    "Remember: use the edit block format exactly as specified. "
-    "path/to/file.ext\\n"
-    "\\u00ab\\u00ab\\u00ab EDIT\\n"
-    "[old text]\\n"
-    "\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550\\u2550 REPL\\n"
-    "[new text]\\n"
-    "\\u00bb\\u00bb\\u00bb EDIT END"
+    "\n\n---\n"
+    "**Reminder:** Edit block rules:\n"
+    "- Close every block with `»»» EDIT END` (not `»»» EDIT`)\n"
+    "- Copy old text character-for-character from the file — never type from memory\n"
+    "- Include enough unique context lines for an unambiguous anchor match\n"
+    "- Keep blocks small — split large changes into multiple edits\n"
+    "- Never use `...` or placeholders inside edit blocks\n"
 )
 
 
@@ -427,9 +428,13 @@ class LLMService:
             if shed:
                 result["shed_files"] = shed
 
+            # Append edit-format reminder to user prompt so it's the last
+            # thing in context before the model generates its response.
+            augmented_message = message + SYSTEM_REMINDER
+
             # Assemble messages
             assembled = self._context.assemble_messages(
-                user_prompt=message,
+                user_prompt=augmented_message,
                 images=images if images else None,
                 symbol_map=symbol_map,
                 symbol_legend=symbol_legend,
