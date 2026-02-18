@@ -331,11 +331,16 @@ class Repo:
             # Add file node
             resolved = self._root / filepath
             lines = 0
+            mtime = 0
             if resolved.exists():
                 try:
                     if not self.is_binary_file(filepath):
                         lines = resolved.read_text().count("\n")
                 except (OSError, UnicodeDecodeError):
+                    pass
+                try:
+                    mtime = resolved.stat().st_mtime
+                except OSError:
                     pass
 
             current["children"].append({
@@ -343,6 +348,7 @@ class Repo:
                 "path": filepath,
                 "type": "file",
                 "lines": lines,
+                "mtime": mtime,
                 "children": [],
             })
 

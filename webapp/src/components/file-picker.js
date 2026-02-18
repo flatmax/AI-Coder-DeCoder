@@ -24,6 +24,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     _contextMenu: { type: Object, state: true }, // {x, y, node, isDir}
     _contextInput: { type: Object, state: true }, // {type, path, value}
     _activeInViewer: { type: String, state: true },
+    _sortMode: { type: String, state: true },       // 'name' | 'mtime' | 'size'
+    _sortAscending: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -61,6 +63,32 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     }
     .filter-input::placeholder {
       color: var(--text-muted);
+    }
+
+    /* Sort buttons */
+    .sort-buttons {
+      display: flex;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .sort-btn {
+      background: none;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      padding: 2px 5px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      white-space: nowrap;
+      line-height: 1;
+    }
+    .sort-btn:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    .sort-btn.active {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
     }
 
     /* Tree container */
@@ -302,6 +330,15 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     this._initialAutoSelect = false;
     this._expanded.add('');  // Root node expanded by default
 
+    // Sort state
+    try {
+      this._sortMode = localStorage.getItem('ac-dc-sort-mode') || 'name';
+      this._sortAscending = localStorage.getItem('ac-dc-sort-asc') !== 'false';
+    } catch {
+      this._sortMode = 'name';
+      this._sortAscending = true;
+    }
+
     this._onDocClick = this._onDocClick.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
   }
@@ -445,11 +482,41 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   }
 
   _sortChildren(children) {
+    const dir = this._sortAscending ? 1 : -1;
     return [...children].sort((a, b) => {
-      // Directories first
+      // Directories always first
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
-      return a.name.localeCompare(b.name);
+      // Both dirs → always alphabetical
+      if (a.type === 'dir') return a.name.localeCompare(b.name);
+      // Files: sort by active mode
+      if (this._sortMode === 'mtime') {
+        const am = a.mtime || 0;
+        const bm = b.mtime || 0;
+        if (am !== bm) return (bm - am) * dir;  // newest first when ascending
+        return a.name.localeCompare(b.name);
+      }
+      if (this._sortMode === 'size') {
+        const al = a.lines || 0;
+        const bl = b.lines || 0;
+        if (al !== bl) return (bl - al) * dir;  // largest first when ascending
+        return a.name.localeCompare(b.name);
+      }
+      // Default: name
+      return a.name.localeCompare(b.name) * dir;
     });
+  }
+
+  _setSort(mode) {
+    if (this._sortMode === mode) {
+      this._sortAscending = !this._sortAscending;
+    } else {
+      this._sortMode = mode;
+      this._sortAscending = true;
+    }
+    try {
+      localStorage.setItem('ac-dc-sort-mode', this._sortMode);
+      localStorage.setItem('ac-dc-sort-asc', String(this._sortAscending));
+    } catch {}
   }
 
   _matchesFilter(node) {
@@ -912,6 +979,23 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           .value=${this._filter}
           @input=${this._onFilterInput}
         />
+        <div class="sort-buttons">
+          <button class="sort-btn ${this._sortMode === 'name' ? 'active' : ''}"
+            title="Sort by name"
+            @click=${() => this._setSort('name')}>
+            A${this._sortMode === 'name' ? (this._sortAscending ? '↓' : '↑') : ''}
+          </button>
+          <button class="sort-btn ${this._sortMode === 'mtime' ? 'active' : ''}"
+            title="Sort by modification time"
+            @click=${() => this._setSort('mtime')}>
+            🕐${this._sortMode === 'mtime' ? (this._sortAscending ? '↓' : '↑') : ''}
+          </button>
+          <button class="sort-btn ${this._sortMode === 'size' ? 'active' : ''}"
+            title="Sort by size (line count)"
+            @click=${() => this._setSort('size')}>
+            #${this._sortMode === 'size' ? (this._sortAscending ? '↓' : '↑') : ''}
+          </button>
+        </div>
       </div>
 
       <div
