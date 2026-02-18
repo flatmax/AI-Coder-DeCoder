@@ -564,36 +564,43 @@ export class SvgEditor {
     e.stopPropagation();
 
     if (isShift) {
-      // Shift+click: toggle element in/out of multi-selection
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Shift+click on an already-selected element — toggle it out
       if (this._multiSelected.has(target)) {
         this._multiSelected.delete(target);
         if (this._selected === target) {
-          // Pick another element as primary, or null
           const remaining = [...this._multiSelected];
           this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
         }
         if (this._multiSelected.size === 0) {
           this._deselect();
-          return;
+        } else {
+          this._renderHandles();
+          this._onSelect(this._selected);
         }
-        this._renderHandles();
-        this._onSelect(this._selected);
-      } else {
-        // Add to multi-selection
-        if (!this._selected) {
-          // Nothing selected yet — make this the primary
-          this._selected = target;
-        }
-        this._multiSelected.add(target);
-        this._renderHandles();
-        this._onSelect(this._selected);
+        return;
       }
 
-      // Start multi-drag if clicking on any selected element
-      if (this._multiSelected.has(target) && this._multiSelected.size > 1) {
-        this._svg.style.cursor = 'grabbing';
-        this._startMultiDrag(svgPt);
-      }
+      // Shift+click on an unselected element — toggle it in
+      if (!this._selected) this._selected = target;
+      this._multiSelected.add(target);
+      this._renderHandles();
+      this._onSelect(this._selected);
+
+      // Start marquee tracking so shift+drag still works for area selection.
+      // On pointer-up, the tiny-marquee fallback is skipped since we already toggled.
+      this._marqueeClickTarget = null;
+      this._startMarquee(svgPt);
+      return;
+    }
+
+    // If clicking an element that's already part of a multi-selection,
+    // start a multi-drag without breaking the selection.
+    if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
+      this._svg.style.cursor = 'grabbing';
+      this._startMultiDrag(svgPt);
       return;
     }
 
@@ -998,6 +1005,7 @@ export class SvgEditor {
     rect.setAttribute('y', svgPt.y);
     rect.setAttribute('width', 0);
     rect.setAttribute('height', 0);
+    // Default style — will be updated in _updateMarquee based on drag direction
     rect.setAttribute('fill', 'rgba(79, 195, 247, 0.1)');
     const sw = this._screenDistToSvgDist(1);
     const dashOn = this._screenDistToSvgDist(4);
@@ -1017,6 +1025,12 @@ export class SvgEditor {
 
   /**
    * Update the marquee rectangle as the pointer moves.
+   *
+   * Drag direction determines selection mode:
+   *   - Top-left → bottom-right (forward): containment mode (solid stroke,
+   *     blue fill) — only elements entirely inside the marquee are selected.
+   *   - Any other direction (reverse): crossing mode (dashed stroke, green
+   *     tinted fill) — elements that intersect or are inside are selected.
    */
   _updateMarquee(svgPt) {
     if (!this._marqueeRect || !this._marqueeStart) return;
@@ -1030,6 +1044,26 @@ export class SvgEditor {
     this._marqueeRect.setAttribute('y', y);
     this._marqueeRect.setAttribute('width', w);
     this._marqueeRect.setAttribute('height', h);
+
+    // Determine drag direction: forward = start is top-left of end
+    const isForward = svgPt.x >= this._marqueeStart.x && svgPt.y >= this._marqueeStart.y;
+    const sw = this._screenDistToSvgDist(1);
+
+    if (isForward) {
+      // Containment mode — solid stroke, blue fill
+      this._marqueeRect.setAttribute('fill', 'rgba(79, 195, 247, 0.12)');
+      this._marqueeRect.setAttribute('stroke', '#4fc3f7');
+      this._marqueeRect.setAttribute('stroke-width', sw);
+      this._marqueeRect.removeAttribute('stroke-dasharray');
+    } else {
+      // Crossing mode — dashed stroke, green-tinted fill
+      const dashOn = this._screenDistToSvgDist(4);
+      const dashOff = this._screenDistToSvgDist(3);
+      this._marqueeRect.setAttribute('fill', 'rgba(126, 231, 135, 0.10)');
+      this._marqueeRect.setAttribute('stroke', '#7ee787');
+      this._marqueeRect.setAttribute('stroke-width', sw);
+      this._marqueeRect.setAttribute('stroke-dasharray', `${dashOn} ${dashOff}`);
+    }
   }
 
   /**
@@ -1055,8 +1089,33 @@ export class SvgEditor {
     // Minimum drag distance to count as a marquee (prevent accidental tiny drags)
     const minSize = this._screenDistToSvgDist(5);
     if ((mx2 - mx1) < minSize && (my2 - my1) < minSize) {
+      // Too small — treat as a Shift+click toggle on the element under cursor
+      const clickTarget = this._marqueeClickTarget;
+      this._marqueeClickTarget = null;
+      if (clickTarget) {
+        if (this._multiSelected.has(clickTarget)) {
+          this._multiSelected.delete(clickTarget);
+          if (this._selected === clickTarget) {
+            const remaining = [...this._multiSelected];
+            this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+          }
+          if (this._multiSelected.size === 0) {
+            this._deselect();
+            return;
+          }
+          this._renderHandles();
+          this._onSelect(this._selected);
+        } else {
+          if (!this._selected) this._selected = clickTarget;
+          this._multiSelected.add(clickTarget);
+          this._renderHandles();
+          this._onSelect(this._selected);
+        }
+      }
       return;
     }
+
+    this._marqueeClickTarget = null;
 
     // Find all editable elements whose bounding boxes overlap the marquee
     const hits = [];
@@ -1123,14 +1182,30 @@ export class SvgEditor {
 
     if (hits.length === 0) return;
 
+    // Determine drag direction: forward = left-to-right (containment mode)
+    const isForward = svgPt.x >= start.x && svgPt.y >= start.y;
+
+    // In containment mode (forward), filter to only fully enclosed elements
+    const selected = isForward
+      ? hits.filter(el => {
+        try {
+          const bbox = el.getBBox();
+          return bbox.x >= mx1 && bbox.y >= my1
+            && (bbox.x + bbox.width) <= mx2 && (bbox.y + bbox.height) <= my2;
+        } catch { return false; }
+      })
+      : hits;  // crossing mode — any intersection counts
+
+    if (selected.length === 0) return;
+
     // Add hits to multi-selection (Shift means additive)
-    for (const el of hits) {
+    for (const el of selected) {
       this._multiSelected.add(el);
     }
 
     // Ensure we have a primary selection
     if (!this._selected || !this._multiSelected.has(this._selected)) {
-      this._selected = hits[hits.length - 1];
+      this._selected = selected[selected.length - 1];
     }
 
     this._renderHandles();
@@ -1147,6 +1222,7 @@ export class SvgEditor {
     }
     this._marqueeStart = null;
     this._marqueeActive = false;
+    this._marqueeClickTarget = null;
     this._svg.style.cursor = '';
   }
 

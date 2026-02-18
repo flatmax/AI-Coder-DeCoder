@@ -119,6 +119,22 @@ When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual
 
 Click an SVG element to select it. A bounding box with handles appears around the selected element. The toolbar shows the selected element's tag name (e.g., `<rect>`, `<circle>`). Click empty space or press Escape to deselect.
 
+### Multi-Selection
+
+Hold **Shift** and click or drag to multi-select:
+
+| Interaction | Behavior |
+|-------------|----------|
+| **Shift+click** on selected element | Immediately remove from multi-selection (toggle out) |
+| **Shift+click** on unselected element | Immediately add to multi-selection (toggle in), then begin marquee tracking so shift+drag still works |
+| **Shift+click** on empty space | Begin marquee selection |
+| **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
+| **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
+
+Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
+
+The toolbar shows the count of selected elements (e.g., "3 elements") when multiple elements are selected. Multi-selected elements can be dragged as a group — clicking on any element that is part of a multi-selection initiates a group drag without breaking the selection.
+
 ### Supported Operations
 
 | Operation | Interaction | Supported Elements |
@@ -162,6 +178,17 @@ The editor determines interaction behavior from the element type:
 | `text` | Translate (x, y or transform) | — (double-click to edit) |
 | `g` (group) | Translate via transform | — |
 
+### Marquee Visual Feedback
+
+The marquee rectangle's appearance changes based on drag direction to signal the selection mode:
+
+| Direction | Fill | Stroke | Dash | Meaning |
+|-----------|------|--------|------|---------|
+| Forward (left→right) | Blue 12% opacity | Solid `#4fc3f7` | None | Containment — must be fully inside |
+| Reverse (right→left) | Green 10% opacity | Dashed `#7ee787` | 4px on / 3px off | Crossing — any intersection counts |
+
+Stroke width and dash lengths scale inversely with zoom to maintain consistent screen-pixel appearance.
+
 ### Dirty Tracking and Undo
 
 Each edit marks the file as dirty (orange pulsing status LED). An **undo stack** captures SVG snapshots after each edit operation (up to 50 entries). Ctrl+Z pops the stack and restores the previous state by re-injecting the SVG content and reinitializing the editor.
@@ -186,6 +213,7 @@ A bottom toolbar with mode toggle, zoom controls, and edit actions:
 | Fit | Fit SVG to panel dimensions |
 | ↩ Undo | Undo last edit (Ctrl+Z). Disabled when nothing to undo |
 | 💾 Save | Save modified SVG (Ctrl+S). Disabled when not dirty |
+| 📋 Copy | Copy SVG as PNG image to clipboard (Ctrl+Shift+C) |
 
 ## SVG Content Injection
 
@@ -245,6 +273,7 @@ If `original` and `modified` are not provided, content is fetched via RPC. If th
 | Ctrl+S | Save modified SVG |
 | Ctrl+Z | Undo last edit (Select mode) |
 | Ctrl+C | Copy selected element (Select mode) |
+| Ctrl+Shift+C | Copy SVG as PNG image to clipboard |
 | Ctrl+V | Paste copied element (Select mode) |
 | Delete / Backspace | Delete selected element (Select mode) |
 | Escape | Deselect current element / cancel text edit |
@@ -284,6 +313,31 @@ Search results for `.svg` files route through the same `navigate-file` → app s
 
 LLM edit blocks for `.svg` files are applied normally (text-based edits). After application, `refreshOpenFiles()` updates the SVG viewer's content if the file is open.
 
+## Context Menu
+
+Right-clicking on the right (editable) panel opens a context menu with:
+
+| Action | Shortcut | Description |
+|--------|----------|-------------|
+| Copy as PNG | Ctrl+Shift+C | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+
+The context menu is positioned at the click point relative to the diff container. It dismisses on clicking outside or on a subsequent right-click. The dismiss listener uses `click` (not `pointerdown`) so that clicking a menu button fires its handler before the dismiss logic runs.
+
+## Copy as PNG
+
+The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
+
+1. **Parse dimensions** — reads `viewBox` or `width`/`height` attributes to determine intrinsic size
+2. **Scale for quality** — scales up to 2×–4× (capped at 4096px on the longest side) for crisp output
+3. **Render to canvas** — creates an offscreen `<canvas>`, draws a white background, then renders the SVG via an `Image` element loaded from a Blob URL
+4. **Clipboard write** — passes a `Promise<Blob>` (not a resolved Blob) to `ClipboardItem` to preserve the user-gesture context across async operations
+5. **Download fallback** — if `navigator.clipboard.write` is unavailable or fails, downloads the PNG file instead
+
+Available via three paths:
+- **Context menu**: right-click → "Copy as PNG"
+- **Toolbar button**: 📋 Copy
+- **Keyboard shortcut**: Ctrl+Shift+C (Cmd+Shift+C on Mac)
+
 ## Future Enhancements
 
 ### Visual Diff Overlay
@@ -300,4 +354,4 @@ A split view with a Monaco text editor showing the SVG source alongside the rend
 
 ### Export
 
-Export the current view (zoomed/cropped) as PNG or PDF.
+~~Export the current view (zoomed/cropped) as PNG or PDF.~~ PNG copy is now implemented via the Copy as PNG feature. PDF export remains a future enhancement.

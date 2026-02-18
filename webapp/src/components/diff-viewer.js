@@ -109,6 +109,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       flex-direction: column;
       width: 100%;
       height: 100%;
+      height: 100dvh;
       overflow: hidden;
     }
 
@@ -161,6 +162,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       align-items: center;
       justify-content: center;
       height: 100%;
+      padding-left: 50%;
       color: var(--text-muted);
     }
     .watermark {
