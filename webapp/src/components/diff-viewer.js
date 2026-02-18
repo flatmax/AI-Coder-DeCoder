@@ -626,18 +626,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const renderSideBySide = !this._previewMode;
 
     if (this._editor) {
-      // Dispose old models before creating new ones to prevent leaks
-      // that break diff computation
+      // Capture old models — they must be disposed AFTER setModel() detaches
+      // the DiffEditorWidget from them. Disposing while still attached causes
+      // "TextModel got disposed before DiffEditorWidget model got reset".
       const oldModel = this._editor.getModel();
-      if (oldModel) {
-        if (oldModel.original) oldModel.original.dispose();
-        if (oldModel.modified) oldModel.modified.dispose();
-      }
 
       // Switch between side-by-side and inline mode
       this._editor.updateOptions({ renderSideBySide });
 
-      // Update models in existing editor
+      // Create new models and set them — this detaches the old models
       const originalModel = monaco.editor.createModel(file.original, language);
       const modifiedModel = monaco.editor.createModel(file.modified, language);
 
@@ -645,6 +642,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         original: originalModel,
         modified: modifiedModel,
       });
+
+      // Now safe to dispose the old models
+      if (oldModel) {
+        if (oldModel.original) oldModel.original.dispose();
+        if (oldModel.modified) oldModel.modified.dispose();
+      }
 
       // Set read-only state on modified side
       this._editor.getModifiedEditor().updateOptions({
