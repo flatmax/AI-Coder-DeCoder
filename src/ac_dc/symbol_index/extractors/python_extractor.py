@@ -46,7 +46,7 @@ class PythonExtractor(BaseExtractor):
                     if name_node:
                         names.append(self._node_text(name_node, source))
             if names:
-                return Import(module=names[0], names=names)
+                return Import(module=names[0], names=names, line=node.start_point[0] + 1)
 
         elif node.type == "import_from_statement":
             # from foo import bar, baz
@@ -86,7 +86,8 @@ class PythonExtractor(BaseExtractor):
                     if name not in ("from", "import") and name not in names:
                         names.append(name)
 
-            return Import(module=module, names=names, level=level, alias=alias)
+            return Import(module=module, names=names, level=level, alias=alias,
+                          line=node.start_point[0] + 1)
 
         return None
 

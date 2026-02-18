@@ -1009,7 +1009,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_hover', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (result?.contents) {
             return {
@@ -1021,7 +1021,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             };
           }
         } catch (e) {
-          // Ignore
+          console.error('[LSP hover] error:', e);
         }
         return null;
       },
@@ -1036,10 +1036,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_definition', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (result?.file && result?.range) {
-            // Open target file if needed
             await this.openFile({ path: result.file, line: result.range.start_line + 1 });
             return {
               uri: monaco.Uri.parse(`file:///${result.file}`),
@@ -1050,7 +1049,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             };
           }
         } catch (e) {
-          // Ignore
+          // Ignore — LSP is best-effort
         }
         return null;
       },
@@ -1065,7 +1064,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_references', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (Array.isArray(result)) {
             return result.map(ref => ({
@@ -1077,7 +1076,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             }));
           }
         } catch (e) {
-          // Ignore
+          console.error('[LSP references] error:', e);
         }
         return null;
       },
@@ -1098,7 +1097,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_completions', file.path,
-            position.lineNumber - 1, position.column - 1, prefix
+            position.lineNumber, position.column, prefix
           );
           if (Array.isArray(result)) {
             const range = new monaco.Range(

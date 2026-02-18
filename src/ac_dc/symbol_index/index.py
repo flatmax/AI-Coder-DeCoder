@@ -214,6 +214,19 @@ class SymbolIndex:
                 if call.line == line:
                     return call
 
+        # Check imports — resolve to target file for go-to-definition
+        for imp in fs.imports:
+            if imp.line == line:
+                resolved = self._resolver.resolve(imp, path,
+                                                  self._parser.language_for_file(path) or "python")
+                if resolved:
+                    from .extractors.base import CallSite
+                    return CallSite(
+                        name=imp.names[0] if imp.names else imp.module,
+                        line=line,
+                        target_file=resolved,
+                    )
+
         return best
 
     def lsp_get_hover(self, path, line, col):
@@ -253,13 +266,19 @@ class SymbolIndex:
         if sym is None:
             return None
 
-        # If it's a call site with target
+        # If it's a call site with target (includes resolved imports)
         if hasattr(sym, 'target_file') and sym.target_file:
             target_fs = self._all_symbols.get(sym.target_file)
             if target_fs:
+                # Try to find the specific named symbol in target file
                 for s in target_fs.all_symbols_flat:
                     if s.name == sym.name:
                         return {"file": sym.target_file, "range": s.range}
+                # No matching symbol — jump to top of target file
+                return {"file": sym.target_file, "range": {
+                    "start_line": 0, "start_col": 0,
+                    "end_line": 0, "end_col": 0,
+                }}
 
         # If it's a symbol, return its own definition
         if hasattr(sym, 'range'):

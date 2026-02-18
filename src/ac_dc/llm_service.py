@@ -1757,6 +1757,32 @@ class LLMService:
 
         return "\n".join(parts)
 
+    # === LSP Proxy Methods ===
+
+    def lsp_get_hover(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_hover for RPC access."""
+        if not self._symbol_index:
+            return None
+        return self._symbol_index.lsp_get_hover(path, line, col)
+
+    def lsp_get_definition(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_definition for RPC access."""
+        if not self._symbol_index:
+            return None
+        return self._symbol_index.lsp_get_definition(path, line, col)
+
+    def lsp_get_references(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_references for RPC access."""
+        if not self._symbol_index:
+            return []
+        return self._symbol_index.lsp_get_references(path, line, col)
+
+    def lsp_get_completions(self, path, line, col, prefix=""):
+        """Proxy to SymbolIndex.lsp_get_completions for RPC access."""
+        if not self._symbol_index:
+            return []
+        return self._symbol_index.lsp_get_completions(path, line, col, prefix)
+
     # === History RPC Methods ===
 
     def history_search(self, query, role=None, limit=50):

@@ -66,10 +66,12 @@ Registered when editor and RPC are both ready:
 
 | Feature | Trigger | RPC |
 |---------|---------|-----|
-| Hover | Mouse hover | `LLM.lsp_get_hover` |
-| Definition | Ctrl+Click/F12 | `LLM.lsp_get_definition` |
-| References | Context menu | `LLM.lsp_get_references` |
-| Completions | Typing/Ctrl+Space | `LLM.lsp_get_completions` |
+| Hover | Mouse hover | `LLMService.lsp_get_hover` |
+| Definition | Ctrl+Click/F12 | `LLMService.lsp_get_definition` |
+| References | Context menu | `LLMService.lsp_get_references` |
+| Completions | Typing/Ctrl+Space | `LLMService.lsp_get_completions` |
+
+Line and column numbers are passed as **1-indexed** values (matching Monaco's convention and the backend's symbol storage). No conversion is needed at the RPC boundary.
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
 

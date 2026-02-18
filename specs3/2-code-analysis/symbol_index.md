@@ -62,6 +62,7 @@ Import:
     names: string[]
     alias: string?
     level: integer         // 0 = absolute, 1+ = relative
+    line: integer          // 1-indexed source line
 ```
 
 ### FileSymbols
@@ -274,12 +275,12 @@ LSP methods are implemented on `SymbolIndex` and exposed to the browser via dele
 
 ### Symbol at Position
 
-Binary search through sorted symbols by line/column range. For nested symbols, return the deepest match. If the cursor is on a call site within a function body, match against the function's `call_sites` list.
+Search through symbols by line/column range. For nested symbols, return the deepest match. If the cursor is on a call site within a function body, match against the function's `call_sites` list. If no symbol or call site matches, check imports by matching `Import.line` against the cursor line; if found, resolve via `ImportResolver` and return a synthetic `CallSite` with `target_file` set.
 
 ### Definition Resolution
 
 1. If cursor is on a **call site**: use `CallSite.target_file` and `target_symbol` to locate definition
-2. If cursor is on an **import name**: use import resolver to find source file, then locate named symbol
+2. If cursor is on an **import statement**: match by line number against `FileSymbols.imports`, resolve via `ImportResolver`, return a synthetic `CallSite` pointing at the target file. If the named symbol exists in the target, jump to it; otherwise jump to the top of the file
 3. If cursor is on a **local symbol**: return its own definition range
 
 ### Completion Scope
