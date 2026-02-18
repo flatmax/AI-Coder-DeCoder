@@ -125,14 +125,15 @@ Hold **Shift** and click or drag to multi-select:
 
 | Interaction | Behavior |
 |-------------|----------|
-| **Shift+click** on element | Toggle element in/out of multi-selection |
-| **Shift+click** on empty space | No-op |
+| **Shift+click** on selected element | Immediately remove from multi-selection (toggle out) |
+| **Shift+click** on unselected element | Immediately add to multi-selection (toggle in), then begin marquee tracking so shift+drag still works |
+| **Shift+click** on empty space | Begin marquee selection |
 | **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
 | **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
 
-Shift+drag always initiates a marquee rectangle. If the drag distance is below 5px (a click rather than a drag), the editor falls back to toggle-select behavior on the element under the cursor. The `_marqueeClickTarget` field tracks this fallback.
+Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
 
-The toolbar shows the count of selected elements (e.g., "3 elements") when multiple elements are selected. Multi-selected elements can be dragged as a group.
+The toolbar shows the count of selected elements (e.g., "3 elements") when multiple elements are selected. Multi-selected elements can be dragged as a group — clicking on any element that is part of a multi-selection initiates a group drag without breaking the selection.
 
 ### Supported Operations
 
