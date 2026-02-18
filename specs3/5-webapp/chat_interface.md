@@ -94,6 +94,8 @@ Coalesced per animation frame via `requestAnimationFrame`. A pending chunk varia
 
 Each chunk carries full accumulated content (not deltas). First chunk sets `streamingActive = true` and begins rendering the streaming card; subsequent chunks update `_streamingContent`. The streaming card is rendered separately from the message list with a `force-visible` class and streaming indicator.
 
+**Code block scroll preservation:** Since `unsafeHTML` replaces the entire DOM subtree on each chunk, any horizontal scroll position on `<pre>` elements is lost. Before updating `_streamingContent`, the handler snapshots `scrollLeft` of every `<pre>` inside the streaming card (by index). After `updateComplete` resolves and the DOM has been rebuilt, the saved `scrollLeft` values are restored to the corresponding `<pre>` elements. This restore step is skipped entirely if no `<pre>` was scrolled, avoiding overhead in the common case.
+
 ### Markdown Rendering
 
 Assistant messages are rendered via `renderMarkdown()` from `webapp/src/utils/markdown.js`, which uses a dedicated `Marked` instance (`markedChat`) with `highlight.js` for syntax highlighting. This is a **separate instance** from the one used by the diff viewer's Markdown preview (`markedSourceMap`) — the two do not share any renderer state.

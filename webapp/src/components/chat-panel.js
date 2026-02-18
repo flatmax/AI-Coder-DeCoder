@@ -1235,8 +1235,38 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._rafId = requestAnimationFrame(() => {
         this._rafId = null;
         if (this._pendingChunk !== null) {
+          // Save horizontal scroll positions of <pre> blocks in the streaming card
+          const streamingCard = this.shadowRoot?.querySelector('.message-card.assistant.force-visible .md-content');
+          const savedScrolls = [];
+          if (streamingCard) {
+            const pres = streamingCard.querySelectorAll('pre');
+            for (const pre of pres) {
+              if (pre.scrollLeft > 0) {
+                savedScrolls.push({ index: savedScrolls.length, scrollLeft: pre.scrollLeft });
+              } else {
+                savedScrolls.push({ index: savedScrolls.length, scrollLeft: 0 });
+              }
+            }
+          }
+
           this._streamingContent = this._pendingChunk;
           this._pendingChunk = null;
+
+          // Restore horizontal scroll positions after DOM update
+          if (savedScrolls.some(s => s.scrollLeft > 0)) {
+            this.updateComplete.then(() => {
+              const card = this.shadowRoot?.querySelector('.message-card.assistant.force-visible .md-content');
+              if (card) {
+                const pres = card.querySelectorAll('pre');
+                for (const saved of savedScrolls) {
+                  if (saved.scrollLeft > 0 && pres[saved.index]) {
+                    pres[saved.index].scrollLeft = saved.scrollLeft;
+                  }
+                }
+              }
+            });
+          }
+
           if (this._autoScroll) {
             // Use updateComplete then double-rAF to ensure DOM has reflowed
             this.updateComplete.then(() => {
