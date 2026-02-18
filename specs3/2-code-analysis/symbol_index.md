@@ -20,7 +20,8 @@ SymbolIndex (orchestrator)
     ├── SymbolCache (mtime-based per-file cache)
     ├── ImportResolver (maps imports to repo file paths)
     ├── ReferenceIndex (cross-file reference tracking)
-    └── CompactFormatter (LLM-optimized text output)
+    ├── CompactFormatter (context — no line numbers)
+    └── CompactFormatter (LSP — with line numbers)
 ```
 
 ## Data Model
@@ -147,6 +148,18 @@ Human-readable, token-efficient text format for the "repository map" sent to the
 
 ### Legend
 
+The context symbol map (sent to the LLM) uses a legend without line numbers:
+
+```
+# c=class m=method f=function af=async func am=async method
+# v=var p=property i=import i→=local
+# ->T=returns ?=optional ←N=refs →=calls
+# +N=more ″=ditto Nc/Nm=test summary
+# @1/=some/frequent/path/ @2/=another/path/
+```
+
+The LSP symbol map includes line numbers and uses an extended legend:
+
 ```
 # c=class m=method f=function af=async func am=async method
 # v=var p=property i=import i→=local
@@ -173,6 +186,29 @@ Human-readable, token-efficient text format for the "repository map" sent to the
 | Test files | `# 5c/25m fixtures:setup_db` (collapsed) |
 
 ### Example
+
+Context symbol map (no line numbers):
+
+```
+app/models.py: ←8
+i dataclasses,typing
+c User ←@1/auth.py,@1/api.py,+2
+  v name
+  v email
+  m __init__(name,email)
+  m validate()->bool →_check_email
+c Session ←@1/auth.py
+  m is_valid()->bool
+
+@1/auth.py: ←3
+i→ app/models.py
+f authenticate(username,password)->?Session →User.validate
+
+tests/test_auth.py:
+# 3c/12m fixtures:mock_store,test_user
+```
+
+LSP symbol map (with line numbers):
 
 ```
 app/models.py: ←8
@@ -256,7 +292,7 @@ Binary search through sorted symbols by line/column range. For nested symbols, r
 ## Caching
 
 - **Symbol cache** — in-memory, per-file, mtime-based invalidation
-- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
+- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt` using the context formatter (no line numbers), rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
 - **Import resolution cache** — cleared when new files are detected
 
 ## Indexing Exclusions
@@ -304,7 +340,7 @@ These directories are skipped during repository-wide indexing. The import resolv
 - file_ref_count returns incoming reference count
 
 ### Compact Formatter
-- Output includes file path, class/method/function with line numbers
+- Output includes file path, class/method/function
 - Legend header present; imports formatted; instance variables listed
 - exclude_files omits specified files; test files collapsed to summary (Nc/Nm)
 - Chunks split evenly with correct total file count
@@ -317,3 +353,7 @@ These directories are skipped during repository-wide indexing. The import resolv
 - Single file reindex after modification picks up new symbols
 - Hover info returns symbol name; completions filtered by prefix
 - Signature hash: stable across repeated calls, 16-char length
+- LSP symbol map includes line numbers on symbol entries; legend mentions `:N=line(s)`
+- Context symbol map has no line numbers on symbol entries; legend omits `:N=line(s)`
+- Context map is shorter than LSP map (no line number annotations)
+- LSP legend and context legend differ: only LSP legend includes `:N=line(s)`

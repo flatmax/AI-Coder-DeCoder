@@ -382,8 +382,13 @@ class TestCompactFormatter:
         output = fmt.format_all(self._make_fs())
         assert "i dataclasses" in output
 
-    def test_line_numbers(self):
+    def test_line_numbers_excluded_by_default(self):
         fmt = CompactFormatter()
+        output = fmt.format_all(self._make_fs())
+        assert ":10" not in output
+
+    def test_line_numbers_included_when_enabled(self):
+        fmt = CompactFormatter(include_line_numbers=True)
         output = fmt.format_all(self._make_fs())
         assert ":10" in output
 
@@ -504,3 +509,46 @@ class TestSymbolIndexIntegration:
         idx.index_repo()
         result = idx.lsp_get_completions("app.py", 4, 0, prefix="r")
         assert isinstance(result, list)
+
+    def test_lsp_symbol_map_has_line_numbers(self, repo):
+        idx = SymbolIndex(str(repo))
+        idx.index_repo()
+        lsp_map = idx.get_lsp_symbol_map()
+        assert ":N=line(s)" in lsp_map, "LSP legend should mention line numbers"
+        # Symbol entries should have `:N` line annotations (e.g. "c App :2")
+        # Strip the legend lines, then check remaining lines for line numbers
+        import re
+        body_lines = [l for l in lsp_map.splitlines() if l and not l.startswith("#")]
+        line_number_pattern = re.compile(r':\d+')
+        lines_with_numbers = [l for l in body_lines if line_number_pattern.search(l)]
+        assert len(lines_with_numbers) >= 2, \
+            f"LSP symbol map should have line numbers on symbol entries, got: {body_lines}"
+
+    def test_context_symbol_map_has_no_line_numbers_on_entries(self, repo):
+        idx = SymbolIndex(str(repo))
+        idx.index_repo()
+        ctx_map = idx.get_symbol_map()
+        import re
+        body_lines = [l for l in ctx_map.splitlines() if l and not l.startswith("#")]
+        line_number_pattern = re.compile(r':\d+')
+        lines_with_numbers = [l for l in body_lines if line_number_pattern.search(l)]
+        # The only `:N` in body should be file path lines like "app.py: ←2"
+        # not symbol lines like "c App :2"
+        for line in lines_with_numbers:
+            assert line.strip().endswith(":") or "←" in line, \
+                f"Context map should not have line numbers on symbols: {line}"
+
+    def test_context_symbol_map_no_line_numbers(self, repo):
+        idx = SymbolIndex(str(repo))
+        idx.index_repo()
+        ctx_map = idx.get_symbol_map()
+        assert ":N=line(s)" not in ctx_map, "Context legend should not mention line numbers"
+        lsp_map = idx.get_lsp_symbol_map()
+        assert len(ctx_map) < len(lsp_map), "Context map should be shorter (no line numbers)"
+
+    def test_lsp_legend_differs_from_context_legend(self, repo):
+        idx = SymbolIndex(str(repo))
+        ctx_legend = idx.get_legend()
+        lsp_legend = idx.get_lsp_legend()
+        assert ":N=line(s)" not in ctx_legend
+        assert ":N=line(s)" in lsp_legend

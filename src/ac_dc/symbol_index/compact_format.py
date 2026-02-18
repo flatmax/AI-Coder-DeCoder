@@ -10,13 +10,19 @@ LEGEND = """# c=class m=method f=function af=async func am=async method
 # :N=line(s) ->T=returns ?=optional ←N=refs →=calls
 # +N=more ″=ditto Nc/Nm=test summary"""
 
+LEGEND_NO_LINES = """# c=class m=method f=function af=async func am=async method
+# v=var p=property i=import i→=local
+# ->T=returns ?=optional ←N=refs →=calls
+# +N=more ″=ditto Nc/Nm=test summary"""
+
 
 class CompactFormatter:
     """Format symbols into LLM-optimized compact text."""
 
-    def __init__(self, reference_index=None):
+    def __init__(self, reference_index=None, include_line_numbers=False):
         self._ref_index = reference_index
         self._path_aliases = {}
+        self._include_lines = include_line_numbers
 
     def format_all(self, all_file_symbols, exclude_files=None, chunks=1):
         """Format all file symbols into compact text.
@@ -68,7 +74,7 @@ class CompactFormatter:
 
     def _format_legend(self):
         """Format the legend with path aliases."""
-        legend = LEGEND
+        legend = LEGEND if self._include_lines else LEGEND_NO_LINES
         for alias, prefix in sorted(self._path_aliases.items()):
             legend += f"\n# {alias}={prefix}"
         return legend
@@ -182,7 +188,8 @@ class CompactFormatter:
             parts[0] += f"->{sym.return_type}"
 
         # Line number
-        parts[0] += f":{sym.start_line}"
+        if self._include_lines:
+            parts[0] += f":{sym.start_line}"
 
         # Instance vars
         if sym.instance_vars:
@@ -238,7 +245,10 @@ class CompactFormatter:
         if len(by_file) <= 3:
             parts = []
             for f, lines_list in list(by_file.items())[:3]:
-                parts.append(f"←{f}:{lines_list[0]}")
+                if self._include_lines:
+                    parts.append(f"←{f}:{lines_list[0]}")
+                else:
+                    parts.append(f"←{f}")
             remaining = len(by_file) - 3
             result = ",".join(parts)
             if remaining > 0:

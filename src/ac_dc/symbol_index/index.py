@@ -28,6 +28,7 @@ class SymbolIndex:
         self._resolver = ImportResolver(repo_root)
         self._ref_index = ReferenceIndex()
         self._formatter = CompactFormatter(self._ref_index)
+        self._lsp_formatter = CompactFormatter(self._ref_index, include_line_numbers=True)
         self._all_symbols = {}  # path -> FileSymbols
 
     @property
@@ -177,9 +178,21 @@ class SymbolIndex:
         self._all_symbols.pop(path, None)
 
     def save_symbol_map(self, output_path, exclude_files=None):
-        """Save symbol map to file."""
-        text = self.get_symbol_map(exclude_files=exclude_files)
+        """Save symbol map to file (context format, no line numbers)."""
+        text = self._formatter.format_all(
+            self._all_symbols, exclude_files=exclude_files,
+        )
         Path(output_path).write_text(text)
+
+    def get_lsp_symbol_map(self, exclude_files=None):
+        """Generate symbol map with line numbers for LSP use."""
+        return self._lsp_formatter.format_all(
+            self._all_symbols, exclude_files=exclude_files,
+        )
+
+    def get_lsp_legend(self):
+        """Get legend with line number notation for LSP use."""
+        return self._lsp_formatter.get_legend()
 
     # === LSP Queries ===
 

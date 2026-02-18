@@ -119,7 +119,7 @@ L0 is the **system role message** (not a user/assistant pair). It concatenates:
    Use this to understand the codebase structure and find relevant code.
 
    ```
-   Then the legend text (abbreviation key + path aliases)
+   Then the legend text (abbreviation key + path aliases). The context legend does not include `:N=line(s)` since line numbers are not present in the context symbol map.
 3. **L0 symbol entries** — symbol blocks for L0-stability files
 4. **L0 file contents** — preceded by:
    ```
