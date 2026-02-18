@@ -180,6 +180,39 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       50% { opacity: 1; box-shadow: 0 0 10px 3px rgba(240, 136, 62, 0.8); }
     }
 
+    /* Context menu */
+    .context-menu {
+      position: absolute;
+      z-index: 100;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 4px 0;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      min-width: 160px;
+    }
+    .context-menu button {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 14px;
+      background: none;
+      border: none;
+      color: var(--text-primary);
+      font-size: 0.75rem;
+      cursor: pointer;
+      text-align: left;
+    }
+    .context-menu button:hover {
+      background: var(--bg-hover);
+    }
+    .context-menu button .shortcut {
+      margin-left: auto;
+      color: var(--text-muted);
+      font-size: 0.65rem;
+    }
+
     /* Empty state */
     .empty-state {
       display: flex;
@@ -212,6 +245,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._undoStack = [];         // per-file undo: array of SVG strings
 
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onContextMenu = this._onContextMenu.bind(this);
   }
 
   connectedCallback() {
@@ -222,6 +256,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
+    this._dismissContextMenu();
     this._disposeAll();
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
@@ -747,6 +782,182 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
+  // === Copy Image ===
+
+  /**
+   * Render the current modified SVG to a canvas and copy as PNG to clipboard.
+   */
+  async _copyImage() {
+    const file = this._getActiveFile();
+    if (!file) return;
+
+    // Get latest content from editor
+    this._captureEditorContent();
+    const svgText = file.modified || file.original || '';
+    if (!svgText.trim()) return;
+
+    try {
+      // Parse SVG to determine intrinsic size
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const svgEl = doc.documentElement;
+
+      // Determine render dimensions from viewBox or width/height attributes
+      let width = 1920;
+      let height = 1080;
+      const vb = svgEl.getAttribute('viewBox');
+      if (vb) {
+        const parts = vb.split(/[\s,]+/).map(Number);
+        if (parts[2] > 0 && parts[3] > 0) {
+          width = parts[2];
+          height = parts[3];
+        }
+      } else {
+        const w = parseFloat(svgEl.getAttribute('width'));
+        const h = parseFloat(svgEl.getAttribute('height'));
+        if (w > 0 && h > 0) { width = w; height = h; }
+      }
+
+      // Scale up for high-quality output (min 2x, capped at 4096px on longest side)
+      const maxDim = Math.max(width, height);
+      const scale = maxDim < 1024 ? Math.min(4, 4096 / maxDim) : Math.min(2, 4096 / maxDim);
+      const renderW = Math.round(width * scale);
+      const renderH = Math.round(height * scale);
+
+      // Ensure the SVG has explicit dimensions for the Image element
+      svgEl.setAttribute('width', renderW);
+      svgEl.setAttribute('height', renderH);
+
+      const serializer = new XMLSerializer();
+      const svgBlob = new Blob([serializer.serializeToString(svgEl)], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.width = renderW;
+      img.height = renderH;
+
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = renderW;
+      canvas.height = renderH;
+      const ctx = canvas.getContext('2d');
+
+      // White background (SVGs often have transparent bg)
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, renderW, renderH);
+      ctx.drawImage(img, 0, 0, renderW, renderH);
+
+      URL.revokeObjectURL(url);
+
+      // Copy to clipboard — pass a Promise<Blob> to ClipboardItem so the
+      // browser can preserve the user-gesture context across the async gap.
+      if (navigator.clipboard?.write) {
+        const blobPromise = new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blobPromise }),
+          ]);
+          this._showCopyToast('Image copied to clipboard');
+        } catch (clipErr) {
+          console.warn('Clipboard write failed, falling back to download:', clipErr);
+          const blob = await blobPromise;
+          this._downloadBlob(blob, file.path);
+        }
+      } else {
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        this._downloadBlob(blob, file.path);
+      }
+    } catch (err) {
+      console.error('Failed to copy SVG as image:', err);
+      this._showCopyToast('Failed to copy image');
+    }
+  }
+
+  _showCopyToast(message) {
+    this.dispatchEvent(new CustomEvent('show-toast', {
+      bubbles: true, composed: true,
+      detail: { message, type: 'info' },
+    }));
+  }
+
+  _downloadBlob(blob, filePath) {
+    if (!blob) {
+      this._showCopyToast('Failed to create image');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (filePath.split('/').pop() || 'image').replace(/\.svg$/i, '') + '.png';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    this._showCopyToast('Image downloaded as PNG');
+  }
+
+  // === Context Menu ===
+
+  _onContextMenu(e) {
+    // Only show on the right (editable) panel
+    const rightPanel = this.shadowRoot.querySelector('.svg-right');
+    if (!rightPanel || !rightPanel.contains(e.target)) return;
+
+    e.preventDefault();
+    this._dismissContextMenu();
+
+    const container = this.shadowRoot.querySelector('.diff-container');
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    const copyBtn = document.createElement('button');
+    copyBtn.innerHTML = '📋 Copy as PNG <span class="shortcut">Ctrl+Shift+C</span>';
+    copyBtn.addEventListener('click', () => {
+      this._dismissContextMenu();
+      this._copyImage();
+    });
+    menu.appendChild(copyBtn);
+
+    container.appendChild(menu);
+    this._contextMenu = menu;
+
+    // Dismiss on next click anywhere (use 'click' so menu buttons fire first)
+    const dismiss = (ev) => {
+      if (menu.contains(ev.target)) return;
+      this._dismissContextMenu();
+    };
+    // Use setTimeout so the current right-click doesn't immediately dismiss
+    setTimeout(() => {
+      window.addEventListener('click', dismiss, { capture: true });
+      window.addEventListener('contextmenu', dismiss, { capture: true });
+      this._contextMenuDismiss = () => {
+        window.removeEventListener('click', dismiss, { capture: true });
+        window.removeEventListener('contextmenu', dismiss, { capture: true });
+      };
+    }, 0);
+  }
+
+  _dismissContextMenu() {
+    if (this._contextMenu) {
+      this._contextMenu.remove();
+      this._contextMenu = null;
+    }
+    if (this._contextMenuDismiss) {
+      this._contextMenuDismiss();
+      this._contextMenuDismiss = null;
+    }
+  }
+
   // === Keyboard ===
 
   _onKeyDown(e) {
@@ -781,6 +992,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       this._save();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
+      e.preventDefault();
+      this._copyImage();
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
@@ -859,6 +1075,10 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._prepareSvgElement(leftContainer);
     this._prepareSvgElement(rightContainer);
 
+    // Attach context menu to right panel
+    rightContainer.removeEventListener('contextmenu', this._onContextMenu);
+    rightContainer.addEventListener('contextmenu', this._onContextMenu);
+
     // Initialize based on mode
     requestAnimationFrame(() => {
       // Skip if a newer _injectSvgContent call has superseded this one
@@ -927,6 +1147,9 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             ?disabled=${this._undoStack.length <= 1}>↩ Undo</button>
           <button @click=${this._save} title="Save (Ctrl+S)"
             ?disabled=${!isDirty}>💾 Save</button>
+
+          <div class="separator"></div>
+          <button @click=${this._copyImage} title="Copy as PNG (Ctrl+Shift+C)">📋 Copy</button>
         </div>
       ` : nothing}
     `;

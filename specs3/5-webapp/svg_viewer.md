@@ -186,6 +186,7 @@ A bottom toolbar with mode toggle, zoom controls, and edit actions:
 | Fit | Fit SVG to panel dimensions |
 | ↩ Undo | Undo last edit (Ctrl+Z). Disabled when nothing to undo |
 | 💾 Save | Save modified SVG (Ctrl+S). Disabled when not dirty |
+| 📋 Copy | Copy SVG as PNG image to clipboard (Ctrl+Shift+C) |
 
 ## SVG Content Injection
 
@@ -245,6 +246,7 @@ If `original` and `modified` are not provided, content is fetched via RPC. If th
 | Ctrl+S | Save modified SVG |
 | Ctrl+Z | Undo last edit (Select mode) |
 | Ctrl+C | Copy selected element (Select mode) |
+| Ctrl+Shift+C | Copy SVG as PNG image to clipboard |
 | Ctrl+V | Paste copied element (Select mode) |
 | Delete / Backspace | Delete selected element (Select mode) |
 | Escape | Deselect current element / cancel text edit |
@@ -284,6 +286,31 @@ Search results for `.svg` files route through the same `navigate-file` → app s
 
 LLM edit blocks for `.svg` files are applied normally (text-based edits). After application, `refreshOpenFiles()` updates the SVG viewer's content if the file is open.
 
+## Context Menu
+
+Right-clicking on the right (editable) panel opens a context menu with:
+
+| Action | Shortcut | Description |
+|--------|----------|-------------|
+| Copy as PNG | Ctrl+Shift+C | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+
+The context menu is positioned at the click point relative to the diff container. It dismisses on clicking outside or on a subsequent right-click. The dismiss listener uses `click` (not `pointerdown`) so that clicking a menu button fires its handler before the dismiss logic runs.
+
+## Copy as PNG
+
+The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
+
+1. **Parse dimensions** — reads `viewBox` or `width`/`height` attributes to determine intrinsic size
+2. **Scale for quality** — scales up to 2×–4× (capped at 4096px on the longest side) for crisp output
+3. **Render to canvas** — creates an offscreen `<canvas>`, draws a white background, then renders the SVG via an `Image` element loaded from a Blob URL
+4. **Clipboard write** — passes a `Promise<Blob>` (not a resolved Blob) to `ClipboardItem` to preserve the user-gesture context across async operations
+5. **Download fallback** — if `navigator.clipboard.write` is unavailable or fails, downloads the PNG file instead
+
+Available via three paths:
+- **Context menu**: right-click → "Copy as PNG"
+- **Toolbar button**: 📋 Copy
+- **Keyboard shortcut**: Ctrl+Shift+C (Cmd+Shift+C on Mac)
+
 ## Future Enhancements
 
 ### Visual Diff Overlay
@@ -300,4 +327,4 @@ A split view with a Monaco text editor showing the SVG source alongside the rend
 
 ### Export
 
-Export the current view (zoomed/cropped) as PNG or PDF.
+~~Export the current view (zoomed/cropped) as PNG or PDF.~~ PNG copy is now implemented via the Copy as PNG feature. PDF export remains a future enhancement.
