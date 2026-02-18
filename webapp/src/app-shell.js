@@ -34,6 +34,9 @@ class AcApp extends JRPCClient {
     _reconnectVisible: { type: Boolean, state: true },
     _reconnectMsg: { type: String, state: true },
     _toasts: { type: Array, state: true },
+    _startupVisible: { type: Boolean, state: true },
+    _startupMessage: { type: String, state: true },
+    _startupPercent: { type: Number, state: true },
   };
 
   static styles = [theme, css`
@@ -158,6 +161,48 @@ class AcApp extends JRPCClient {
       from { opacity: 0; transform: translateY(8px); }
       to { opacity: 1; transform: translateY(0); }
     }
+
+    /* Startup overlay */
+    .startup-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20000;
+      background: var(--bg-primary, #0d1117);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.4s ease;
+    }
+    .startup-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .startup-brand {
+      font-size: 3rem;
+      opacity: 0.25;
+      margin-bottom: 2rem;
+      user-select: none;
+    }
+    .startup-message {
+      font-size: 0.95rem;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 1.2rem;
+      min-height: 1.4em;
+    }
+    .startup-bar-track {
+      width: 280px;
+      height: 4px;
+      background: var(--bg-tertiary, #21262d);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .startup-bar-fill {
+      height: 100%;
+      background: var(--accent-blue, #58a6ff);
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
   `];
 
   constructor() {
@@ -172,6 +217,9 @@ class AcApp extends JRPCClient {
     this._toastIdCounter = 0;
     this._wasConnected = false;
     this._statusBarTimer = null;
+    this._startupVisible = true;
+    this._startupMessage = 'Connecting...';
+    this._startupPercent = 0;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
@@ -250,8 +298,16 @@ class AcApp extends JRPCClient {
     // Show green status bar briefly
     this._showStatusBar('ok');
 
+    // Update startup overlay — connected, waiting for init
+    if (this._startupVisible) {
+      this._startupMessage = 'Connected — initializing...';
+      this._startupPercent = 5;
+    }
+
     if (wasReconnecting) {
       this._showToast('Reconnected', 'success');
+      // Hide startup overlay on reconnect (init already done)
+      this._startupVisible = false;
     }
   }
 
@@ -386,6 +442,24 @@ class AcApp extends JRPCClient {
     window.dispatchEvent(new CustomEvent('files-changed', {
       detail: { selectedFiles },
     }));
+    return true;
+  }
+
+  /**
+   * Receive startup progress from server during deferred initialization.
+   * Called via RPC: AcApp.startupProgress(stage, message, percent)
+   */
+  startupProgress(stage, message, percent) {
+    this._startupMessage = message || '';
+    if (typeof percent === 'number') {
+      this._startupPercent = Math.min(100, Math.max(0, percent));
+    }
+    if (stage === 'ready') {
+      // Dismiss overlay with a short delay for the animation
+      setTimeout(() => {
+        this._startupVisible = false;
+      }, 400);
+    }
     return true;
   }
 
@@ -667,6 +741,16 @@ class AcApp extends JRPCClient {
       </div>
 
       <ac-token-hud></ac-token-hud>
+
+      ${this._startupVisible ? html`
+        <div class="startup-overlay" role="status" aria-live="polite" aria-label="Loading">
+          <div class="startup-brand">AC⚡DC</div>
+          <div class="startup-message">${this._startupMessage}</div>
+          <div class="startup-bar-track">
+            <div class="startup-bar-fill" style="width: ${this._startupPercent}%"></div>
+          </div>
+        </div>
+      ` : ''}
 
       <div class="status-bar ${this._statusBar}" role="status" aria-live="polite"
            aria-label="${this._statusBar === 'ok' ? 'Connected' : this._statusBar === 'error' ? 'Disconnected' : ''}"></div>

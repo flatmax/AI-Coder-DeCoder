@@ -139,6 +139,8 @@ streamChunk(requestId, content) {
 | WebSocket opens | jrpc-oo handshake begins |
 | `remoteIsUp()` | Connection confirmed, remote is ready |
 | `setupDone()` | `call` proxy populated — can now make RPC calls |
+| `startupProgress` calls | Server sends initialization progress (first connect only) |
+| `startupProgress("ready", ...)` | Browser dismisses startup overlay, normal operation begins |
 | Normal operation | Request/response pairs over the shared connection |
 | `setupSkip()` | Connection failed |
 | `remoteDisconnected()` | WebSocket closed |
@@ -240,6 +242,8 @@ All state is **global** across connected clients:
 ### Reconnection
 
 On WebSocket reconnect (browser refresh), the client calls `LLMService.get_current_state()` which returns current session messages, selected files, streaming status, session ID, and repo name. The client rebuilds its UI from this state. On first connect after server startup, the state already contains messages from the auto-restored last session (see [Context and History — Auto-Restore on Startup](../3-llm-engine/context_and_history.md#auto-restore-on-startup)).
+
+The startup overlay only appears on first connection. On reconnect (when `_wasConnected` is already true), the overlay is skipped and a "Reconnected" success toast is shown instead.
 
 ## Server-Side Class Organization
 
@@ -350,6 +354,7 @@ Three top-level service classes, registered via `add_class()`:
 | `AcApp.streamComplete` | `(requestId, result) → true` | Stream finished |
 | `AcApp.compactionEvent` | `(requestId, event) → true` | Progress notification |
 | `AcApp.filesChanged` | `(selectedFiles) → true` | File selection broadcast |
+| `AcApp.startupProgress` | `(stage, message, percent) → true` | Startup initialization progress |
 
 ## Error Handling
 
@@ -359,51 +364,71 @@ Three top-level service classes, registered via `add_class()`:
 
 ## Server Initialization Pseudocode
 
-The following shows how services are constructed and registered in `main.py`:
+The following shows how services are constructed and registered in `main.py`. The startup is split into two phases: a **fast phase** that gets the WebSocket server running and the browser connected, and a **deferred phase** that performs heavy initialization with progress reporting.
+
+### Phase 1: Fast Startup (WebSocket + Browser)
 
 ```pseudo
-# 1. Initialize services
+# 1. Initialize lightweight services (fast — no parsing)
 config = ConfigManager(repo_root)
 repo = Repo(repo_root)
-symbol_index = SymbolIndex(repo_root)
+settings = Settings(config)
 
-# 2. Create event callback for server→browser notifications
-async def event_callback(event_name, *args):
-    call = llm_service.get_call()
-    if call:
-        await call[f"AcApp.{event_name}"](*args)
-
-# 3. Create chunk callback for streaming
-async def chunk_callback(request_id, content):
-    call = llm_service.get_call()
-    if call:
-        await call["AcApp.streamChunk"](request_id, content)
-
-# 4. Create LLM service with all dependencies
+# 2. Create LLM service with deferred init (no symbol index yet)
 llm_service = LLMService(
     config_manager=config,
     repo=repo,
-    symbol_index=symbol_index,
-    chunk_callback=chunk_callback,
-    event_callback=event_callback
+    symbol_index=None,
+    deferred_init=True,       # skip session restore, stability init
 )
 
-settings = Settings(config)
-
-# 5. Register with RPC server — public methods become RPC endpoints
+# 3. Register with RPC server
 server = JRPCServer(port, remote_timeout=60)
-server.add_class(repo)              # Exposes Repo.get_file_tree, etc.
-server.add_class(llm_service)       # Exposes LLMService.chat_streaming, etc.
-server.add_class(settings)          # Exposes Settings.get_config_content, etc.
+server.add_class(repo)
+server.add_class(llm_service)
+server.add_class(settings)
 
-# 6. Start server
+# 4. Wire up callbacks (chunk_callback, event_callback)
+# 5. Start server — WebSocket now accepting connections
 await server.start()
+
+# 6. Open browser immediately — user sees startup overlay
+webbrowser.open(url)
 ```
+
+### Phase 2: Deferred Initialization (with Progress)
+
+```pseudo
+# 7. Wait briefly for browser to connect
+await asyncio.sleep(0.5)
+
+# 8. Initialize symbol index (optional — may fail if tree-sitter unavailable)
+await send_progress("symbol_index", "Initializing symbol parser...", 10)
+symbol_index = SymbolIndex(repo_root)
+
+# 9. Complete deferred init — restore last session
+await send_progress("session_restore", "Restoring session...", 30)
+llm_service.complete_deferred_init(symbol_index)
+
+# 10. Index repository (heaviest step — parses all source files)
+await send_progress("indexing", "Indexing repository...", 50)
+await run_in_executor(symbol_index.index_repo, file_list)
+
+# 11. Initialize stability tracker (tier assignments, reference graph)
+await send_progress("stability", "Building cache tiers...", 80)
+llm_service._try_initialize_stability()
+
+# 12. Signal ready — browser dismisses startup overlay
+await send_progress("ready", "Ready", 100)
+```
+
+Progress is sent via `AcApp.startupProgress(stage, message, percent)` — best-effort, since the browser may not be connected yet during early stages. The `_init_complete` flag gates `chat_streaming` so requests are rejected with a user-friendly message until initialization finishes.
 
 **Event callback variance:** Different events pass different argument shapes:
 - `streamComplete(request_id, result)` — 2 args
 - `compactionEvent(request_id, event_dict)` — 2 args
 - `filesChanged(selected_files_list)` — 1 arg (no request_id)
+- `startupProgress(stage, message, percent)` — 3 args
 
 The `*args` splat handles this variance, but callers must match the browser method signatures exactly.
 

@@ -16,6 +16,7 @@ User clicks Send
     ▼
 Server: LLMService.chat_streaming(request_id, message, files, images)
     │
+    ├─ Guard: reject if server still initializing (deferred init not complete)
     ├─ Guard: reject if another stream is active
     ├─ Persist user message to history store
     ├─ Launch background streaming task
@@ -65,9 +66,13 @@ Post-response compaction (→ context_and_history.md)
 
 The streaming handler uses **tiered assembly** (`assemble_tiered_messages`) for LLM requests. This produces a message array with `cache_control` markers at tier boundaries, enabling provider-level prompt caching. The stability tracker's tier assignments drive content placement — see [Prompt Assembly — Tiered Assembly Data Flow](prompt_assembly.md#tiered-assembly-data-flow) for the complete data flow.
 
+### Deferred Initialization Guard
+
+The LLM service supports a **deferred initialization** mode (`deferred_init=True`) used by the startup sequence. When deferred, the service skips session restoration and stability initialization at construction time. The `_init_complete` flag starts as `False` and gates `chat_streaming` — requests arriving before initialization completes are rejected with `"Server is still initializing — please wait a moment"`. The flag is set to `True` after `complete_deferred_init()` finishes restoring the last session.
+
 ### Stability Tracker Initialization
 
-The stability tracker is initialized **eagerly at server startup** (`_try_initialize_stability` in LLMService's constructor) when the symbol index and repo are available. This runs `index_repo()`, builds the reference graph, initializes tier assignments, seeds L0, and prints a startup HUD — all before any client connects.
+The stability tracker is initialized **eagerly during the deferred startup phase** (`_try_initialize_stability` called from `main.py` after `complete_deferred_init`). This runs `index_repo()`, builds the reference graph, initializes tier assignments, seeds L0, and prints a startup HUD — with progress reported to the browser via `startupProgress`.
 
 If eager initialization fails (e.g., no symbol index or repo), a **fallback lazy initialization** occurs on the first chat request inside `_stream_chat`. Once initialized (by either path), the `_stability_initialized` flag prevents re-initialization. The lazy path also seeds `system:prompt` into L0 after `index_repo()` to ensure the legend reflects final content.
 

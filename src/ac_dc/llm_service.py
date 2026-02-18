@@ -97,7 +97,7 @@ class LLMService:
     """
 
     def __init__(self, config_manager, repo=None, symbol_index=None,
-                 chunk_callback=None, event_callback=None):
+                 chunk_callback=None, event_callback=None, deferred_init=False):
         """Initialize LLM service.
 
         Args:
@@ -106,12 +106,15 @@ class LLMService:
             symbol_index: SymbolIndex instance (optional)
             chunk_callback: async fn(request_id, content) for streaming chunks
             event_callback: async fn(event_name, data) for lifecycle events
+            deferred_init: if True, skip heavy init (session restore, stability)
+                          — call complete_deferred_init() later
         """
         self._config = config_manager
         self._repo = repo
         self._symbol_index = symbol_index
         self._chunk_callback = chunk_callback
         self._event_callback = event_callback
+        self._init_complete = False
 
         # Compute model-aware cache target tokens
         _counter = TokenCounter(config_manager.model)
@@ -171,11 +174,13 @@ class LLMService:
         # URL service
         self._url_service = self._init_url_service()
 
-        # Auto-restore last session into context
-        self._restore_last_session()
+        if not deferred_init:
+            # Auto-restore last session into context
+            self._restore_last_session()
 
-        # Initialize stability tracker eagerly if symbol index is available
-        self._try_initialize_stability()
+            # Initialize stability tracker eagerly if symbol index is available
+            self._try_initialize_stability()
+            self._init_complete = True
 
         # Session totals
         self._session_totals = {
@@ -277,6 +282,32 @@ class LLMService:
         except Exception as e:
             logger.warning(f"Eager stability initialization failed: {e}")
 
+    def complete_deferred_init(self, symbol_index=None):
+        """Complete initialization that was deferred at construction time.
+
+        Called by main.py after the WebSocket server is running and the
+        browser is connected, so progress can be reported to the user.
+
+        Args:
+            symbol_index: SymbolIndex instance (may be None if unavailable)
+        """
+        if self._init_complete:
+            return
+
+        if symbol_index is not None:
+            self._symbol_index = symbol_index
+
+        # Restore last session
+        self._restore_last_session()
+
+        self._init_complete = True
+        logger.info("Deferred initialization complete")
+
+    @property
+    def init_complete(self):
+        """Whether heavy initialization has finished."""
+        return self._init_complete
+
     # === State Management (RPC) ===
 
     def get_current_state(self):
@@ -320,6 +351,9 @@ class LLMService:
         Returns:
             {status: "started"} immediately; results via streamComplete callback
         """
+        if not self._init_complete:
+            return {"error": "Server is still initializing — please wait a moment"}
+
         if self._streaming_active:
             return {"error": "Another stream is active"}
 
