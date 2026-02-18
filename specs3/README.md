@@ -101,6 +101,12 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 |------|-------------|
 | [Build and Deployment](6-deployment/build_and_deployment.md) | Build pipeline, CI, versioning, startup sequence, CLI |
 
+### Layer 7: Future
+
+| Spec | Description |
+|------|-------------|
+| [Document Mode](7-future/document_mode.md) | Document index for markdown/docx/xlsx, cache tier integration, document mode toggle |
+
 ### Consolidated References
 
 The [Communication Layer](1-foundation/communication_layer.md) spec contains:
