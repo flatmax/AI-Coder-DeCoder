@@ -564,13 +564,43 @@ export class SvgEditor {
     e.stopPropagation();
 
     if (isShift) {
-      // Shift+click/drag always starts a marquee — even on top of elements.
-      // On pointer-up, if the marquee was too small (just a click), we fall
-      // back to the toggle-select behaviour for the element under the cursor.
       e.preventDefault();
       e.stopPropagation();
-      this._marqueeClickTarget = target;   // remember for click fallback
+
+      // Shift+click on an already-selected element — toggle it out
+      if (this._multiSelected.has(target)) {
+        this._multiSelected.delete(target);
+        if (this._selected === target) {
+          const remaining = [...this._multiSelected];
+          this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+        }
+        if (this._multiSelected.size === 0) {
+          this._deselect();
+        } else {
+          this._renderHandles();
+          this._onSelect(this._selected);
+        }
+        return;
+      }
+
+      // Shift+click on an unselected element — toggle it in
+      if (!this._selected) this._selected = target;
+      this._multiSelected.add(target);
+      this._renderHandles();
+      this._onSelect(this._selected);
+
+      // Start marquee tracking so shift+drag still works for area selection.
+      // On pointer-up, the tiny-marquee fallback is skipped since we already toggled.
+      this._marqueeClickTarget = null;
       this._startMarquee(svgPt);
+      return;
+    }
+
+    // If clicking an element that's already part of a multi-selection,
+    // start a multi-drag without breaking the selection.
+    if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
+      this._svg.style.cursor = 'grabbing';
+      this._startMultiDrag(svgPt);
       return;
     }
 
