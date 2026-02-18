@@ -162,6 +162,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       align-items: center;
       justify-content: center;
       height: 100%;
+      padding-left: 50%;
       color: var(--text-muted);
     }
     .watermark {
