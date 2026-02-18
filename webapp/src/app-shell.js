@@ -41,6 +41,7 @@ class AcApp extends JRPCClient {
       display: block;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       overflow: hidden;
     }
 
@@ -186,6 +187,7 @@ class AcApp extends JRPCClient {
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onWindowResize = this._onWindowResize.bind(this);
   }
 
   connectedCallback() {
@@ -211,6 +213,9 @@ class AcApp extends JRPCClient {
 
     // Save viewport state before page unload
     window.addEventListener('beforeunload', this._onBeforeUnload);
+
+    // Re-layout on window resize (display change, maximize, etc.)
+    window.addEventListener('resize', this._onWindowResize);
   }
 
   disconnectedCallback() {
@@ -224,6 +229,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('keydown', this._onGlobalKeyDown);
     window.removeEventListener('ac-toast', this._onToastEvent);
     window.removeEventListener('beforeunload', this._onBeforeUnload);
+    window.removeEventListener('resize', this._onWindowResize);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
@@ -634,6 +640,17 @@ class AcApp extends JRPCClient {
 
   _onBeforeUnload() {
     this._saveViewportState();
+  }
+
+  /**
+   * Force viewers to re-layout when the window is resized
+   * (e.g. laptop lid reopen, maximize, display change).
+   */
+  _onWindowResize() {
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (diffV?._editor) {
+      diffV._editor.layout();
+    }
   }
 
   render() {
