@@ -119,6 +119,21 @@ When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual
 
 Click an SVG element to select it. A bounding box with handles appears around the selected element. The toolbar shows the selected element's tag name (e.g., `<rect>`, `<circle>`). Click empty space or press Escape to deselect.
 
+### Multi-Selection
+
+Hold **Shift** and click or drag to multi-select:
+
+| Interaction | Behavior |
+|-------------|----------|
+| **Shift+click** on element | Toggle element in/out of multi-selection |
+| **Shift+click** on empty space | No-op |
+| **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
+| **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
+
+Shift+drag always initiates a marquee rectangle. If the drag distance is below 5px (a click rather than a drag), the editor falls back to toggle-select behavior on the element under the cursor. The `_marqueeClickTarget` field tracks this fallback.
+
+The toolbar shows the count of selected elements (e.g., "3 elements") when multiple elements are selected. Multi-selected elements can be dragged as a group.
+
 ### Supported Operations
 
 | Operation | Interaction | Supported Elements |
@@ -161,6 +176,17 @@ The editor determines interaction behavior from the element type:
 | `path` | Translate via transform | Move individual path points |
 | `text` | Translate (x, y or transform) | — (double-click to edit) |
 | `g` (group) | Translate via transform | — |
+
+### Marquee Visual Feedback
+
+The marquee rectangle's appearance changes based on drag direction to signal the selection mode:
+
+| Direction | Fill | Stroke | Dash | Meaning |
+|-----------|------|--------|------|---------|
+| Forward (left→right) | Blue 12% opacity | Solid `#4fc3f7` | None | Containment — must be fully inside |
+| Reverse (right→left) | Green 10% opacity | Dashed `#7ee787` | 4px on / 3px off | Crossing — any intersection counts |
+
+Stroke width and dash lengths scale inversely with zoom to maintain consistent screen-pixel appearance.
 
 ### Dirty Tracking and Undo
 
