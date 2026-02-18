@@ -50,7 +50,13 @@ History is immutable, so N ≥ 3 waiting is unnecessary. History graduation is *
 2. **Token threshold met** — if eligible history tokens exceed `cache_target_tokens`, the **oldest** messages graduate, keeping the most recent `cache_target_tokens` worth in active (since recent history is most likely to be referenced)
 3. **Never** (if `cache_target_tokens = 0`) — history stays active permanently
 
-The `cache_target_tokens` = `cache_min_tokens × buffer_multiplier` (default: 1024 × 1.5 = 1536).
+The `cache_target_tokens` = `max(cache_min_tokens, min_cacheable_tokens) × buffer_multiplier`.
+
+The `min_cacheable_tokens` is model-aware — per Anthropic's prompt caching docs:
+- **4096 tokens** for Claude Opus 4.6, Opus 4.5, Haiku 4.5
+- **1024 tokens** for Claude Sonnet 4.6, Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4
+
+The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. The `buffer_multiplier` defaults to 1.1. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
 
 ## Ripple Promotion
 
@@ -114,7 +120,7 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 ### L0 Seeding
 
-L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet the provider's minimum cache size (default: 1024 tokens). Symbols are selected by reference count descending (most-referenced first) from the reference index. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
+L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet `cache_target_tokens`. Symbols are selected by reference count descending (most-referenced first) from the reference index. A conservative per-symbol token estimate (400 tokens) is used during seeding since real token counts aren't available until the first update — this prevents over-seeding L0 when placeholder tokens are too small. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
 
 ### Clustering Algorithm
 
@@ -123,7 +129,7 @@ L0 is seeded at initialization with the system prompt, symbol legend, and enough
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
 4. **Distribute orphan files** — files not in any connected component (no mutual references) are distributed into the smallest tier via the same greedy bin-packing. This is critical because `connected_components()` only returns files with bidirectional references — files with only one-way references or no references at all would otherwise be untracked at initialization, causing them to register as new active items on every request and never stabilize.
 
-**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by `file_ref_count` descending) to meet the provider's minimum cache size (e.g., 1024 tokens for Anthropic). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active). **L0-seeded symbols are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
+**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by `file_ref_count` descending) to meet `cache_target_tokens` (model-aware: 4505 for Opus 4.6, 1126 for Sonnet). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active). **L0-seeded symbols are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
 
 After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
 
@@ -131,7 +137,7 @@ After distribution, tiers below `cache_target_tokens` are merged into the smalle
 
 ## Cache Block Structure
 
-See [Prompt Assembly](prompt_assembly.md) for the complete message ordering. Each non-empty tier uses one cache breakpoint. Providers typically allow 4 breakpoints per request. Blocks under the provider minimum (e.g., 1024 tokens for Anthropic) won't actually be cached.
+See [Prompt Assembly](prompt_assembly.md) for the complete message ordering. Each non-empty tier uses one cache breakpoint. Providers typically allow 4 breakpoints per request. Blocks under the provider minimum won't actually be cached — the minimum is model-dependent (4096 tokens for Opus 4.5/4.6 and Haiku 4.5; 1024 tokens for Sonnet and other Claude models). The `cache_target_tokens` value accounts for this via `max(cache_min_tokens, min_cacheable_tokens) × buffer_multiplier`.
 
 ## N Value Display
 

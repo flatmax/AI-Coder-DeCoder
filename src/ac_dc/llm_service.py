@@ -113,11 +113,22 @@ class LLMService:
         self._chunk_callback = chunk_callback
         self._event_callback = event_callback
 
+        # Compute model-aware cache target tokens
+        _counter = TokenCounter(config_manager.model)
+        _min_cacheable = _counter.min_cacheable_tokens
+        _cache_target = config_manager.cache_target_tokens_for_model(_min_cacheable)
+        logger.info(
+            f"Cache config: model={config_manager.model}, "
+            f"min_cacheable={_min_cacheable}, "
+            f"cache_target={_cache_target}, "
+            f"compaction_trigger={config_manager.compaction_config.get('compaction_trigger_tokens', '?')}"
+        )
+
         # Context manager
         self._context = ContextManager(
             model_name=config_manager.model,
             repo_root=str(repo.root) if repo else None,
-            cache_target_tokens=config_manager.cache_target_tokens,
+            cache_target_tokens=_cache_target,
             compaction_config=config_manager.compaction_config,
             system_prompt=config_manager.get_system_prompt(),
         )
@@ -140,7 +151,7 @@ class LLMService:
 
         # Stability tracker
         self._stability_tracker = StabilityTracker(
-            cache_target_tokens=config_manager.cache_target_tokens,
+            cache_target_tokens=_cache_target,
         )
         self._context.set_stability_tracker(self._stability_tracker)
         self._stability_initialized = False
@@ -673,9 +684,10 @@ class LLMService:
 
             # Post-response compaction
             try:
-                logger.info(f"Post-response compaction check — history: {len(self._context.get_history())} messages")
+                needs_compact = self._context.should_compact()
+                logger.debug(f"Post-response compaction check — history: {len(self._context.get_history())} messages, compact={needs_compact}")
                 # Notify UI that compaction is starting — best-effort
-                if self._context.should_compact() and self._event_callback:
+                if needs_compact and self._event_callback:
                     try:
                         await self._event_callback(
                             "compactionEvent", request_id,
@@ -687,7 +699,11 @@ class LLMService:
                     except Exception as e:
                         logger.debug(f"Compacting notification failed (non-critical): {e}")
 
-                compaction_result = await self._context.compact_history_if_needed()
+                compaction_result = None
+                if needs_compact:
+                    compaction_result = await self._context.compact_history_if_needed(
+                        already_checked=True
+                    )
                 if compaction_result and compaction_result.get("case") != "none":
                     logger.info(f"Compaction complete: case={compaction_result.get('case')}")
                     # Notify UI that history was compacted — retry-tolerant

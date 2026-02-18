@@ -268,9 +268,9 @@ class ContextManager:
         """Attach a history compactor instance."""
         self._compactor = compactor
 
-    async def compact_history_if_needed(self):
+    async def compact_history_if_needed(self, already_checked=False):
         """Run compaction if threshold exceeded. Returns compaction result or None."""
-        if not self.should_compact():
+        if not already_checked and not self.should_compact():
             return None
 
         logger.info(f"🗜️  Compaction starting — {len(self._history)} messages, {self.history_token_count():,} tokens")

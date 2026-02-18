@@ -254,23 +254,33 @@ class ConfigManager:
 
     @property
     def cache_buffer_multiplier(self):
-        return self._llm_config.get("cache_buffer_multiplier", 1.5)
+        return self._llm_config.get("cache_buffer_multiplier", 1.1)
+
+    def cache_target_tokens_for_model(self, min_cacheable_tokens):
+        """Compute cache target tokens using the model-aware minimum.
+
+        The minimum cacheable prompt length varies by model (e.g. 4096 for
+        Opus 4.5/4.6 and Haiku 4.5, 1024 for Sonnet). We use whichever is
+        larger — the config override or the model's hard minimum — then
+        apply the buffer multiplier.
+        """
+        effective_min = max(self.cache_min_tokens, min_cacheable_tokens)
+        return int(effective_min * self.cache_buffer_multiplier)
 
     @property
     def cache_target_tokens(self):
+        """Fallback for callers without a model reference."""
         return int(self.cache_min_tokens * self.cache_buffer_multiplier)
 
     @property
     def compaction_config(self):
-        config = self._app_config.get("history_compaction", {
+        return self._app_config.get("history_compaction", {
             "enabled": True,
             "compaction_trigger_tokens": 24000,
             "verbatim_window_tokens": 4000,
             "summary_budget_tokens": 500,
             "min_verbatim_exchanges": 2,
         })
-        logger.info(f"ConfigManager.compaction_config: trigger_tokens={config.get('compaction_trigger_tokens', '?')}")
-        return config
 
     @property
     def url_cache_config(self):
