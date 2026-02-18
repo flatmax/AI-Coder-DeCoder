@@ -670,6 +670,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         wordWrap: this._previewMode ? 'on' : 'off',
         renderWhitespace: 'selection',
         contextmenu: true,
+        links: false,
+        hover: { enabled: true, above: false, sticky: true, delay: 600 },
         scrollbar: {
           verticalScrollbarSize: 8,
           horizontalScrollbarSize: 8,
