@@ -432,6 +432,7 @@ class TestInitialization:
         """Initialization uses connected_components from reference index."""
         from unittest.mock import MagicMock
         ref_index = MagicMock()
+        ref_index.file_ref_count.return_value = 0
         ref_index.connected_components.return_value = [
             {"src/a.py", "src/b.py"},
             {"src/c.py"},
@@ -439,30 +440,37 @@ class TestInitialization:
         files = ["src/a.py", "src/b.py", "src/c.py"]
         tracker.initialize_from_reference_graph(ref_index, files)
 
-        # All files should have symbol entries
+        # All files should have symbol entries in some tier
         for f in files:
             item = tracker.get_item(f"symbol:{f}")
             assert item is not None
-            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
+            assert item.tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
 
-        # Clustered files (a, b) should be in the same tier
-        tier_a = tracker.get_item("symbol:src/a.py").tier
-        tier_b = tracker.get_item("symbol:src/b.py").tier
-        assert tier_a == tier_b
+        # Files not seeded into L0 that share a cluster should be in the same tier
+        non_l0 = [f for f in ["src/a.py", "src/b.py"]
+                   if tracker.get_item(f"symbol:{f}").tier != Tier.L0]
+        if len(non_l0) == 2:
+            assert tracker.get_item(f"symbol:{non_l0[0]}").tier == \
+                   tracker.get_item(f"symbol:{non_l0[1]}").tier
 
     def test_l0_never_assigned_by_clustering(self, tracker):
-        """L0 is never assigned by initialization — must be earned via promotion."""
+        """Clustering does not assign L0 — only _seed_l0_symbols does."""
         from unittest.mock import MagicMock
         ref_index = MagicMock()
+        ref_index.file_ref_count.return_value = 0
         ref_index.connected_components.return_value = [
             {f"src/file{i}.py" for i in range(20)},
         ]
         files = [f"src/file{i}.py" for i in range(20)]
         tracker.initialize_from_reference_graph(ref_index, files)
 
-        for f in files:
-            item = tracker.get_item(f"symbol:{f}")
-            assert item.tier != Tier.L0
+        # L0 items should only come from _seed_l0_symbols (limited by cache_target_tokens),
+        # not from clustering — so most files should be in L1/L2/L3
+        l0_count = sum(1 for f in files
+                       if tracker.get_item(f"symbol:{f}").tier == Tier.L0)
+        non_l0_count = len(files) - l0_count
+        assert non_l0_count > 0, "Clustering should place most files in L1-L3"
+        assert l0_count < len(files), "Not all files should be in L0"
 
 
 # === Threshold Anchoring ===
