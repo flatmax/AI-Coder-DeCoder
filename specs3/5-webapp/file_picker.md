@@ -6,6 +6,17 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 
 ## Tree Rendering
 
+### Branch Badge
+
+The root row (repo name) displays a **branch badge** — a compact pill showing the current git branch name with a `⎇` icon prefix. Fetched via `Repo.get_current_branch` during each `loadTree()` call, so it stays current after commits, checkouts, and review entry/exit.
+
+| State | Display | Style |
+|-------|---------|-------|
+| Normal branch | `⎇ main` | Muted text, default border |
+| Detached HEAD | `⎇ abc1234` (short SHA) | Orange text, orange-tinted border |
+
+The badge truncates long branch names with ellipsis (max 140px) and shows a tooltip with the full branch name. When detached, the short SHA is resolved via `Repo.resolve_ref('HEAD')`.
+
 **Directories**: Expandable toggle. Checkbox selects/deselects all children. Indeterminate when partially selected.
 
 **Files**: Checkbox for selection. Name click opens in diff viewer. Shows:
@@ -144,3 +155,4 @@ When a review starts (via `review-started` event from the review selector):
 - Expanded directories: tracked in component state and propagated via events
 - Panel width: local storage (default ~280px)
 - Panel collapsed: local storage
+- Branch name: fetched live on each `loadTree()` (not persisted)

@@ -442,8 +442,17 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       try {
         const branchResult = await this.rpcExtract('Repo.get_current_branch');
         if (branchResult && !branchResult.error) {
-          this._branch = branchResult.branch || branchResult.sha?.slice(0, 7) || '';
-          this._branchDetached = !!branchResult.detached;
+          const name = typeof branchResult === 'string' ? branchResult : (branchResult.branch || '');
+          this._branchDetached = (name === 'HEAD');
+          if (this._branchDetached) {
+            // Detached HEAD — show short SHA instead
+            try {
+              const sha = await this.rpcExtract('Repo.resolve_ref', 'HEAD');
+              this._branch = (typeof sha === 'string' ? sha : '').slice(0, 7) || 'detached';
+            } catch { this._branch = 'detached'; }
+          } else {
+            this._branch = name;
+          }
         }
       } catch (e) {
         // Non-critical — leave branch empty
