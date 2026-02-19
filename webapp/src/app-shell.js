@@ -20,6 +20,14 @@ const STORAGE_KEY_LAST_FILE = 'ac-last-open-file';
 const STORAGE_KEY_LAST_VIEWPORT = 'ac-last-viewport';
 
 /**
+ * Return a repo-scoped localStorage key.
+ * Falls back to the bare key if repo name is unknown.
+ */
+function _repoKey(key, repoName) {
+  return repoName ? `${key}:${repoName}` : key;
+}
+
+/**
  * Extract WebSocket port from URL query parameter ?port=N
  */
 function getPortFromURL() {
@@ -220,6 +228,7 @@ class AcApp extends JRPCClient {
     this._startupVisible = true;
     this._startupMessage = 'Connecting...';
     this._startupPercent = 0;
+    this._repoName = null;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
@@ -479,6 +488,7 @@ class AcApp extends JRPCClient {
       // Set browser tab title to ⚡ {repo_name}
       if (state?.repo_name) {
         document.title = `${state.repo_name}`;
+        this._repoName = state.repo_name;
       }
 
       // If server already finished initialization (e.g. browser connected
@@ -514,11 +524,11 @@ class AcApp extends JRPCClient {
    */
   _reopenLastFile() {
     try {
-      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;
 
       // Read saved viewport before navigating (navigation may overwrite it)
-      const raw = localStorage.getItem(STORAGE_KEY_LAST_VIEWPORT);
+      const raw = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_VIEWPORT, this._repoName));
       let viewport = null;
       if (raw) {
         viewport = JSON.parse(raw);
@@ -551,7 +561,7 @@ class AcApp extends JRPCClient {
    */
   _saveViewportState() {
     try {
-      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;
 
       // Only save viewport for diff files (SVG zoom restore not yet supported)
@@ -562,7 +572,7 @@ class AcApp extends JRPCClient {
         const diffState = diffV.getViewportState?.() ?? null;
         if (!diffState) return;
         const viewport = { path, type: 'diff', diff: diffState };
-        localStorage.setItem(STORAGE_KEY_LAST_VIEWPORT, JSON.stringify(viewport));
+        localStorage.setItem(_repoKey(STORAGE_KEY_LAST_VIEWPORT, this._repoName), JSON.stringify(viewport));
       }
     } catch (_) {}
   }
@@ -593,7 +603,7 @@ class AcApp extends JRPCClient {
     this._saveViewportState();
 
     // Remember last opened file for restore on refresh
-    try { localStorage.setItem(STORAGE_KEY_LAST_FILE, detail.path); } catch (_) {}
+    try { localStorage.setItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName), detail.path); } catch (_) {}
 
     const isSvg = detail.path.toLowerCase().endsWith('.svg');
 
