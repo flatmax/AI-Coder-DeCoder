@@ -267,14 +267,71 @@ Documents tend to change less frequently than code, so they would naturally stab
 
 ## Document Mode Toggle
 
-Rather than a hard mode switch that replaces one index with another, document mode controls **verbosity per file type**:
+Document mode is a **full context switch**, not an additive layer. It replaces the code-oriented context with a documentation-oriented context. The target audience is non-technical users — managers, product owners, technical writers — who work with documents and don't need code symbols.
 
-| Mode | Code files | Document files |
-|---|---|---|
-| Default (code) | Full symbol detail | Heading-only outlines |
-| Document mode | File names only | Expanded outlines (headings + link targets + optional first-paragraph summaries) |
+| Mode | Symbol map | Document index | File tree | System prompt |
+|---|---|---|---|---|
+| Code (default) | Full symbol detail | Not included | Source files | Code-oriented |
+| Document | Not included | Full outlines: headings + KeyBERT keywords + links + first-paragraph summaries | Document files only (`.md`, `.docx`, `.pdf`, `.xlsx`, `.csv`) | Document-oriented |
 
-This is a flag on `_build_tiered_content()` and the formatter, not a separate pipeline. Both indexes are always built; the mode just controls how much detail each contributes to the prompt.
+### What Changes in Document Mode
+
+1. **Symbol map removed** — no code symbols in context. The entire token budget is available for document outlines, selected document content, and conversation history
+2. **File tree filtered** — only document files appear. Source code files are hidden from the tree and file picker
+3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
+4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
+5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
+6. **Snippets swapped** — a separate `doc-snippets.json` with document-relevant quick actions: "Summarise this section", "Check cross-references", "Suggest restructuring", "Write an executive summary"
+
+### What Stays the Same
+
+- Conversation history, compaction, and session management — unchanged
+- URL fetching and context — unchanged (useful for referencing external docs)
+- File editing via edit blocks — unchanged
+- Search — works on document content instead of code
+- Review mode — disabled in document mode (code review is not applicable)
+
+### Switching Modes
+
+Mode switching is a session-level action — it clears the current context and rebuilds with the appropriate index. Conversation history is preserved but the LLM is informed of the mode change via a system message.
+
+```
+User clicks mode toggle
+    │
+    ├── Clear file context (selected files)
+    ├── Swap system prompt (system.md → system_doc.md)
+    ├── Swap snippets (snippets.json → doc-snippets.json)
+    ├── Rebuild tier content from doc_index instead of symbol_index
+    ├── Filter file tree to document files only
+    └── Insert system message: "Switched to document mode"
+```
+
+## System Prompt for Document Mode
+
+A separate `system_doc.md` prompt optimised for document work. Key differences from the code prompt:
+
+- No references to programming languages, frameworks, or debugging
+- Focus on: document structure, clarity, cross-referencing, consistency, writing style
+- Edit block format explained in terms of document editing (sections, paragraphs, headings) rather than code editing (functions, classes, imports)
+- Awareness of document types: specs, READMEs, design docs, reports, meeting notes, requirements
+
+The prompt includes awareness of the document index format so the LLM understands the heading + keyword outlines it sees in context.
+
+## Document-Specific Snippets
+
+`doc-snippets.json` provides quick actions relevant to document workflows:
+
+```json
+[
+  {"label": "Summarise", "text": "Summarise this document in 3-5 bullet points"},
+  {"label": "Cross-refs", "text": "Check all cross-references in this document and flag any broken links"},
+  {"label": "Restructure", "text": "Suggest a better structure for this document"},
+  {"label": "Executive summary", "text": "Write an executive summary of this document"},
+  {"label": "TOC", "text": "Generate a table of contents for this document"},
+  {"label": "Consistency", "text": "Check this document for terminology inconsistencies"},
+  {"label": "Simplify", "text": "Rewrite this section in simpler language"}
+]
+```
 
 ## Cross-Reference Index
 
