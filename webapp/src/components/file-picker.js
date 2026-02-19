@@ -662,7 +662,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _ctxRename(node) {
     this._contextMenu = null;
-    this._contextInput = { type: 'rename', path: node.path, value: node.name };
+    this._contextInput = { type: 'rename', path: node.path, value: node.path };
   }
 
   async _ctxDelete(path) {
@@ -712,9 +712,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
     try {
       if (input.type === 'rename') {
-        const dir = input.path.includes('/') ? input.path.substring(0, input.path.lastIndexOf('/')) : '';
-        const newPath = dir ? `${dir}/${value}` : value;
-        await this.rpcExtract('Repo.rename_file', input.path, newPath);
+        await this.rpcExtract('Repo.rename_file', input.path, value);
       } else if (input.type === 'new-file') {
         const newPath = input.path ? `${input.path}/${value}` : value;
         await this.rpcExtract('Repo.create_file', newPath, '');
@@ -776,6 +774,12 @@ export class AcFilePicker extends RpcMixin(LitElement) {
         } else {
           this._onRowClick(item.node);
         }
+      }
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      const item = items[idx];
+      if (item && item.node.type === 'file') {
+        this._ctxRename(item.node);
       }
     }
   }
@@ -937,7 +941,14 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     if (inp && this._contextInput) {
       inp.focus();
       if (this._contextInput.type === 'rename') {
-        inp.select();
+        // Select just the filename portion so the user can quickly rename,
+        // but the full path is visible and editable for moving files.
+        const val = inp.value || '';
+        const lastSlash = val.lastIndexOf('/');
+        const nameStart = lastSlash + 1;
+        const dotIdx = val.lastIndexOf('.');
+        const nameEnd = dotIdx > nameStart ? dotIdx : val.length;
+        inp.setSelectionRange(nameStart, nameEnd);
       }
     }
   }
