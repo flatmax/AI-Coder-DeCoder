@@ -285,7 +285,7 @@ class AcApp extends JRPCClient {
   // === jrpc-oo lifecycle callbacks ===
 
   remoteIsUp() {
-    console.log('WebSocket connected — remote is up');
+    console.log('WebSocket connected — remote is up, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     const wasReconnecting = this._reconnectAttempt > 0;
     this._reconnectAttempt = 0;
     this._reconnectVisible = false;
@@ -312,7 +312,7 @@ class AcApp extends JRPCClient {
   }
 
   setupDone() {
-    console.log('jrpc-oo setup done — call proxy ready');
+    console.log('jrpc-oo setup done — call proxy ready, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     this._wasConnected = true;
 
     // Publish the call proxy so all child components get RPC access
@@ -450,13 +450,16 @@ class AcApp extends JRPCClient {
    * Called via RPC: AcApp.startupProgress(stage, message, percent)
    */
   startupProgress(stage, message, percent) {
+    console.log(`startupProgress: stage=${stage}, message=${message}, percent=${percent}, _startupVisible=${this._startupVisible}`);
     this._startupMessage = message || '';
     if (typeof percent === 'number') {
       this._startupPercent = Math.min(100, Math.max(0, percent));
     }
     if (stage === 'ready') {
+      console.log('startupProgress: ready — dismissing overlay in 400ms');
       // Dismiss overlay with a short delay for the animation
       setTimeout(() => {
+        console.log('startupProgress: dismissing overlay now');
         this._startupVisible = false;
       }, 400);
     }
@@ -471,10 +474,21 @@ class AcApp extends JRPCClient {
       // Unwrap jrpc-oo envelope
       const state = this._extract(raw);
       console.log('Initial state loaded:', state);
+      console.log('init_complete:', state?.init_complete, 'startupVisible:', this._startupVisible);
 
       // Set browser tab title to ⚡ {repo_name}
       if (state?.repo_name) {
         document.title = `${state.repo_name}`;
+      }
+
+      // If server already finished initialization (e.g. browser connected
+      // after suspend/resume or slow page load), dismiss the startup overlay.
+      // The startupProgress("ready") RPC may have been sent while disconnected.
+      if (state?.init_complete) {
+        console.log('Server already initialized — dismissing startup overlay');
+        this._startupVisible = false;
+      } else {
+        console.log('Server not yet initialized — keeping startup overlay');
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
