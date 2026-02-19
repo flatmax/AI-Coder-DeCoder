@@ -373,34 +373,59 @@ export class SvgEditor {
 
   /** Reset viewBox to show all content, fitted and centered within the container. */
   fitContent() {
-    const o = this._origViewBox;
-    if (!o || o.w <= 0 || o.h <= 0) return;
+    // Use the actual rendered content bounds (getBBox) rather than the
+    // original viewBox attribute, which may be a crop window that doesn't
+    // cover all content.  Fall back to _origViewBox if getBBox fails.
+    let contentBounds;
+    try {
+      const bbox = this._svg.getBBox();
+      if (bbox.width > 0 && bbox.height > 0) {
+        contentBounds = { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
+      }
+    } catch {
+      // getBBox can fail for hidden/empty SVGs
+    }
+    if (!contentBounds) contentBounds = this._origViewBox;
+    if (!contentBounds || contentBounds.w <= 0 || contentBounds.h <= 0) return;
 
-    // Get the container dimensions from the SVG element's bounding rect
+    const cb = contentBounds;
+
+    // Compute a viewBox that shows all content centered and aspect-ratio-
+    // preserved.  The shorter axis is expanded to match the container's
+    // aspect ratio so the browser's default preserveAspectRatio="xMidYMid meet"
+    // becomes a no-op (viewBox AR === container AR).
     const rect = this._svg.getBoundingClientRect();
     const cw = rect.width || 1;
     const ch = rect.height || 1;
     const containerAR = cw / ch;
-    const contentAR = o.w / o.h;
+    const contentAR = cb.w / cb.h;
 
-    let vbX, vbY, vbW, vbH;
+    // Add a small margin (3%) so content doesn't touch edges
+    const margin = 0.03;
+    const mx = cb.x - cb.w * margin;
+    const my = cb.y - cb.h * margin;
+    const mw = cb.w * (1 + margin * 2);
+    const mh = cb.h * (1 + margin * 2);
+
+    let vbW, vbH;
     if (contentAR > containerAR) {
-      // Content is wider than container — match width, expand height
-      vbW = o.w;
-      vbH = o.w / containerAR;
-      vbX = o.x;
-      vbY = o.y - (vbH - o.h) / 2;
+      // Content is wider — width constrains
+      vbW = mw;
+      vbH = mw / containerAR;
     } else {
-      // Content is taller than container — match height, expand width
-      vbH = o.h;
-      vbW = o.h * containerAR;
-      vbX = o.x - (vbW - o.w) / 2;
-      vbY = o.y;
+      // Content is taller — height constrains
+      vbH = mh;
+      vbW = mh * containerAR;
     }
+
+    // Center the content within the expanded viewBox
+    const vbX = mx - (vbW - mw) / 2;
+    const vbY = my - (vbH - mh) / 2;
 
     this._setViewBox(vbX, vbY, vbW, vbH);
     this._zoomLevel = 1;
     this._updateHandles();
+    this._onZoom({ zoom: 1, viewBox: { x: vbX, y: vbY, w: vbW, h: vbH } });
   }
 
   _onWheel(e) {

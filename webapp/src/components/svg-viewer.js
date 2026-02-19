@@ -461,6 +461,23 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
     if (!leftSvg) return;
 
+    // Update the viewBox to cover all rendered content so that
+    // svg-pan-zoom's fit() shows everything (the original viewBox
+    // may be a crop window that doesn't include all elements).
+    try {
+      const bbox = leftSvg.getBBox();
+      if (bbox.width > 0 && bbox.height > 0) {
+        const margin = 0.03;
+        const mx = bbox.x - bbox.width * margin;
+        const my = bbox.y - bbox.height * margin;
+        const mw = bbox.width * (1 + margin * 2);
+        const mh = bbox.height * (1 + margin * 2);
+        leftSvg.setAttribute('viewBox', `${mx} ${my} ${mw} ${mh}`);
+      }
+    } catch {
+      // getBBox can fail for hidden/empty SVGs — keep original viewBox
+    }
+
     try {
       this._panZoomLeft = svgPanZoom(leftSvg, {
         zoomEnabled: true,
@@ -504,9 +521,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         maxZoom: 40,
         zoomScaleSensitivity: 0.3,
         dblClickZoomEnabled: true,
-        onZoom: onUpdate,
-        onPan: onUpdate,
-        onUpdatedCTM: onUpdate,
       });
     } catch (e) {
       console.warn('svg-pan-zoom init failed for right panel:', e);
@@ -691,6 +705,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     // for the container aspect ratio and resets zoom.
     if (this._mode === 'select' && this._svgEditor) {
       this._svgEditor.fitContent();
+      this._zoomLevel = Math.round(this._svgEditor.zoomLevel * 100);
     }
   }
 
@@ -984,7 +999,14 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
-  _prepareSvgElement(container) {
+  /**
+   * @param {HTMLElement} container
+   * @param {Object} [opts]
+   * @param {boolean} [opts.editable] - if true, set preserveAspectRatio="none"
+   *   so the viewBox maps 1-to-1 to the container rect (SvgEditor manages
+   *   aspect ratio via viewBox calculations).
+   */
+  _prepareSvgElement(container, { editable = false } = {}) {
     const svg = container.querySelector('svg');
     if (svg) {
       svg.style.width = '100%';
@@ -996,6 +1018,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       }
       svg.removeAttribute('width');
       svg.removeAttribute('height');
+      if (editable) {
+        // The default preserveAspectRatio="xMidYMid meet" causes the browser
+        // to add its own fitting transform on top of the viewBox.  SvgEditor
+        // controls the viewBox directly (including aspect-ratio-correct fitting
+        // in fitContent), so we must disable the browser's extra transform.
+        // Without this, portrait/landscape SVGs get double-fitted and appear
+        // off-center or incorrectly sized.
+        svg.setAttribute('preserveAspectRatio', 'none');
+      }
     }
   }
 
