@@ -271,13 +271,13 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 
 | Mode | Symbol map | Document index | File tree | System prompt |
 |---|---|---|---|---|
-| Code (default) | Full symbol detail | Not included | Source files | Code-oriented |
-| Document | Not included | Full outlines: headings + KeyBERT keywords + links + first-paragraph summaries | Document files only (`.md`, `.docx`, `.pdf`, `.xlsx`, `.csv`) | Document-oriented |
+| Code (default) | Full symbol detail | Not included | All files | Code-oriented |
+| Document | Not included | Full outlines: headings + KeyBERT keywords + links + first-paragraph summaries | All files (unchanged) | Document-oriented |
 
 ### What Changes in Document Mode
 
 1. **Symbol map removed** — no code symbols in context. The entire token budget is available for document outlines, selected document content, and conversation history
-2. **File tree filtered** — only document files appear. Source code files are hidden from the tree and file picker
+2. **File tree unchanged** — all files remain visible. Users may need to reference code files while editing documentation (e.g., verifying what they're documenting). The tree is cheap in tokens and filtering it adds complexity for no benefit
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
 5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
@@ -288,8 +288,8 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 - Conversation history, compaction, and session management — unchanged
 - URL fetching and context — unchanged (useful for referencing external docs)
 - File editing via edit blocks — unchanged
-- Search — works on document content instead of code
-- Review mode — disabled in document mode (code review is not applicable)
+- Search — unchanged (grep over file content works on any text)
+- Review mode — unchanged (reviewing document edits before committing is equally useful)
 
 ### Switching Modes
 
@@ -302,7 +302,6 @@ User clicks mode toggle
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (snippets.json → doc-snippets.json)
     ├── Rebuild tier content from doc_index instead of symbol_index
-    ├── Filter file tree to document files only
     └── Insert system message: "Switched to document mode"
 ```
 
@@ -343,11 +342,66 @@ The document reference index tracks three types of links:
 
 This enables the connected components algorithm (already used in `reference_index.py`) to cluster related documents and code files together for tier initialization.
 
-## Open Questions
+## Design Decisions
 
-- **Should the document index share the `symbol_index/cache.py` infrastructure?** The mtime-based caching and content hashing would apply equally well. Could use the same `SymbolCache` with a different key prefix, or a parallel `DocCache`.
-- **How should the UI expose document mode?** A toggle in the dialog, a per-session setting, or auto-detected from repo content (e.g., if >50% of files are documents)?
-- **Should document outlines support search?** The existing `search_files` in `repo.py` searches file content via grep — document headings could be an additional search target.
-- **Which sentence-transformer model for KeyBERT?** The default `all-MiniLM-L6-v2` (80MB) is a good balance of speed and quality. Larger models like `all-mpnet-base-v2` (420MB) produce better keywords but with slower first-load. Should this be configurable?
-- **Should keywords be omitted for unique headings?** If a heading text appears only once in a document, keywords add less value. The formatter could skip them to save tokens — but consistent formatting may be simpler.
-- **Keyword language support?** KeyBERT works best with English text. For multilingual repos, a multilingual model (`paraphrase-multilingual-MiniLM-L12-v2`) could be used at the cost of larger download and slightly lower English quality.
+### Cache Infrastructure — Shared Base Class
+
+The document index shares the `symbol_index/cache.py` infrastructure via a base class extraction. `SymbolCache` is refactored into an abstract `BaseCache` with concrete subclasses:
+
+- `BaseCache` — mtime-based get/put/invalidate, content hashing, `cached_files` property
+- `SymbolCache(BaseCache)` — existing code symbol caching (unchanged external API)
+- `DocCache(BaseCache)` — document outline caching with the same mtime semantics
+
+This pattern extends to the formatter: `BaseFormatter` provides common logic (path aliasing, tier integration, test file collapsing), while `CompactFormatter` and `DocFormatter` implement format-specific output and legends. The legend for document symbols (headings, keywords, links) is defined as an abstract method in the base class, implemented differently by each subclass.
+
+### UI Mode Toggle
+
+Document mode is exposed as a toggle in the `ac-dialog` component, next to the existing tab bar. A simple code/document mode indicator shows the current mode and switches on click. Mode switching clears file context and rebuilds tier content from the appropriate index.
+
+### Search — Unchanged
+
+The existing `search_files` in `repo.py` (grep over file content) is used as-is for both modes. Document headings are not added as a separate search target. This keeps the implementation simple and can be revisited later if heading-specific search proves valuable.
+
+### Sentence-Transformer Model — User Configurable
+
+The sentence-transformer model used by KeyBERT is configurable via `app.json`. The default is `all-mpnet-base-v2` — the highest quality English model. Load time (~5s first run, ~400ms cached) is acceptable given the fine-grained progress reporting described below. Comparative performance for a 50-document repo (1000 sections):
+
+| Model | Size | Load (first) | Load (cached) | Per-section | Full repo (1000 sections) |
+|---|---|---|---|---|---|
+| `all-MiniLM-L6-v2` | 80MB | ~2s | ~200ms | ~20-30ms | ~25s |
+| `all-MiniLM-L12-v2` | 120MB | ~2.5s | ~250ms | ~25-40ms | ~30s |
+| `all-mpnet-base-v2` (default) | 420MB | ~5s | ~400ms | ~40-60ms | ~65s |
+| `all-distilroberta-v1` | 290MB | ~4s | ~350ms | ~35-50ms | ~45s |
+
+Configuration in `app.json`:
+
+```json
+{
+  "doc_index": {
+    "keyword_model": "all-mpnet-base-v2"
+  }
+}
+```
+
+### Progress Reporting
+
+Document indexing with keyword extraction is slower than code indexing (~65s vs ~1-5s for a 50-doc repo on first run). A fine-grained progress bar in the UI keeps the user informed throughout.
+
+**Backend progress events** — The document indexer emits progress via the existing `startupProgress(stage, message, percent)` server→client RPC push. This is the same mechanism already used by `app-shell.js` for initial load: the Python backend calls `self._event_callback('startupProgress', stage, message, percent)` on `LLMService`, which pushes to the frontend via jrpc-oo, and the `startupProgress` method on `AcApp` renders the progress bar. Phases:
+
+1. **Model loading** (0–10%) — "Loading keyword model…" — emitted once when the sentence-transformer model initialises. On first-ever run this includes the ~420MB download, reported as a sub-progress if the model library exposes download callbacks.
+2. **Structure extraction** (10–30%) — "Extracting outlines… (12/50 files)" — fast phase, increments per file.
+3. **Keyword extraction** (30–95%) — "Extracting keywords… (8/50 files)" — the slow phase, increments per file. Each file completion updates the percentage proportionally (`30 + 65 * files_done / total_files`).
+4. **Cache write** (95–100%) — "Caching results…" — writing enriched outlines to the doc cache.
+
+**Frontend display** — The `app-shell.js` `startupProgress` handler already renders a progress bar with stage label and percentage. Document indexing reuses this exactly. The bar appears during initial index build and during re-indexing when many files have changed. For incremental updates (1-2 files changed), the operation is fast enough (<2s) that no progress bar is shown.
+
+**Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress.
+
+### Keywords — Always Included
+
+Keywords are always included for all headings, including unique ones. Consistent formatting is simpler to implement and reason about, and the token cost is modest (~3-8 tokens per heading). Omitting keywords for unique headings would add conditional logic for marginal token savings.
+
+### Language Support — English Only
+
+Only English is supported initially. The default `all-MiniLM-L6-v2` model is English-optimised. Multilingual support (via `paraphrase-multilingual-MiniLM-L12-v2` or similar) can be added later as a configurable model option if needed.
