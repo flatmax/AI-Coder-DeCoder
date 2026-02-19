@@ -224,19 +224,19 @@ Keyword extraction results are cached alongside the structural outline using the
 
 ### Performance
 
-| Operation | Time | Notes |
+| Operation | Time (mpnet-base default) | Notes |
 |-----------|------|-------|
-| Model load (first call) | ~2s | One-time per session |
-| Model load (cached) | ~200ms | sentence-transformers caches locally |
-| Extract keywords (one section) | ~20-50ms | Depends on section length |
-| Full document (20 sections) | ~500ms | Parallelizable if needed |
-| Full repo (50 docs) | ~10-25s | Runs once, then mtime-cached |
+| Model load (first call) | ~5s | One-time per session (~420MB download on first-ever run) |
+| Model load (cached) | ~400ms | sentence-transformers caches locally |
+| Extract keywords (one section) | ~40-60ms | Depends on section length |
+| Full document (20 sections) | ~1s | Parallelizable if needed |
+| Full repo (50 docs) | ~50-65s | Runs once, then mtime-cached |
 
-For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code.
+For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce these times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
 ### Token Budget
 
-Keywords add ~3-8 tokens per heading. For a document with 20 headings, that's 60-160 extra tokens — a modest cost for significant disambiguation value. The formatter can optionally omit keywords for headings that are already unique within their document (optimization for token-sensitive budgets).
+Keywords add ~3-8 tokens per heading. For a document with 20 headings, that's 60-160 extra tokens — a modest cost for significant disambiguation value.
 
 ### Configuration
 
@@ -245,6 +245,7 @@ Keyword enrichment is controlled via `app.json`:
 ```json
 {
   "doc_index": {
+    "keyword_model": "all-mpnet-base-v2",
     "keywords_enabled": true,
     "keywords_top_n": 3,
     "keywords_ngram_range": [1, 2],
@@ -404,4 +405,4 @@ Keywords are always included for all headings, including unique ones. Consistent
 
 ### Language Support — English Only
 
-Only English is supported initially. The default `all-MiniLM-L6-v2` model is English-optimised. Multilingual support (via `paraphrase-multilingual-MiniLM-L12-v2` or similar) can be added later as a configurable model option if needed.
+Only English is supported initially. The default `all-mpnet-base-v2` model is English-optimised. Multilingual support (via `paraphrase-multilingual-MiniLM-L12-v2` or similar) can be added later as a configurable model option if needed.
