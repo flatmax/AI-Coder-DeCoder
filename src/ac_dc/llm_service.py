@@ -228,8 +228,11 @@ class LLMService:
                 return
             for msg in msgs:
                 self._context.add_message(msg["role"], msg["content"])
-            self._session_id = session_id
-            logger.info(f"Restored session {session_id} with {len(msgs)} messages")
+            # Start a NEW session for upcoming messages — don't reuse the old
+            # session ID, otherwise new messages get appended to the previous
+            # session and the first chat after restart merges into old history.
+            self._session_id = self._new_session_id()
+            logger.info(f"Restored {len(msgs)} messages from session {session_id}, new session: {self._session_id}")
         except Exception as e:
             logger.warning(f"Failed to restore last session: {e}")
 
