@@ -245,6 +245,7 @@ class AcApp extends JRPCClient {
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
     this._onWindowResize = this._onWindowResize.bind(this);
+    this._resizeRAF = null;
   }
 
   connectedCallback() {
@@ -289,6 +290,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('resize', this._onWindowResize);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
+    if (this._resizeRAF) { cancelAnimationFrame(this._resizeRAF); this._resizeRAF = null; }
   }
 
   // === jrpc-oo lifecycle callbacks ===
@@ -600,7 +602,8 @@ class AcApp extends JRPCClient {
     if (!detail?.path) return;
 
     // Save viewport state of the currently-open file before navigating away
-    this._saveViewportState();
+    // (non-blocking — avoid synchronous layout queries during navigation)
+    try { this._saveViewportState(); } catch (_) {}
 
     // Remember last opened file for restore on refresh
     try { localStorage.setItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName), detail.path); } catch (_) {}
@@ -743,12 +746,17 @@ class AcApp extends JRPCClient {
   /**
    * Force viewers to re-layout when the window is resized
    * (e.g. laptop lid reopen, maximize, display change).
+   * Throttled to one layout per animation frame to avoid jank.
    */
   _onWindowResize() {
-    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
-    if (diffV?._editor) {
-      diffV._editor.layout();
-    }
+    if (this._resizeRAF) return;
+    this._resizeRAF = requestAnimationFrame(() => {
+      this._resizeRAF = null;
+      const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (diffV?._editor) {
+        diffV._editor.layout();
+      }
+    });
   }
 
   render() {
