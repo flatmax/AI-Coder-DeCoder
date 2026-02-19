@@ -66,10 +66,12 @@ Registered when editor and RPC are both ready:
 
 | Feature | Trigger | RPC |
 |---------|---------|-----|
-| Hover | Mouse hover | `LLM.lsp_get_hover` |
-| Definition | Ctrl+Click/F12 | `LLM.lsp_get_definition` |
-| References | Context menu | `LLM.lsp_get_references` |
-| Completions | Typing/Ctrl+Space | `LLM.lsp_get_completions` |
+| Hover | Mouse hover | `LLMService.lsp_get_hover` |
+| Definition | Ctrl+Click/F12 | `LLMService.lsp_get_definition` |
+| References | Context menu | `LLMService.lsp_get_references` |
+| Completions | Typing/Ctrl+Space | `LLMService.lsp_get_completions` |
+
+Line and column numbers are passed as **1-indexed** values (matching Monaco's convention and the backend's symbol storage). No conversion is needed at the RPC boundary.
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
 
@@ -84,7 +86,28 @@ For `.md` and `.markdown` files, a **Preview** button appears in the top-right c
 | Left | Monaco editor (inline diff mode, word wrap enabled) |
 | Right | Live-rendered Markdown preview |
 
-When preview mode is active, the Monaco diff editor switches to **inline mode** (not side-by-side) so the editor fits in half the viewport. Word wrap is enabled for comfortable editing. The preview pane renders the modified editor's content using `renderMarkdownWithSourceMap()`, which injects `data-source-line` attributes into the HTML output for scroll synchronization.
+When preview mode is active, the Monaco diff editor switches to **inline mode** (not side-by-side) so the editor fits in half the viewport. Word wrap is enabled for comfortable editing. The preview pane renders the modified editor's content using `renderMarkdownWithSourceMap()` from `webapp/src/utils/markdown.js`.
+
+### Dual Marked Instances
+
+The markdown utility module maintains two completely independent `Marked` instances:
+
+| Instance | Export | Purpose | Custom Renderers |
+|----------|--------|---------|-----------------|
+| `markedChat` | `renderMarkdown()` | Chat message rendering | `code()` only — language label, copy button, syntax highlighting |
+| `markedSourceMap` | `renderMarkdownWithSourceMap()` | Diff viewer preview | `code()` and `hr()` — with `data-source-line` attributes for scroll sync |
+
+The two instances share no renderer state. This separation prevents preview-specific logic (source-line injection, walkTokens hooks) from affecting chat rendering, and keeps the chat renderer simple by using marked's defaults for all non-code block elements.
+
+### Source-Line Attribute Injection
+
+`renderMarkdownWithSourceMap()` injects `data-source-line` attributes into the HTML output for scroll synchronization. The approach uses a two-phase strategy:
+
+**Phase 1 — Line map construction:** Before rendering, the raw markdown source is lexed to produce a `Map<tokenKey, lineNumber>`. Each token is keyed by `type:text_prefix` (e.g., `heading:Installation`, `paragraph:Some text`). The line number is determined by finding the token's `raw` text in the source and counting preceding newlines.
+
+**Phase 2 — Attribute injection:** For `code` and `hr` blocks, the `markedSourceMap` renderer overrides inject `data-source-line` directly into the output HTML. For `heading`, `paragraph`, `blockquote`, `list`, and `table` elements, the renderer returns `false` (delegating to marked's defaults for correct inline token parsing, nested structure handling, etc.). A `walkTokens` hook collects source-line mappings for these elements into an ordered queue, and a `postprocess` hook injects `data-source-line` into the first matching opening tag that doesn't already have the attribute.
+
+This design ensures that complex block elements (nested lists, task-list checkboxes, tables with alignment, blockquotes with nested content) render correctly using marked's own logic, while still carrying source-line metadata for scroll synchronization.
 
 ### Live Update
 

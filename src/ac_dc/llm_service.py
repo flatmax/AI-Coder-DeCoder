@@ -97,7 +97,7 @@ class LLMService:
     """
 
     def __init__(self, config_manager, repo=None, symbol_index=None,
-                 chunk_callback=None, event_callback=None):
+                 chunk_callback=None, event_callback=None, deferred_init=False):
         """Initialize LLM service.
 
         Args:
@@ -106,18 +106,32 @@ class LLMService:
             symbol_index: SymbolIndex instance (optional)
             chunk_callback: async fn(request_id, content) for streaming chunks
             event_callback: async fn(event_name, data) for lifecycle events
+            deferred_init: if True, skip heavy init (session restore, stability)
+                          — call complete_deferred_init() later
         """
         self._config = config_manager
         self._repo = repo
         self._symbol_index = symbol_index
         self._chunk_callback = chunk_callback
         self._event_callback = event_callback
+        self._init_complete = False
+
+        # Compute model-aware cache target tokens
+        _counter = TokenCounter(config_manager.model)
+        _min_cacheable = _counter.min_cacheable_tokens
+        _cache_target = config_manager.cache_target_tokens_for_model(_min_cacheable)
+        logger.info(
+            f"Cache config: model={config_manager.model}, "
+            f"min_cacheable={_min_cacheable}, "
+            f"cache_target={_cache_target}, "
+            f"compaction_trigger={config_manager.compaction_config.get('compaction_trigger_tokens', '?')}"
+        )
 
         # Context manager
         self._context = ContextManager(
             model_name=config_manager.model,
             repo_root=str(repo.root) if repo else None,
-            cache_target_tokens=config_manager.cache_target_tokens,
+            cache_target_tokens=_cache_target,
             compaction_config=config_manager.compaction_config,
             system_prompt=config_manager.get_system_prompt(),
         )
@@ -140,7 +154,7 @@ class LLMService:
 
         # Stability tracker
         self._stability_tracker = StabilityTracker(
-            cache_target_tokens=config_manager.cache_target_tokens,
+            cache_target_tokens=_cache_target,
         )
         self._context.set_stability_tracker(self._stability_tracker)
         self._stability_initialized = False
@@ -153,17 +167,20 @@ class LLMService:
                 model=config_manager.model,
                 detection_model=config_manager.smaller_model,
                 compaction_prompt=config_manager.get_compaction_prompt(),
+                config_manager=config_manager,
             )
             self._context.init_compactor(compactor)
 
         # URL service
         self._url_service = self._init_url_service()
 
-        # Auto-restore last session into context
-        self._restore_last_session()
+        if not deferred_init:
+            # Auto-restore last session into context
+            self._restore_last_session()
 
-        # Initialize stability tracker eagerly if symbol index is available
-        self._try_initialize_stability()
+            # Initialize stability tracker eagerly if symbol index is available
+            self._try_initialize_stability()
+            self._init_complete = True
 
         # Session totals
         self._session_totals = {
@@ -265,6 +282,32 @@ class LLMService:
         except Exception as e:
             logger.warning(f"Eager stability initialization failed: {e}")
 
+    def complete_deferred_init(self, symbol_index=None):
+        """Complete initialization that was deferred at construction time.
+
+        Called by main.py after the WebSocket server is running and the
+        browser is connected, so progress can be reported to the user.
+
+        Args:
+            symbol_index: SymbolIndex instance (may be None if unavailable)
+        """
+        if self._init_complete:
+            return
+
+        if symbol_index is not None:
+            self._symbol_index = symbol_index
+
+        # Restore last session
+        self._restore_last_session()
+
+        self._init_complete = True
+        logger.info("Deferred initialization complete")
+
+    @property
+    def init_complete(self):
+        """Whether heavy initialization has finished."""
+        return self._init_complete
+
     # === State Management (RPC) ===
 
     def get_current_state(self):
@@ -275,6 +318,7 @@ class LLMService:
             "streaming_active": self._streaming_active,
             "session_id": self._session_id,
             "repo_name": self._repo.root.name if self._repo else None,
+            "init_complete": self._init_complete,
         }
 
     def set_selected_files(self, files):
@@ -308,6 +352,9 @@ class LLMService:
         Returns:
             {status: "started"} immediately; results via streamComplete callback
         """
+        if not self._init_complete:
+            return {"error": "Server is still initializing — please wait a moment"}
+
         if self._streaming_active:
             return {"error": "Another stream is active"}
 
@@ -672,9 +719,55 @@ class LLMService:
 
             # Post-response compaction
             try:
-                await self._context.compact_history_if_needed()
+                needs_compact = self._context.should_compact()
+                logger.debug(f"Post-response compaction check — history: {len(self._context.get_history())} messages, compact={needs_compact}")
+                # Notify UI that compaction is starting — best-effort
+                if needs_compact and self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", request_id,
+                            {
+                                "stage": "compacting",
+                                "message": f"🗜️ Compacting history ({self._context.history_token_count():,} tokens)...",
+                            },
+                        )
+                    except Exception as e:
+                        logger.debug(f"Compacting notification failed (non-critical): {e}")
+
+                compaction_result = None
+                if needs_compact:
+                    compaction_result = await self._context.compact_history_if_needed(
+                        already_checked=True
+                    )
+                if compaction_result and compaction_result.get("case") != "none":
+                    logger.info(f"Compaction complete: case={compaction_result.get('case')}")
+                    # Notify UI that history was compacted — retry-tolerant
+                    for attempt in range(3):
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {
+                                        "stage": "compacted",
+                                        "case": compaction_result.get("case"),
+                                        "message": f"History compacted ({compaction_result.get('case')}): "
+                                                   f"{len(self._context.get_history())} messages, "
+                                                   f"{self._context.history_token_count():,} tokens",
+                                        "messages": self._context.get_history(),
+                                    },
+                                )
+                                break  # success
+                            except Exception as e:
+                                logger.warning(f"Failed to send compaction event (attempt {attempt + 1}): {e}")
+                                if attempt < 2:
+                                    await asyncio.sleep(1)
+                elif compaction_result:
+                    logger.debug("Compaction returned 'none'")
+                else:
+                    logger.debug("Compaction not needed")
             except Exception as e:
                 logger.warning(f"Compaction failed: {e}")
+                logger.debug(traceback.format_exc())
 
     async def _run_llm_stream(self, request_id, messages):
         """Run LLM completion with streaming in a thread pool.
@@ -1698,6 +1791,32 @@ class LLMService:
                 parts.append("")
 
         return "\n".join(parts)
+
+    # === LSP Proxy Methods ===
+
+    def lsp_get_hover(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_hover for RPC access."""
+        if not self._symbol_index:
+            return None
+        return self._symbol_index.lsp_get_hover(path, line, col)
+
+    def lsp_get_definition(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_definition for RPC access."""
+        if not self._symbol_index:
+            return None
+        return self._symbol_index.lsp_get_definition(path, line, col)
+
+    def lsp_get_references(self, path, line, col):
+        """Proxy to SymbolIndex.lsp_get_references for RPC access."""
+        if not self._symbol_index:
+            return []
+        return self._symbol_index.lsp_get_references(path, line, col)
+
+    def lsp_get_completions(self, path, line, col, prefix=""):
+        """Proxy to SymbolIndex.lsp_get_completions for RPC access."""
+        if not self._symbol_index:
+            return []
+        return self._symbol_index.lsp_get_completions(path, line, col, prefix)
 
     # === History RPC Methods ===
 

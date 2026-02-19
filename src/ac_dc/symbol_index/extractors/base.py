@@ -28,6 +28,7 @@ class Import:
     names: list = field(default_factory=list)
     alias: Optional[str] = None
     level: int = 0  # 0 = absolute, 1+ = relative
+    line: int = 0   # 1-indexed source line
 
 
 @dataclass

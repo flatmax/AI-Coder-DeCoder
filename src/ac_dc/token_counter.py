@@ -95,3 +95,22 @@ class TokenCounter:
     def max_history_tokens(self):
         """Maximum tokens for conversation history (1/16 of max input)."""
         return self.max_input_tokens // 16
+
+    @property
+    def min_cacheable_tokens(self):
+        """Minimum tokens for Anthropic prompt caching.
+
+        Per Anthropic docs:
+        - 4096 tokens for Claude Opus 4.6, Opus 4.5, Haiku 4.5
+        - 1024 tokens for Claude Sonnet 4.6, Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4, etc.
+        """
+        model = self._model_name.lower()
+        if "claude" not in model:
+            return 1024  # non-Anthropic models: safe default
+        # Opus 4.5 / 4.6
+        if "opus" in model and ("4-5" in model or "4.5" in model or "4-6" in model or "4.6" in model):
+            return 4096
+        # Haiku 4.5
+        if "haiku" in model and ("4-5" in model or "4.5" in model):
+            return 4096
+        return 1024

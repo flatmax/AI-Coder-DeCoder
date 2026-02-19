@@ -1235,8 +1235,38 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._rafId = requestAnimationFrame(() => {
         this._rafId = null;
         if (this._pendingChunk !== null) {
+          // Save horizontal scroll positions of <pre> blocks in the streaming card
+          const streamingCard = this.shadowRoot?.querySelector('.message-card.assistant.force-visible .md-content');
+          const savedScrolls = [];
+          if (streamingCard) {
+            const pres = streamingCard.querySelectorAll('pre');
+            for (const pre of pres) {
+              if (pre.scrollLeft > 0) {
+                savedScrolls.push({ index: savedScrolls.length, scrollLeft: pre.scrollLeft });
+              } else {
+                savedScrolls.push({ index: savedScrolls.length, scrollLeft: 0 });
+              }
+            }
+          }
+
           this._streamingContent = this._pendingChunk;
           this._pendingChunk = null;
+
+          // Restore horizontal scroll positions after DOM update
+          if (savedScrolls.some(s => s.scrollLeft > 0)) {
+            this.updateComplete.then(() => {
+              const card = this.shadowRoot?.querySelector('.message-card.assistant.force-visible .md-content');
+              if (card) {
+                const pres = card.querySelectorAll('pre');
+                for (const saved of savedScrolls) {
+                  if (saved.scrollLeft > 0 && pres[saved.index]) {
+                    pres[saved.index].scrollLeft = saved.scrollLeft;
+                  }
+                }
+              }
+            });
+          }
+
           if (this._autoScroll) {
             // Use updateComplete then double-rAF to ensure DOM has reflowed
             this.updateComplete.then(() => {
@@ -1327,11 +1357,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onCompactionEvent(e) {
     const { requestId, event } = e.detail || {};
-    if (requestId !== this._currentRequestId) return;
+    // Accept events for current stream OR just-finished stream (compaction runs after streamComplete)
+    if (requestId !== this._currentRequestId && requestId !== this._lastRequestId) return;
     const stage = event?.stage || '';
     const message = event?.message || '';
     if (stage === 'url_fetch' || stage === 'url_ready') {
       this._showToast(message, stage === 'url_ready' ? 'success' : '');
+    } else if (stage === 'compacting') {
+      this._showToast(message || '🗜️ Compacting history...', '');
+    } else if (stage === 'compacted') {
+      // History was compacted — replace messages with compacted version
+      if (event?.messages && Array.isArray(event.messages)) {
+        this.messages = event.messages.map(m => ({ role: m.role, content: m.content }));
+      }
+      this._showToast(message || 'History compacted', 'success');
     }
   }
 
@@ -1509,6 +1548,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this._currentRequestId = requestId;
+    this._lastRequestId = requestId;
     const images = this._images.length > 0 ? [...this._images] : null;
     const files = this.selectedFiles?.length > 0 ? [...this.selectedFiles] : null;
 

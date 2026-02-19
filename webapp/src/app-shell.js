@@ -34,6 +34,9 @@ class AcApp extends JRPCClient {
     _reconnectVisible: { type: Boolean, state: true },
     _reconnectMsg: { type: String, state: true },
     _toasts: { type: Array, state: true },
+    _startupVisible: { type: Boolean, state: true },
+    _startupMessage: { type: String, state: true },
+    _startupPercent: { type: Number, state: true },
   };
 
   static styles = [theme, css`
@@ -41,6 +44,7 @@ class AcApp extends JRPCClient {
       display: block;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       overflow: hidden;
     }
 
@@ -157,6 +161,48 @@ class AcApp extends JRPCClient {
       from { opacity: 0; transform: translateY(8px); }
       to { opacity: 1; transform: translateY(0); }
     }
+
+    /* Startup overlay */
+    .startup-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20000;
+      background: var(--bg-primary, #0d1117);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.4s ease;
+    }
+    .startup-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .startup-brand {
+      font-size: 3rem;
+      opacity: 0.25;
+      margin-bottom: 2rem;
+      user-select: none;
+    }
+    .startup-message {
+      font-size: 0.95rem;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 1.2rem;
+      min-height: 1.4em;
+    }
+    .startup-bar-track {
+      width: 280px;
+      height: 4px;
+      background: var(--bg-tertiary, #21262d);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .startup-bar-fill {
+      height: 100%;
+      background: var(--accent-blue, #58a6ff);
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
   `];
 
   constructor() {
@@ -171,6 +217,9 @@ class AcApp extends JRPCClient {
     this._toastIdCounter = 0;
     this._wasConnected = false;
     this._statusBarTimer = null;
+    this._startupVisible = true;
+    this._startupMessage = 'Connecting...';
+    this._startupPercent = 0;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
@@ -186,6 +235,7 @@ class AcApp extends JRPCClient {
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onWindowResize = this._onWindowResize.bind(this);
   }
 
   connectedCallback() {
@@ -211,6 +261,9 @@ class AcApp extends JRPCClient {
 
     // Save viewport state before page unload
     window.addEventListener('beforeunload', this._onBeforeUnload);
+
+    // Re-layout on window resize (display change, maximize, etc.)
+    window.addEventListener('resize', this._onWindowResize);
   }
 
   disconnectedCallback() {
@@ -224,6 +277,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('keydown', this._onGlobalKeyDown);
     window.removeEventListener('ac-toast', this._onToastEvent);
     window.removeEventListener('beforeunload', this._onBeforeUnload);
+    window.removeEventListener('resize', this._onWindowResize);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
   }
@@ -231,7 +285,7 @@ class AcApp extends JRPCClient {
   // === jrpc-oo lifecycle callbacks ===
 
   remoteIsUp() {
-    console.log('WebSocket connected — remote is up');
+    console.log('WebSocket connected — remote is up, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     const wasReconnecting = this._reconnectAttempt > 0;
     this._reconnectAttempt = 0;
     this._reconnectVisible = false;
@@ -244,13 +298,21 @@ class AcApp extends JRPCClient {
     // Show green status bar briefly
     this._showStatusBar('ok');
 
+    // Update startup overlay — connected, waiting for init
+    if (this._startupVisible) {
+      this._startupMessage = 'Connected — initializing...';
+      this._startupPercent = 5;
+    }
+
     if (wasReconnecting) {
       this._showToast('Reconnected', 'success');
+      // Hide startup overlay on reconnect (init already done)
+      this._startupVisible = false;
     }
   }
 
   setupDone() {
-    console.log('jrpc-oo setup done — call proxy ready');
+    console.log('jrpc-oo setup done — call proxy ready, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     this._wasConnected = true;
 
     // Publish the call proxy so all child components get RPC access
@@ -383,6 +445,27 @@ class AcApp extends JRPCClient {
     return true;
   }
 
+  /**
+   * Receive startup progress from server during deferred initialization.
+   * Called via RPC: AcApp.startupProgress(stage, message, percent)
+   */
+  startupProgress(stage, message, percent) {
+    console.log(`startupProgress: stage=${stage}, message=${message}, percent=${percent}, _startupVisible=${this._startupVisible}`);
+    this._startupMessage = message || '';
+    if (typeof percent === 'number') {
+      this._startupPercent = Math.min(100, Math.max(0, percent));
+    }
+    if (stage === 'ready') {
+      console.log('startupProgress: ready — dismissing overlay in 400ms');
+      // Dismiss overlay with a short delay for the animation
+      setTimeout(() => {
+        console.log('startupProgress: dismissing overlay now');
+        this._startupVisible = false;
+      }, 400);
+    }
+    return true;
+  }
+
   // === Initial state ===
 
   async _loadInitialState() {
@@ -391,10 +474,21 @@ class AcApp extends JRPCClient {
       // Unwrap jrpc-oo envelope
       const state = this._extract(raw);
       console.log('Initial state loaded:', state);
+      console.log('init_complete:', state?.init_complete, 'startupVisible:', this._startupVisible);
 
       // Set browser tab title to ⚡ {repo_name}
       if (state?.repo_name) {
         document.title = `${state.repo_name}`;
+      }
+
+      // If server already finished initialization (e.g. browser connected
+      // after suspend/resume or slow page load), dismiss the startup overlay.
+      // The startupProgress("ready") RPC may have been sent while disconnected.
+      if (state?.init_complete) {
+        console.log('Server already initialized — dismissing startup overlay');
+        this._startupVisible = false;
+      } else {
+        console.log('Server not yet initialized — keeping startup overlay');
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
@@ -636,6 +730,17 @@ class AcApp extends JRPCClient {
     this._saveViewportState();
   }
 
+  /**
+   * Force viewers to re-layout when the window is resized
+   * (e.g. laptop lid reopen, maximize, display change).
+   */
+  _onWindowResize() {
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (diffV?._editor) {
+      diffV._editor.layout();
+    }
+  }
+
   render() {
     return html`
       <div class="viewport">
@@ -650,6 +755,16 @@ class AcApp extends JRPCClient {
       </div>
 
       <ac-token-hud></ac-token-hud>
+
+      ${this._startupVisible ? html`
+        <div class="startup-overlay" role="status" aria-live="polite" aria-label="Loading">
+          <div class="startup-brand">AC⚡DC</div>
+          <div class="startup-message">${this._startupMessage}</div>
+          <div class="startup-bar-track">
+            <div class="startup-bar-fill" style="width: ${this._startupPercent}%"></div>
+          </div>
+        </div>
+      ` : ''}
 
       <div class="status-bar ${this._statusBar}" role="status" aria-live="polite"
            aria-label="${this._statusBar === 'ok' ? 'Connected' : this._statusBar === 'error' ? 'Disconnected' : ''}"></div>

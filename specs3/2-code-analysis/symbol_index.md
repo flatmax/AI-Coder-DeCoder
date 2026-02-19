@@ -20,7 +20,8 @@ SymbolIndex (orchestrator)
     ├── SymbolCache (mtime-based per-file cache)
     ├── ImportResolver (maps imports to repo file paths)
     ├── ReferenceIndex (cross-file reference tracking)
-    └── CompactFormatter (LLM-optimized text output)
+    ├── CompactFormatter (context — no line numbers)
+    └── CompactFormatter (LSP — with line numbers)
 ```
 
 ## Data Model
@@ -61,6 +62,7 @@ Import:
     names: string[]
     alias: string?
     level: integer         // 0 = absolute, 1+ = relative
+    line: integer          // 1-indexed source line
 ```
 
 ### FileSymbols
@@ -147,6 +149,18 @@ Human-readable, token-efficient text format for the "repository map" sent to the
 
 ### Legend
 
+The context symbol map (sent to the LLM) uses a legend without line numbers:
+
+```
+# c=class m=method f=function af=async func am=async method
+# v=var p=property i=import i→=local
+# ->T=returns ?=optional ←N=refs →=calls
+# +N=more ″=ditto Nc/Nm=test summary
+# @1/=some/frequent/path/ @2/=another/path/
+```
+
+The LSP symbol map includes line numbers and uses an extended legend:
+
 ```
 # c=class m=method f=function af=async func am=async method
 # v=var p=property i=import i→=local
@@ -173,6 +187,29 @@ Human-readable, token-efficient text format for the "repository map" sent to the
 | Test files | `# 5c/25m fixtures:setup_db` (collapsed) |
 
 ### Example
+
+Context symbol map (no line numbers):
+
+```
+app/models.py: ←8
+i dataclasses,typing
+c User ←@1/auth.py,@1/api.py,+2
+  v name
+  v email
+  m __init__(name,email)
+  m validate()->bool →_check_email
+c Session ←@1/auth.py
+  m is_valid()->bool
+
+@1/auth.py: ←3
+i→ app/models.py
+f authenticate(username,password)->?Session →User.validate
+
+tests/test_auth.py:
+# 3c/12m fixtures:mock_store,test_user
+```
+
+LSP symbol map (with line numbers):
 
 ```
 app/models.py: ←8
@@ -238,12 +275,12 @@ LSP methods are implemented on `SymbolIndex` and exposed to the browser via dele
 
 ### Symbol at Position
 
-Binary search through sorted symbols by line/column range. For nested symbols, return the deepest match. If the cursor is on a call site within a function body, match against the function's `call_sites` list.
+Search through symbols by line/column range. For nested symbols, return the deepest match. If the cursor is on a call site within a function body, match against the function's `call_sites` list. If no symbol or call site matches, check imports by matching `Import.line` against the cursor line; if found, resolve via `ImportResolver` and return a synthetic `CallSite` with `target_file` set.
 
 ### Definition Resolution
 
 1. If cursor is on a **call site**: use `CallSite.target_file` and `target_symbol` to locate definition
-2. If cursor is on an **import name**: use import resolver to find source file, then locate named symbol
+2. If cursor is on an **import statement**: match by line number against `FileSymbols.imports`, resolve via `ImportResolver`, return a synthetic `CallSite` pointing at the target file. If the named symbol exists in the target, jump to it; otherwise jump to the top of the file
 3. If cursor is on a **local symbol**: return its own definition range
 
 ### Completion Scope
@@ -256,7 +293,7 @@ Binary search through sorted symbols by line/column range. For nested symbols, r
 ## Caching
 
 - **Symbol cache** — in-memory, per-file, mtime-based invalidation
-- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt`, rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
+- **Symbol map persistence** — saved to `{repo_root}/.ac-dc/symbol_map.txt` using the context formatter (no line numbers), rebuilt before each LLM request (via `index_repo()`) and saved **after** the response (not before the request). The rebuild happens pre-request but the file write happens post-response alongside the terminal HUD
 - **Import resolution cache** — cleared when new files are detected
 
 ## Indexing Exclusions
@@ -304,7 +341,7 @@ These directories are skipped during repository-wide indexing. The import resolv
 - file_ref_count returns incoming reference count
 
 ### Compact Formatter
-- Output includes file path, class/method/function with line numbers
+- Output includes file path, class/method/function
 - Legend header present; imports formatted; instance variables listed
 - exclude_files omits specified files; test files collapsed to summary (Nc/Nm)
 - Chunks split evenly with correct total file count
@@ -317,3 +354,7 @@ These directories are skipped during repository-wide indexing. The import resolv
 - Single file reindex after modification picks up new symbols
 - Hover info returns symbol name; completions filtered by prefix
 - Signature hash: stable across repeated calls, 16-char length
+- LSP symbol map includes line numbers on symbol entries; legend mentions `:N=line(s)`
+- Context symbol map has no line numbers on symbol entries; legend omits `:N=line(s)`
+- Context map is shorter than LSP map (no line number annotations)
+- LSP legend and context legend differ: only LSP legend includes `:N=line(s)`

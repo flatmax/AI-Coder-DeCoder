@@ -109,6 +109,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       flex-direction: column;
       width: 100%;
       height: 100%;
+      height: 100dvh;
       overflow: hidden;
     }
 
@@ -161,6 +162,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       align-items: center;
       justify-content: center;
       height: 100%;
+      padding-left: 50%;
       color: var(--text-muted);
     }
     .watermark {
@@ -624,18 +626,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const renderSideBySide = !this._previewMode;
 
     if (this._editor) {
-      // Dispose old models before creating new ones to prevent leaks
-      // that break diff computation
+      // Capture old models — they must be disposed AFTER setModel() detaches
+      // the DiffEditorWidget from them. Disposing while still attached causes
+      // "TextModel got disposed before DiffEditorWidget model got reset".
       const oldModel = this._editor.getModel();
-      if (oldModel) {
-        if (oldModel.original) oldModel.original.dispose();
-        if (oldModel.modified) oldModel.modified.dispose();
-      }
 
       // Switch between side-by-side and inline mode
       this._editor.updateOptions({ renderSideBySide });
 
-      // Update models in existing editor
+      // Create new models and set them — this detaches the old models
       const originalModel = monaco.editor.createModel(file.original, language);
       const modifiedModel = monaco.editor.createModel(file.modified, language);
 
@@ -643,6 +642,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         original: originalModel,
         modified: modifiedModel,
       });
+
+      // Now safe to dispose the old models
+      if (oldModel) {
+        if (oldModel.original) oldModel.original.dispose();
+        if (oldModel.modified) oldModel.modified.dispose();
+      }
 
       // Set read-only state on modified side
       this._editor.getModifiedEditor().updateOptions({
@@ -665,6 +670,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         wordWrap: this._previewMode ? 'on' : 'off',
         renderWhitespace: 'selection',
         contextmenu: true,
+        links: false,
+        hover: { enabled: true, above: false, sticky: true, delay: 600 },
         scrollbar: {
           verticalScrollbarSize: 8,
           horizontalScrollbarSize: 8,
@@ -1004,7 +1011,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_hover', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (result?.contents) {
             return {
@@ -1016,7 +1023,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             };
           }
         } catch (e) {
-          // Ignore
+          console.error('[LSP hover] error:', e);
         }
         return null;
       },
@@ -1031,10 +1038,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_definition', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (result?.file && result?.range) {
-            // Open target file if needed
             await this.openFile({ path: result.file, line: result.range.start_line + 1 });
             return {
               uri: monaco.Uri.parse(`file:///${result.file}`),
@@ -1045,7 +1051,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             };
           }
         } catch (e) {
-          // Ignore
+          // Ignore — LSP is best-effort
         }
         return null;
       },
@@ -1060,7 +1066,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_references', file.path,
-            position.lineNumber - 1, position.column - 1
+            position.lineNumber, position.column
           );
           if (Array.isArray(result)) {
             return result.map(ref => ({
@@ -1072,7 +1078,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             }));
           }
         } catch (e) {
-          // Ignore
+          console.error('[LSP references] error:', e);
         }
         return null;
       },
@@ -1093,7 +1099,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         try {
           const result = await this.rpcExtract(
             'LLMService.lsp_get_completions', file.path,
-            position.lineNumber - 1, position.column - 1, prefix
+            position.lineNumber, position.column, prefix
           );
           if (Array.isArray(result)) {
             const range = new monaco.Range(

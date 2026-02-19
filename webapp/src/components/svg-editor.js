@@ -371,6 +371,63 @@ export class SvgEditor {
     }
   }
 
+  /** Reset viewBox to show all content, fitted and centered within the container. */
+  fitContent() {
+    // Use the actual rendered content bounds (getBBox) rather than the
+    // original viewBox attribute, which may be a crop window that doesn't
+    // cover all content.  Fall back to _origViewBox if getBBox fails.
+    let contentBounds;
+    try {
+      const bbox = this._svg.getBBox();
+      if (bbox.width > 0 && bbox.height > 0) {
+        contentBounds = { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
+      }
+    } catch {
+      // getBBox can fail for hidden/empty SVGs
+    }
+    if (!contentBounds) contentBounds = this._origViewBox;
+    if (!contentBounds || contentBounds.w <= 0 || contentBounds.h <= 0) return;
+
+    const cb = contentBounds;
+
+    // Compute a viewBox that shows all content centered and aspect-ratio-
+    // preserved.  The shorter axis is expanded to match the container's
+    // aspect ratio so the browser's default preserveAspectRatio="xMidYMid meet"
+    // becomes a no-op (viewBox AR === container AR).
+    const rect = this._svg.getBoundingClientRect();
+    const cw = rect.width || 1;
+    const ch = rect.height || 1;
+    const containerAR = cw / ch;
+    const contentAR = cb.w / cb.h;
+
+    // Add a small margin (3%) so content doesn't touch edges
+    const margin = 0.03;
+    const mx = cb.x - cb.w * margin;
+    const my = cb.y - cb.h * margin;
+    const mw = cb.w * (1 + margin * 2);
+    const mh = cb.h * (1 + margin * 2);
+
+    let vbW, vbH;
+    if (contentAR > containerAR) {
+      // Content is wider — width constrains
+      vbW = mw;
+      vbH = mw / containerAR;
+    } else {
+      // Content is taller — height constrains
+      vbH = mh;
+      vbW = mh * containerAR;
+    }
+
+    // Center the content within the expanded viewBox
+    const vbX = mx - (vbW - mw) / 2;
+    const vbY = my - (vbH - mh) / 2;
+
+    this._setViewBox(vbX, vbY, vbW, vbH);
+    this._zoomLevel = 1;
+    this._updateHandles();
+    this._onZoom({ zoom: 1, viewBox: { x: vbX, y: vbY, w: vbW, h: vbH } });
+  }
+
   _onWheel(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -564,36 +621,43 @@ export class SvgEditor {
     e.stopPropagation();
 
     if (isShift) {
-      // Shift+click: toggle element in/out of multi-selection
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Shift+click on an already-selected element — toggle it out
       if (this._multiSelected.has(target)) {
         this._multiSelected.delete(target);
         if (this._selected === target) {
-          // Pick another element as primary, or null
           const remaining = [...this._multiSelected];
           this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
         }
         if (this._multiSelected.size === 0) {
           this._deselect();
-          return;
+        } else {
+          this._renderHandles();
+          this._onSelect(this._selected);
         }
-        this._renderHandles();
-        this._onSelect(this._selected);
-      } else {
-        // Add to multi-selection
-        if (!this._selected) {
-          // Nothing selected yet — make this the primary
-          this._selected = target;
-        }
-        this._multiSelected.add(target);
-        this._renderHandles();
-        this._onSelect(this._selected);
+        return;
       }
 
-      // Start multi-drag if clicking on any selected element
-      if (this._multiSelected.has(target) && this._multiSelected.size > 1) {
-        this._svg.style.cursor = 'grabbing';
-        this._startMultiDrag(svgPt);
-      }
+      // Shift+click on an unselected element — toggle it in
+      if (!this._selected) this._selected = target;
+      this._multiSelected.add(target);
+      this._renderHandles();
+      this._onSelect(this._selected);
+
+      // Start marquee tracking so shift+drag still works for area selection.
+      // On pointer-up, the tiny-marquee fallback is skipped since we already toggled.
+      this._marqueeClickTarget = null;
+      this._startMarquee(svgPt);
+      return;
+    }
+
+    // If clicking an element that's already part of a multi-selection,
+    // start a multi-drag without breaking the selection.
+    if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
+      this._svg.style.cursor = 'grabbing';
+      this._startMultiDrag(svgPt);
       return;
     }
 
@@ -998,6 +1062,7 @@ export class SvgEditor {
     rect.setAttribute('y', svgPt.y);
     rect.setAttribute('width', 0);
     rect.setAttribute('height', 0);
+    // Default style — will be updated in _updateMarquee based on drag direction
     rect.setAttribute('fill', 'rgba(79, 195, 247, 0.1)');
     const sw = this._screenDistToSvgDist(1);
     const dashOn = this._screenDistToSvgDist(4);
@@ -1017,6 +1082,12 @@ export class SvgEditor {
 
   /**
    * Update the marquee rectangle as the pointer moves.
+   *
+   * Drag direction determines selection mode:
+   *   - Top-left → bottom-right (forward): containment mode (solid stroke,
+   *     blue fill) — only elements entirely inside the marquee are selected.
+   *   - Any other direction (reverse): crossing mode (dashed stroke, green
+   *     tinted fill) — elements that intersect or are inside are selected.
    */
   _updateMarquee(svgPt) {
     if (!this._marqueeRect || !this._marqueeStart) return;
@@ -1030,6 +1101,26 @@ export class SvgEditor {
     this._marqueeRect.setAttribute('y', y);
     this._marqueeRect.setAttribute('width', w);
     this._marqueeRect.setAttribute('height', h);
+
+    // Determine drag direction: forward = start is top-left of end
+    const isForward = svgPt.x >= this._marqueeStart.x && svgPt.y >= this._marqueeStart.y;
+    const sw = this._screenDistToSvgDist(1);
+
+    if (isForward) {
+      // Containment mode — solid stroke, blue fill
+      this._marqueeRect.setAttribute('fill', 'rgba(79, 195, 247, 0.12)');
+      this._marqueeRect.setAttribute('stroke', '#4fc3f7');
+      this._marqueeRect.setAttribute('stroke-width', sw);
+      this._marqueeRect.removeAttribute('stroke-dasharray');
+    } else {
+      // Crossing mode — dashed stroke, green-tinted fill
+      const dashOn = this._screenDistToSvgDist(4);
+      const dashOff = this._screenDistToSvgDist(3);
+      this._marqueeRect.setAttribute('fill', 'rgba(126, 231, 135, 0.10)');
+      this._marqueeRect.setAttribute('stroke', '#7ee787');
+      this._marqueeRect.setAttribute('stroke-width', sw);
+      this._marqueeRect.setAttribute('stroke-dasharray', `${dashOn} ${dashOff}`);
+    }
   }
 
   /**
@@ -1055,8 +1146,33 @@ export class SvgEditor {
     // Minimum drag distance to count as a marquee (prevent accidental tiny drags)
     const minSize = this._screenDistToSvgDist(5);
     if ((mx2 - mx1) < minSize && (my2 - my1) < minSize) {
+      // Too small — treat as a Shift+click toggle on the element under cursor
+      const clickTarget = this._marqueeClickTarget;
+      this._marqueeClickTarget = null;
+      if (clickTarget) {
+        if (this._multiSelected.has(clickTarget)) {
+          this._multiSelected.delete(clickTarget);
+          if (this._selected === clickTarget) {
+            const remaining = [...this._multiSelected];
+            this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+          }
+          if (this._multiSelected.size === 0) {
+            this._deselect();
+            return;
+          }
+          this._renderHandles();
+          this._onSelect(this._selected);
+        } else {
+          if (!this._selected) this._selected = clickTarget;
+          this._multiSelected.add(clickTarget);
+          this._renderHandles();
+          this._onSelect(this._selected);
+        }
+      }
       return;
     }
+
+    this._marqueeClickTarget = null;
 
     // Find all editable elements whose bounding boxes overlap the marquee
     const hits = [];
@@ -1123,14 +1239,30 @@ export class SvgEditor {
 
     if (hits.length === 0) return;
 
+    // Determine drag direction: forward = left-to-right (containment mode)
+    const isForward = svgPt.x >= start.x && svgPt.y >= start.y;
+
+    // In containment mode (forward), filter to only fully enclosed elements
+    const selected = isForward
+      ? hits.filter(el => {
+        try {
+          const bbox = el.getBBox();
+          return bbox.x >= mx1 && bbox.y >= my1
+            && (bbox.x + bbox.width) <= mx2 && (bbox.y + bbox.height) <= my2;
+        } catch { return false; }
+      })
+      : hits;  // crossing mode — any intersection counts
+
+    if (selected.length === 0) return;
+
     // Add hits to multi-selection (Shift means additive)
-    for (const el of hits) {
+    for (const el of selected) {
       this._multiSelected.add(el);
     }
 
     // Ensure we have a primary selection
     if (!this._selected || !this._multiSelected.has(this._selected)) {
-      this._selected = hits[hits.length - 1];
+      this._selected = selected[selected.length - 1];
     }
 
     this._renderHandles();
@@ -1147,6 +1279,7 @@ export class SvgEditor {
     }
     this._marqueeStart = null;
     this._marqueeActive = false;
+    this._marqueeClickTarget = null;
     this._svg.style.cursor = '';
   }
 
@@ -1235,21 +1368,43 @@ export class SvgEditor {
       const bbox = el.getBBox();
       if (bbox.width === 0 && bbox.height === 0) return;
 
+      // Transform bbox from element-local coords into SVG root coords
+      // so the overlay aligns with the visually-rendered position
+      // (accounts for ancestor <g> transforms).
+      let bx = bbox.x, by = bbox.y, bw = bbox.width, bh = bbox.height;
+      const ctm = el.getCTM();
+      const svgCtm = this._svg.getCTM();
+      if (ctm && svgCtm) {
+        const inv = svgCtm.inverse();
+        const m = inv.multiply(ctm);
+        const corners = [
+          { x: bbox.x, y: bbox.y },
+          { x: bbox.x + bbox.width, y: bbox.y },
+          { x: bbox.x + bbox.width, y: bbox.y + bbox.height },
+          { x: bbox.x, y: bbox.y + bbox.height },
+        ];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const c of corners) {
+          const tx = m.a * c.x + m.c * c.y + m.e;
+          const ty = m.b * c.x + m.d * c.y + m.f;
+          if (tx < minX) minX = tx;
+          if (ty < minY) minY = ty;
+          if (tx > maxX) maxX = tx;
+          if (ty > maxY) maxY = ty;
+        }
+        bx = minX; by = minY; bw = maxX - minX; bh = maxY - minY;
+      }
+
       const ns = 'http://www.w3.org/2000/svg';
-      const pad = 3;
       const rect = document.createElementNS(ns, 'rect');
-      rect.setAttribute('x', bbox.x - pad);
-      rect.setAttribute('y', bbox.y - pad);
-      rect.setAttribute('width', bbox.width + pad * 2);
-      rect.setAttribute('height', bbox.height + pad * 2);
       const sw = this._screenDistToSvgDist(1);
       const dashOn = this._screenDistToSvgDist(4);
       const dashOff = this._screenDistToSvgDist(3);
       const padSvg = this._screenDistToSvgDist(3);
-      rect.setAttribute('x', bbox.x - padSvg);
-      rect.setAttribute('y', bbox.y - padSvg);
-      rect.setAttribute('width', bbox.width + padSvg * 2);
-      rect.setAttribute('height', bbox.height + padSvg * 2);
+      rect.setAttribute('x', bx - padSvg);
+      rect.setAttribute('y', by - padSvg);
+      rect.setAttribute('width', bw + padSvg * 2);
+      rect.setAttribute('height', bh + padSvg * 2);
       rect.setAttribute('fill', 'none');
       rect.setAttribute('stroke', '#4fc3f7');
       rect.setAttribute('stroke-width', sw);
