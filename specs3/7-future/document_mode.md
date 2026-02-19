@@ -212,7 +212,7 @@ KeywordEnricher:
 
 ### Lazy Loading
 
-KeyBERT depends on `sentence-transformers` which downloads a model (~100MB) on first use. The enricher follows the same lazy-loading pattern as tree-sitter languages in `parser.py`:
+KeyBERT depends on `sentence-transformers` which downloads the configured model on first use (~420MB for the default `all-mpnet-base-v2`). The enricher follows the same lazy-loading pattern as tree-sitter languages in `parser.py`:
 
 - `KeyBERT` is imported inside `__init__` or on first call
 - If `keybert` is not installed, a warning is logged and headings are emitted without keywords
@@ -261,7 +261,7 @@ Document outline blocks integrate with the existing stability tracker and cache 
 
 1. **Stability tracker** tracks doc files by key (e.g., `file:specs3/README.md`), same as code files
 2. **Tier graduation** works identically — a frequently referenced doc promotes from L3 → L2 → L1
-3. **`_build_tiered_content()`** assembles doc blocks and code blocks together, intermingled based on tier assignment
+3. **`_build_tiered_content()`** assembles blocks from whichever index is active for the current mode — doc outline blocks in document mode, code symbol blocks in code mode. The two are never intermingled; the mode toggle is a full context switch
 4. **Content hashing** detects when a doc's structure changes (heading added/removed), triggering demotion back to active tier
 
 Documents tend to change less frequently than code, so they would naturally stabilize at higher tiers quickly — a good fit for the caching model.
@@ -295,6 +295,8 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 ### Switching Modes
 
 Mode switching is a session-level action — it clears the current context and rebuilds with the appropriate index. Conversation history is preserved but the LLM is informed of the mode change via a system message.
+
+**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built lazily on first switch to document mode. Holding both avoids rebuild latency when toggling back and forth. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
 
 ```
 User clicks mode toggle
@@ -341,7 +343,9 @@ The document reference index tracks three types of links:
 - **Doc → Code**: `[context](../src/context.py)` — documents referencing source files
 - **Code → Doc**: Not extracted automatically, but could be inferred from comments containing doc paths
 
-This enables the connected components algorithm (already used in `reference_index.py`) to cluster related documents and code files together for tier initialization.
+This is implemented as a separate `DocReferenceIndex` class in `doc_index/reference_index.py`, not a subclass of the code `ReferenceIndex`. The two indexes have different edge types (heading-level links vs symbol-level imports) and different build inputs. However, `DocReferenceIndex` exposes the same `connected_components()` and `file_ref_count()` interface so the stability tracker's `initialize_from_reference_graph()` works with either index without modification.
+
+This enables the connected components algorithm to cluster related documents and code files together for tier initialization.
 
 ## Design Decisions
 
@@ -353,7 +357,7 @@ The document index shares the `symbol_index/cache.py` infrastructure via a base 
 - `SymbolCache(BaseCache)` — existing code symbol caching (unchanged external API)
 - `DocCache(BaseCache)` — document outline caching with the same mtime semantics
 
-This pattern extends to the formatter: `BaseFormatter` provides common logic (path aliasing, tier integration, test file collapsing), while `CompactFormatter` and `DocFormatter` implement format-specific output and legends. The legend for document symbols (headings, keywords, links) is defined as an abstract method in the base class, implemented differently by each subclass.
+This pattern extends to the formatter: a `BaseFormatter` (in a shared location, e.g., `symbol_index/base_formatter.py` or a new top-level `formatting/` package) provides common logic (path aliasing, reference counting integration), while `CompactFormatter` (in `symbol_index/compact_format.py`, unchanged external API) and `DocFormatter` (in `doc_index/formatter.py`) implement format-specific output. Mode-specific logic — such as test file collapsing for code or sheet summarisation for documents — lives in the respective subclass. The legend is defined as an abstract method in the base class, implemented differently by each subclass to describe its own symbol vocabulary.
 
 ### UI Mode Toggle
 
