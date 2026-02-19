@@ -1194,6 +1194,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       if ((!oldMessages || oldMessages.length === 0) && this.messages.length > 0) {
         this._autoScroll = true;
         requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+        // Seed input history with user messages from restored session
+        this._seedInputHistory(this.messages);
       }
     }
   }
@@ -1729,12 +1731,33 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this.messages = [...messages];
       this._autoScroll = true;
       requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+      // Seed input history with user messages from loaded session
+      this._seedInputHistory(messages);
     }
     // Notify parent about the session change
     this.dispatchEvent(new CustomEvent('session-loaded', {
       detail: { sessionId, messages },
       bubbles: true, composed: true,
     }));
+  }
+
+  /**
+   * Seed the input history with user messages from a loaded session,
+   * so up-arrow recalls previous messages from the conversation.
+   */
+  _seedInputHistory(messages) {
+    const historyEl = this.shadowRoot?.querySelector('ac-input-history');
+    if (!historyEl) return;
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        const text = Array.isArray(msg.content)
+          ? msg.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join('\n')
+          : (msg.content || '');
+        if (text.trim()) {
+          historyEl.addEntry(text);
+        }
+      }
+    }
   }
 
   _onPasteToPrompt(e) {
