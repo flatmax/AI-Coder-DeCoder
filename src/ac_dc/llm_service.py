@@ -650,6 +650,7 @@ class LLMService:
 
                     result["files_modified"] = modified
                     result["passed"] = sum(1 for r in edit_results if r.status == EditStatus.APPLIED)
+                    result["already_applied"] = sum(1 for r in edit_results if r.status == EditStatus.ALREADY_APPLIED)
                     result["failed"] = sum(1 for r in edit_results if r.status == EditStatus.FAILED)
                     result["skipped"] = sum(1 for r in edit_results if r.status == EditStatus.SKIPPED)
                     result["not_in_context"] = sum(1 for r in edit_results if r.status == EditStatus.NOT_IN_CONTEXT)

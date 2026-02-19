@@ -143,7 +143,7 @@ Omitting line numbers saves tokens — meaningful across a documentation-heavy r
 
 ## Extractors — Markdown Only (v1)
 
-The initial implementation supports **markdown files only**. No external parsing libraries are required — heading extraction is a simple line-by-line scan for `#` prefixes, and link extraction uses a basic regex for `[text](target)` patterns.
+The initial implementation supports **markdown files only** (`.md` extension). All other file formats — including plain text (`.txt`), reStructuredText (`.rst`), and binary document formats — are ignored by the document indexer. They remain visible in the file tree and can be loaded into context as selected files, but produce no structural outline. No external parsing libraries are required — heading extraction is a simple line-by-line scan for `#` prefixes, and link extraction uses a basic regex for `[text](target)` patterns.
 
 | Format | Library | Extracts |
 |---|---|---|
@@ -180,9 +180,9 @@ pandoc -f csv -t markdown -o data/users.md data/users.csv
 
 Once converted, the `.md` files are indexed automatically by the document index like any other markdown file. The original binary files can remain in the repo (or in `.gitignore`) — only the `.md` versions are indexed.
 
-### Future: Native Format Extractors
+### Future: Additional Format Extractors
 
-Dedicated extractors for binary formats may be added in a future version if demand warrants it. The extractor registry pattern (base class + per-format subclasses) is designed to accommodate this:
+Dedicated extractors for other text formats and binary formats may be added in a future version if demand warrants it. The extractor registry pattern (base class + per-format subclasses) is designed to accommodate this:
 
 ```
 extractors/

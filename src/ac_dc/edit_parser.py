@@ -32,6 +32,7 @@ class EditStatus(Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     NOT_IN_CONTEXT = "not_in_context"
+    ALREADY_APPLIED = "already_applied"
 
 
 class ParseState(Enum):
@@ -224,6 +225,33 @@ def _diagnose_failure(file_content, anchor_lines, old_only):
     return "Anchor not found in file"
 
 
+def _check_already_applied(block, file_content):
+    """Check if an edit's new content is already present in the file.
+
+    Returns True if the new_lines (anchor + new_only) can be found in
+    the file, suggesting the edit was already applied in a prior request.
+    """
+    if not block.new_lines:
+        return False
+
+    # Search for the full new content (anchor + new_only) in the file
+    new_text = "\n".join(block.new_lines)
+    if not new_text.strip():
+        return False
+
+    file_lines = file_content.split("\n")
+    search_lines = block.new_lines
+    if len(search_lines) > len(file_lines):
+        return False
+
+    for i in range(len(file_lines) - len(search_lines) + 1):
+        candidate = "\n".join(file_lines[i:i + len(search_lines)])
+        if candidate == new_text:
+            return True
+
+    return False
+
+
 def validate_edit(block, file_content):
     """Validate an edit block against file content.
 
@@ -239,6 +267,9 @@ def validate_edit(block, file_content):
     anchor_idx, match_count = _find_anchor(file_content, block.anchor_lines, block.old_only)
 
     if match_count == 0:
+        # Check if the edit was already applied (new content already present)
+        if _check_already_applied(block, file_content):
+            return False, "already_applied"
         diag = _diagnose_failure(file_content, block.anchor_lines, block.old_only)
         return False, f"Anchor not found: {diag}"
 
@@ -286,6 +317,12 @@ def apply_edit(block, file_content):
 
     valid, error = validate_edit(block, file_content)
     if not valid:
+        if error == "already_applied":
+            return file_content, EditResult(
+                file_path=block.file_path,
+                status=EditStatus.ALREADY_APPLIED,
+                message="Edit already applied",
+            )
         return file_content, EditResult(
             file_path=block.file_path,
             status=EditStatus.FAILED,
@@ -381,11 +418,18 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
 
         if dry_run:
             valid, error = validate_edit(block, content)
-            results.append(EditResult(
-                file_path=block.file_path,
-                status=EditStatus.VALIDATED if valid else EditStatus.FAILED,
-                message=error if error else "Validation passed",
-            ))
+            if not valid and error == "already_applied":
+                results.append(EditResult(
+                    file_path=block.file_path,
+                    status=EditStatus.ALREADY_APPLIED,
+                    message="Edit already applied",
+                ))
+            else:
+                results.append(EditResult(
+                    file_path=block.file_path,
+                    status=EditStatus.VALIDATED if valid else EditStatus.FAILED,
+                    message=error if error else "Validation passed",
+                ))
             if valid and content is not None:
                 new_content, _ = apply_edit(block, content)
                 file_contents[block.file_path] = new_content

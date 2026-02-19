@@ -1305,8 +1305,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           editMeta.editResults[er.file] = { status: er.status, message: er.message };
         }
       }
-      if (result.passed || result.failed || result.skipped || result.not_in_context) {
+      if (result.passed || result.failed || result.skipped || result.not_in_context || result.already_applied) {
         editMeta.passed = result.passed || 0;
+        editMeta.already_applied = result.already_applied || 0;
         editMeta.failed = result.failed || 0;
         editMeta.skipped = result.skipped || 0;
         editMeta.not_in_context = result.not_in_context || 0;
@@ -2201,6 +2202,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     else if (status === 'skipped') badge = '<span class="edit-badge skipped">⚠️ skipped</span>';
     else if (status === 'validated') badge = '<span class="edit-badge validated">☑ validated</span>';
     else if (status === 'not_in_context') badge = '<span class="edit-badge not-in-context">⚠️ not in context</span>';
+    else if (status === 'already_applied') badge = '<span class="edit-badge applied">✅ already applied</span>';
     else if (seg.isCreate) badge = '<span class="edit-badge applied">🆕 new</span>';
     else badge = '<span class="edit-badge pending">⏳ pending</span>';
 
@@ -2249,9 +2251,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _renderEditSummary(msg) {
-    if (!msg.passed && !msg.failed && !msg.skipped && !msg.not_in_context) return nothing;
+    if (!msg.passed && !msg.failed && !msg.skipped && !msg.not_in_context && !msg.already_applied) return nothing;
     const parts = [];
     if (msg.passed) parts.push(html`<span class="stat pass">✅ ${msg.passed} applied</span>`);
+    if (msg.already_applied) parts.push(html`<span class="stat pass">✅ ${msg.already_applied} already applied</span>`);
     if (msg.failed) parts.push(html`<span class="stat fail">❌ ${msg.failed} failed</span>`);
     if (msg.skipped) parts.push(html`<span class="stat skip">⚠️ ${msg.skipped} skipped</span>`);
     if (msg.not_in_context) parts.push(html`<span class="stat skip">⚠️ ${msg.not_in_context} not in context</span>`);
@@ -2262,7 +2265,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       : nothing;
     // Check for edit failures — show retry hint
     const hasFailures = msg.editResults && Object.values(msg.editResults).some(
-      er => er.status === 'failed'
+      er => er.status === 'failed' && er.message !== 'already_applied'
     );
     const failureNote = hasFailures
       ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
