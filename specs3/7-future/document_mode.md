@@ -28,21 +28,18 @@ A separate `doc_index/` module, independent of tree-sitter:
 src/ac_dc/doc_index/
     __init__.py
     cache.py              # DocCache(BaseCache) — mtime-based outline caching
-    extractor.py          # base class + registry
     formatter.py          # DocFormatter(BaseFormatter) — compact map output
     keyword_enricher.py   # KeyBERT-based topic extraction per section
     reference_index.py    # DocReferenceIndex — doc↔doc and doc→code links
     index.py              # DocIndex — orchestrator (parallels symbol_index/index.py)
     extractors/
+        __init__.py       # EXTRACTORS registry: {'.md': MarkdownExtractor} (v1 has one entry; mirrors symbol_index pattern for future extension)
+        base.py           # BaseDocExtractor — extract(path) → DocOutline
         markdown_extractor.py
-        docx_extractor.py
-        xlsx_extractor.py
-        pdf_extractor.py
-        csv_extractor.py
 ```
 
 **Why separate from `symbol_index/`:**
-- No tree-sitter dependency — document parsing uses regex or lightweight libraries
+- No tree-sitter dependency — document parsing uses regex only (no external libraries for extraction)
 - Different data model — headings have depth/nesting that code symbols don't, and cross-references work differently than imports
 - Cleaner separation — `symbol_index/` is already complex with parser, cache, extractors, reference_index, compact_format
 
@@ -51,23 +48,20 @@ src/ac_dc/doc_index/
 ```pseudo
 DocHeading:
     text: string
-    level: integer          # 1–6 for markdown, style-based for docx
+    level: integer          # 1–6 for markdown headings
+    keywords: string[]      # KeyBERT-extracted terms, e.g. ["OAuth2", "bearer token", "expiry"]
+    start_line: integer     # line number where this heading appears (for keyword enricher slicing)
     children: DocHeading[]  # nested sub-headings
 
 DocLink:
     target: string          # relative path or URL
-    context: string         # surrounding heading text
+    source_heading: string  # text of the heading under which this link appears (for reference index context)
 
 DocOutline:
     path: string
     headings: DocHeading[]
     links: DocLink[]
-    meta: dict              # format-specific: sheet count, page count, row count, etc.
 
-DocKeywords:
-    heading_path: string[]  # e.g. ["Authentication", "Parameters"]
-    keywords: string[]      # e.g. ["client_id", "scope", "redirect_uri"]
-    score: float[]          # KeyBERT relevance scores, 0.0–1.0
 ```
 
 ## Compact Output Format
@@ -107,38 +101,35 @@ docs/api-reference.md:
 
 Without keywords, every `### Overview` / `### Parameters` / `### Error Codes` looks identical to the LLM.
 
-### XLSX Example
+### Converted DOCX Example
+
+A `.docx` file converted via `pandoc -f docx -t markdown` and indexed as markdown:
 
 ```
-data/budget.xlsx:
-  Sheet: Q1 Revenue (rows: 150, cols: A-M)
-  Sheet: Q2 Forecast (rows: 80, cols: A-H)
-  Sheet: Lookups (rows: 20, cols: A-C)
-```
-
-### DOCX Example
-
-```
-docs/architecture.docx:
+docs/architecture.md:
   # System Architecture
   ## Component Overview (services, databases, message queues)
   ## Data Flow (ingestion, transformation, storage)
     ### Input Pipeline (REST API, file upload, webhooks)
     ### Processing (validation, enrichment, dedup)
   ## Deployment (Docker, Kubernetes, CI/CD)
-  links: api-spec.docx, diagrams/flow.xlsx
+  links: api-spec.md, diagrams/flow.md
 ```
 
-### CSV Example
+### Converted Data File Example
+
+A CSV converted to a markdown table (or summarised in a README):
 
 ```
-data/users.csv:
-  Columns: id, name, email, role, created_at (rows: 12,400)
+data/README.md:
+  # Data Files
+  ## users.csv (id, name, email, role, created_at — 12,400 rows)
+  ## budget.xlsx (3 sheets: Q1 Revenue, Q2 Forecast, Lookups)
 ```
 
 ## Line Numbers
 
-Line numbers are **not included** in the document index output. In the code symbol map, line numbers serve two purposes:
+Line numbers are **not included** in the document index output. This mirrors the code symbol map's context format — `get_symbol_map()` also omits line numbers (only the LSP variant `get_lsp_symbol_map()` includes them for editor features). Line numbers serve two purposes in code:
 
 1. **LLM spatial hint** — rough sense of where things are and how large sections are
 2. **LSP features** — hover, go-to-definition, completions in the editor
@@ -150,20 +141,59 @@ For documents, neither purpose is compelling:
 
 Omitting line numbers saves tokens — meaningful across a documentation-heavy repo with dozens of files.
 
-## Extractors by File Type
+## Extractors — Markdown Only (v1)
 
-Each extractor scans a file type and produces a `DocOutline`. Dependencies beyond markdown are optional — imported lazily and skipped if unavailable (same pattern as tree-sitter language loading in `parser.py`).
+The initial implementation supports **markdown files only**. No external parsing libraries are required — heading extraction is a simple line-by-line scan for `#` prefixes, and link extraction uses a basic regex for `[text](target)` patterns.
 
 | Format | Library | Extracts |
 |---|---|---|
-| Markdown (`.md`) | None (regex) | Headings, links, code fence labels |
-| Word (`.docx`) | `python-docx` | Headings by style, hyperlinks |
-| Excel (`.xlsx`) | `openpyxl` | Sheet names, dimensions, header rows |
-| PDF (`.pdf`) | `pymupdf` or `pdfplumber` | TOC / heading extraction, page count |
-| CSV (`.csv`) | stdlib `csv` | Column headers, row count |
-| **All above** | `keybert` | Per-section keyword extraction (post-processing step) |
+| Markdown (`.md`) | None (regex) | Headings, links |
+| Markdown (post-processing) | `keybert` | Per-section keyword extraction |
 
-The markdown extractor requires no external dependencies — heading extraction is a simple line-by-line scan for `#` prefixes, and link extraction uses a basic regex for `[text](target)` patterns.
+### Non-Markdown Documents — Convert First
+
+For `.docx`, `.pdf`, `.xlsx`, `.csv`, and other formats, the recommended workflow is to **convert to markdown before adding to the repository**. This is a deliberate design choice:
+
+1. **Converted markdown is strictly superior in a git repo** — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol
+2. **Conversion tools are mature and widely available** — `pandoc` handles `.docx`/`.pdf`/`.epub`/`.rst`, `markitdown` and `marker` handle PDF with layout preservation, and simple scripts handle CSV→markdown tables
+3. **Dedicated extractors would produce inferior results** — a `.docx` extractor can only extract headings and links (a lossy outline), while `pandoc` converts the full content to editable markdown. Why index a shadow when you can have the real thing?
+4. **PDF heading extraction is inherently unreliable** — PDFs lack semantic structure; heading detection is heuristic-based and error-prone. Converting to markdown with a purpose-built tool (where the user can verify quality) produces far better results than attempting automated extraction at index time
+5. **XLSX/CSV are data, not documents** — their "outline" (sheet names, column headers) is so minimal that a brief description in a README is more useful than a dedicated extractor
+6. **Zero additional dependencies** — no `python-docx`, `openpyxl`, `pymupdf`, or `pdfplumber` to install, version-manage, or lazily import
+
+Example conversion workflows:
+
+```bash
+# Word documents
+pandoc -f docx -t markdown -o docs/architecture.md docs/architecture.docx
+
+# PDF (simple text)
+pandoc -f pdf -t markdown -o docs/spec.md docs/spec.pdf
+
+# PDF (complex layout — use a dedicated tool)
+marker docs/report.pdf docs/report.md
+
+# CSV to markdown table
+# (simple script or pandoc)
+pandoc -f csv -t markdown -o data/users.md data/users.csv
+```
+
+Once converted, the `.md` files are indexed automatically by the document index like any other markdown file. The original binary files can remain in the repo (or in `.gitignore`) — only the `.md` versions are indexed.
+
+### Future: Native Format Extractors
+
+Dedicated extractors for binary formats may be added in a future version if demand warrants it. The extractor registry pattern (base class + per-format subclasses) is designed to accommodate this:
+
+```
+extractors/
+    markdown_extractor.py   # v1 — regex-based, no dependencies
+    docx_extractor.py       # future — python-docx
+    xlsx_extractor.py       # future — openpyxl
+    pdf_extractor.py        # future — pymupdf or pdfplumber
+    csv_extractor.py        # future — stdlib csv
+```
+
+Each future extractor would be optional — imported lazily and skipped if its library is unavailable (same pattern as tree-sitter language loading in `parser.py`).
 
 ## Keyword Enrichment with KeyBERT
 
@@ -203,14 +233,19 @@ KeywordEnricher:
     _min_section_chars: int  # skip keyword extraction for very short sections (default: 50)
 
     enrich(outline: DocOutline, full_text: string) -> DocOutline:
-        for each heading:
-            section_text = slice between this heading and next sibling/parent
+        full_text_lines = full_text.splitlines()
+        all_headings = _flatten(outline.headings)  # recursive tree→list
+        for i, heading in enumerate(all_headings):
+            end_line = all_headings[i+1].start_line if i+1 < len(all_headings) else len(full_text_lines)
+            section_text = "\n".join(full_text_lines[heading.start_line:end_line])
             if len(section_text) < _min_section_chars:
                 skip
             keywords = _model.extract_keywords(section_text, top_n, ngram_range)
             heading.keywords = [kw for kw, score in keywords if score > 0.3]
         return outline
 ```
+
+The enricher receives `full_text` as a separate parameter (not stored in the outline) to keep the cached `DocOutline` compact. Each `DocHeading` stores its `start_line`, and the enricher flattens the heading tree to compute section boundaries (each section runs from one heading's `start_line` to the next heading's `start_line`). The markdown extractor populates `start_line` during extraction at no additional cost.
 
 ### Lazy Loading
 
@@ -222,7 +257,9 @@ KeyBERT depends on `sentence-transformers` which downloads the configured model 
 
 ### Caching
 
-Keyword extraction results are cached alongside the structural outline using the same mtime-based cache as the symbol index. Since KeyBERT is deterministic (same input → same output), content hashing works correctly for tier stability detection. Keyword extraction only re-runs when the file's mtime changes.
+Keyword extraction results are cached alongside the structural outline using the same mtime-based cache as the symbol index. Since KeyBERT is deterministic (same input + same model → same output), content hashing works correctly for tier stability detection. Keyword extraction only re-runs when the file's mtime changes.
+
+**Model change invalidation:** The `DocCache` stores the `keyword_model` name used to generate each cached entry. On cache lookup, if the stored model name differs from the current `app.json` configuration, the entry is treated as stale and re-extracted. This ensures that changing `keyword_model` triggers a full re-enrichment without requiring a manual cache clear.
 
 ### Performance
 
@@ -230,11 +267,12 @@ Keyword extraction results are cached alongside the structural outline using the
 |-----------|------|-------|
 | Model load (first call) | ~5s | One-time per session (~420MB download on first-ever run) |
 | Model load (cached) | ~400ms | sentence-transformers caches locally |
+| Markdown structure extraction (one file) | <5ms | Regex-based, no dependencies |
 | Extract keywords (one section) | ~40-60ms | Depends on section length |
 | Full document (20 sections) | ~1s | Parallelizable if needed |
-| Full repo (50 docs) | ~50-65s | Runs once, then mtime-cached |
+| Full repo (50 docs) | ~50-65s | First run; subsequent runs check mtime and skip unchanged files |
 
-For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce these times by ~60% at some quality cost — see the model comparison table in Design Decisions.
+For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
 ### Token Budget
 
@@ -298,21 +336,38 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 
 Mode switching is a session-level action — it clears the current context and rebuilds with the appropriate index. Conversation history is preserved but the LLM is informed of the mode change via a system message.
 
-**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built lazily on first switch to document mode. Holding both avoids rebuild latency when toggling back and forth. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
+**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built **lazily on first switch to document mode**. This avoids penalising users who never use document mode with a ~65s startup cost. On first switch, the progress bar (described in Progress Reporting below) keeps the user informed during keyword extraction. Once built, both indexes are held in memory so subsequent mode switches are instant. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
+
+**Dispatch mechanism in `_build_tiered_content()`:** The method checks `self._mode` (an enum: `Mode.CODE` or `Mode.DOC`) and calls the appropriate index. Both `SymbolIndex` and `DocIndex` expose the same two methods needed by tier assembly: `get_symbol_map()`/`get_doc_map()` for the full map and `get_file_symbol_block()`/`get_file_doc_block()` for per-file blocks. A shared interface is not needed — the dispatch is a simple if/else in one method. The formatter selection follows the same pattern: `CompactFormatter` for code, `DocFormatter` for documents.
+
+**File discovery in `DocIndex`:** The orchestrator scans the repo for `.md` files using the same `os.walk` pattern as `SymbolIndex._get_source_files()`, filtered by extension rather than `language_for_file()`. Files matching `.gitignore` patterns and the `.ac-dc/` directory are excluded, consistent with the code index.
 
 ```
 User clicks mode toggle
     │
+    ├── If first switch to document mode:
+    │     ├── Show progress bar via startupProgress events
+    │     ├── Build DocIndex (structure extraction + keyword enrichment, ~65s first run)
+    │     ├── Build DocReferenceIndex from extracted links
+    │     └── Initialize document-mode StabilityTracker from DocReferenceIndex
+    │
     ├── Clear file context (selected files)
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (snippets.json → doc-snippets.json)
+    ├── Switch stability tracker to doc-mode instance (separate state per mode)
     ├── Rebuild tier content from doc_index instead of symbol_index
     └── Insert system message: "Switched to document mode"
 ```
 
+**History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
+
+**Mode persistence:** The current mode is stored in the webapp's `localStorage` (keyed per repo, like other dialog preferences) and sent to the backend on reconnect. The backend does not persist mode state — it defaults to code mode on startup and accepts the mode from the frontend during the initial `setupDone` handshake.
+
+**Stability tracker lifecycle:** Two independent `StabilityTracker` instances are held — one for code mode, one for document mode. Each tracks its own tier state, graduation history, and content hashes. Mode switching activates the appropriate tracker instance; the inactive instance retains its state so switching back is instant with no re-initialization. Both trackers are initialized lazily — the document tracker is created on first switch to document mode, using `DocReferenceIndex.connected_components()` for initial tier assignment.
+
 ## System Prompt for Document Mode
 
-A separate `system_doc.md` prompt optimised for document work. Key differences from the code prompt:
+A separate `system_doc.md` prompt (in `src/ac_dc/config/system_doc.md`, alongside the existing `system.md`) optimised for document work. Document-mode snippets live in `src/ac_dc/config/doc-snippets.json` (alongside `snippets.json`). Key differences from the code prompt:
 
 - No references to programming languages, frameworks, or debugging
 - Focus on: document structure, clarity, cross-referencing, consistency, writing style
@@ -345,9 +400,9 @@ The document reference index tracks three types of links:
 - **Doc → Code**: `[context](../src/context.py)` — documents referencing source files
 - **Code → Doc**: Not extracted automatically, but could be inferred from comments containing doc paths
 
-This is implemented as a separate `DocReferenceIndex` class in `doc_index/reference_index.py`, not a subclass of the code `ReferenceIndex`. The two indexes have different edge types (heading-level links vs symbol-level imports) and different build inputs. However, `DocReferenceIndex` exposes the same `connected_components()` and `file_ref_count()` interface so the stability tracker's `initialize_from_reference_graph()` works with either index without modification.
+This is implemented as a separate `DocReferenceIndex` class in `doc_index/reference_index.py`, not a subclass of the code `ReferenceIndex`. The two indexes have different edge types (heading-level links vs symbol-level imports) and different build inputs. However, `DocReferenceIndex` exposes the same `connected_components()` and `file_ref_count()` protocol methods so the stability tracker's `initialize_from_reference_graph()` works with either index. The tracker calls only these two methods and never inspects the internal node types (`Symbol`/`CallSite` vs `DocHeading`/`DocLink`), so no modification to the tracker is needed — it operates on file-level connectivity, not symbol-level details.
 
-This enables the connected components algorithm to cluster related documents and code files together for tier initialization.
+This enables the connected components algorithm to cluster related documents together for tier initialization. Doc→Code links are included as edges in the graph — if `specs/api.md` links to `src/api.py`, both files appear as nodes in the `DocReferenceIndex`. However, code files in this graph are leaf nodes (they have no outgoing edges since they aren't parsed by the doc extractor), so they serve only as clustering bridges: two documents that both reference the same source file will land in the same connected component.
 
 ## Design Decisions
 
@@ -355,11 +410,13 @@ This enables the connected components algorithm to cluster related documents and
 
 The document index shares the `symbol_index/cache.py` infrastructure via a base class extraction. `SymbolCache` is refactored into an abstract `BaseCache` with concrete subclasses:
 
-- `BaseCache` — mtime-based get/put/invalidate, content hashing, `cached_files` property
+- `BaseCache` (in `src/ac_dc/base_cache.py`) — mtime-based get/put/invalidate, content hashing, `cached_files` property
 - `SymbolCache(BaseCache)` — existing code symbol caching (unchanged external API)
 - `DocCache(BaseCache)` — document outline caching with the same mtime semantics
 
-This pattern extends to the formatter: a `BaseFormatter` (in a shared location, e.g., `symbol_index/base_formatter.py` or a new top-level `formatting/` package) provides common logic (path aliasing, reference counting integration), while `CompactFormatter` (in `symbol_index/compact_format.py`, unchanged external API) and `DocFormatter` (in `doc_index/formatter.py`) implement format-specific output. Mode-specific logic — such as test file collapsing for code or sheet summarisation for documents — lives in the respective subclass. The legend is defined as an abstract method in the base class, implemented differently by each subclass to describe its own symbol vocabulary.
+This pattern extends to the formatter: a `BaseFormatter` (in `src/ac_dc/base_formatter.py`) provides common logic (path aliasing, reference counting integration), while `CompactFormatter` (in `symbol_index/compact_format.py`, unchanged external API) and `DocFormatter` (in `doc_index/formatter.py`) implement format-specific output. Mode-specific logic — such as test file collapsing for code — lives in the respective subclass. The legend is defined as an abstract method in the base class, implemented differently by each subclass to describe its own symbol vocabulary.
+
+**Why `ac_dc/` level for base classes:** Both `symbol_index/` and `doc_index/` are sibling packages. Placing shared bases in either one would create a cross-dependency. The `ac_dc/` package root is the natural shared location, keeping both index packages independent.
 
 ### UI Mode Toggle
 
