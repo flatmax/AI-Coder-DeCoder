@@ -411,10 +411,18 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
 
   show() {
     this.open = true;
+    this._selectedSessionId = null;
+    this._sessionMessages = [];
+    this._searchQuery = '';
+    this._searchResults = [];
+    this._mode = 'sessions';
     this._loadSessions();
     this.updateComplete.then(() => {
       const input = this.shadowRoot?.querySelector('.search-input');
-      if (input) input.focus();
+      if (input) {
+        input.value = '';
+        input.focus();
+      }
     });
   }
 
@@ -440,7 +448,6 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
   }
 
   async _selectSession(sessionId) {
-    if (sessionId === this._selectedSessionId && this._sessionMessages.length > 0) return;
     this._selectedSessionId = sessionId;
     this._loadingMessages = true;
     this._sessionMessages = [];
