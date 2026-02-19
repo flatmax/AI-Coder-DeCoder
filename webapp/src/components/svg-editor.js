@@ -371,6 +371,38 @@ export class SvgEditor {
     }
   }
 
+  /** Reset viewBox to show all content, fitted and centered within the container. */
+  fitContent() {
+    const o = this._origViewBox;
+    if (!o || o.w <= 0 || o.h <= 0) return;
+
+    // Get the container dimensions from the SVG element's bounding rect
+    const rect = this._svg.getBoundingClientRect();
+    const cw = rect.width || 1;
+    const ch = rect.height || 1;
+    const containerAR = cw / ch;
+    const contentAR = o.w / o.h;
+
+    let vbX, vbY, vbW, vbH;
+    if (contentAR > containerAR) {
+      // Content is wider than container — match width, expand height
+      vbW = o.w;
+      vbH = o.w / containerAR;
+      vbX = o.x;
+      vbY = o.y - (vbH - o.h) / 2;
+    } else {
+      // Content is taller than container — match height, expand width
+      vbH = o.h;
+      vbW = o.h * containerAR;
+      vbX = o.x - (vbW - o.w) / 2;
+      vbY = o.y;
+    }
+
+    this._setViewBox(vbX, vbY, vbW, vbH);
+    this._zoomLevel = 1;
+    this._updateHandles();
+  }
+
   _onWheel(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -1311,21 +1343,43 @@ export class SvgEditor {
       const bbox = el.getBBox();
       if (bbox.width === 0 && bbox.height === 0) return;
 
+      // Transform bbox from element-local coords into SVG root coords
+      // so the overlay aligns with the visually-rendered position
+      // (accounts for ancestor <g> transforms).
+      let bx = bbox.x, by = bbox.y, bw = bbox.width, bh = bbox.height;
+      const ctm = el.getCTM();
+      const svgCtm = this._svg.getCTM();
+      if (ctm && svgCtm) {
+        const inv = svgCtm.inverse();
+        const m = inv.multiply(ctm);
+        const corners = [
+          { x: bbox.x, y: bbox.y },
+          { x: bbox.x + bbox.width, y: bbox.y },
+          { x: bbox.x + bbox.width, y: bbox.y + bbox.height },
+          { x: bbox.x, y: bbox.y + bbox.height },
+        ];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const c of corners) {
+          const tx = m.a * c.x + m.c * c.y + m.e;
+          const ty = m.b * c.x + m.d * c.y + m.f;
+          if (tx < minX) minX = tx;
+          if (ty < minY) minY = ty;
+          if (tx > maxX) maxX = tx;
+          if (ty > maxY) maxY = ty;
+        }
+        bx = minX; by = minY; bw = maxX - minX; bh = maxY - minY;
+      }
+
       const ns = 'http://www.w3.org/2000/svg';
-      const pad = 3;
       const rect = document.createElementNS(ns, 'rect');
-      rect.setAttribute('x', bbox.x - pad);
-      rect.setAttribute('y', bbox.y - pad);
-      rect.setAttribute('width', bbox.width + pad * 2);
-      rect.setAttribute('height', bbox.height + pad * 2);
       const sw = this._screenDistToSvgDist(1);
       const dashOn = this._screenDistToSvgDist(4);
       const dashOff = this._screenDistToSvgDist(3);
       const padSvg = this._screenDistToSvgDist(3);
-      rect.setAttribute('x', bbox.x - padSvg);
-      rect.setAttribute('y', bbox.y - padSvg);
-      rect.setAttribute('width', bbox.width + padSvg * 2);
-      rect.setAttribute('height', bbox.height + padSvg * 2);
+      rect.setAttribute('x', bx - padSvg);
+      rect.setAttribute('y', by - padSvg);
+      rect.setAttribute('width', bw + padSvg * 2);
+      rect.setAttribute('height', bh + padSvg * 2);
       rect.setAttribute('fill', 'none');
       rect.setAttribute('stroke', '#4fc3f7');
       rect.setAttribute('stroke-width', sw);

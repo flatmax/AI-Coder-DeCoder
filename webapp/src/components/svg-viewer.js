@@ -83,67 +83,38 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       cursor: grabbing;
     }
 
-    /* Toolbar */
-    .toolbar {
+    /* Fit button — floating bottom-right */
+    .fit-btn {
+      position: absolute;
+      bottom: 12px;
+      right: 16px;
+      z-index: 10;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-size: 1rem;
+      cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      padding: 4px 8px;
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-primary);
-      flex-shrink: 0;
+      transition: background 0.15s, color 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
-
-    .toolbar button {
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border-primary);
-      color: var(--text-secondary);
-      padding: 3px 10px;
-      border-radius: 4px;
-      font-size: 0.7rem;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-    .toolbar button:hover {
+    .fit-btn:hover {
       background: var(--bg-hover);
       color: var(--text-primary);
-    }
-    .toolbar button.active {
-      background: var(--accent-primary);
-      color: var(--bg-primary);
-      border-color: var(--accent-primary);
-    }
-
-    .toolbar .zoom-label {
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      min-width: 48px;
-      text-align: center;
-    }
-
-    .toolbar .separator {
-      width: 1px;
-      height: 16px;
-      background: var(--border-primary);
-    }
-
-    .toolbar .mode-label {
-      font-size: 0.65rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
     }
 
     /* Splitter handle */
     .splitter {
       width: 4px;
-      cursor: col-resize;
       background: transparent;
       flex-shrink: 0;
       z-index: 1;
     }
-    .splitter:hover { background: var(--accent-primary); opacity: 0.3; }
 
     /* Status LED — floating top-right indicator */
     .status-led {
@@ -240,7 +211,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._panZoomLeft = null;
     this._panZoomRight = null;   // only used in 'pan' mode
     this._svgEditor = null;       // only used in 'select' mode
-    this._syncing = false;
     this._resizeObserver = null;
     this._undoStack = [];         // per-file undo: array of SVG strings
 
@@ -491,20 +461,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
     if (!leftSvg) return;
 
-    const onUpdate = () => {
-      if (this._syncing) return;
-      this._syncing = true;
-      try {
-        if (this._panZoomLeft) {
-          const zoom = this._panZoomLeft.getZoom();
-          this._zoomLevel = Math.round(zoom * 100);
-          this._syncLeftToRight();
-        }
-      } finally {
-        this._syncing = false;
-      }
-    };
-
     try {
       this._panZoomLeft = svgPanZoom(leftSvg, {
         zoomEnabled: true,
@@ -516,9 +472,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         maxZoom: 40,
         zoomScaleSensitivity: 0.3,
         dblClickZoomEnabled: true,
-        onZoom: onUpdate,
-        onPan: onUpdate,
-        onUpdatedCTM: onUpdate,
       });
     } catch (e) {
       console.warn('svg-pan-zoom init failed for left panel:', e);
@@ -539,22 +492,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
     if (!rightSvg) return;
-
-    const onUpdate = () => {
-      if (this._syncing) return;
-      this._syncing = true;
-      try {
-        if (this._panZoomRight && this._panZoomLeft) {
-          const zoom = this._panZoomRight.getZoom();
-          const pan = this._panZoomRight.getPan();
-          this._panZoomLeft.zoom(zoom);
-          this._panZoomLeft.pan(pan);
-          this._zoomLevel = Math.round(zoom * 100);
-        }
-      } finally {
-        this._syncing = false;
-      }
-    };
 
     try {
       this._panZoomRight = svgPanZoom(rightSvg, {
@@ -614,10 +551,8 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       onDeselect: () => {
         this._selectedTag = '';
       },
-      onZoom: ({ zoom, viewBox }) => {
-        // Sync the right panel's zoom to the left panel
+      onZoom: ({ zoom }) => {
         this._zoomLevel = Math.round(zoom * 100);
-        this._syncRightToLeft(viewBox);
       },
     });
   }
@@ -636,13 +571,20 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.zoom(zoom);
       this._panZoomRight.pan(pan);
     } else if (this._mode === 'select' && this._svgEditor) {
-      // Read the left panel's effective viewBox from svg-pan-zoom and apply to editor
+      // svg-pan-zoom doesn't modify the viewBox attribute — it uses an
+      // internal viewport-group transform.  Compute the effective visible
+      // area from the pan-zoom zoom/pan state and the original viewBox.
       const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
       if (leftSvg) {
-        const vb = leftSvg.getAttribute('viewBox');
-        if (vb) {
-          const parts = vb.split(/[\s,]+/).map(Number);
-          this._svgEditor.setViewBox(parts[0], parts[1], parts[2], parts[3]);
+        const origVb = this._getOriginalViewBox(leftSvg);
+        if (origVb) {
+          const zoom = this._panZoomLeft.getZoom();
+          const pan = this._panZoomLeft.getPan();
+          const w = origVb.w / zoom;
+          const h = origVb.h / zoom;
+          const x = origVb.x - pan.x / zoom;
+          const y = origVb.y - pan.y / zoom;
+          this._svgEditor.setViewBox(x, y, w, h);
         }
       }
     }
@@ -733,12 +675,23 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   }
 
   _fitAll() {
-    if (this._panZoomLeft) this._panZoomLeft.fit();
-    if (this._panZoomRight) this._panZoomRight.fit();
     if (this._panZoomLeft) {
+      this._panZoomLeft.resize();
+      this._panZoomLeft.fit();
+      this._panZoomLeft.center();
       this._zoomLevel = Math.round(this._panZoomLeft.getZoom() * 100);
     }
-    this._syncLeftToRight();
+    if (this._panZoomRight) {
+      this._panZoomRight.resize();
+      this._panZoomRight.fit();
+      this._panZoomRight.center();
+    }
+
+    // In select mode, use the editor's own fit method which accounts
+    // for the container aspect ratio and resets zoom.
+    if (this._mode === 'select' && this._svgEditor) {
+      this._svgEditor.fitContent();
+    }
   }
 
   _undo() {
@@ -1091,6 +1044,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       } else {
         this._initRightPanZoom();
       }
+
+      // Auto-fit both panels so they start with content fully visible.
+      // Use a second rAF so the container has its final layout dimensions.
+      requestAnimationFrame(() => {
+        if (gen !== this._injectGeneration) return;
+        this._fitAll();
+      });
     });
   }
 
@@ -1108,6 +1068,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
             @click=${() => isDirty ? this._save() : null}
           ></button>
+          <button class="fit-btn" @click=${this._fitAll} title="Fit to view">⊡</button>
           <div class="diff-panel">
             <div class="svg-container svg-left"></div>
           </div>
@@ -1122,36 +1083,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         `}
       </div>
 
-      ${file ? html`
-        <div class="toolbar">
-          <!-- Mode toggle -->
-          <button class="${this._mode === 'select' ? 'active' : ''}"
-            @click=${() => this._setMode('select')} title="Select & edit mode">✦ Select</button>
-          <button class="${this._mode === 'pan' ? 'active' : ''}"
-            @click=${() => this._setMode('pan')} title="Pan & zoom mode">✥ Pan</button>
-          ${this._selectedTag ? html`<span class="mode-label">${this._selectedTag}</span>` : nothing}
-
-          <div class="separator"></div>
-
-          <!-- Zoom controls -->
-          <button @click=${this._zoomOut} title="Zoom out (−)">−</button>
-          <span class="zoom-label">${this._zoomLevel}%</span>
-          <button @click=${this._zoomIn} title="Zoom in (+)">+</button>
-          <button @click=${this._zoomReset} title="Reset zoom">1:1</button>
-          <button @click=${this._fitAll} title="Fit to view">Fit</button>
-
-          <div class="separator"></div>
-
-          <!-- Edit actions -->
-          <button @click=${this._undo} title="Undo (Ctrl+Z)"
-            ?disabled=${this._undoStack.length <= 1}>↩ Undo</button>
-          <button @click=${this._save} title="Save (Ctrl+S)"
-            ?disabled=${!isDirty}>💾 Save</button>
-
-          <div class="separator"></div>
-          <button @click=${this._copyImage} title="Copy as PNG (Ctrl+Shift+C)">📋 Copy</button>
-        </div>
-      ` : nothing}
     `;
   }
 }
