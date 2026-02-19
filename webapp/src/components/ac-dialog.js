@@ -33,6 +33,11 @@ export class AcDialog extends RpcMixin(LitElement) {
     minimized: { type: Boolean, reflect: true },
     _historyPercent: { type: Number, state: true },
     _reviewActive: { type: Boolean, state: true },
+    _mode: { type: String, state: true },
+    _modeSwitching: { type: Boolean, state: true },
+    _modeSwitchMessage: { type: String, state: true },
+    _modeSwitchPercent: { type: Number, state: true },
+    _repoName: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -172,6 +177,37 @@ export class AcDialog extends RpcMixin(LitElement) {
     .history-bar-fill.orange { background: var(--accent-orange); }
     .history-bar-fill.red { background: var(--accent-red); }
 
+    /* Mode switch overlay */
+    .mode-switch-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 50;
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      opacity: 0.95;
+    }
+    .mode-switch-overlay .mode-switch-msg {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .mode-switch-overlay .mode-switch-bar {
+      width: 200px;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .mode-switch-overlay .mode-switch-fill {
+      height: 100%;
+      background: var(--accent-primary);
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
+
     /* Resize handle — right edge */
     .resize-handle {
       position: absolute;
@@ -233,6 +269,11 @@ export class AcDialog extends RpcMixin(LitElement) {
     this.minimized = this._loadBoolPref('ac-dc-minimized', false);
     this._historyPercent = 0;
     this._reviewActive = false;
+    this._mode = 'code';
+    this._modeSwitching = false;
+    this._modeSwitchMessage = '';
+    this._modeSwitchPercent = 0;
+    this._repoName = null;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
@@ -241,6 +282,8 @@ export class AcDialog extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('keydown', this._onKeyDown);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
+    window.addEventListener('state-loaded', this._onStateLoaded);
     // Restore dialog width if previously resized
     this._restoreDialogWidth();
     // Restore dialog position if previously undocked
@@ -250,11 +293,36 @@ export class AcDialog extends RpcMixin(LitElement) {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('state-loaded', this._onStateLoaded);
+  }
+
+  _onStateLoaded(e) {
+    const state = e.detail;
+    if (state?.repo_name && !this._repoName) {
+      this._repoName = state.repo_name;
+      // Migrate legacy bare key to repo-scoped key
+      this._migrateModeKey();
+    }
+  }
+
+  /**
+   * Migrate legacy bare 'ac-dc-mode' key to repo-scoped key.
+   * Only runs once when repo name first becomes available.
+   */
+  _migrateModeKey() {
+    const repoKey = this._modeKey();
+    const existing = this._loadPref(repoKey, null);
+    if (existing) return; // already have a repo-scoped value
+    const legacy = this._loadPref('ac-dc-mode', null);
+    if (legacy) {
+      this._savePref(repoKey, legacy);
+    }
   }
 
   onRpcReady() {
     this._refreshHistoryBar();
     this._refreshReviewState();
+    this._refreshMode();
     // Restore last-used tab now that RPC is connected and tabs can load data
     const savedTab = this._loadPref('ac-dc-active-tab', 'files');
     if (savedTab !== this.activeTab) {
@@ -270,6 +338,11 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('session-loaded', () => this._refreshHistoryBar());
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
+      window.addEventListener('mode-switch-progress', (e) => {
+        const { message, percent } = e.detail || {};
+        if (message !== undefined) this._modeSwitchMessage = message;
+        if (typeof percent === 'number') this._modeSwitchPercent = percent;
+      });
     }
   }
 
@@ -297,6 +370,63 @@ export class AcDialog extends RpcMixin(LitElement) {
         }
       }
     });
+  }
+
+  /**
+   * Return a repo-scoped localStorage key for mode persistence.
+   * Falls back to a bare key if repo name is not yet known.
+   */
+  _modeKey() {
+    return this._repoName ? `ac-dc-mode:${this._repoName}` : 'ac-dc-mode';
+  }
+
+  async _refreshMode() {
+    try {
+      const result = await this.rpcExtract('LLMService.get_mode');
+      if (result && result.mode) {
+        this._mode = result.mode;
+      }
+    } catch (e) {
+      // Ignore — RPC may not be ready
+    }
+    // Also restore persisted mode preference and sync if needed
+    const saved = this._loadPref(this._modeKey(), null);
+    if (saved && saved !== this._mode) {
+      await this._switchMode(saved);
+    }
+  }
+
+  async _switchMode(mode) {
+    if (mode === this._mode) return;
+    this._modeSwitching = true;
+    this._modeSwitchMessage = mode === 'doc' ? 'Building document index...' : 'Switching to code mode...';
+    this._modeSwitchPercent = 0;
+    try {
+      const result = await this.rpcExtract('LLMService.switch_mode', mode);
+      if (result && !result.error) {
+        this._mode = result.mode || mode;
+        this._savePref(this._modeKey(), this._mode);
+        // Notify children to refresh snippets and context
+        window.dispatchEvent(new CustomEvent('mode-changed', {
+          detail: { mode: this._mode },
+        }));
+      } else if (result?.error) {
+        window.dispatchEvent(new CustomEvent('ac-toast', {
+          detail: { message: result.error, type: 'error' },
+        }));
+      }
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('ac-toast', {
+        detail: { message: `Mode switch failed: ${e.message || e}`, type: 'error' },
+      }));
+    } finally {
+      this._modeSwitching = false;
+    }
+  }
+
+  _onModeToggle() {
+    const newMode = this._mode === 'code' ? 'doc' : 'code';
+    this._switchMode(newMode);
   }
 
   async _refreshHistoryBar() {
@@ -647,6 +777,13 @@ export class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <div class="header-actions">
+          <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''}"
+            title="${this._mode === 'code' ? 'Switch to Document mode' : 'Switch to Code mode'}"
+            aria-label="${this._mode === 'code' ? 'Switch to document mode' : 'Switch to code mode'}"
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onModeToggle()}>
+            ${this._mode === 'code' ? '💻' : '📝'}
+          </button>
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
             aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
@@ -665,6 +802,15 @@ export class AcDialog extends RpcMixin(LitElement) {
       </div>
 
       <div class="content ${this.minimized ? 'minimized' : ''}">
+        ${this._modeSwitching ? html`
+          <div class="mode-switch-overlay">
+            <div class="mode-switch-msg">${this._modeSwitchMessage}</div>
+            <div class="mode-switch-bar">
+              <div class="mode-switch-fill" style="width: ${this._modeSwitchPercent}%"></div>
+            </div>
+          </div>
+        ` : ''}
+
         <!-- Files tab (always rendered) -->
         <div class="tab-panel ${this.activeTab === 'files' ? 'active' : ''}"
              role="tabpanel" id="panel-files" aria-labelledby="tab-files">

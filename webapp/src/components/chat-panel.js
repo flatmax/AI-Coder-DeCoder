@@ -1118,6 +1118,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onViewUrlContent = this._onViewUrlContent.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
   }
 
   connectedCallback() {
@@ -1125,6 +1126,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-chunk', this._onStreamChunk);
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('compaction-event', this._onCompactionEvent);
+    window.addEventListener('mode-changed', this._onModeChanged);
     this.addEventListener('view-url-content', this._onViewUrlContent);
   }
 
@@ -1133,6 +1135,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-chunk', this._onStreamChunk);
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('compaction-event', this._onCompactionEvent);
+    window.removeEventListener('mode-changed', this._onModeChanged);
     this.removeEventListener('view-url-content', this._onViewUrlContent);
     if (this._rafId) cancelAnimationFrame(this._rafId);
     if (this._observer) this._observer.disconnect();
@@ -1356,6 +1359,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (result?.files_auto_added?.length > 0) {
       this._populateNotInContextRetryPrompt(result.files_auto_added);
     }
+  }
+
+  _onModeChanged(e) {
+    this._loadSnippets();
   }
 
   _onCompactionEvent(e) {

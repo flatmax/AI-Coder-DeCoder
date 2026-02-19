@@ -474,6 +474,14 @@ class AcApp extends JRPCClient {
         this._startupVisible = false;
       }, 400);
     }
+
+    // Forward doc_index progress to mode-switch overlay when startup is done
+    if (!this._startupVisible && stage === 'doc_index') {
+      window.dispatchEvent(new CustomEvent('mode-switch-progress', {
+        detail: { message: message || '', percent: percent || 0 },
+      }));
+    }
+
     return true;
   }
 
@@ -501,6 +509,13 @@ class AcApp extends JRPCClient {
         this._startupVisible = false;
       } else {
         console.log('Server not yet initialized — keeping startup overlay');
+      }
+
+      // Broadcast mode from server state
+      if (state?.mode) {
+        window.dispatchEvent(new CustomEvent('mode-changed', {
+          detail: { mode: state.mode },
+        }));
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));

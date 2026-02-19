@@ -136,3 +136,80 @@ def test_system_reminder():
     reminder = config.get_system_reminder()
     assert len(reminder) > 0
     assert "edit" in reminder.lower() or "Edit" in reminder
+
+
+# === Settings Wrapper Tests ===
+
+
+def test_settings_get_config_content():
+    """Settings.get_config_content returns dict with content key."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    result = s.get_config_content("litellm")
+    assert isinstance(result, dict)
+    assert "content" in result
+    assert len(result["content"]) > 0
+
+
+def test_settings_save_and_read(temp_repo):
+    """Settings save and read round-trip."""
+    from ac_dc.settings import Settings
+    config = ConfigManager(repo_root=temp_repo)
+    s = Settings(config)
+    s.save_config_content("system_extra", "# Custom extra\n")
+    result = s.get_config_content("system_extra")
+    assert isinstance(result, dict)
+    assert "Custom extra" in result["content"]
+
+
+def test_settings_reload_llm_config():
+    """Settings.reload_llm_config returns result."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    result = s.reload_llm_config()
+    assert result is not None
+
+
+def test_settings_get_config_info():
+    """Settings.get_config_info returns model and paths."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    info = s.get_config_info()
+    assert "model" in info
+
+
+def test_settings_get_snippets():
+    """Settings.get_snippets returns list."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    snippets = s.get_snippets()
+    assert isinstance(snippets, list)
+
+
+def test_settings_get_review_snippets():
+    """Settings.get_review_snippets returns list."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    snippets = s.get_review_snippets()
+    assert isinstance(snippets, list)
+
+
+def test_settings_invalid_config_type():
+    """Settings returns error for invalid config type."""
+    from ac_dc.settings import Settings
+    config = ConfigManager()
+    s = Settings(config)
+    result = s.get_config_content("invalid_type")
+    assert isinstance(result, (dict, str))
+    if isinstance(result, dict):
+        # Settings wraps the error — check for error key or empty content
+        assert "error" in result or result.get("content", "") == ""
+    result2 = s.save_config_content("invalid_type", "data")
+    assert isinstance(result2, (dict, str))
+    if isinstance(result2, dict):
+        assert "error" in result2 or result2.get("content", "") == ""

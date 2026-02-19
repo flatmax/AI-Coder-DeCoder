@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import litellm
 
-from .context import ContextManager
+from .context import ContextManager, Mode
 from .edit_parser import (
     EditResult,
     EditStatus,
@@ -190,6 +190,11 @@ class LLMService:
             "cache_write_tokens": 0,
         }
 
+        # Document mode state
+        self._doc_index = None
+        self._doc_stability_tracker = None
+        self._doc_stability_initialized = False
+
         # Review mode state
         self._review_active = False
         self._saved_system_prompt = None  # original system prompt, saved during review
@@ -322,6 +327,7 @@ class LLMService:
             "session_id": self._session_id,
             "repo_name": self._repo.root.name if self._repo else None,
             "init_complete": self._init_complete,
+            "mode": self._context.mode.value,
         }
 
     def set_selected_files(self, files):
@@ -340,6 +346,134 @@ class LLMService:
         # Don't reset stability_initialized — symbol tiers persist across sessions
         # Only history items are purged (done by clear_history -> purge_history_items)
         return {"session_id": self._session_id}
+
+    # === Mode Switching (RPC) ===
+
+    def get_mode(self):
+        """Return current mode."""
+        return {"mode": self._context.mode.value}
+
+    async def switch_mode(self, mode):
+        """Switch between code and document modes.
+
+        Full context switch: clears file context, swaps system prompt,
+        swaps snippets, switches stability tracker, rebuilds tier content.
+
+        Args:
+            mode: "code" or "doc"
+
+        Returns:
+            {mode: str, message: str}
+        """
+        try:
+            new_mode = Mode(mode)
+        except ValueError:
+            return {"error": f"Invalid mode: {mode}. Use 'code' or 'doc'."}
+
+        if new_mode == self._context.mode:
+            return {"mode": new_mode.value, "message": "Already in this mode"}
+
+        if new_mode == Mode.DOC:
+            return await self._switch_to_doc_mode()
+        else:
+            return self._switch_to_code_mode()
+
+    async def _switch_to_doc_mode(self):
+        """Switch from code mode to document mode."""
+        # Build doc index lazily on first switch
+        if self._doc_index is None:
+            await self._build_doc_index()
+
+        # Clear file context
+        self._context.file_context.clear()
+        self._selected_files = []
+
+        # Swap system prompt
+        self._context.set_system_prompt(self._config.get_doc_system_prompt())
+
+        # Create doc-mode stability tracker if needed
+        if self._doc_stability_tracker is None:
+            from .stability_tracker import StabilityTracker
+            self._doc_stability_tracker = StabilityTracker(
+                cache_target_tokens=self._context._cache_target_tokens,
+            )
+
+        # Initialize doc stability tracker from doc reference index
+        if not self._doc_stability_initialized and self._doc_index:
+            try:
+                ref_index = self._doc_index.reference_index
+                all_files = list(self._doc_index._all_outlines.keys())
+                self._doc_stability_tracker.initialize_from_reference_graph(
+                    ref_index, all_files, counter=self._context.counter,
+                )
+                self._doc_stability_initialized = True
+                logger.info(f"Doc stability tracker initialized with {len(self._doc_stability_tracker.items)} items")
+            except Exception as e:
+                logger.warning(f"Doc stability initialization failed: {e}")
+
+        # Switch tracker on context
+        self._context.set_stability_tracker(self._doc_stability_tracker)
+
+        # Set mode
+        self._context.set_mode(Mode.DOC)
+
+        # Insert system message
+        self._context.add_message("system", "Switched to document mode.")
+
+        logger.info("Switched to document mode")
+        return {"mode": "doc", "message": "Switched to document mode"}
+
+    def _switch_to_code_mode(self):
+        """Switch from document mode to code mode."""
+        # Clear file context
+        self._context.file_context.clear()
+        self._selected_files = []
+
+        # Restore code system prompt
+        self._context.set_system_prompt(self._config.get_system_prompt())
+
+        # Switch back to code stability tracker
+        self._context.set_stability_tracker(self._stability_tracker)
+
+        # Set mode
+        self._context.set_mode(Mode.CODE)
+
+        # Insert system message
+        self._context.add_message("system", "Switched to code mode.")
+
+        logger.info("Switched to code mode")
+        return {"mode": "code", "message": "Switched to code mode"}
+
+    async def _build_doc_index(self):
+        """Build the document index lazily on first switch to doc mode."""
+        if not self._repo:
+            return
+
+        from .doc_index.index import DocIndex
+
+        doc_config = self._config.doc_index_config
+
+        def _progress(stage, message, percent):
+            if self._event_callback:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(
+                            self._event_callback("startupProgress", stage, message, percent)
+                        )
+                except Exception:
+                    pass
+
+        _progress("doc_index", "Building document index...", 0)
+
+        self._doc_index = DocIndex(
+            repo_root=str(self._repo.root),
+            doc_config=doc_config,
+        )
+
+        self._doc_index.index_repo(progress_callback=_progress)
+
+        logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")
 
     # === Streaming Chat (RPC) ===
 
@@ -411,7 +545,14 @@ class LLMService:
             symbol_legend = ""
             file_tree = ""
 
-            if self._symbol_index:
+            if self._context.mode == Mode.DOC and self._doc_index:
+                # Document mode — use doc index for map
+                self._doc_index.index_repo()
+                symbol_map = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                symbol_legend = self._doc_index.get_legend()
+            elif self._symbol_index:
                 self._symbol_index.index_repo(
                     self._repo.get_flat_file_list() if self._repo else None
                 )
@@ -854,8 +995,17 @@ class LLMService:
         - history:{N} for conversation messages
         - When a file is selected, its symbol:{path} stays tracked but
           the symbol map excludes it (full content replaces it in prompt)
+
+        Dispatches to the appropriate tracker/index based on current mode.
         """
-        if not self._stability_tracker:
+        if self._context.mode == Mode.DOC:
+            tracker = self._doc_stability_tracker
+            index = self._doc_index
+        else:
+            tracker = self._stability_tracker
+            index = self._symbol_index
+
+        if not tracker:
             return
 
         counter = self._context.counter
@@ -865,9 +1015,15 @@ class LLMService:
         # Hash only the system prompt text (not legend) for stability —
         # the legend includes path aliases that change with exclude_files,
         # causing spurious hash mismatches. Token count includes both.
-        system_prompt = self._config.get_system_prompt() or ""
+        if self._context.mode == Mode.DOC:
+            system_prompt = self._config.get_doc_system_prompt() or ""
+        else:
+            system_prompt = self._config.get_system_prompt() or ""
         if system_prompt:
-            legend = self._symbol_index.get_legend() or "" if self._symbol_index else ""
+            if index and hasattr(index, 'get_legend'):
+                legend = index.get_legend() or ""
+            else:
+                legend = ""
             system_content = system_prompt + legend
             active_items.append({
                 "key": "system:prompt",
@@ -875,35 +1031,44 @@ class LLMService:
                 "tokens": counter.count(system_content),
             })
 
-        # Per-file symbol entries for indexed files NOT currently selected.
-        # Selected files have full content in context; their symbol blocks
-        # are excluded from the symbol map to avoid redundancy. Per spec:
+        # Per-file symbol/doc entries for indexed files NOT currently selected.
+        # Selected files have full content in context; their symbol/doc blocks
+        # are excluded from the map to avoid redundancy. Per spec:
         # "A file never appears as both symbol block and full content."
-        if self._symbol_index:
+        if index:
             selected_set = set(self._selected_files)
 
             # Remove symbol entries for selected files — they now have file: entries
             for path in selected_set:
                 sym_key = f"symbol:{path}"
-                if sym_key in self._stability_tracker._items:
-                    tier = self._stability_tracker._items[sym_key].tier
-                    del self._stability_tracker._items[sym_key]
-                    self._stability_tracker._broken_tiers.add(tier)
-                    self._stability_tracker._changes.append({
+                if sym_key in tracker._items:
+                    tier = tracker._items[sym_key].tier
+                    del tracker._items[sym_key]
+                    tracker._broken_tiers.add(tier)
+                    tracker._changes.append({
                         "action": "removed", "key": sym_key,
                         "reason": "file selected — full content replaces symbol",
                     })
 
-            for path in self._symbol_index._all_symbols:
+            # Get all indexed paths from the appropriate index
+            if self._context.mode == Mode.DOC:
+                all_indexed = self._doc_index._all_outlines if self._doc_index else {}
+            else:
+                all_indexed = self._symbol_index._all_symbols if self._symbol_index else {}
+
+            for path in all_indexed:
                 if path in selected_set:
                     continue  # full file content is active; skip symbol entry
-                block = self._symbol_index.get_file_symbol_block(path)
+                if self._context.mode == Mode.DOC:
+                    block = self._doc_index.get_file_doc_block(path) if self._doc_index else ""
+                else:
+                    block = self._symbol_index.get_file_symbol_block(path) if self._symbol_index else ""
                 if block:
-                    # Use signature hash (based on raw symbol data) rather than
+                    # Use signature hash (based on raw data) rather than
                     # hashing the formatted block — the formatted output changes
                     # when path aliases or exclude_files change, causing spurious
                     # hash mismatches and mass demotions.
-                    sig_hash = self._symbol_index.get_signature_hash(path)
+                    sig_hash = index.get_signature_hash(path)
                     active_items.append({
                         "key": f"symbol:{path}",
                         "content_hash": sig_hash or StabilityTracker.hash_content(block),
@@ -939,7 +1104,7 @@ class LLMService:
                 pass
 
         # Run update cycle
-        result = self._stability_tracker.update(active_items, existing_files)
+        result = tracker.update(active_items, existing_files)
 
         # Log tier changes
         for change in result.get("changes", []):
@@ -955,10 +1120,17 @@ class LLMService:
 
         Returns dict with l0/l1/l2/l3 keys, or None if tracker not ready.
         Each tier contains: symbols, files, history, graduated_files, graduated_history_indices.
+
+        Dispatches to the appropriate index based on current mode.
         """
-        tracker = self._stability_tracker
-        if not tracker or not self._stability_initialized:
-            return None
+        if self._context.mode == Mode.DOC:
+            tracker = self._doc_stability_tracker
+            if not tracker or not self._doc_stability_initialized:
+                return None
+        else:
+            tracker = self._stability_tracker
+            if not tracker or not self._stability_initialized:
+                return None
 
         history = self._context.get_history()
         tiered = {}
@@ -989,7 +1161,12 @@ class LLMService:
                     continue
                 elif key.startswith("symbol:"):
                     path = key.split(":", 1)[1]
-                    if self._symbol_index:
+                    if self._context.mode == Mode.DOC:
+                        if self._doc_index:
+                            block = self._doc_index.get_file_doc_block(path)
+                            if block:
+                                symbol_parts.append(block)
+                    elif self._symbol_index:
                         block = self._symbol_index.get_file_symbol_block(path)
                         if block:
                             symbol_parts.append(block)
@@ -1730,10 +1907,13 @@ class LLMService:
         """Return snippets appropriate for the current mode.
 
         In review mode, returns review-specific snippets.
+        In document mode, returns document-specific snippets.
         Otherwise, returns standard coding snippets.
         """
         if self._review_active:
             return self._config.get_review_snippets()
+        if self._context.mode == Mode.DOC:
+            return self._config.get_doc_snippets()
         return self._config.get_snippets()
 
     def _build_review_context(self):
