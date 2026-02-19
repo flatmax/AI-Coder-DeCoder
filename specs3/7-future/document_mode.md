@@ -27,10 +27,12 @@ A separate `doc_index/` module, independent of tree-sitter:
 ```
 src/ac_dc/doc_index/
     __init__.py
+    cache.py              # DocCache(BaseCache) — mtime-based outline caching
     extractor.py          # base class + registry
-    formatter.py          # produce compact map output
+    formatter.py          # DocFormatter(BaseFormatter) — compact map output
     keyword_enricher.py   # KeyBERT-based topic extraction per section
-    reference_index.py    # cross-references: doc↔doc and doc→code
+    reference_index.py    # DocReferenceIndex — doc↔doc and doc→code links
+    index.py              # DocIndex — orchestrator (parallels symbol_index/index.py)
     extractors/
         markdown_extractor.py
         docx_extractor.py
