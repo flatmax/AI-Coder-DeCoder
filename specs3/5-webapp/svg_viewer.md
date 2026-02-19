@@ -201,6 +201,10 @@ There is no persistent toolbar. The viewer uses floating overlay buttons and key
 
 A floating `⊡` button in the bottom-right corner of the diff container. Fits both panels so SVG content is fully visible within the available space. Styled as a 32×32px rounded button with border, background blur, and box-shadow for visibility over SVG content. Hover state lightens the background and text color.
 
+Fitting uses the SVG element's `getBBox()` (the actual rendered content bounding box) rather than the `viewBox` attribute, which may be a crop window that doesn't cover all elements. A 3% margin is added around the content. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
+
+For the left panel, the viewBox attribute is updated to the content bounding box before `svg-pan-zoom` is initialized, so its `fit()` and `center()` methods operate on the full content area. For the right panel (SvgEditor), `fitContent()` computes and sets the viewBox directly.
+
 ### Status LED
 
 A floating 10px circular indicator in the top-right corner of the diff container:
@@ -234,6 +238,8 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
    - `style.width` and `style.height` set to `100%`
    - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
+
+**Content bounds vs viewBox**: An SVG's `viewBox` attribute may define a crop window that doesn't cover all rendered content (elements can extend outside the declared viewBox). During initialization, the left panel's viewBox is updated to the actual content bounding box (`getBBox()` with a 3% margin) before `svg-pan-zoom` is created. The right panel's `SvgEditor.fitContent()` similarly uses `getBBox()` to compute a viewBox that shows all content. This ensures "fit" works correctly regardless of the original viewBox.
 
 **Retry on next frame**: If the `.svg-left` / `.svg-right` containers are not yet in the shadow DOM when `_injectSvgContent()` runs (due to Lit render timing — the method may be called from `updated()` before the template has committed), it schedules a retry via `requestAnimationFrame`. This ensures injection succeeds even when called during the Lit update lifecycle before the DOM reflects the latest template.
 
