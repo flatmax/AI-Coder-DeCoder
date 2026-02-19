@@ -28,40 +28,51 @@ class HistoryCompactor:
     """
 
     def __init__(self, config, model=None, detection_model=None,
-                 compaction_prompt=None):
+                 compaction_prompt=None, config_manager=None):
         """Initialize compactor.
 
         Args:
-            config: compaction config dict
+            config: compaction config dict (used as fallback)
             model: primary model name (for token counting)
             detection_model: smaller model for topic detection
             compaction_prompt: system prompt for topic detector
+            config_manager: live ConfigManager for hot-reloaded values
         """
+
         self._config = config or {}
+        self._config_manager = config_manager
         self._model = model
         self._detection_model = detection_model or config.get("detection_model")
         self._compaction_prompt = compaction_prompt
         self._counter = TokenCounter(model)
+        logger.info(f"HistoryCompactor.__init__: trigger_tokens={self._active_config.get('compaction_trigger_tokens', '?')}")
+
+    @property
+    def _active_config(self):
+        """Return live config from ConfigManager if available, else snapshot."""
+        if self._config_manager:
+            return self._config_manager.compaction_config
+        return self._config
 
     @property
     def enabled(self):
-        return self._config.get("enabled", False)
+        return self._active_config.get("enabled", False)
 
     @property
     def trigger_tokens(self):
-        return self._config.get("compaction_trigger_tokens", 24000)
+        return self._active_config.get("compaction_trigger_tokens", 24000)
 
     @property
     def verbatim_window_tokens(self):
-        return self._config.get("verbatim_window_tokens", 4000)
+        return self._active_config.get("verbatim_window_tokens", 4000)
 
     @property
     def summary_budget_tokens(self):
-        return self._config.get("summary_budget_tokens", 500)
+        return self._active_config.get("summary_budget_tokens", 500)
 
     @property
     def min_verbatim_exchanges(self):
-        return self._config.get("min_verbatim_exchanges", 2)
+        return self._active_config.get("min_verbatim_exchanges", 2)
 
     def should_compact(self, messages):
         """Check if compaction should run.
@@ -69,9 +80,13 @@ class HistoryCompactor:
         Returns True if enabled and history tokens exceed trigger.
         """
         if not self.enabled:
+            logger.debug("HistoryCompactor.should_compact: disabled")
             return False
         tokens = self._counter.count_messages(messages)
-        return tokens > self.trigger_tokens
+        trigger = self.trigger_tokens
+        needs = tokens > trigger
+        logger.info(f"HistoryCompactor.should_compact: {tokens:,} / {trigger:,} tokens → {needs} (config id={id(self._config):#x})")
+        return needs
 
     async def compact(self, messages):
         """Run compaction on message history.
@@ -90,8 +105,11 @@ class HistoryCompactor:
 
         # Find verbatim window start
         verbatim_start = self._find_verbatim_start(messages)
+        logger.info(f"Compaction: {len(messages)} messages, verbatim_start={verbatim_start}")
 
         # Detect topic boundary
+        logger.info(f"Detecting topic boundary with model={self._detection_model}, "
+                     f"analyzing messages[:{verbatim_start}]")
         boundary = await detect_topic_boundary(
             messages[:verbatim_start] if verbatim_start > 0 else messages,
             model=self._detection_model,
@@ -100,12 +118,17 @@ class HistoryCompactor:
 
         boundary_index = boundary.get("boundary_index")
         confidence = boundary.get("confidence", 0.0)
+        summary = boundary.get("summary", "")[:100]
+        logger.info(f"Topic boundary: index={boundary_index}, confidence={confidence:.2f}, "
+                     f"reason={boundary.get('boundary_reason', '?')}, "
+                     f"summary_preview={summary!r}")
 
         # Decide strategy
         if (boundary_index is not None
                 and boundary_index >= verbatim_start
                 and confidence >= 0.5):
             # Truncate: boundary is in or after verbatim window
+            logger.info(f"Strategy: TRUNCATE (boundary {boundary_index} >= verbatim_start {verbatim_start}, confidence {confidence:.2f})")
             result = self._apply_truncate(messages, boundary_index)
             result["boundary"] = boundary
             return result
@@ -113,11 +136,13 @@ class HistoryCompactor:
               and boundary_index < verbatim_start
               and confidence >= 0.5):
             # Summarize: boundary is before verbatim window
+            logger.info(f"Strategy: SUMMARIZE (boundary {boundary_index} < verbatim_start {verbatim_start}, confidence {confidence:.2f})")
             result = self._apply_summarize(messages, verbatim_start, boundary)
             result["boundary"] = boundary
             return result
         else:
             # Low confidence or no boundary: summarize as fallback
+            logger.info(f"Strategy: SUMMARIZE/fallback (boundary={boundary_index}, confidence={confidence:.2f})")
             result = self._apply_summarize(messages, verbatim_start, boundary)
             result["boundary"] = boundary
             return result

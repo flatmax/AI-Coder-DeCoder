@@ -52,14 +52,44 @@ For `--dev` mode, a Vite dev server runs as a child process:
 
 ## Startup Sequence
 
+The startup is split into two phases to give the user early feedback. The browser connects and shows a startup overlay while heavy initialization runs in the background with progress updates.
+
+### Phase 1: Fast (< 1 second)
+
 1. Validate git repository (not a repo → write self-contained HTML to temp file, open as `file://` in browser, print terminal banner with `git init` / `cd` instructions, exit)
 2. Find available ports
-3. Initialize services: ConfigManager, Repo, LLM, Settings
-4. Register with JRPCServer
+3. Initialize lightweight services: ConfigManager, Repo, Settings
+4. Create LLMService with `deferred_init=True` (no symbol index, no session restore)
 5. If `--dev`: start Vite subprocess
-6. Start RPC WebSocket server
-7. Open browser (unless `--no-browser`)
-8. Serve forever
+6. Register services with JRPCServer and start WebSocket server
+7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
+
+### Phase 2: Deferred (progress reported to browser)
+
+8. Wait briefly (500ms) for browser WebSocket connection
+9. Initialize SymbolIndex (tree-sitter parser) — progress: 10%
+10. Complete deferred LLM init (restore last session) — progress: 30%
+11. Index repository (parse all source files, heaviest step, runs in executor) — progress: 50%
+12. Initialize stability tracker (tier assignments, reference graph) — progress: 80%
+13. Signal ready — progress: 100%, browser dismisses startup overlay
+14. Serve forever
+
+Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes.
+
+### Startup Overlay (Browser)
+
+The browser shows a full-screen overlay with the AC⚡DC brand, a status message, and a progress bar. The overlay updates as `startupProgress` calls arrive:
+
+| Stage | Message | Percent |
+|-------|---------|---------|
+| (connected) | `Connected — initializing...` | 5% |
+| `symbol_index` | `Initializing symbol parser...` | 10% |
+| `session_restore` | `Restoring session...` | 30% |
+| `indexing` | `Indexing repository...` | 50% |
+| `stability` | `Building cache tiers...` | 80% |
+| `ready` | `Ready` | 100% |
+
+The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not first connect), the overlay is not shown — only a "Reconnected" toast appears.
 
 ### CLI Arguments
 

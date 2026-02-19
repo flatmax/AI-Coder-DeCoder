@@ -210,8 +210,11 @@ class TestContextManagerBudget:
             "enabled": True,
             "compaction_trigger_tokens": 100000,
         })
-        # Simulate a compactor being set
-        ctx.init_compactor(object())
+        # Simulate a compactor with a should_compact method
+        class FakeCompactor:
+            def should_compact(self, history):
+                return False
+        ctx.init_compactor(FakeCompactor())
         ctx.add_message("user", "short message")
         assert ctx.should_compact() is False
 

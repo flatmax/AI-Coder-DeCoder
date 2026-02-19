@@ -147,7 +147,6 @@ const markedSourceMap = new Marked({
   breaks: true,
   renderer: {
     code(token) {
-      // Re-use the same highlighting logic as the main renderer
       let text, lang;
       if (typeof token === 'string') {
         text = token;
@@ -171,7 +170,6 @@ const markedSourceMap = new Marked({
           highlighted = escapeHtml(text);
         }
       }
-      // Look up source line from the side-channel map
       const key = 'code:' + text.slice(0, 120);
       const line = _currentLineMap?.get(key) ?? '';
       const attr = line !== '' ? ` data-source-line="${line}"` : '';
@@ -183,85 +181,51 @@ const markedSourceMap = new Marked({
       const key = 'heading:' + text.slice(0, 120);
       const line = _currentLineMap?.get(key) ?? '';
       const attr = line !== '' ? ` data-source-line="${line}"` : '';
-      // Render inline content — marked provides `tokens` for inline parsing
-      let inner;
-      if (typeof token === 'object' && token.tokens) {
-        inner = markedSourceMap.parser.parseInline(token.tokens);
-      } else {
-        inner = text;
-      }
-      return `<h${depth}${attr}>${inner}</h${depth}>\n`;
+      // Use marked's default heading rendering, then inject the data attribute
+      return false;
     },
     paragraph(token) {
       const text = typeof token === 'string' ? token : (token.text || '');
       const key = 'paragraph:' + text.slice(0, 120);
       const line = _currentLineMap?.get(key) ?? '';
       const attr = line !== '' ? ` data-source-line="${line}"` : '';
-      let inner;
-      if (typeof token === 'object' && token.tokens) {
-        inner = markedSourceMap.parser.parseInline(token.tokens);
-      } else {
-        inner = text;
-      }
-      return `<p${attr}>${inner}</p>\n`;
-    },
-    list(token) {
-      const items = typeof token === 'object' ? token.items : [];
-      const ordered = typeof token === 'object' ? token.ordered : false;
-      const tag = ordered ? 'ol' : 'ul';
-      const body = items.map(item => {
-        const itemText = typeof item === 'string' ? item : (item.text || '');
-        const key = 'list_item:' + itemText.slice(0, 120);
-        const line = _currentLineMap?.get(key) ?? '';
-        const attr = line !== '' ? ` data-source-line="${line}"` : '';
-        let inner;
-        if (typeof item === 'object' && item.tokens) {
-          inner = markedSourceMap.parser.parseInline(item.tokens);
-        } else {
-          inner = itemText;
-        }
-        return `<li${attr}>${inner}</li>\n`;
-      }).join('');
-      return `<${tag}>${body}</${tag}>\n`;
-    },
-    blockquote(token) {
-      const text = typeof token === 'string' ? token : (token.text || '');
-      const key = 'blockquote:' + text.slice(0, 120);
-      const line = _currentLineMap?.get(key) ?? '';
-      const attr = line !== '' ? ` data-source-line="${line}"` : '';
-      let inner;
-      if (typeof token === 'object' && token.tokens) {
-        inner = markedSourceMap.parser.parse(token.tokens);
-      } else {
-        inner = `<p>${text}</p>`;
-      }
-      return `<blockquote${attr}>${inner}</blockquote>\n`;
+      return false;
     },
     hr() {
       return `<hr data-source-line="">\n`;
     },
-    table(token) {
-      const text = typeof token === 'string' ? token : (token.text || '');
-      const key = 'table:' + (text || '').slice(0, 120);
+  },
+});
+
+// Post-process: inject data-source-line into default-rendered heading/paragraph tags.
+// When a renderer returns false, marked uses its default. We hook walkTokens to stash
+// the source line, then use a postprocess hook to inject it.
+const _pendingSourceLines = [];
+
+markedSourceMap.use({
+  walkTokens(token) {
+    if (!_currentLineMap) return;
+    if (token.type === 'heading' || token.type === 'paragraph') {
+      const text = token.text || '';
+      const key = token.type + ':' + text.slice(0, 120);
       const line = _currentLineMap?.get(key) ?? '';
-      const attr = line !== '' ? ` data-source-line="${line}"` : '';
-      // Fall back to default rendering for the body
-      if (typeof token === 'object' && token.header && token.rows) {
-        const headerCells = token.header.map((cell, i) => {
-          const align = token.align?.[i] ? ` align="${token.align[i]}"` : '';
-          const cellInner = cell.tokens ? markedSourceMap.parser.parseInline(cell.tokens) : (cell.text || '');
-          return `<th${align}>${cellInner}</th>`;
-        }).join('');
-        const bodyRows = token.rows.map(row =>
-          '<tr>' + row.map((cell, i) => {
-            const align = token.align?.[i] ? ` align="${token.align[i]}"` : '';
-            const cellInner = cell.tokens ? markedSourceMap.parser.parseInline(cell.tokens) : (cell.text || '');
-            return `<td${align}>${cellInner}</td>`;
-          }).join('') + '</tr>'
-        ).join('\n');
-        return `<table${attr}><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table>\n`;
+      if (line !== '') {
+        _pendingSourceLines.push({ type: token.type, text: text.slice(0, 80), line });
       }
-      return `<table${attr}>${text}</table>\n`;
+    }
+  },
+  hooks: {
+    postprocess(html) {
+      let result = html;
+      for (const entry of _pendingSourceLines) {
+        const tag = entry.type === 'heading' ? 'h[1-6]' : 'p';
+        // Find the first matching tag without a data-source-line and inject it.
+        // Must handle tags that already have attributes (e.g. <h2 id="...">).
+        const re = new RegExp(`(<${tag})(?![^>]*data-source-line)(\\s|>)`, 'i');
+        result = result.replace(re, `$1 data-source-line="${entry.line}"$2`);
+      }
+      _pendingSourceLines.length = 0;
+      return result;
     },
   },
 });

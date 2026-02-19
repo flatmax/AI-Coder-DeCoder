@@ -520,16 +520,16 @@ class StabilityTracker:
     def _seed_l0_symbols(self, ref_index, all_files, counter):
         """Seed L0 with high-connectivity symbols to meet provider cache minimum.
 
-        Selects symbols by reference count descending until L0 reaches
-        cache_target_tokens. System prompt is seeded separately by LLMService.
+        Selects the top few high-connectivity symbols by reference count
+        descending. Uses a conservative per-symbol token estimate so we
+        don't accidentally consume all files into L0. System prompt is
+        seeded separately by LLMService; its tokens count toward L0.
 
         Returns set of paths placed in L0.
         """
-        MIN_L0_TOKENS = 1024  # provider cache minimum
-
         # Get current L0 tokens (system:prompt may already be seeded)
         l0_tokens = self.get_tier_tokens(Tier.L0)
-        if l0_tokens >= MIN_L0_TOKENS:
+        if l0_tokens >= self._cache_target_tokens:
             return set()
 
         # Rank files by reference count descending
@@ -539,17 +539,17 @@ class StabilityTracker:
             reverse=True,
         )
 
+        # Conservative per-symbol estimate — symbol blocks average ~200-500
+        # tokens each. Using 400 avoids over-seeding L0 when real token
+        # counts aren't available yet (they're corrected on first update).
+        ESTIMATED_TOKENS_PER_SYMBOL = 400
+
         seeded = set()
         for path in ranked:
-            if l0_tokens >= MIN_L0_TOKENS:
+            if l0_tokens >= self._cache_target_tokens:
                 break
             key = f"symbol:{path}"
-            # Estimate tokens — use counter if available, else rough estimate
-            tokens = 0
-            if counter:
-                # We don't have the block content yet (not indexed), but we
-                # can use a rough estimate; tokens will be corrected on first update
-                tokens = 50  # placeholder per symbol
+            tokens = ESTIMATED_TOKENS_PER_SYMBOL
             self._items[key] = TrackedItem(
                 key=key,
                 tier=Tier.L0,
@@ -561,7 +561,7 @@ class StabilityTracker:
             seeded.add(path)
 
         if seeded:
-            logger.info(f"Seeded {len(seeded)} symbols into L0 for cache minimum")
+            logger.info(f"Seeded {len(seeded)} symbols into L0 for cache minimum ({l0_tokens:,} estimated tokens)")
 
         return seeded
 

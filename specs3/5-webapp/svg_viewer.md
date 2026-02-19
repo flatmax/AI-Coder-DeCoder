@@ -33,20 +33,21 @@ Both viewers maintain independent tab state. Switching between an open `.svg` ta
 
 ```
 ┌──────────────────────────────────────────────────┐
-│ [sample.svg ×] [diagram.svg ×]        Tab bar    │
-├────────────────────┬─┬───────────────────────────┤
-│    Original        │ │    Modified               │
-├────────────────────┤ ├───────────────────────────┤
-│                    │ │                           │
-│   ┌──────────┐    │ │    ┌──────────┐           │
-│   │  SVG     │    │ │    │  SVG     │           │
-│   │ content  │    │ │    │ content  │           │
-│   └──────────┘    │ │    └──────────┘           │
-│                    │ │                           │
-├────────────────────┴─┴───────────────────────────┤
-│  [−]  100%  [+]  [1:1]  [Fit]        Toolbar    │
+│                                         [●] [⊡]  │
+│                                                   │
+│   ┌──────────┐    │    ┌──────────┐              │
+│   │  SVG     │    │    │  SVG     │              │
+│   │ original │    │    │ modified │              │
+│   └──────────┘    │    └──────────┘              │
+│                    │                              │
+│   Left panel       │   Right panel               │
+│   (read-only)      │   (editable)                │
 └──────────────────────────────────────────────────┘
+        [●] = status LED (top-right)
+        [⊡] = fit button (bottom-right)
 ```
+
+There is no tab bar or bottom toolbar — the viewer is a minimal chrome layout with only floating overlay controls.
 
 ### Panels
 
@@ -60,31 +61,26 @@ When no SVG files are open, the viewer shows the AC⚡DC watermark (8rem, 18% op
 
 ## File Tabs
 
-Tab bar matching the diff viewer style:
-
-- File name (basename only)
-- Status badge: **N** (new file, cyan), **Δ** (changed, orange), **=** (identical, green)
-- Close button (✕)
-- Active tab has accent bottom border
+The viewer supports multiple open files internally (switchable via Ctrl+PageDown/PageUp, closable via Ctrl+W), but does **not** render a visible tab bar. File status is communicated solely through the floating status LED.
 
 ### Status Detection
 
-| Badge | Condition |
-|-------|-----------|
-| N (new) | File does not exist in HEAD |
-| Δ (changed) | Original content differs from modified |
-| = (same) | Original and modified are identical |
+| LED State | Condition |
+|-----------|-----------|
+| Dirty (orange, pulsing) | Modified content differs from last saved content |
+| New file (cyan) | File does not exist in HEAD |
+| Clean (green) | No unsaved changes |
 
 ## Interaction Modes
 
-The viewer has two modes, toggled via toolbar buttons:
+The viewer has two modes, switchable programmatically via `_setMode()` (no UI toggle is currently rendered):
 
 | Mode | Left Panel | Right Panel | Purpose |
 |------|-----------|-------------|---------|
 | **Select** (default) | `svg-pan-zoom` (read-only navigation) | `SvgEditor` (visual editing) | Edit SVG elements by dragging, resizing, and typing |
 | **Pan** | `svg-pan-zoom` (navigation) | `svg-pan-zoom` (navigation) | Navigate both panels without editing |
 
-Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches.
+Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger.
 
 ## Synchronized Pan/Zoom
 
@@ -105,7 +101,7 @@ In **Pan mode**, both panels use `svg-pan-zoom` with bidirectional sync — inte
 
 In **Select mode**, the left panel's `svg-pan-zoom` viewport drives synchronization. When the left panel is panned/zoomed, its viewBox is read and applied to the right panel's `SvgEditor` via `setViewBox()`. When the user zooms in the editor (mouse wheel), the editor's `onZoom` callback syncs back to the left panel by computing the equivalent `svg-pan-zoom` transform.
 
-A guard flag (`_syncing`) prevents infinite callback loops. The toolbar zoom percentage label updates from whichever panel initiated the change.
+A guard flag (`_syncing`) prevents infinite callback loops.
 
 ### Shadow DOM Compatibility
 
@@ -117,7 +113,23 @@ When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual
 
 ### Element Selection
 
-Click an SVG element to select it. A bounding box with handles appears around the selected element. The toolbar shows the selected element's tag name (e.g., `<rect>`, `<circle>`). Click empty space or press Escape to deselect.
+Click an SVG element to select it. A bounding box with handles appears around the selected element. Click empty space or press Escape to deselect. The selected element's tag name is tracked internally (`_selectedTag`) but is not currently displayed in the UI.
+
+### Multi-Selection
+
+Hold **Shift** and click or drag to multi-select:
+
+| Interaction | Behavior |
+|-------------|----------|
+| **Shift+click** on selected element | Immediately remove from multi-selection (toggle out) |
+| **Shift+click** on unselected element | Immediately add to multi-selection (toggle in), then begin marquee tracking so shift+drag still works |
+| **Shift+click** on empty space | Begin marquee selection |
+| **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
+| **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
+
+Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
+
+The count of selected elements is tracked internally (e.g., `_selectedTag` = "3 elements") but is not currently displayed in the UI. Multi-selected elements can be dragged as a group — clicking on any element that is part of a multi-selection initiates a group drag without breaking the selection.
 
 ### Supported Operations
 
@@ -162,30 +174,58 @@ The editor determines interaction behavior from the element type:
 | `text` | Translate (x, y or transform) | — (double-click to edit) |
 | `g` (group) | Translate via transform | — |
 
+### Marquee Visual Feedback
+
+The marquee rectangle's appearance changes based on drag direction to signal the selection mode:
+
+| Direction | Fill | Stroke | Dash | Meaning |
+|-----------|------|--------|------|---------|
+| Forward (left→right) | Blue 12% opacity | Solid `#4fc3f7` | None | Containment — must be fully inside |
+| Reverse (right→left) | Green 10% opacity | Dashed `#7ee787` | 4px on / 3px off | Crossing — any intersection counts |
+
+Stroke width and dash lengths scale inversely with zoom to maintain consistent screen-pixel appearance.
+
 ### Dirty Tracking and Undo
 
-Each edit marks the file as dirty (orange pulsing status LED). An **undo stack** captures SVG snapshots after each edit operation (up to 50 entries). Ctrl+Z pops the stack and restores the previous state by re-injecting the SVG content and reinitializing the editor.
+Each edit marks the file as dirty (orange pulsing status LED in the top-right corner). An **undo stack** captures SVG snapshots after each edit operation (up to 50 entries). Ctrl+Z pops the stack and restores the previous state by re-injecting the SVG content and reinitializing the editor.
 
 ### Save
 
-Ctrl+S (or clicking the dirty status LED) saves the modified SVG content to disk via `Repo.write_file`. The `SvgEditor.getContent()` method commits any active text edit, removes selection handles, serializes the SVG, then re-renders handles — ensuring saved content is clean.
+Ctrl+S or clicking the dirty status LED saves the modified SVG content to disk via `Repo.write_file`. The `SvgEditor.getContent()` method commits any active text edit, removes selection handles, serializes the SVG, then re-renders handles — ensuring saved content is clean. A `file-saved` event is dispatched on success.
 
-## Toolbar
+## Controls
 
-A bottom toolbar with mode toggle, zoom controls, and edit actions:
+There is no persistent toolbar. The viewer uses floating overlay buttons and keyboard shortcuts for all actions.
 
-| Button | Action |
-|--------|--------|
-| ✦ Select | Switch to Select (edit) mode |
-| ✥ Pan | Switch to Pan (navigate) mode |
-| `<tag>` | Shows selected element's tag name (Select mode only) |
-| − | Zoom out (propagates via sync callback) |
-| % label | Current zoom percentage (read-only) |
-| + | Zoom in |
-| 1:1 | Reset to 100% zoom and center position |
-| Fit | Fit SVG to panel dimensions |
-| ↩ Undo | Undo last edit (Ctrl+Z). Disabled when nothing to undo |
-| 💾 Save | Save modified SVG (Ctrl+S). Disabled when not dirty |
+### Fit Button
+
+A floating `⊡` button in the bottom-right corner of the diff container. Fits both panels so SVG content is fully visible within the available space. Styled as a 32×32px rounded button with border, background blur, and box-shadow for visibility over SVG content. Hover state lightens the background and text color.
+
+Fitting uses the SVG element's `getBBox()` (the actual rendered content bounding box) rather than the `viewBox` attribute, which may be a crop window that doesn't cover all elements. A 3% margin is added around the content. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
+
+For the left panel, the viewBox attribute is updated to the content bounding box before `svg-pan-zoom` is initialized, so its `fit()` and `center()` methods operate on the full content area. For the right panel (SvgEditor), `fitContent()` computes and sets the viewBox directly.
+
+### Status LED
+
+A floating 10px circular indicator in the top-right corner of the diff container:
+
+| State | Color | Behavior |
+|-------|-------|----------|
+| **Dirty** (unsaved edits) | Orange with pulse animation | Click to save (Ctrl+S) |
+| **New file** (no HEAD version) | Cyan/accent | Informational only |
+| **Clean** | Green | Informational only |
+
+The LED has a hover scale transform (1.4×) for discoverability.
+
+### Zoom
+
+Zooming is performed exclusively via mouse wheel — there are no zoom +/− toolbar buttons. The mouse wheel handler on `SvgEditor` (Select mode) or `svg-pan-zoom` (Pan mode) provides smooth zoom centered on the cursor position. The zoom level is tracked internally (`_zoomLevel`) but is not displayed in the UI.
+
+| Input | Behavior |
+|-------|----------|
+| Mouse wheel | Zoom in/out centered on cursor |
+| Min zoom | 0.1× |
+| Max zoom | 40× |
 
 ## SVG Content Injection
 
@@ -198,6 +238,8 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
    - `style.width` and `style.height` set to `100%`
    - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
+
+**Content bounds vs viewBox**: An SVG's `viewBox` attribute may define a crop window that doesn't cover all rendered content (elements can extend outside the declared viewBox). During initialization, the left panel's viewBox is updated to the actual content bounding box (`getBBox()` with a 3% margin) before `svg-pan-zoom` is created. The right panel's `SvgEditor.fitContent()` similarly uses `getBBox()` to compute a viewBox that shows all content. This ensures "fit" works correctly regardless of the original viewBox.
 
 **Retry on next frame**: If the `.svg-left` / `.svg-right` containers are not yet in the shadow DOM when `_injectSvgContent()` runs (due to Lit render timing — the method may be called from `updated()` before the template has committed), it schedules a retry via `requestAnimationFrame`. This ensures injection succeeds even when called during the Lit update lifecycle before the DOM reflects the latest template.
 
@@ -237,17 +279,21 @@ If `original` and `modified` are not provided, content is fetched via RPC. If th
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+PageDown | Next tab |
-| Ctrl+PageUp | Previous tab |
-| Ctrl+W | Close active tab |
-| Ctrl+S | Save modified SVG |
-| Ctrl+Z | Undo last edit (Select mode) |
-| Ctrl+C | Copy selected element (Select mode) |
-| Ctrl+V | Paste copied element (Select mode) |
-| Delete / Backspace | Delete selected element (Select mode) |
-| Escape | Deselect current element / cancel text edit |
+All toolbar-level actions are accessible only via keyboard shortcuts. Element-level shortcuts (Copy, Paste, Delete, Escape) are handled by `SvgEditor` internally and only apply in Select mode when the editor has focus.
+
+| Shortcut | Scope | Action |
+|----------|-------|--------|
+| Ctrl+PageDown | Viewer | Next tab |
+| Ctrl+PageUp | Viewer | Previous tab |
+| Ctrl+W | Viewer | Close active tab |
+| Ctrl+S | Viewer | Save modified SVG |
+| Ctrl+Z | Viewer (Select mode) | Undo last edit |
+| Ctrl+Shift+C | Viewer | Copy SVG as PNG image to clipboard |
+| Ctrl+C | SvgEditor | Copy selected element(s) |
+| Ctrl+V | SvgEditor | Paste copied element(s) with offset |
+| Ctrl+D | SvgEditor | Duplicate selected element(s) in place |
+| Delete / Backspace | SvgEditor | Delete selected element(s) |
+| Escape | SvgEditor | Deselect / cancel text edit / cancel marquee |
 
 ## Resize Handling
 
@@ -284,6 +330,30 @@ Search results for `.svg` files route through the same `navigate-file` → app s
 
 LLM edit blocks for `.svg` files are applied normally (text-based edits). After application, `refreshOpenFiles()` updates the SVG viewer's content if the file is open.
 
+## Context Menu
+
+Right-clicking on the right (editable) panel opens a context menu with:
+
+| Action | Shortcut | Description |
+|--------|----------|-------------|
+| Copy as PNG | Ctrl+Shift+C | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+
+The context menu is positioned at the click point relative to the diff container. It dismisses on clicking outside or on a subsequent right-click. The dismiss listener uses `click` (not `pointerdown`) so that clicking a menu button fires its handler before the dismiss logic runs.
+
+## Copy as PNG
+
+The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
+
+1. **Parse dimensions** — reads `viewBox` or `width`/`height` attributes to determine intrinsic size
+2. **Scale for quality** — scales up to 2×–4× (capped at 4096px on the longest side) for crisp output
+3. **Render to canvas** — creates an offscreen `<canvas>`, draws a white background, then renders the SVG via an `Image` element loaded from a Blob URL
+4. **Clipboard write** — passes a `Promise<Blob>` (not a resolved Blob) to `ClipboardItem` to preserve the user-gesture context across async operations
+5. **Download fallback** — if `navigator.clipboard.write` is unavailable or fails, downloads the PNG file instead
+
+Available via two paths:
+- **Context menu**: right-click → "Copy as PNG"
+- **Keyboard shortcut**: Ctrl+Shift+C (Cmd+Shift+C on Mac)
+
 ## Future Enhancements
 
 ### Visual Diff Overlay
@@ -300,4 +370,4 @@ A split view with a Monaco text editor showing the SVG source alongside the rend
 
 ### Export
 
-Export the current view (zoomed/cropped) as PNG or PDF.
+~~Export the current view (zoomed/cropped) as PNG or PDF.~~ PNG copy is now implemented via the Copy as PNG feature. PDF export remains a future enhancement.

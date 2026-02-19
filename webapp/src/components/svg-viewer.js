@@ -83,67 +83,38 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       cursor: grabbing;
     }
 
-    /* Toolbar */
-    .toolbar {
+    /* Fit button — floating bottom-right */
+    .fit-btn {
+      position: absolute;
+      bottom: 12px;
+      right: 16px;
+      z-index: 10;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-size: 1rem;
+      cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      padding: 4px 8px;
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-primary);
-      flex-shrink: 0;
+      transition: background 0.15s, color 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
-
-    .toolbar button {
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border-primary);
-      color: var(--text-secondary);
-      padding: 3px 10px;
-      border-radius: 4px;
-      font-size: 0.7rem;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-    .toolbar button:hover {
+    .fit-btn:hover {
       background: var(--bg-hover);
       color: var(--text-primary);
-    }
-    .toolbar button.active {
-      background: var(--accent-primary);
-      color: var(--bg-primary);
-      border-color: var(--accent-primary);
-    }
-
-    .toolbar .zoom-label {
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      min-width: 48px;
-      text-align: center;
-    }
-
-    .toolbar .separator {
-      width: 1px;
-      height: 16px;
-      background: var(--border-primary);
-    }
-
-    .toolbar .mode-label {
-      font-size: 0.65rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
     }
 
     /* Splitter handle */
     .splitter {
       width: 4px;
-      cursor: col-resize;
       background: transparent;
       flex-shrink: 0;
       z-index: 1;
     }
-    .splitter:hover { background: var(--accent-primary); opacity: 0.3; }
 
     /* Status LED — floating top-right indicator */
     .status-led {
@@ -180,6 +151,39 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       50% { opacity: 1; box-shadow: 0 0 10px 3px rgba(240, 136, 62, 0.8); }
     }
 
+    /* Context menu */
+    .context-menu {
+      position: absolute;
+      z-index: 100;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 4px 0;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      min-width: 160px;
+    }
+    .context-menu button {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 14px;
+      background: none;
+      border: none;
+      color: var(--text-primary);
+      font-size: 0.75rem;
+      cursor: pointer;
+      text-align: left;
+    }
+    .context-menu button:hover {
+      background: var(--bg-hover);
+    }
+    .context-menu button .shortcut {
+      margin-left: auto;
+      color: var(--text-muted);
+      font-size: 0.65rem;
+    }
+
     /* Empty state */
     .empty-state {
       display: flex;
@@ -207,11 +211,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._panZoomLeft = null;
     this._panZoomRight = null;   // only used in 'pan' mode
     this._svgEditor = null;       // only used in 'select' mode
-    this._syncing = false;
     this._resizeObserver = null;
     this._undoStack = [];         // per-file undo: array of SVG strings
 
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onContextMenu = this._onContextMenu.bind(this);
   }
 
   connectedCallback() {
@@ -222,6 +226,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
+    this._dismissContextMenu();
     this._disposeAll();
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
@@ -456,19 +461,22 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
     if (!leftSvg) return;
 
-    const onUpdate = () => {
-      if (this._syncing) return;
-      this._syncing = true;
-      try {
-        if (this._panZoomLeft) {
-          const zoom = this._panZoomLeft.getZoom();
-          this._zoomLevel = Math.round(zoom * 100);
-          this._syncLeftToRight();
-        }
-      } finally {
-        this._syncing = false;
+    // Update the viewBox to cover all rendered content so that
+    // svg-pan-zoom's fit() shows everything (the original viewBox
+    // may be a crop window that doesn't include all elements).
+    try {
+      const bbox = leftSvg.getBBox();
+      if (bbox.width > 0 && bbox.height > 0) {
+        const margin = 0.03;
+        const mx = bbox.x - bbox.width * margin;
+        const my = bbox.y - bbox.height * margin;
+        const mw = bbox.width * (1 + margin * 2);
+        const mh = bbox.height * (1 + margin * 2);
+        leftSvg.setAttribute('viewBox', `${mx} ${my} ${mw} ${mh}`);
       }
-    };
+    } catch {
+      // getBBox can fail for hidden/empty SVGs — keep original viewBox
+    }
 
     try {
       this._panZoomLeft = svgPanZoom(leftSvg, {
@@ -481,9 +489,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         maxZoom: 40,
         zoomScaleSensitivity: 0.3,
         dblClickZoomEnabled: true,
-        onZoom: onUpdate,
-        onPan: onUpdate,
-        onUpdatedCTM: onUpdate,
       });
     } catch (e) {
       console.warn('svg-pan-zoom init failed for left panel:', e);
@@ -505,22 +510,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
     if (!rightSvg) return;
 
-    const onUpdate = () => {
-      if (this._syncing) return;
-      this._syncing = true;
-      try {
-        if (this._panZoomRight && this._panZoomLeft) {
-          const zoom = this._panZoomRight.getZoom();
-          const pan = this._panZoomRight.getPan();
-          this._panZoomLeft.zoom(zoom);
-          this._panZoomLeft.pan(pan);
-          this._zoomLevel = Math.round(zoom * 100);
-        }
-      } finally {
-        this._syncing = false;
-      }
-    };
-
     try {
       this._panZoomRight = svgPanZoom(rightSvg, {
         zoomEnabled: true,
@@ -532,9 +521,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         maxZoom: 40,
         zoomScaleSensitivity: 0.3,
         dblClickZoomEnabled: true,
-        onZoom: onUpdate,
-        onPan: onUpdate,
-        onUpdatedCTM: onUpdate,
       });
     } catch (e) {
       console.warn('svg-pan-zoom init failed for right panel:', e);
@@ -579,10 +565,8 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       onDeselect: () => {
         this._selectedTag = '';
       },
-      onZoom: ({ zoom, viewBox }) => {
-        // Sync the right panel's zoom to the left panel
+      onZoom: ({ zoom }) => {
         this._zoomLevel = Math.round(zoom * 100);
-        this._syncRightToLeft(viewBox);
       },
     });
   }
@@ -601,13 +585,20 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.zoom(zoom);
       this._panZoomRight.pan(pan);
     } else if (this._mode === 'select' && this._svgEditor) {
-      // Read the left panel's effective viewBox from svg-pan-zoom and apply to editor
+      // svg-pan-zoom doesn't modify the viewBox attribute — it uses an
+      // internal viewport-group transform.  Compute the effective visible
+      // area from the pan-zoom zoom/pan state and the original viewBox.
       const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
       if (leftSvg) {
-        const vb = leftSvg.getAttribute('viewBox');
-        if (vb) {
-          const parts = vb.split(/[\s,]+/).map(Number);
-          this._svgEditor.setViewBox(parts[0], parts[1], parts[2], parts[3]);
+        const origVb = this._getOriginalViewBox(leftSvg);
+        if (origVb) {
+          const zoom = this._panZoomLeft.getZoom();
+          const pan = this._panZoomLeft.getPan();
+          const w = origVb.w / zoom;
+          const h = origVb.h / zoom;
+          const x = origVb.x - pan.x / zoom;
+          const y = origVb.y - pan.y / zoom;
+          this._svgEditor.setViewBox(x, y, w, h);
         }
       }
     }
@@ -698,12 +689,24 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   }
 
   _fitAll() {
-    if (this._panZoomLeft) this._panZoomLeft.fit();
-    if (this._panZoomRight) this._panZoomRight.fit();
     if (this._panZoomLeft) {
+      this._panZoomLeft.resize();
+      this._panZoomLeft.fit();
+      this._panZoomLeft.center();
       this._zoomLevel = Math.round(this._panZoomLeft.getZoom() * 100);
     }
-    this._syncLeftToRight();
+    if (this._panZoomRight) {
+      this._panZoomRight.resize();
+      this._panZoomRight.fit();
+      this._panZoomRight.center();
+    }
+
+    // In select mode, use the editor's own fit method which accounts
+    // for the container aspect ratio and resets zoom.
+    if (this._mode === 'select' && this._svgEditor) {
+      this._svgEditor.fitContent();
+      this._zoomLevel = Math.round(this._svgEditor.zoomLevel * 100);
+    }
   }
 
   _undo() {
@@ -747,6 +750,182 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
+  // === Copy Image ===
+
+  /**
+   * Render the current modified SVG to a canvas and copy as PNG to clipboard.
+   */
+  async _copyImage() {
+    const file = this._getActiveFile();
+    if (!file) return;
+
+    // Get latest content from editor
+    this._captureEditorContent();
+    const svgText = file.modified || file.original || '';
+    if (!svgText.trim()) return;
+
+    try {
+      // Parse SVG to determine intrinsic size
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const svgEl = doc.documentElement;
+
+      // Determine render dimensions from viewBox or width/height attributes
+      let width = 1920;
+      let height = 1080;
+      const vb = svgEl.getAttribute('viewBox');
+      if (vb) {
+        const parts = vb.split(/[\s,]+/).map(Number);
+        if (parts[2] > 0 && parts[3] > 0) {
+          width = parts[2];
+          height = parts[3];
+        }
+      } else {
+        const w = parseFloat(svgEl.getAttribute('width'));
+        const h = parseFloat(svgEl.getAttribute('height'));
+        if (w > 0 && h > 0) { width = w; height = h; }
+      }
+
+      // Scale up for high-quality output (min 2x, capped at 4096px on longest side)
+      const maxDim = Math.max(width, height);
+      const scale = maxDim < 1024 ? Math.min(4, 4096 / maxDim) : Math.min(2, 4096 / maxDim);
+      const renderW = Math.round(width * scale);
+      const renderH = Math.round(height * scale);
+
+      // Ensure the SVG has explicit dimensions for the Image element
+      svgEl.setAttribute('width', renderW);
+      svgEl.setAttribute('height', renderH);
+
+      const serializer = new XMLSerializer();
+      const svgBlob = new Blob([serializer.serializeToString(svgEl)], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.width = renderW;
+      img.height = renderH;
+
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = renderW;
+      canvas.height = renderH;
+      const ctx = canvas.getContext('2d');
+
+      // White background (SVGs often have transparent bg)
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, renderW, renderH);
+      ctx.drawImage(img, 0, 0, renderW, renderH);
+
+      URL.revokeObjectURL(url);
+
+      // Copy to clipboard — pass a Promise<Blob> to ClipboardItem so the
+      // browser can preserve the user-gesture context across the async gap.
+      if (navigator.clipboard?.write) {
+        const blobPromise = new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blobPromise }),
+          ]);
+          this._showCopyToast('Image copied to clipboard');
+        } catch (clipErr) {
+          console.warn('Clipboard write failed, falling back to download:', clipErr);
+          const blob = await blobPromise;
+          this._downloadBlob(blob, file.path);
+        }
+      } else {
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        this._downloadBlob(blob, file.path);
+      }
+    } catch (err) {
+      console.error('Failed to copy SVG as image:', err);
+      this._showCopyToast('Failed to copy image');
+    }
+  }
+
+  _showCopyToast(message) {
+    this.dispatchEvent(new CustomEvent('show-toast', {
+      bubbles: true, composed: true,
+      detail: { message, type: 'info' },
+    }));
+  }
+
+  _downloadBlob(blob, filePath) {
+    if (!blob) {
+      this._showCopyToast('Failed to create image');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (filePath.split('/').pop() || 'image').replace(/\.svg$/i, '') + '.png';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    this._showCopyToast('Image downloaded as PNG');
+  }
+
+  // === Context Menu ===
+
+  _onContextMenu(e) {
+    // Only show on the right (editable) panel
+    const rightPanel = this.shadowRoot.querySelector('.svg-right');
+    if (!rightPanel || !rightPanel.contains(e.target)) return;
+
+    e.preventDefault();
+    this._dismissContextMenu();
+
+    const container = this.shadowRoot.querySelector('.diff-container');
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    const copyBtn = document.createElement('button');
+    copyBtn.innerHTML = '📋 Copy as PNG <span class="shortcut">Ctrl+Shift+C</span>';
+    copyBtn.addEventListener('click', () => {
+      this._dismissContextMenu();
+      this._copyImage();
+    });
+    menu.appendChild(copyBtn);
+
+    container.appendChild(menu);
+    this._contextMenu = menu;
+
+    // Dismiss on next click anywhere (use 'click' so menu buttons fire first)
+    const dismiss = (ev) => {
+      if (menu.contains(ev.target)) return;
+      this._dismissContextMenu();
+    };
+    // Use setTimeout so the current right-click doesn't immediately dismiss
+    setTimeout(() => {
+      window.addEventListener('click', dismiss, { capture: true });
+      window.addEventListener('contextmenu', dismiss, { capture: true });
+      this._contextMenuDismiss = () => {
+        window.removeEventListener('click', dismiss, { capture: true });
+        window.removeEventListener('contextmenu', dismiss, { capture: true });
+      };
+    }, 0);
+  }
+
+  _dismissContextMenu() {
+    if (this._contextMenu) {
+      this._contextMenu.remove();
+      this._contextMenu = null;
+    }
+    if (this._contextMenuDismiss) {
+      this._contextMenuDismiss();
+      this._contextMenuDismiss = null;
+    }
+  }
+
   // === Keyboard ===
 
   _onKeyDown(e) {
@@ -783,6 +962,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._save();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
+      e.preventDefault();
+      this._copyImage();
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
       if (this._mode === 'select') {
         e.preventDefault();
@@ -815,7 +999,14 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     }
   }
 
-  _prepareSvgElement(container) {
+  /**
+   * @param {HTMLElement} container
+   * @param {Object} [opts]
+   * @param {boolean} [opts.editable] - if true, set preserveAspectRatio="none"
+   *   so the viewBox maps 1-to-1 to the container rect (SvgEditor manages
+   *   aspect ratio via viewBox calculations).
+   */
+  _prepareSvgElement(container, { editable = false } = {}) {
     const svg = container.querySelector('svg');
     if (svg) {
       svg.style.width = '100%';
@@ -827,6 +1018,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       }
       svg.removeAttribute('width');
       svg.removeAttribute('height');
+      if (editable) {
+        // The default preserveAspectRatio="xMidYMid meet" causes the browser
+        // to add its own fitting transform on top of the viewBox.  SvgEditor
+        // controls the viewBox directly (including aspect-ratio-correct fitting
+        // in fitContent), so we must disable the browser's extra transform.
+        // Without this, portrait/landscape SVGs get double-fitted and appear
+        // off-center or incorrectly sized.
+        svg.setAttribute('preserveAspectRatio', 'none');
+      }
     }
   }
 
@@ -859,6 +1059,10 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._prepareSvgElement(leftContainer);
     this._prepareSvgElement(rightContainer);
 
+    // Attach context menu to right panel
+    rightContainer.removeEventListener('contextmenu', this._onContextMenu);
+    rightContainer.addEventListener('contextmenu', this._onContextMenu);
+
     // Initialize based on mode
     requestAnimationFrame(() => {
       // Skip if a newer _injectSvgContent call has superseded this one
@@ -871,6 +1075,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       } else {
         this._initRightPanZoom();
       }
+
+      // Auto-fit both panels so they start with content fully visible.
+      // Use a second rAF so the container has its final layout dimensions.
+      requestAnimationFrame(() => {
+        if (gen !== this._injectGeneration) return;
+        this._fitAll();
+      });
     });
   }
 
@@ -888,6 +1099,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
             @click=${() => isDirty ? this._save() : null}
           ></button>
+          <button class="fit-btn" @click=${this._fitAll} title="Fit to view">⊡</button>
           <div class="diff-panel">
             <div class="svg-container svg-left"></div>
           </div>
@@ -902,33 +1114,6 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
         `}
       </div>
 
-      ${file ? html`
-        <div class="toolbar">
-          <!-- Mode toggle -->
-          <button class="${this._mode === 'select' ? 'active' : ''}"
-            @click=${() => this._setMode('select')} title="Select & edit mode">✦ Select</button>
-          <button class="${this._mode === 'pan' ? 'active' : ''}"
-            @click=${() => this._setMode('pan')} title="Pan & zoom mode">✥ Pan</button>
-          ${this._selectedTag ? html`<span class="mode-label">${this._selectedTag}</span>` : nothing}
-
-          <div class="separator"></div>
-
-          <!-- Zoom controls -->
-          <button @click=${this._zoomOut} title="Zoom out (−)">−</button>
-          <span class="zoom-label">${this._zoomLevel}%</span>
-          <button @click=${this._zoomIn} title="Zoom in (+)">+</button>
-          <button @click=${this._zoomReset} title="Reset zoom">1:1</button>
-          <button @click=${this._fitAll} title="Fit to view">Fit</button>
-
-          <div class="separator"></div>
-
-          <!-- Edit actions -->
-          <button @click=${this._undo} title="Undo (Ctrl+Z)"
-            ?disabled=${this._undoStack.length <= 1}>↩ Undo</button>
-          <button @click=${this._save} title="Save (Ctrl+S)"
-            ?disabled=${!isDirty}>💾 Save</button>
-        </div>
-      ` : nothing}
     `;
   }
 }

@@ -382,7 +382,7 @@ def main(args=None):
     else:
         webapp_port = parsed.webapp_port
 
-    # Step 3: Initialize services
+    # Step 3: Initialize lightweight services (fast — no heavy parsing)
     from ac_dc.config import ConfigManager
     from ac_dc.repo import Repo
     from ac_dc.settings import Settings
@@ -391,21 +391,6 @@ def main(args=None):
     repo = Repo(repo_path)
     settings = Settings(config)
 
-    # Symbol index (optional — may fail if tree-sitter not available)
-    symbol_index = None
-    try:
-        from ac_dc.symbol_index.index import SymbolIndex
-        symbol_index = SymbolIndex(repo_path)
-        logger.info("Symbol index initialized")
-    except Exception as e:
-        logger.warning(f"Symbol index unavailable: {e}")
-
-    # LLM service
-    from ac_dc.llm_service import LLMService
-    llm_service = LLMService(
-        config, repo=repo, symbol_index=symbol_index,
-    )
-
     # Step 4: Start Vite dev/preview server
     vite_proc = None
     if parsed.dev:
@@ -413,7 +398,8 @@ def main(args=None):
     elif parsed.preview:
         vite_proc = _start_vite_preview_server(webapp_port)
 
-    # Step 5: Start RPC WebSocket server
+    # Step 5: Start RPC WebSocket server EARLY — before heavy init
+    # This lets the browser connect immediately and show progress.
     try:
         from jrpc_oo import JRPCServer
     except ImportError:
@@ -421,6 +407,12 @@ def main(args=None):
         sys.exit(1)
 
     import asyncio
+
+    # LLM service created with deferred init (no symbol index yet)
+    from ac_dc.llm_service import LLMService
+    llm_service = LLMService(
+        config, repo=repo, symbol_index=None, deferred_init=True,
+    )
 
     async def _run_server():
         server = JRPCServer(server_port, remote_timeout=60)
@@ -466,7 +458,7 @@ def main(args=None):
         logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
         logger.info(f"Version: {version}")
 
-        # Step 6: Open browser
+        # Step 6: Open browser EARLY — before heavy init
         if not parsed.no_browser:
             try:
                 webbrowser.open(url)
@@ -474,6 +466,53 @@ def main(args=None):
             except Exception as e:
                 logger.warning(f"Failed to open browser: {e}")
                 print(f"\nOpen in browser: {url}\n")
+
+        # Step 7: Heavy initialization in background with progress reporting
+        async def _send_progress(stage, message, percent=None):
+            """Send startup progress to browser (best-effort)."""
+            try:
+                call = llm_service.get_call()
+                if call:
+                    await call["AcApp.startupProgress"](stage, message, percent)
+            except Exception:
+                pass  # Browser may not be connected yet
+
+        # Give the browser a moment to connect before sending progress
+        await asyncio.sleep(0.5)
+
+        # Symbol index (optional — may fail if tree-sitter not available)
+        symbol_index = None
+        try:
+            await _send_progress("symbol_index", "Initializing symbol parser...", 10)
+            from ac_dc.symbol_index.index import SymbolIndex
+            symbol_index = SymbolIndex(repo_path)
+            logger.info("Symbol index initialized")
+        except Exception as e:
+            logger.warning(f"Symbol index unavailable: {e}")
+
+        # Complete deferred initialization with symbol index
+        await _send_progress("session_restore", "Restoring session...", 30)
+        llm_service.complete_deferred_init(symbol_index)
+
+        # Index repo (the heaviest step — parses all source files)
+        if symbol_index:
+            await _send_progress("indexing", "Indexing repository...", 50)
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: symbol_index.index_repo(repo.get_flat_file_list()),
+                )
+                logger.info(f"Repo indexed: {len(symbol_index._all_symbols)} files")
+            except Exception as e:
+                logger.warning(f"Repo indexing failed: {e}")
+
+        # Initialize stability tracker (tier assignments, reference graph)
+        await _send_progress("stability", "Building cache tiers...", 80)
+        llm_service._try_initialize_stability()
+
+        await _send_progress("ready", "Ready", 100)
+        logger.info("Startup complete — all services initialized")
 
         # Serve forever
         try:

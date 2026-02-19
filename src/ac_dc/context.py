@@ -240,20 +240,23 @@ class ContextManager:
         }
 
     def should_compact(self):
-        """Check if compaction should run."""
-        if not self._compaction_config.get("enabled", False):
-            return False
+        """Check if compaction should run. Delegates to compactor."""
         if self._compactor is None:
+            logger.debug("Compaction check: no compactor instance")
             return False
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
-        return self.history_token_count() > trigger
+        return self._compactor.should_compact(self._history)
 
     def get_compaction_status(self):
         """Return compaction status info."""
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+        if self._compactor:
+            trigger = self._compactor.trigger_tokens
+            enabled = self._compactor.enabled
+        else:
+            trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+            enabled = self._compaction_config.get("enabled", False)
         current = self.history_token_count()
         return {
-            "enabled": self._compaction_config.get("enabled", False),
+            "enabled": enabled,
             "trigger_tokens": trigger,
             "current_tokens": current,
             "percent": round((current / trigger * 100) if trigger > 0 else 0, 1),
@@ -265,15 +268,20 @@ class ContextManager:
         """Attach a history compactor instance."""
         self._compactor = compactor
 
-    async def compact_history_if_needed(self):
+    async def compact_history_if_needed(self, already_checked=False):
         """Run compaction if threshold exceeded. Returns compaction result or None."""
-        if not self.should_compact():
+        if not already_checked and not self.should_compact():
             return None
 
+        logger.info(f"🗜️  Compaction starting — {len(self._history)} messages, {self.history_token_count():,} tokens")
         result = await self._compactor.compact(self._history)
+        case = result.get("case", "?") if result else "null"
+        msg_count = len(result.get("messages", [])) if result else 0
+        logger.info(f"🗜️  Compaction result: case={case}, messages: {len(self._history)} → {msg_count}")
         if result and result.get("case") != "none":
             self.set_history(result["messages"])
             self.reregister_history_items()
+            logger.info(f"🗜️  History replaced — now {len(self._history)} messages, {self.history_token_count():,} tokens")
         return result
 
     # === Stability Tracker Integration ===
@@ -350,7 +358,10 @@ class ContextManager:
         Triggers when history > 2x compaction trigger.
         Preserves user/assistant pairs.
         """
-        trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
+        if self._compactor:
+            trigger = self._compactor.trigger_tokens
+        else:
+            trigger = self._compaction_config.get("compaction_trigger_tokens", 24000)
         limit = trigger * 2
 
         if self.history_token_count() <= limit:

@@ -57,9 +57,10 @@ def test_default_app_config_has_expected_keys():
 
 
 def test_cache_target_tokens():
-    """Cache target tokens computed from defaults (1024 × 1.5 = 1536)."""
+    """Cache target tokens computed from defaults."""
     config = ConfigManager()
-    assert config.cache_target_tokens == int(1024 * 1.5)
+    expected = int(config.cache_min_tokens * config.cache_buffer_multiplier)
+    assert config.cache_target_tokens == expected
 
 
 def test_save_and_read_round_trip(temp_repo):

@@ -110,7 +110,7 @@ Users who customized managed files directly (instead of using `system_extra.md`)
 
 ## Loading and Caching
 
-- **App config** — loaded once and cached in memory; force-reload available
+- **App config** — loaded once and cached in memory; force-reload available. Downstream consumers (e.g., `HistoryCompactor`) must read config values through `ConfigManager` properties rather than capturing snapshot dicts at construction time, so that hot-reloaded values take effect immediately
 - **LLM config** — read on init and on explicit reload; env vars applied on load
 - **System prompts** — read fresh from files; concatenated at assembly time (each request). Edits take effect on the next LLM request without restart
 - **Snippets** — loaded on request with two-location fallback: `{repo_root}/.ac-dc/snippets.json` first, then app config directory `snippets.json`
