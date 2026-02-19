@@ -871,12 +871,28 @@ class LLMService:
                 "tokens": counter.count(system_content),
             })
 
-        # Per-file symbol entries for ALL indexed files
-        # Selected files still get symbol entries tracked (for tier persistence)
-        # but are excluded from the symbol map prompt output
+        # Per-file symbol entries for indexed files NOT currently selected.
+        # Selected files have full content in context; their symbol blocks
+        # are excluded from the symbol map to avoid redundancy. Per spec:
+        # "A file never appears as both symbol block and full content."
         if self._symbol_index:
             selected_set = set(self._selected_files)
+
+            # Remove symbol entries for selected files — they now have file: entries
+            for path in selected_set:
+                sym_key = f"symbol:{path}"
+                if sym_key in self._stability_tracker._items:
+                    tier = self._stability_tracker._items[sym_key].tier
+                    del self._stability_tracker._items[sym_key]
+                    self._stability_tracker._broken_tiers.add(tier)
+                    self._stability_tracker._changes.append({
+                        "action": "removed", "key": sym_key,
+                        "reason": "file selected — full content replaces symbol",
+                    })
+
             for path in self._symbol_index._all_symbols:
+                if path in selected_set:
+                    continue  # full file content is active; skip symbol entry
                 block = self._symbol_index.get_file_symbol_block(path)
                 if block:
                     # Use signature hash (based on raw symbol data) rather than
