@@ -20,6 +20,14 @@ const STORAGE_KEY_LAST_FILE = 'ac-last-open-file';
 const STORAGE_KEY_LAST_VIEWPORT = 'ac-last-viewport';
 
 /**
+ * Return a repo-scoped localStorage key.
+ * Falls back to the bare key if repo name is unknown.
+ */
+function _repoKey(key, repoName) {
+  return repoName ? `${key}:${repoName}` : key;
+}
+
+/**
  * Extract WebSocket port from URL query parameter ?port=N
  */
 function getPortFromURL() {
@@ -220,6 +228,7 @@ class AcApp extends JRPCClient {
     this._startupVisible = true;
     this._startupMessage = 'Connecting...';
     this._startupPercent = 0;
+    this._repoName = null;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
@@ -236,6 +245,7 @@ class AcApp extends JRPCClient {
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
     this._onWindowResize = this._onWindowResize.bind(this);
+    this._resizeRAF = null;
   }
 
   connectedCallback() {
@@ -280,6 +290,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('resize', this._onWindowResize);
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._statusBarTimer) clearTimeout(this._statusBarTimer);
+    if (this._resizeRAF) { cancelAnimationFrame(this._resizeRAF); this._resizeRAF = null; }
   }
 
   // === jrpc-oo lifecycle callbacks ===
@@ -451,6 +462,20 @@ class AcApp extends JRPCClient {
    */
   startupProgress(stage, message, percent) {
     console.log(`startupProgress: stage=${stage}, message=${message}, percent=${percent}, _startupVisible=${this._startupVisible}`);
+
+    // doc_index is a background task — don't let it stall the startup overlay.
+    // Forward its progress to the dialog header bar only.
+    if (stage === 'doc_index') {
+      // Only forward in-progress updates; the completion signal comes
+      // via compaction-event (doc_index_ready) which the dialog handles.
+      if (percent < 100) {
+        window.dispatchEvent(new CustomEvent('mode-switch-progress', {
+          detail: { message: message || '', percent: percent || 0 },
+        }));
+      }
+      return true;
+    }
+
     this._startupMessage = message || '';
     if (typeof percent === 'number') {
       this._startupPercent = Math.min(100, Math.max(0, percent));
@@ -463,6 +488,7 @@ class AcApp extends JRPCClient {
         this._startupVisible = false;
       }, 400);
     }
+
     return true;
   }
 
@@ -479,6 +505,7 @@ class AcApp extends JRPCClient {
       // Set browser tab title to ⚡ {repo_name}
       if (state?.repo_name) {
         document.title = `${state.repo_name}`;
+        this._repoName = state.repo_name;
       }
 
       // If server already finished initialization (e.g. browser connected
@@ -489,6 +516,13 @@ class AcApp extends JRPCClient {
         this._startupVisible = false;
       } else {
         console.log('Server not yet initialized — keeping startup overlay');
+      }
+
+      // Broadcast mode from server state
+      if (state?.mode) {
+        window.dispatchEvent(new CustomEvent('mode-changed', {
+          detail: { mode: state.mode },
+        }));
       }
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
@@ -514,11 +548,11 @@ class AcApp extends JRPCClient {
    */
   _reopenLastFile() {
     try {
-      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;
 
       // Read saved viewport before navigating (navigation may overwrite it)
-      const raw = localStorage.getItem(STORAGE_KEY_LAST_VIEWPORT);
+      const raw = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_VIEWPORT, this._repoName));
       let viewport = null;
       if (raw) {
         viewport = JSON.parse(raw);
@@ -551,7 +585,7 @@ class AcApp extends JRPCClient {
    */
   _saveViewportState() {
     try {
-      const path = localStorage.getItem(STORAGE_KEY_LAST_FILE);
+      const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;
 
       // Only save viewport for diff files (SVG zoom restore not yet supported)
@@ -562,7 +596,7 @@ class AcApp extends JRPCClient {
         const diffState = diffV.getViewportState?.() ?? null;
         if (!diffState) return;
         const viewport = { path, type: 'diff', diff: diffState };
-        localStorage.setItem(STORAGE_KEY_LAST_VIEWPORT, JSON.stringify(viewport));
+        localStorage.setItem(_repoKey(STORAGE_KEY_LAST_VIEWPORT, this._repoName), JSON.stringify(viewport));
       }
     } catch (_) {}
   }
@@ -590,10 +624,11 @@ class AcApp extends JRPCClient {
     if (!detail?.path) return;
 
     // Save viewport state of the currently-open file before navigating away
-    this._saveViewportState();
+    // (non-blocking — avoid synchronous layout queries during navigation)
+    try { this._saveViewportState(); } catch (_) {}
 
     // Remember last opened file for restore on refresh
-    try { localStorage.setItem(STORAGE_KEY_LAST_FILE, detail.path); } catch (_) {}
+    try { localStorage.setItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName), detail.path); } catch (_) {}
 
     const isSvg = detail.path.toLowerCase().endsWith('.svg');
 
@@ -733,12 +768,17 @@ class AcApp extends JRPCClient {
   /**
    * Force viewers to re-layout when the window is resized
    * (e.g. laptop lid reopen, maximize, display change).
+   * Throttled to one layout per animation frame to avoid jank.
    */
   _onWindowResize() {
-    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
-    if (diffV?._editor) {
-      diffV._editor.layout();
-    }
+    if (this._resizeRAF) return;
+    this._resizeRAF = requestAnimationFrame(() => {
+      this._resizeRAF = null;
+      const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (diffV?._editor) {
+        diffV._editor.layout();
+      }
+    });
   }
 
   render() {

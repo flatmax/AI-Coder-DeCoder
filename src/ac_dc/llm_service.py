@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import litellm
 
-from .context import ContextManager
+from .context import ContextManager, Mode
 from .edit_parser import (
     EditResult,
     EditStatus,
@@ -190,6 +190,12 @@ class LLMService:
             "cache_write_tokens": 0,
         }
 
+        # Document mode state
+        self._doc_index = None
+        self._doc_index_building = False
+        self._doc_stability_tracker = None
+        self._doc_stability_initialized = False
+
         # Review mode state
         self._review_active = False
         self._saved_system_prompt = None  # original system prompt, saved during review
@@ -228,8 +234,11 @@ class LLMService:
                 return
             for msg in msgs:
                 self._context.add_message(msg["role"], msg["content"])
-            self._session_id = session_id
-            logger.info(f"Restored session {session_id} with {len(msgs)} messages")
+            # Start a NEW session for upcoming messages — don't reuse the old
+            # session ID, otherwise new messages get appended to the previous
+            # session and the first chat after restart merges into old history.
+            self._session_id = self._new_session_id()
+            logger.info(f"Restored {len(msgs)} messages from session {session_id}, new session: {self._session_id}")
         except Exception as e:
             logger.warning(f"Failed to restore last session: {e}")
 
@@ -256,6 +265,10 @@ class LLMService:
             )
             self._stability_initialized = True
             logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
+
+            # Measure token counts for all initialized items so the cache
+            # tab can display per-item tokens before the first chat request.
+            self._measure_tracker_tokens(self._stability_tracker, self._symbol_index)
 
             # Seed system:prompt into L0
             # Hash only the system prompt text (not legend) for stability —
@@ -288,6 +301,9 @@ class LLMService:
         Called by main.py after the WebSocket server is running and the
         browser is connected, so progress can be reported to the user.
 
+        Session restore is handled separately (before server.start) so
+        that get_current_state() returns history immediately on connect.
+
         Args:
             symbol_index: SymbolIndex instance (may be None if unavailable)
         """
@@ -297,11 +313,89 @@ class LLMService:
         if symbol_index is not None:
             self._symbol_index = symbol_index
 
-        # Restore last session
-        self._restore_last_session()
+        # Restore last session only if not already done (main.py calls
+        # _restore_last_session() before server.start for early availability)
+        if not self._context.get_history():
+            self._restore_last_session()
+
+        # Initialize stability tracker eagerly now that symbol index is available
+        self._try_initialize_stability()
 
         self._init_complete = True
         logger.info("Deferred initialization complete")
+
+        # Doc index build is started by main.py AFTER the "ready" signal
+        # so the startup overlay dismisses before heavy model loading
+        # (KeyBERT/PyTorch) blocks the GIL and stalls WebSocket delivery.
+
+    def _start_background_doc_index(self):
+        """Kick off doc index build in background if not already done."""
+        if self._doc_index is not None or self._doc_index_building:
+            return
+        if not self._repo:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._build_doc_index_background_silent())
+            else:
+                logger.debug("Event loop not running — skipping background doc index")
+        except Exception as e:
+            logger.debug(f"Could not start background doc index: {e}")
+
+    async def _build_doc_index_background_silent(self):
+        """Build doc index in background without switching mode.
+
+        Sends progress toasts so the user knows it's happening.
+        When done, notifies frontend that doc mode is available.
+        """
+        try:
+            # Send initial toast so user knows it started
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_progress",
+                        {
+                            "stage": "doc_index_progress",
+                            "message": "📝 Building document index…",
+                            "percent": 0,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            await self._build_doc_index()
+
+            # Notify frontend that doc index is ready (mode not switched yet)
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_ready",
+                        {
+                            "stage": "doc_index_ready",
+                            "message": "📝 Document index ready — doc mode available",
+                            "mode_available": True,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            logger.info("Background doc index build complete — doc mode now available")
+
+        except Exception as e:
+            logger.error(f"Background doc index build failed: {e}")
+            self._doc_index_building = False
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_failed",
+                        {
+                            "stage": "doc_index_failed",
+                            "message": f"Document index build failed: {e}",
+                        },
+                    )
+                except Exception:
+                    pass
 
     @property
     def init_complete(self):
@@ -319,6 +413,7 @@ class LLMService:
             "session_id": self._session_id,
             "repo_name": self._repo.root.name if self._repo else None,
             "init_complete": self._init_complete,
+            "mode": self._context.mode.value,
         }
 
     def set_selected_files(self, files):
@@ -337,6 +432,310 @@ class LLMService:
         # Don't reset stability_initialized — symbol tiers persist across sessions
         # Only history items are purged (done by clear_history -> purge_history_items)
         return {"session_id": self._session_id}
+
+    # === Mode Switching (RPC) ===
+
+    def get_mode(self):
+        """Return current mode."""
+        return {
+            "mode": self._context.mode.value,
+            "doc_index_ready": self._doc_index is not None and not self._doc_index_building,
+            "doc_index_building": self._doc_index_building,
+        }
+
+    async def switch_mode(self, mode):
+        """Switch between code and document modes.
+
+        Full context switch: clears file context, swaps system prompt,
+        swaps snippets, switches stability tracker, rebuilds tier content.
+
+        Args:
+            mode: "code" or "doc"
+
+        Returns:
+            {mode: str, message: str}
+        """
+        try:
+            new_mode = Mode(mode)
+        except ValueError:
+            return {"error": f"Invalid mode: {mode}. Use 'code' or 'doc'."}
+
+        if new_mode == self._context.mode:
+            return {"mode": new_mode.value, "message": "Already in this mode"}
+
+        if new_mode == Mode.DOC:
+            return await self._switch_to_doc_mode()
+        else:
+            return self._switch_to_code_mode()
+
+    async def _switch_to_doc_mode(self):
+        """Switch from code mode to document mode."""
+        # If doc index is currently being built in the background, tell the
+        # user to wait — don't start a second build.
+        if self._doc_index_building:
+            return {
+                "mode": self._context.mode.value,
+                "message": "Document index is still building — please wait for it to finish.",
+                "building": True,
+            }
+
+        # If doc index hasn't been built yet, start the build now.
+        # This shouldn't normally happen (build starts at startup), but
+        # handles edge cases like missing repo at init time.
+        if self._doc_index is None:
+            self._start_background_doc_index()
+            return {
+                "mode": "code",
+                "message": "Document index build starting — you'll be notified when it's ready.",
+                "building": True,
+            }
+
+        # Doc index is ready — re-index changed files with progress, then switch
+        if self._doc_index:
+            try:
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            "Re-indexing documents…", 10,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0)
+
+                self._doc_index.index_repo()
+
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            "Switching to document mode…", 90,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0)
+            except Exception as e:
+                logger.warning(f"Doc re-index on mode switch failed: {e}")
+
+        result = self._finalize_doc_mode_switch()
+
+        # Signal completion so header progress bar clears
+        if self._event_callback:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_ready",
+                    {
+                        "stage": "doc_index_ready",
+                        "message": "Switched to document mode",
+                        "mode_available": True,
+                    },
+                )
+            except Exception:
+                pass
+
+        return result
+
+    def _finalize_doc_mode_switch(self):
+        """Complete the switch to document mode (doc index must be ready).
+
+        Note: index_repo() is called by _switch_to_doc_mode() before this
+        method, with progress reporting.  Don't duplicate it here.
+        """
+        # Clear file context
+        self._context.file_context.clear()
+        self._selected_files = []
+
+        # Swap system prompt
+        self._context.set_system_prompt(self._config.get_doc_system_prompt())
+
+        # Create doc-mode stability tracker if needed
+        if self._doc_stability_tracker is None:
+            from .stability_tracker import StabilityTracker
+            self._doc_stability_tracker = StabilityTracker(
+                cache_target_tokens=self._context._cache_target_tokens,
+            )
+
+        # Initialize doc stability tracker from doc reference index
+        if not self._doc_stability_initialized and self._doc_index:
+            try:
+                ref_index = self._doc_index.reference_index
+                all_files = list(self._doc_index._all_outlines.keys())
+                self._doc_stability_tracker.initialize_from_reference_graph(
+                    ref_index, all_files, counter=self._context.counter,
+                )
+                self._doc_stability_initialized = True
+                logger.info(f"Doc stability tracker initialized with {len(self._doc_stability_tracker.items)} items")
+
+                # Measure token counts for all initialized items
+                self._measure_tracker_tokens(self._doc_stability_tracker, self._doc_index)
+            except Exception as e:
+                logger.warning(f"Doc stability initialization failed: {e}")
+
+        # Seed system:prompt into L0 for doc mode
+        try:
+            sys_prompt = self._config.get_doc_system_prompt() or ""
+            sys_legend = self._doc_index.get_legend() if self._doc_index else ""
+            sys_content = sys_prompt + sys_legend
+            if sys_content:
+                self._doc_stability_tracker._items["system:prompt"] = TrackedItem(
+                    key="system:prompt",
+                    tier=Tier.L0,
+                    n=TIER_CONFIG[Tier.L0]["entry_n"],
+                    content_hash=StabilityTracker.hash_content(sys_prompt),
+                    tokens=self._context.counter.count(sys_content),
+                )
+                logger.info("Seeded system:prompt into L0 for doc mode")
+        except Exception as e:
+            logger.warning(f"Failed to seed doc system prompt: {e}")
+
+        # Switch tracker on context
+        self._context.set_stability_tracker(self._doc_stability_tracker)
+
+        # Set mode
+        self._context.set_mode(Mode.DOC)
+
+        # Insert system message
+        self._context.add_message("system", "Switched to document mode.")
+
+        logger.info("Switched to document mode")
+
+        result = {"mode": "doc", "message": "Switched to document mode"}
+
+        # Notify about degraded keyword enrichment
+        if self._doc_index and not self._doc_index.keywords_available:
+            result["keywords_available"] = False
+            result["keywords_message"] = (
+                "Document mode is active but keyword enrichment is unavailable "
+                "(keybert not installed). Headings will appear without keyword "
+                "annotations. Install with: pip install keybert sentence-transformers"
+            )
+
+        return result
+
+    def _switch_to_code_mode(self):
+        """Switch from document mode to code mode."""
+        # Clear file context
+        self._context.file_context.clear()
+        self._selected_files = []
+
+        # Restore code system prompt
+        self._context.set_system_prompt(self._config.get_system_prompt())
+
+        # Switch back to code stability tracker
+        self._context.set_stability_tracker(self._stability_tracker)
+
+        # Set mode
+        self._context.set_mode(Mode.CODE)
+
+        # Insert system message
+        self._context.add_message("system", "Switched to code mode.")
+
+        logger.info("Switched to code mode")
+        return {"mode": "code", "message": "Switched to code mode"}
+
+    async def _build_doc_index(self):
+        """Build the document index lazily on first switch to doc mode."""
+        if not self._repo:
+            return
+
+        self._doc_index_building = True
+
+        from .doc_index.index import DocIndex
+
+        doc_config = self._config.doc_index_config
+
+        # Thread-safe progress: store last message so heartbeat can re-send it
+        _last_progress = {"message": "Building document index…", "percent": 0}
+
+        _loop = asyncio.get_event_loop()
+
+        def _progress(stage, message, percent):
+            _last_progress["message"] = message
+            _last_progress["percent"] = percent
+            if self._event_callback:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback("startupProgress", stage, message, percent),
+                        _loop,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback(
+                            "compactionEvent", "doc_index_progress",
+                            {
+                                "stage": "doc_index_progress",
+                                "message": f"📝 {message}",
+                                "percent": percent,
+                            },
+                        ),
+                        _loop,
+                    )
+                except Exception:
+                    pass
+
+        # Send initial progress directly (we're still on the event loop thread)
+        if self._event_callback:
+            try:
+                await self._event_callback("startupProgress", "doc_index", "Building document index…", 0)
+                await self._event_callback(
+                    "compactionEvent", "doc_index_progress",
+                    {
+                        "stage": "doc_index_progress",
+                        "message": "📝 Building document index…",
+                        "percent": 0,
+                    },
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0)  # yield so progress event can be delivered
+
+        self._doc_index = DocIndex(
+            repo_root=str(self._repo.root),
+            doc_config=doc_config,
+        )
+
+        # Run the blocking index_repo in executor so progress events can flow.
+        # A heartbeat task re-sends the latest progress every 2s so the UI
+        # stays alive during long blocking operations (model download/load).
+        _indexing_done = False
+
+        async def _heartbeat():
+            while not _indexing_done:
+                await asyncio.sleep(2)
+                if not _indexing_done and self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            _last_progress["message"],
+                            _last_progress["percent"],
+                        )
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_progress",
+                            {
+                                "stage": "doc_index_progress",
+                                "message": f"📝 {_last_progress['message']}",
+                                "percent": _last_progress["percent"],
+                            },
+                        )
+                    except Exception:
+                        pass
+
+        loop = asyncio.get_event_loop()
+        heartbeat_task = asyncio.ensure_future(_heartbeat())
+        try:
+            await loop.run_in_executor(
+                self._executor,
+                lambda: self._doc_index.index_repo(progress_callback=_progress),
+            )
+        finally:
+            _indexing_done = True
+            heartbeat_task.cancel()
+
+        self._doc_index_building = False
+        logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")
+
+        # Check if keyword enrichment is available
+        if not self._doc_index.keywords_available:
+            logger.warning("Document mode running without keyword enrichment (keybert not installed)")
 
     # === Streaming Chat (RPC) ===
 
@@ -408,7 +807,14 @@ class LLMService:
             symbol_legend = ""
             file_tree = ""
 
-            if self._symbol_index:
+            if self._context.mode == Mode.DOC and self._doc_index:
+                # Document mode — use doc index for map
+                self._doc_index.index_repo()
+                symbol_map = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                symbol_legend = self._doc_index.get_legend()
+            elif self._symbol_index:
                 self._symbol_index.index_repo(
                     self._repo.get_flat_file_list() if self._repo else None
                 )
@@ -627,6 +1033,11 @@ class LLMService:
                         for path in modified:
                             self._symbol_index.invalidate_file(path)
 
+                    # Invalidate doc index cache for modified doc files
+                    if self._doc_index:
+                        for path in modified:
+                            self._doc_index.invalidate_file(path)
+
                     # Auto-add not-in-context files to selected files
                     files_auto_added = []
                     if not_in_context_blocks:
@@ -647,6 +1058,7 @@ class LLMService:
 
                     result["files_modified"] = modified
                     result["passed"] = sum(1 for r in edit_results if r.status == EditStatus.APPLIED)
+                    result["already_applied"] = sum(1 for r in edit_results if r.status == EditStatus.ALREADY_APPLIED)
                     result["failed"] = sum(1 for r in edit_results if r.status == EditStatus.FAILED)
                     result["skipped"] = sum(1 for r in edit_results if r.status == EditStatus.SKIPPED)
                     result["not_in_context"] = sum(1 for r in edit_results if r.status == EditStatus.NOT_IN_CONTEXT)
@@ -850,8 +1262,17 @@ class LLMService:
         - history:{N} for conversation messages
         - When a file is selected, its symbol:{path} stays tracked but
           the symbol map excludes it (full content replaces it in prompt)
+
+        Dispatches to the appropriate tracker/index based on current mode.
         """
-        if not self._stability_tracker:
+        if self._context.mode == Mode.DOC:
+            tracker = self._doc_stability_tracker
+            index = self._doc_index
+        else:
+            tracker = self._stability_tracker
+            index = self._symbol_index
+
+        if not tracker:
             return
 
         counter = self._context.counter
@@ -861,9 +1282,15 @@ class LLMService:
         # Hash only the system prompt text (not legend) for stability —
         # the legend includes path aliases that change with exclude_files,
         # causing spurious hash mismatches. Token count includes both.
-        system_prompt = self._config.get_system_prompt() or ""
+        if self._context.mode == Mode.DOC:
+            system_prompt = self._config.get_doc_system_prompt() or ""
+        else:
+            system_prompt = self._config.get_system_prompt() or ""
         if system_prompt:
-            legend = self._symbol_index.get_legend() or "" if self._symbol_index else ""
+            if index and hasattr(index, 'get_legend'):
+                legend = index.get_legend() or ""
+            else:
+                legend = ""
             system_content = system_prompt + legend
             active_items.append({
                 "key": "system:prompt",
@@ -871,19 +1298,44 @@ class LLMService:
                 "tokens": counter.count(system_content),
             })
 
-        # Per-file symbol entries for ALL indexed files
-        # Selected files still get symbol entries tracked (for tier persistence)
-        # but are excluded from the symbol map prompt output
-        if self._symbol_index:
+        # Per-file symbol/doc entries for indexed files NOT currently selected.
+        # Selected files have full content in context; their symbol/doc blocks
+        # are excluded from the map to avoid redundancy. Per spec:
+        # "A file never appears as both symbol block and full content."
+        if index:
             selected_set = set(self._selected_files)
-            for path in self._symbol_index._all_symbols:
-                block = self._symbol_index.get_file_symbol_block(path)
+
+            # Remove symbol entries for selected files — they now have file: entries
+            for path in selected_set:
+                sym_key = f"symbol:{path}"
+                if sym_key in tracker._items:
+                    tier = tracker._items[sym_key].tier
+                    del tracker._items[sym_key]
+                    tracker._broken_tiers.add(tier)
+                    tracker._changes.append({
+                        "action": "removed", "key": sym_key,
+                        "reason": "file selected — full content replaces symbol",
+                    })
+
+            # Get all indexed paths from the appropriate index
+            if self._context.mode == Mode.DOC:
+                all_indexed = self._doc_index._all_outlines if self._doc_index else {}
+            else:
+                all_indexed = self._symbol_index._all_symbols if self._symbol_index else {}
+
+            for path in all_indexed:
+                if path in selected_set:
+                    continue  # full file content is active; skip symbol entry
+                if self._context.mode == Mode.DOC:
+                    block = self._doc_index.get_file_doc_block(path) if self._doc_index else ""
+                else:
+                    block = self._symbol_index.get_file_symbol_block(path) if self._symbol_index else ""
                 if block:
-                    # Use signature hash (based on raw symbol data) rather than
+                    # Use signature hash (based on raw data) rather than
                     # hashing the formatted block — the formatted output changes
                     # when path aliases or exclude_files change, causing spurious
                     # hash mismatches and mass demotions.
-                    sig_hash = self._symbol_index.get_signature_hash(path)
+                    sig_hash = index.get_signature_hash(path)
                     active_items.append({
                         "key": f"symbol:{path}",
                         "content_hash": sig_hash or StabilityTracker.hash_content(block),
@@ -919,7 +1371,7 @@ class LLMService:
                 pass
 
         # Run update cycle
-        result = self._stability_tracker.update(active_items, existing_files)
+        result = tracker.update(active_items, existing_files)
 
         # Log tier changes
         for change in result.get("changes", []):
@@ -935,10 +1387,17 @@ class LLMService:
 
         Returns dict with l0/l1/l2/l3 keys, or None if tracker not ready.
         Each tier contains: symbols, files, history, graduated_files, graduated_history_indices.
+
+        Dispatches to the appropriate index based on current mode.
         """
-        tracker = self._stability_tracker
-        if not tracker or not self._stability_initialized:
-            return None
+        if self._context.mode == Mode.DOC:
+            tracker = self._doc_stability_tracker
+            if not tracker or not self._doc_stability_initialized:
+                return None
+        else:
+            tracker = self._stability_tracker
+            if not tracker or not self._stability_initialized:
+                return None
 
         history = self._context.get_history()
         tiered = {}
@@ -969,7 +1428,12 @@ class LLMService:
                     continue
                 elif key.startswith("symbol:"):
                     path = key.split(":", 1)[1]
-                    if self._symbol_index:
+                    if self._context.mode == Mode.DOC:
+                        if self._doc_index:
+                            block = self._doc_index.get_file_doc_block(path)
+                            if block:
+                                symbol_parts.append(block)
+                    elif self._symbol_index:
                         block = self._symbol_index.get_file_symbol_block(path)
                         if block:
                             symbol_parts.append(block)
@@ -1043,7 +1507,7 @@ class LLMService:
         for key, item in tier_items.items():
             if key.startswith("system:"):
                 item_type = "system"
-                path = None
+                path = "system:prompt"
                 name = "System + Legend"
             elif key.startswith("file:"):
                 item_type = "files"
@@ -1117,20 +1581,37 @@ class LLMService:
 
         counter = self._context.counter
 
-        system_tokens = counter.count(self._config.get_system_prompt())
+        # Use mode-appropriate prompt and index
+        is_doc = self._context.mode == Mode.DOC
+        if is_doc:
+            system_tokens = counter.count(self._config.get_doc_system_prompt())
+        else:
+            system_tokens = counter.count(self._config.get_system_prompt())
+
         legend_tokens = 0
-        if self._symbol_index:
+        symbol_map_tokens = 0
+        symbol_map_files = 0
+
+        if is_doc and self._doc_index:
+            legend = self._doc_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+            sm = self._doc_index.get_doc_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+                symbol_map_files = len(self._doc_index._all_outlines)
+        elif self._symbol_index:
             legend = self._symbol_index.get_legend()
             if legend:
                 legend_tokens = counter.count(legend)
-
-        symbol_map_tokens = 0
-        if self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
+                symbol_map_files = len(self._symbol_index._all_symbols)
 
         # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
@@ -1287,6 +1768,7 @@ class LLMService:
 
         return {
             "model": counter.model_name,
+            "mode": self._context.mode.value,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
             "cache_hit_rate": cache_hit_rate,
@@ -1296,6 +1778,7 @@ class LLMService:
                 "system": system_tokens,
                 "legend": legend_tokens,
                 "symbol_map": symbol_map_tokens,
+                "symbol_map_files": symbol_map_files,
                 "files": file_tokens,
                 "file_count": len(file_details),
                 "file_details": file_details,
@@ -1326,10 +1809,18 @@ class LLMService:
         cache_read = usage.get("cache_read_tokens", 0)
         cache_write = usage.get("cache_write_tokens", 0)
 
-        # Gather per-tier data
-        system_tokens = counter.count(self._config.get_system_prompt())
+        # Gather per-tier data (mode-aware)
+        is_doc_hud = self._context.mode == Mode.DOC
+        if is_doc_hud:
+            system_tokens = counter.count(self._config.get_doc_system_prompt())
+        else:
+            system_tokens = counter.count(self._config.get_system_prompt())
         legend_tokens = 0
-        if self._symbol_index:
+        if is_doc_hud and self._doc_index:
+            legend = self._doc_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+        elif self._symbol_index:
             legend = self._symbol_index.get_legend()
             if legend:
                 legend_tokens = counter.count(legend)
@@ -1358,7 +1849,13 @@ class LLMService:
         else:
             # No tracker — show everything as active
             symbol_map_tokens = 0
-            if self._symbol_index:
+            if is_doc_hud and self._doc_index:
+                sm = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if sm:
+                    symbol_map_tokens = counter.count(sm)
+            elif self._symbol_index:
                 sm = self._symbol_index.get_symbol_map(
                     exclude_files=set(self._selected_files)
                 )
@@ -1437,9 +1934,16 @@ class LLMService:
         # --- Token Usage ---
         logger.info(f"Model: {counter.model_name}")
 
-        # Category breakdown
+        # Category breakdown (mode-aware)
+        is_doc = self._context.mode == Mode.DOC
         symbol_map_tokens = 0
-        if self._symbol_index:
+        if is_doc and self._doc_index:
+            sm = self._doc_index.get_doc_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+        elif self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
@@ -1449,8 +1953,9 @@ class LLMService:
         history_tokens = self._context.history_token_count()
         max_tokens = counter.max_input_tokens
 
+        map_label = "Doc Map:" if is_doc else "Symbol Map:"
         logger.info(f"System:      {system_tokens + legend_tokens:>8,}")
-        logger.info(f"Symbol Map:  {symbol_map_tokens:>8,}")
+        logger.info(f"{map_label:<13}{symbol_map_tokens:>8,}")
         logger.info(f"Files:       {file_tokens:>8,}")
         logger.info(f"History:     {history_tokens:>8,}")
         logger.info(f"Total:       {total:>8,} / {max_tokens:,}")
@@ -1488,6 +1993,38 @@ class LLMService:
             # Print promotions first, then demotions
             for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
+
+    def _measure_tracker_tokens(self, tracker, index):
+        """Measure token counts for all symbol: items in a tracker.
+
+        Called after initialize_from_reference_graph so the cache tab
+        can display per-item tokens before the first chat request.
+        Items are initialized with tokens=0; this fills in real counts.
+        """
+        if not tracker or not index:
+            return
+        counter = self._context.counter
+        measured = 0
+        for key, item in tracker._items.items():
+            if item.tokens > 0:
+                continue  # already measured
+            if key.startswith("symbol:"):
+                path = key.split(":", 1)[1]
+                if hasattr(index, 'get_file_symbol_block'):
+                    block = index.get_file_symbol_block(path)
+                elif hasattr(index, 'get_file_doc_block'):
+                    block = index.get_file_doc_block(path)
+                else:
+                    block = None
+                if block:
+                    item.tokens = counter.count(block)
+                    # Update content hash from signature hash for stability
+                    sig_hash = index.get_signature_hash(path)
+                    if sig_hash:
+                        item.content_hash = sig_hash
+                    measured += 1
+        if measured:
+            logger.info(f"Measured tokens for {measured} tracker items")
 
     def _print_init_hud(self):
         """Print tier distribution after initialization."""
@@ -1710,10 +2247,13 @@ class LLMService:
         """Return snippets appropriate for the current mode.
 
         In review mode, returns review-specific snippets.
+        In document mode, returns document-specific snippets.
         Otherwise, returns standard coding snippets.
         """
         if self._review_active:
             return self._config.get_review_snippets()
+        if self._context.mode == Mode.DOC:
+            return self._config.get_doc_snippets()
         return self._config.get_snippets()
 
     def _build_review_context(self):
@@ -1793,6 +2333,56 @@ class LLMService:
         return "\n".join(parts)
 
     # === LSP Proxy Methods ===
+
+    def get_file_map_block(self, path):
+        """Return the map representation of a file or special block based on current mode.
+
+        Handles:
+        - system:prompt — returns system prompt + legend
+        - Regular files — symbol block (code mode) or doc outline block (doc mode)
+
+        Args:
+            path: relative file path or special key like "system:prompt"
+
+        Returns:
+            {path: str, content: str, mode: str} or {error: str}
+        """
+        if not path:
+            return {"error": "No path specified"}
+
+        mode = self._context.mode
+
+        # Special key: system prompt + legend
+        if path == "system:prompt":
+            parts = []
+            if mode == Mode.DOC:
+                prompt = self._config.get_doc_system_prompt() or ""
+                legend = self._doc_index.get_legend() if self._doc_index else ""
+            else:
+                prompt = self._config.get_system_prompt() or ""
+                legend = self._symbol_index.get_legend() if self._symbol_index else ""
+            if prompt:
+                parts.append("# System Prompt\n\n" + prompt)
+            if legend:
+                parts.append("\n# Legend\n\n" + legend)
+            content = "\n".join(parts)
+            if content:
+                return {"path": path, "content": content, "mode": mode.value}
+            return {"error": "No system prompt available"}
+
+        if mode == Mode.DOC and self._doc_index:
+            block = self._doc_index.get_file_doc_block(path)
+            if block:
+                return {"path": path, "content": block, "mode": "doc"}
+            return {"error": f"No document outline for {path}"}
+
+        if self._symbol_index:
+            block = self._symbol_index.get_file_symbol_block(path)
+            if block:
+                return {"path": path, "content": block, "mode": "code"}
+            return {"error": f"No symbol data for {path}"}
+
+        return {"error": "No index available"}
 
     def lsp_get_hover(self, path, line, col):
         """Proxy to SymbolIndex.lsp_get_hover for RPC access."""

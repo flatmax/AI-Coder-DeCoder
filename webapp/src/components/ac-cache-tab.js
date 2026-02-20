@@ -7,6 +7,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
+import '../components/url-content-dialog.js';
 
 function formatTokens(n) {
   if (n == null) return '—';
@@ -257,6 +258,14 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       white-space: nowrap;
     }
 
+    .item-name.clickable {
+      cursor: pointer;
+    }
+    .item-name.clickable:hover {
+      color: var(--accent-primary);
+      text-decoration: underline;
+    }
+
     .item-tokens {
       font-family: var(--font-mono);
       color: var(--accent-green);
@@ -434,6 +443,36 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     return fi === f.length;
   }
 
+  async _viewMapBlock(item) {
+    const path = item.path;
+    if (!path) return;
+
+    try {
+      const data = await this.rpcExtract('LLMService.get_file_map_block', path);
+      if (!data || data.error) {
+        console.warn('No map block:', data?.error);
+        return;
+      }
+
+      const isSystem = path.startsWith('system:');
+      const modeLabel = isSystem ? 'System'
+        : data.mode === 'doc' ? 'Document Outline' : 'Symbol Map';
+      const displayName = isSystem ? 'System Prompt + Legend' : path;
+      const dialog = this.shadowRoot?.querySelector('ac-url-content-dialog');
+      if (dialog) {
+        dialog.show({
+          url: path,
+          title: `${modeLabel}: ${displayName}`,
+          url_type: data.mode === 'doc' ? 'documentation' : 'generic',
+          content: data.content,
+          fetched_at: null,
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to load map block:', e);
+    }
+  }
+
   // === Render ===
 
   _renderPerformance() {
@@ -525,7 +564,9 @@ export class AcCacheTab extends RpcMixin(LitElement) {
                 return html`
                   <div class="tier-item">
                     <span class="item-icon">${icon}</span>
-                    <span class="item-name" title="${name}">${name}</span>
+                    <span class="item-name ${item.path ? 'clickable' : ''}"
+                          title="${name}"
+                          @click=${item.path ? () => this._viewMapBlock(item) : null}>${name}</span>
                     <span class="item-tokens">${formatTokens(itemTokens)}</span>
                     ${n != null ? html`
                       <div class="stability-bar" title="N=${n}/${threshold || '?'}">
@@ -540,7 +581,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
                 <div class="tier-item">
                   <span class="item-icon">📦</span>
                   <span class="item-name" style="color: var(--text-muted); font-style: italic;"
-                    >${unmeasured.length} pre-indexed symbols (awaiting measurement)</span>
+                    >${unmeasured.length} pre-indexed ${this._data?.mode === 'doc' ? 'documents' : 'symbols'} (awaiting measurement)</span>
                 </div>
               ` : nothing}
               ${contents.length === 0 ? html`
@@ -604,6 +645,8 @@ export class AcCacheTab extends RpcMixin(LitElement) {
         ${this._renderChanges()}
         ${this._renderFooter()}
       `}
+
+      <ac-url-content-dialog></ac-url-content-dialog>
     `;
   }
 }

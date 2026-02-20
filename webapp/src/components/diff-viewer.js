@@ -450,6 +450,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const updatedFiles = [];
     let changed = false;
 
+    // Capture scroll position before reloading content
+    const savedViewport = this.getViewportState();
+
     for (const file of this._files) {
       if (file.is_config) {
         updatedFiles.push(file);
@@ -476,6 +479,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       this._dirtySet = new Set();
       await this.updateComplete;
       this._showEditor();
+      // Restore scroll position after editor is rebuilt with new content
+      if (savedViewport) {
+        this.restoreViewportState(savedViewport);
+      }
     }
   }
 

@@ -9,9 +9,16 @@ This is the central state holder for an LLM session. It coordinates:
 
 import logging
 import os
+from enum import Enum
 from pathlib import Path
 
 from .token_counter import TokenCounter
+
+
+class Mode(Enum):
+    """Session mode — determines which index feeds context."""
+    CODE = "code"
+    DOC = "doc"
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +58,12 @@ FILES_L3_HEADER = (
 )
 TIER_SYMBOLS_HEADER = "# Repository Structure (continued)\n\n"
 REVIEW_CONTEXT_HEADER = "# Code Review Context\n\n"
+
+DOC_MAP_HEADER = (
+    "# Document Structure\n\n"
+    "Below is an outline map of documentation files showing headings, keywords, and cross-references.\n"
+    "Use this to understand document content and navigate without loading full files.\n\n"
+)
 
 
 class FileContext:
@@ -178,6 +191,21 @@ class ContextManager:
 
         # Review context
         self._review_context = None  # string or None
+
+        # Mode
+        self._mode = Mode.CODE
+
+    # === Mode ===
+
+    @property
+    def mode(self):
+        return self._mode
+
+    def set_mode(self, mode):
+        """Switch mode. Caller is responsible for rebuilding context."""
+        if isinstance(mode, str):
+            mode = Mode(mode)
+        self._mode = mode
 
     # === Conversation History ===
 
@@ -409,7 +437,8 @@ class ContextManager:
         # [0] System message: system prompt + legend + symbol map
         system_content = self._system_prompt
         if symbol_legend or symbol_map:
-            system_content += "\n\n" + REPO_MAP_HEADER
+            map_header = DOC_MAP_HEADER if self._mode == Mode.DOC else REPO_MAP_HEADER
+            system_content += "\n\n" + map_header
             if symbol_legend:
                 system_content += symbol_legend + "\n\n"
             if symbol_map:
@@ -505,7 +534,8 @@ class ContextManager:
         l0 = tiers.get("l0", {})
         system_parts = [self._system_prompt]
         if symbol_legend or symbol_map or l0.get("symbols"):
-            system_parts.append(REPO_MAP_HEADER)
+            map_header = DOC_MAP_HEADER if self._mode == Mode.DOC else REPO_MAP_HEADER
+            system_parts.append(map_header)
             if symbol_legend:
                 system_parts.append(symbol_legend)
             if l0.get("symbols"):

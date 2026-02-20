@@ -309,6 +309,8 @@ A separate component (`AcInputHistory`) hosted inside the chat input area. The c
 - Up/Down arrows navigate the filtered list; Enter selects; Escape restores original input and closes
 - Clicking an item selects it
 
+**Session seeding:** When a session is loaded (from the history browser or on startup state restore), all user messages from that session are added to the input history via `addEntry()`. This lets up-arrow recall previous messages from the loaded conversation, not just messages typed since the page loaded. Multimodal user messages (containing image blocks) have their text blocks extracted and joined. Empty/whitespace-only messages are skipped.
+
 ### Snippet Drawer
 
 Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer open/closed state persisted to localStorage (`ac-dc-snippet-drawer`).

@@ -20,11 +20,13 @@ from pathlib import Path
 # or repo-local .ac-dc/ overrides instead.
 _MANAGED_FILES = {
     "system.md",
+    "system_doc.md",
     "compaction.md",
     "review.md",
     "app.json",
     "snippets.json",
     "review-snippets.json",
+    "doc-snippets.json",
 }
 
 # Files that users are expected to edit — never overwritten automatically.
@@ -77,6 +79,8 @@ class ConfigManager:
         "snippets": {"file": "snippets.json", "format": "json"},
         "review": {"file": "review.md", "format": "markdown"},
         "review_snippets": {"file": "review-snippets.json", "format": "json"},
+        "system_doc": {"file": "system_doc.md", "format": "markdown"},
+        "doc_snippets": {"file": "doc-snippets.json", "format": "json"},
     }
 
     def __init__(self, repo_root=None):
@@ -283,6 +287,17 @@ class ConfigManager:
         })
 
     @property
+    def doc_index_config(self):
+        return self._app_config.get("doc_index", {
+            "keyword_model": "all-mpnet-base-v2",
+            "keywords_enabled": True,
+            "keywords_top_n": 3,
+            "keywords_ngram_range": [1, 2],
+            "keywords_min_section_chars": 50,
+            "keywords_min_score": 0.3,
+        })
+
+    @property
     def url_cache_config(self):
         return self._app_config.get("url_cache", {
             "path": "/tmp/ac-dc-url-cache",
@@ -362,6 +377,30 @@ class ConfigManager:
 
         # Fall back to config directory
         data = self._load_json("review-snippets.json")
+        return data.get("snippets", [])
+
+    def get_doc_system_prompt(self):
+        """Assemble document-mode system prompt from files."""
+        main = self._load_text("system_doc.md")
+        extra = self._load_text("system_extra.md")
+        if extra.strip():
+            return main + "\n\n" + extra
+        return main
+
+    def get_doc_snippets(self):
+        """Load document-mode snippets with two-location fallback."""
+        # Try repo-local first
+        if self._repo_root:
+            local_path = self._repo_root / ".ac-dc" / "doc-snippets.json"
+            if local_path.exists():
+                try:
+                    data = json.loads(local_path.read_text())
+                    return data.get("snippets", [])
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # Fall back to config directory
+        data = self._load_json("doc-snippets.json")
         return data.get("snippets", [])
 
     def get_config_content(self, config_type):

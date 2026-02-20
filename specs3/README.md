@@ -56,6 +56,7 @@ Depends on: Repository (for file access)
 | Spec | Description |
 |------|-------------|
 | [Symbol Index](2-code-analysis/symbol_index.md) | Tree-sitter parsing, extractors, compact format, reference graph, LSP |
+| [Document Mode](2-code-analysis/document_mode.md) | Document index for markdown/SVG, cache tier integration, document mode toggle |
 
 ### Layer 3: LLM Engine (**read in order**)
 
@@ -100,12 +101,6 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 | Spec | Description |
 |------|-------------|
 | [Build and Deployment](6-deployment/build_and_deployment.md) | Build pipeline, CI, versioning, startup sequence, CLI |
-
-### Layer 7: Future
-
-| Spec | Description |
-|------|-------------|
-| [Document Mode](7-future/document_mode.md) | Document index for markdown/docx/xlsx, cache tier integration, document mode toggle |
 
 ### Consolidated References
 

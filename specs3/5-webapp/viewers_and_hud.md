@@ -19,11 +19,25 @@ Before computing the breakdown, `get_context_breakdown()` synchronizes the in-me
 
 **Limitation:** The sync silently skips binary files and files that don't exist (checking `is_binary_file` and `file_exists` before loading). Unlike `_stream_chat`, which reports `binary_files` and `invalid_files` in the stream result, the breakdown sync does not surface these problems. The context viewer may therefore show a clean token budget while the next actual request would produce binary/missing file warnings and exclude those files. The discrepancy is minor (binary/missing files would contribute zero tokens either way) but could be confusing if the user expects the viewer to flag invalid selections.
 
+### Mode-Aware Breakdown Computation
+
+`get_context_breakdown()` dispatches to the appropriate index and system prompt based on the current mode (`Mode.CODE` or `Mode.DOC`):
+
+| Field | Code Mode | Document Mode |
+|-------|-----------|---------------|
+| `system` tokens | `get_system_prompt()` | `get_doc_system_prompt()` |
+| `legend` tokens | `SymbolIndex.get_legend()` | `DocIndex.get_legend()` |
+| `symbol_map` tokens | `SymbolIndex.get_symbol_map()` | `DocIndex.get_doc_map()` |
+| `symbol_map_files` | `len(_all_symbols)` | `len(_all_outlines)` |
+
+This ensures the context breakdown and terminal HUD report accurate token counts for the active mode rather than always using the code index.
+
 `LLMService.get_context_breakdown()` returns:
 
 ```pseudo
 {
     model: string,
+    mode: string,                    // "code" or "doc" — current operating mode
     total_tokens: integer,
     max_input_tokens: integer,
     cache_hit_rate: float,           // cached_tokens / total_tokens
@@ -44,9 +58,16 @@ Before computing the breakdown, `get_context_breakdown()` synchronizes the in-me
     }],
     breakdown: {
         system: integer,
+        legend: integer,
         symbol_map: integer,
+        symbol_map_files: integer,   // number of indexed files in current mode's index
         files: integer,
+        file_count: integer,
+        file_details: [{name, path, tokens}],
+        urls: integer,
+        url_details: [{name, url, tokens}],
         history: integer,
+        history_messages: integer,
     },
     promotions: [string],            // "L3 → L2: symbol:path/to/file"
     demotions: [string],             // "L2 → active: symbol:path/to/file"
@@ -93,7 +114,7 @@ Session Totals
 
 ### Model Info
 
-Below the budget bar: model name and cache hit rate percentage. Displayed as a compact info row.
+Below the budget bar: model name, cache hit rate percentage, and mode indicator. In document mode, ` · 📝 Doc Mode` is appended to the model name. Displayed as a compact info row.
 
 ### Categories
 
@@ -149,10 +170,12 @@ Model: provider/model    Total: 38.7K
 |------|------|--------|
 | system | ⚙️ | Token count |
 | legend | 📖 | Token count |
-| symbols | 📦 | File path + stability bar (N/threshold) + tokens |
+| symbols | 📦 (code) / 📝 (doc) | File path + stability bar (N/threshold) + tokens |
 | files | 📄 | File path + stability bar (N/threshold) + tokens |
 | urls | 🔗 | Title + tokens |
 | history | 💬 | Message count + tokens |
+
+**Mode-aware labels:** When `mode === "doc"`, the cache viewer shows "pre-indexed documents" instead of "pre-indexed symbols" for unmeasured tier items, and uses the 📝 icon for symbol-type entries. The context viewer shows "Doc Map" instead of "Symbol Map" for the symbol_map category, and the stacked bar legend label adapts similarly.
 
 ### Stability Bars
 
@@ -290,7 +313,7 @@ Cache:         read: 21,640, write: 48,070
 Session total: 182,756
 ```
 
-Category breakdown (System, Symbol Map, Files, History) counted independently from tier data. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
+Category breakdown counted independently from tier data. In document mode, "Symbol Map" is labelled "Doc Map" and the system prompt tokens reflect the document system prompt. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
 
 ### Tier Changes
 

@@ -132,7 +132,30 @@ class StabilityTracker:
         - New: register at active, N=0
         - Changed (hash mismatch): N=0, demote to active
         - Unchanged: N++
+
+        Items tracked as file:* or history:* that are no longer in the
+        active list are removed — they represent deselected files or
+        compacted history that should not persist in cached tiers.
+        Symbol entries persist (they represent the repo structure).
         """
+        active_keys = {item["key"] for item in active_items}
+
+        # Remove file: and history: items that are no longer active
+        to_remove = []
+        for key in self._items:
+            if key.startswith("file:") and key not in active_keys:
+                to_remove.append(key)
+            elif key.startswith("history:") and key not in active_keys:
+                to_remove.append(key)
+        for key in to_remove:
+            tier = self._items[key].tier
+            del self._items[key]
+            self._broken_tiers.add(tier)
+            self._changes.append({
+                "action": "removed", "key": key,
+                "reason": "no longer active",
+            })
+
         for item_info in active_items:
             key = item_info["key"]
             new_hash = item_info["content_hash"]

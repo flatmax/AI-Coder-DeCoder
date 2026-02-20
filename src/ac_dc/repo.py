@@ -253,7 +253,19 @@ class Repo:
                 # Remove quotes from paths with special characters
                 if filepath.startswith('"') and filepath.endswith('"'):
                     filepath = filepath[1:-1]
-                if index_status in ("M", "A", "D", "R"):
+                # Renames: porcelain format is "old -> new"; track the new path
+                # Paths with special chars may be individually quoted
+                if index_status == "R" and " -> " in filepath:
+                    rename_parts = filepath.split(" -> ", 1)
+                    old_part = rename_parts[0].strip()
+                    new_part = rename_parts[1].strip()
+                    if old_part.startswith('"') and old_part.endswith('"'):
+                        old_part = old_part[1:-1]
+                    if new_part.startswith('"') and new_part.endswith('"'):
+                        new_part = new_part[1:-1]
+                    staged.append(new_part)
+                    staged.append(old_part)
+                elif index_status in ("M", "A", "D", "R"):
                     staged.append(filepath)
                 if work_status == "M":
                     modified.append(filepath)

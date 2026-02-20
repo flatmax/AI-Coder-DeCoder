@@ -28,7 +28,7 @@ import { SharedRpc } from './shared-rpc.js';
 /**
  * Dispatch a global toast event.
  */
-function dispatchToast(message, type = 'error') {
+export function dispatchToast(message, type = 'error') {
   window.dispatchEvent(new CustomEvent('ac-toast', {
     detail: { message, type },
   }));

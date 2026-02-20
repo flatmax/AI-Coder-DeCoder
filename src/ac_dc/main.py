@@ -408,17 +408,46 @@ def main(args=None):
 
     import asyncio
 
-    # LLM service created with deferred init (no symbol index yet)
-    from ac_dc.llm_service import LLMService
-    llm_service = LLMService(
-        config, repo=repo, symbol_index=None, deferred_init=True,
-    )
-
     async def _run_server():
         server = JRPCServer(server_port, remote_timeout=60)
         server.add_class(repo)
-        server.add_class(llm_service)
         server.add_class(settings)
+
+        # Step 5.5: Create LLM service and restore last session BEFORE the
+        # server starts accepting connections.  This way get_current_state()
+        # returns previous session messages as soon as the browser connects.
+        # litellm import happens here — if provider SDK init hangs (e.g.
+        # boto3 credential chain) the server won't start, but that is
+        # preferable to the browser connecting and seeing no history.
+        from ac_dc.llm_service import LLMService
+        llm_service = LLMService(
+            config, repo=repo, symbol_index=None, deferred_init=True,
+        )
+        llm_service._restore_last_session()
+        server.add_class(llm_service)
+
+        await server.start()
+
+        version = _get_version()
+        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
+        url = _build_browser_url(
+            server_port, version,
+            dev_mode=(parsed.dev or parsed.preview),
+            webapp_port=webapp_port,
+            base_url_override=base_url,
+        )
+
+        logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
+        logger.info(f"Version: {version}")
+
+        # Step 6: Open browser EARLY — before heavy init
+        if not parsed.no_browser:
+            try:
+                webbrowser.open(url)
+                logger.info(f"Opened browser: {url}")
+            except Exception as e:
+                logger.warning(f"Failed to open browser: {e}")
+                print(f"\nOpen in browser: {url}\n")
 
         # Wire up callbacks
         async def chunk_callback(request_id, content):
@@ -444,29 +473,6 @@ def main(args=None):
         llm_service._chunk_callback = chunk_callback
         llm_service._event_callback = event_callback
 
-        await server.start()
-
-        version = _get_version()
-        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
-        url = _build_browser_url(
-            server_port, version,
-            dev_mode=(parsed.dev or parsed.preview),
-            webapp_port=webapp_port,
-            base_url_override=base_url,
-        )
-
-        logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
-        logger.info(f"Version: {version}")
-
-        # Step 6: Open browser EARLY — before heavy init
-        if not parsed.no_browser:
-            try:
-                webbrowser.open(url)
-                logger.info(f"Opened browser: {url}")
-            except Exception as e:
-                logger.warning(f"Failed to open browser: {e}")
-                print(f"\nOpen in browser: {url}\n")
-
         # Step 7: Heavy initialization in background with progress reporting
         async def _send_progress(stage, message, percent=None):
             """Send startup progress to browser (best-effort)."""
@@ -491,8 +497,13 @@ def main(args=None):
             logger.warning(f"Symbol index unavailable: {e}")
 
         # Complete deferred initialization with symbol index
-        await _send_progress("session_restore", "Restoring session...", 30)
+        # (session already restored above before server.start — this
+        # wires up the symbol index and remaining heavy init)
+        await _send_progress("session_restore", "Completing initialization...", 30)
         llm_service.complete_deferred_init(symbol_index)
+
+        # NOTE: doc index build is deferred to after "ready" signal below,
+        # so the startup overlay dismisses before heavy model loading starts.
 
         # Index repo (the heaviest step — parses all source files)
         if symbol_index:
@@ -513,6 +524,11 @@ def main(args=None):
 
         await _send_progress("ready", "Ready", 100)
         logger.info("Startup complete — all services initialized")
+
+        # Start background doc index build AFTER "ready" so the startup
+        # overlay dismisses before heavy model loading (KeyBERT/PyTorch)
+        # blocks the GIL and stalls WebSocket delivery.
+        llm_service._start_background_doc_index()
 
         # Serve forever
         try:
