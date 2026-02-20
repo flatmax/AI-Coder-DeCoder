@@ -44,6 +44,7 @@ class DocIndex:
         self._ref_index = DocReferenceIndex()
         self._formatter = DocFormatter(self._ref_index)
         self._all_outlines = {}  # path -> DocOutline
+        self._repo_files = None  # set of all repo file paths (for image ref validation)
 
         # Initialize keyword enricher from config
         kw_enabled = self._config.get("keywords_enabled", True)
@@ -112,7 +113,7 @@ class DocIndex:
 
         # Extract outline
         extractor = extractor_cls()
-        outline = extractor.extract(path, text)
+        outline = extractor.extract(path, text, repo_files=self._repo_files)
 
         # Enrich with keywords (skip SVG — text labels are already keywords)
         if self._enricher and ext != '.svg':
@@ -137,6 +138,9 @@ class DocIndex:
         """
         if file_list is None:
             file_list = self._get_doc_files()
+
+        # Build repo file set for image reference validation
+        self._repo_files = self._get_all_repo_files()
 
         # Filter to supported extensions only
         doc_files = [
@@ -185,7 +189,7 @@ class DocIndex:
                 continue
 
             extractor = extractor_cls()
-            outline = extractor.extract(path, text)
+            outline = extractor.extract(path, text, repo_files=self._repo_files)
 
             # SVG text labels are already terse keywords — skip enrichment
             if ext == '.svg':
@@ -281,6 +285,19 @@ class DocIndex:
         self._dump_to_tmp()
 
         return self._all_outlines
+
+    def _get_all_repo_files(self):
+        """Get set of all files in the repo (for image reference validation)."""
+        files = set()
+        for dirpath, dirnames, filenames in os.walk(self._root):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith('.') and d not in _SKIP_DIRS
+            ]
+            for f in filenames:
+                rel = os.path.relpath(os.path.join(dirpath, f), self._root)
+                files.add(rel.replace("\\", "/"))
+        return files
 
     def _get_doc_files(self):
         """Get all indexable document files."""

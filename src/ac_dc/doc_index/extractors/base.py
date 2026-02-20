@@ -43,6 +43,7 @@ class DocLink:
     target: str             # relative path or URL
     target_heading: str = ""  # heading anchor in target, if present (e.g. "History-Compaction")
     source_heading: str = ""  # heading text under which link appears
+    is_image: bool = False    # true for image references (![alt](path), <img src>, path scan)
 
 
 @dataclass
@@ -80,12 +81,13 @@ class DocOutline:
 class BaseDocExtractor:
     """Base class for document format extractors."""
 
-    def extract(self, path, text):
+    def extract(self, path, text, repo_files=None):
         """Extract document outline from text content.
 
         Args:
             path: file path (relative to repo root)
             text: full text content of the file
+            repo_files: optional set of repo file paths (for image ref validation)
 
         Returns:
             DocOutline

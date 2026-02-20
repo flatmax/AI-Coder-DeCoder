@@ -54,6 +54,7 @@ def _outline_to_dict(outline):
                 "target": lnk.target,
                 "target_heading": lnk.target_heading,
                 "source_heading": lnk.source_heading,
+                **({"is_image": True} if lnk.is_image else {}),
             }
             for lnk in outline.links
         ],
@@ -95,6 +96,7 @@ def _dict_to_outline(d):
                 target=lnk["target"],
                 target_heading=lnk.get("target_heading", ""),
                 source_heading=lnk.get("source_heading", ""),
+                is_image=lnk.get("is_image", False),
             )
             for lnk in d.get("links", [])
         ],

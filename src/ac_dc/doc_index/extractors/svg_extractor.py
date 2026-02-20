@@ -75,12 +75,13 @@ class SvgExtractor(BaseDocExtractor):
     - <a> links as DocLinks for cross-reference tracking
     """
 
-    def extract(self, path, text):
+    def extract(self, path, text, repo_files=None):
         """Extract document outline from SVG content.
 
         Args:
             path: file path (relative to repo root)
             text: full SVG content as string
+            repo_files: unused (accepted for interface compatibility)
 
         Returns:
             DocOutline

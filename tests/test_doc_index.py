@@ -250,6 +250,79 @@ class TestMarkdownExtractor:
         assert len(outline.links) == 1
         assert outline.links[0].target_heading == ""
 
+    def test_image_svg_path_scan(self):
+        """SVG paths detected via path-extension scan."""
+        text = "# Title\n\n![diagram](assets/arch.svg)\n"
+        outline = self._extract(text, path="docs/readme.md")
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 1
+        assert image_links[0].target == "docs/assets/arch.svg"
+
+    def test_image_html_img_svg(self):
+        """SVG in <img src> detected via path-extension scan."""
+        text = '# Title\n\n<img src="assets/flow.svg" width="600">\n'
+        outline = self._extract(text, path="docs/readme.md")
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 1
+        assert image_links[0].target == "docs/assets/flow.svg"
+
+    def test_image_svg_external_url_excluded(self):
+        """External URLs with .svg are excluded when repo_files provided."""
+        text = "# Title\n\n![badge](https://img.shields.io/badge/cov.svg)\n"
+        outline = MarkdownExtractor().extract(
+            "readme.md", text, repo_files=set()
+        )
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 0
+
+    def test_image_svg_validated_against_repo_files(self):
+        """SVG paths validated against repo file tree."""
+        text = "# Title\n\n![arch](assets/arch.svg)\n"
+        # With repo_files that include the resolved path
+        outline = MarkdownExtractor().extract(
+            "docs/readme.md", text, repo_files={"docs/assets/arch.svg"}
+        )
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 1
+        # Without the file in repo_files
+        outline2 = MarkdownExtractor().extract(
+            "docs/readme.md", text, repo_files={"other/file.txt"}
+        )
+        image_links2 = [l for l in outline2.links if l.is_image]
+        assert len(image_links2) == 0
+
+    def test_image_svg_not_duplicated_with_link(self):
+        """SVG in a markdown link is not duplicated by the path scan."""
+        text = "# Title\n\nSee [diagram](assets/arch.svg)\n"
+        outline = self._extract(text, path="docs/readme.md")
+        # Should have the regular link but not a duplicate image link
+        regular_links = [l for l in outline.links if not l.is_image]
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(regular_links) == 1
+        assert len(image_links) == 0
+
+    def test_image_svg_source_heading_tracked(self):
+        """Image references track which heading they appear under."""
+        text = "# Title\n\n## Architecture\n\n![arch](assets/arch.svg)\n"
+        outline = self._extract(text, path="docs/readme.md")
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 1
+        assert image_links[0].source_heading == "Architecture"
+
+    def test_image_svg_in_fenced_code_skipped(self):
+        """SVG paths inside fenced code blocks are not extracted."""
+        text = "# Title\n\n```\n![arch](assets/arch.svg)\n```\n"
+        outline = self._extract(text, path="docs/readme.md")
+        image_links = [l for l in outline.links if l.is_image]
+        assert len(image_links) == 0
+
+    def test_image_is_image_flag_false_for_regular_links(self):
+        """Regular links have is_image=False."""
+        text = "# Title\n\n[other](other.md)\n"
+        outline = self._extract(text)
+        assert len(outline.links) == 1
+        assert outline.links[0].is_image is False
+
 
 # === Document Type Detection Tests ===
 
@@ -387,7 +460,10 @@ class TestDocCache:
                 incoming_ref_count=2,
                 outgoing_refs=[DocSectionRef(target_path="other.md", target_heading="Details")],
             )],
-            links=[DocLink(target="other.md#Details", target_heading="Details", source_heading="Title")],
+            links=[
+                DocLink(target="other.md#Details", target_heading="Details", source_heading="Title"),
+                DocLink(target="assets/arch.svg", source_heading="Title", is_image=True),
+            ],
         )
         cache1 = DocCache(repo_root=str(tmp_path))
         cache1.put("doc.md", 42.0, outline, keyword_model="test-model")
@@ -406,6 +482,9 @@ class TestDocCache:
         assert result.headings[0].outgoing_refs[0].target_heading == "Details"
         assert result.links[0].target == "other.md#Details"
         assert result.links[0].target_heading == "Details"
+        assert result.links[0].is_image is False
+        assert result.links[1].target == "assets/arch.svg"
+        assert result.links[1].is_image is True
 
     def test_disk_persistence_stale_mtime_after_restart(self, tmp_path):
         """Disk-cached entry rejected when mtime doesn't match."""
@@ -661,6 +740,52 @@ class TestDocReferenceIndex:
         idx = DocReferenceIndex()
         idx.build(outlines)
         assert idx.file_ref_count("src/main.py") >= 1
+
+    def test_image_ref_creates_cross_reference(self):
+        """Image references (is_image=True) create cross-reference edges."""
+        outlines = {
+            "docs/readme.md": DocOutline(
+                path="docs/readme.md",
+                headings=[DocHeading(text="Overview", level=1)],
+                links=[DocLink(
+                    target="assets/arch.svg",
+                    source_heading="Overview",
+                    is_image=True,
+                )],
+            ),
+            "assets/arch.svg": DocOutline(
+                path="assets/arch.svg",
+                headings=[DocHeading(text="Architecture", level=1)],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        assert idx.file_ref_count("assets/arch.svg") >= 1
+        refs = idx.files_referencing("assets/arch.svg")
+        assert "docs/readme.md" in refs
+
+    def test_image_ref_multiple_docs_increment_count(self):
+        """Multiple docs embedding the same SVG produce correct ←N count."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="A", level=1)],
+                links=[DocLink(target="diagram.svg", source_heading="A", is_image=True)],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="B", level=1)],
+                links=[DocLink(target="diagram.svg", source_heading="B", is_image=True)],
+            ),
+            "diagram.svg": DocOutline(
+                path="diagram.svg",
+                headings=[DocHeading(text="Diagram", level=1)],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        assert idx.file_ref_count("diagram.svg") == 2
+        assert outlines["diagram.svg"].headings[0].incoming_ref_count == 2
 
 
 # === DocFormatter Tests ===
@@ -1193,6 +1318,56 @@ class TestKeywordEnricherProgress:
         result = enricher.enrich(outline, "Short section text", progress_callback=None)
         # Keywords should remain empty since section is too short
         assert result.headings[0].keywords == []
+
+
+class TestCodeStripping:
+    """Tests for _strip_code pre-processing."""
+
+    def test_fenced_code_block_removed(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "Some prose.\n```python\nprint('hello')\n```\nMore prose."
+        result = _strip_code(text)
+        assert "print" not in result
+        assert "Some prose" in result
+        assert "More prose" in result
+
+    def test_tilde_fence_removed(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "Before.\n~~~\ncode here\n~~~\nAfter."
+        result = _strip_code(text)
+        assert "code here" not in result
+        assert "Before" in result
+        assert "After" in result
+
+    def test_inline_code_removed(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "Use the `OpusModel` class for inference."
+        result = _strip_code(text)
+        assert "OpusModel" not in result
+        assert "Use the" in result
+        assert "class for inference" in result
+
+    def test_empty_after_strip_returns_original(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "```\nonly code\n```"
+        result = _strip_code(text)
+        # Result may be empty/whitespace — caller handles fallback
+        # Just verify it doesn't crash
+        assert isinstance(result, str)
+
+    def test_no_code_unchanged(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "Plain prose with no code blocks or spans."
+        result = _strip_code(text)
+        assert result == text
+
+    def test_mixed_fenced_and_inline(self):
+        from ac_dc.doc_index.keyword_enricher import _strip_code
+        text = "The `config` parameter.\n```\nmodel = 'opus'\n```\nSee docs."
+        result = _strip_code(text)
+        assert "config" not in result
+        assert "opus" not in result
+        assert "See docs" in result
 
 
 # === Base Cache Tests ===

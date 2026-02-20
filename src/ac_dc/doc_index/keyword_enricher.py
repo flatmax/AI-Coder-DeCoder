@@ -3,11 +3,31 @@
 Lazily imports keybert — if not installed, headings are returned without
 keywords and a warning is logged. The sentence-transformer model is
 initialized once and reused across files.
+
+Pre-processing: fenced code blocks and inline code spans are stripped
+before embedding so KeyBERT focuses on explanatory prose rather than
+example data (model names, token counts, config snippets).
+
+Adaptive top_n: sections with >= 15 lines get top_n + 2 keywords to
+capture vocabulary from multi-pathway decision logic.
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# Fenced code blocks: ```…``` or ~~~…~~~
+_FENCED_CODE_RE = re.compile(
+    r'(?m)^[ \t]*(`{3,}|~{3,})[^\n]*\n(.*?\n)?[ \t]*\1[ \t]*$',
+    re.DOTALL,
+)
+# Inline code spans: `…`
+_INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
+
+# Threshold for adaptive top_n (section lines)
+_LARGE_SECTION_LINES = 15
+_LARGE_SECTION_BONUS = 2
 
 
 class KeywordEnricher:
@@ -118,6 +138,12 @@ class KeywordEnricher:
         in a single call so the sentence-transformer can batch-encode the
         embeddings efficiently (2-4× faster than per-heading calls).
 
+        Pre-processing strips fenced code blocks and inline code spans so
+        KeyBERT focuses on explanatory prose rather than example data.
+
+        Adaptive top_n: sections with >= 15 lines get top_n + 2 keywords
+        to capture vocabulary from multi-pathway decision logic.
+
         Args:
             outline: DocOutline with headings (modified in place)
             full_text: full document text (for slicing sections)
@@ -136,6 +162,7 @@ class KeywordEnricher:
 
         # Collect eligible sections for batched extraction
         batch_texts = []
+        batch_top_ns = []
         batch_headings = []
 
         for i, heading in enumerate(all_headings):
@@ -151,11 +178,28 @@ class KeywordEnricher:
             if len(section_text) < self._min_section_chars:
                 continue
 
-            batch_texts.append(section_text)
+            # Strip code blocks/spans so KeyBERT focuses on prose
+            cleaned = _strip_code(section_text)
+            if not cleaned.strip():
+                cleaned = section_text  # fallback: section is entirely code
+
+            batch_texts.append(cleaned)
             batch_headings.append(heading)
+
+            # Adaptive top_n: large sections get more keywords
+            section_lines = end - start
+            effective_top_n = (
+                self._top_n + _LARGE_SECTION_BONUS
+                if section_lines >= _LARGE_SECTION_LINES
+                else self._top_n
+            )
+            batch_top_ns.append(effective_top_n)
 
         if not batch_texts:
             return outline
+
+        # Batched call uses max(top_ns) — we trim per-heading below
+        max_top_n = max(batch_top_ns)
 
         try:
             # KeyBERT accepts a list of documents and returns a list of
@@ -163,7 +207,7 @@ class KeywordEnricher:
             # all embeddings in a single forward pass.
             all_keywords = self._kw_model.extract_keywords(
                 batch_texts,
-                top_n=self._top_n,
+                top_n=max_top_n,
                 keyphrase_ngram_range=self._ngram_range,
                 use_mmr=True,
                 diversity=self._diversity,
@@ -174,19 +218,23 @@ class KeywordEnricher:
             if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
                 all_keywords = [all_keywords]
 
-            for heading, keywords in zip(batch_headings, all_keywords):
+            for heading, keywords, effective_n in zip(
+                batch_headings, all_keywords, batch_top_ns
+            ):
                 heading.keywords = [
-                    kw for kw, score in keywords
+                    kw for kw, score in keywords[:effective_n]
                     if score > self._min_score
                 ]
         except Exception as e:
             logger.debug(f"Batched keyword extraction failed: {e}")
             # Fall back to per-heading extraction
-            for heading, section_text in zip(batch_headings, batch_texts):
+            for heading, section_text, effective_n in zip(
+                batch_headings, batch_texts, batch_top_ns
+            ):
                 try:
                     keywords = self._kw_model.extract_keywords(
                         section_text,
-                        top_n=self._top_n,
+                        top_n=effective_n,
                         keyphrase_ngram_range=self._ngram_range,
                         use_mmr=True,
                         diversity=self._diversity,
@@ -209,3 +257,24 @@ class KeywordEnricher:
         if self._available is None:
             self._init_model()
         return self._available
+
+
+def _strip_code(text):
+    """Strip fenced code blocks and inline code spans from text.
+
+    Used to pre-process section text before KeyBERT embedding so the
+    transformer focuses on explanatory prose rather than example data
+    (model names, token counts, configuration snippets).
+
+    Args:
+        text: section text (may contain markdown code blocks/spans)
+
+    Returns:
+        Text with code blocks and inline spans removed.
+        Returns original text if stripping would produce empty output.
+    """
+    # Remove fenced code blocks (```…``` or ~~~…~~~)
+    result = _FENCED_CODE_RE.sub('', text)
+    # Remove inline code spans (`…`)
+    result = _INLINE_CODE_RE.sub('', result)
+    return result

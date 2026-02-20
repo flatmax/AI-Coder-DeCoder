@@ -10,6 +10,9 @@ import re
 
 from .base import BaseDocExtractor, DocHeading, DocLink, DocOutline
 
+# Path-extension scan for SVG image references — catches all embedding syntaxes
+_SVG_PATH_RE = re.compile(r'[\w./-]+\.svg\b')
+
 # ATX heading: one or more # at start of line, followed by space and text
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$')
 
@@ -28,12 +31,14 @@ _DISPLAY_MATH_RE = re.compile(r'^\$\$')                # $$ on its own line
 class MarkdownExtractor(BaseDocExtractor):
     """Extract headings and links from markdown files."""
 
-    def extract(self, path, text):
+    def extract(self, path, text, repo_files=None):
         """Extract document outline from markdown text.
 
         Args:
             path: file path
             text: full markdown content
+            repo_files: optional set of repo file paths for image reference
+                        validation. If None, all SVG path matches are included.
 
         Returns:
             DocOutline with nested headings and links
@@ -89,6 +94,36 @@ class MarkdownExtractor(BaseDocExtractor):
                     target=raw_target,
                     target_heading=target_heading,
                     source_heading=source_heading,
+                ))
+
+            # Extract SVG image references via path-extension scan
+            for svg_match in _SVG_PATH_RE.finditer(line):
+                svg_path = svg_match.group(0)
+                # Skip external URLs
+                if "://" in line[max(0, svg_match.start() - 10):svg_match.start()]:
+                    continue
+                # Resolve relative to source file's directory
+                source_dir = os.path.dirname(path)
+                resolved = os.path.normpath(os.path.join(source_dir, svg_path))
+                resolved = resolved.replace("\\", "/")
+                # Block path traversal
+                if resolved.startswith(".."):
+                    continue
+                # Validate against repo file tree if available
+                if repo_files is not None and resolved not in repo_files:
+                    continue
+                # Avoid duplicating links already captured by the link regex
+                if any(l.target == svg_path or l.target.split("#")[0] == svg_path
+                       for l in all_links if not l.is_image):
+                    continue
+                source_heading = ""
+                if flat_headings:
+                    source_heading = flat_headings[-1].text
+                all_links.append(DocLink(
+                    target=resolved,
+                    target_heading="",
+                    source_heading=source_heading,
+                    is_image=True,
                 ))
 
         # Annotate sections with line counts and content types
