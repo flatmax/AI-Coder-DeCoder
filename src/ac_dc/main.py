@@ -408,17 +408,42 @@ def main(args=None):
 
     import asyncio
 
-    # LLM service created with deferred init (no symbol index yet)
-    from ac_dc.llm_service import LLMService
-    llm_service = LLMService(
-        config, repo=repo, symbol_index=None, deferred_init=True,
-    )
-
     async def _run_server():
         server = JRPCServer(server_port, remote_timeout=60)
         server.add_class(repo)
-        server.add_class(llm_service)
         server.add_class(settings)
+
+        await server.start()
+
+        version = _get_version()
+        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
+        url = _build_browser_url(
+            server_port, version,
+            dev_mode=(parsed.dev or parsed.preview),
+            webapp_port=webapp_port,
+            base_url_override=base_url,
+        )
+
+        logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
+        logger.info(f"Version: {version}")
+
+        # Step 6: Open browser EARLY — before heavy init
+        if not parsed.no_browser:
+            try:
+                webbrowser.open(url)
+                logger.info(f"Opened browser: {url}")
+            except Exception as e:
+                logger.warning(f"Failed to open browser: {e}")
+                print(f"\nOpen in browser: {url}\n")
+
+        # Step 6.5: Create LLM service AFTER browser opens
+        # litellm import and provider SDK init (e.g. boto3 credential chain)
+        # can hang with misconfigured credentials — don't block browser launch
+        from ac_dc.llm_service import LLMService
+        llm_service = LLMService(
+            config, repo=repo, symbol_index=None, deferred_init=True,
+        )
+        server.add_class(llm_service)
 
         # Wire up callbacks
         async def chunk_callback(request_id, content):
@@ -443,29 +468,6 @@ def main(args=None):
 
         llm_service._chunk_callback = chunk_callback
         llm_service._event_callback = event_callback
-
-        await server.start()
-
-        version = _get_version()
-        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
-        url = _build_browser_url(
-            server_port, version,
-            dev_mode=(parsed.dev or parsed.preview),
-            webapp_port=webapp_port,
-            base_url_override=base_url,
-        )
-
-        logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
-        logger.info(f"Version: {version}")
-
-        # Step 6: Open browser EARLY — before heavy init
-        if not parsed.no_browser:
-            try:
-                webbrowser.open(url)
-                logger.info(f"Opened browser: {url}")
-            except Exception as e:
-                logger.warning(f"Failed to open browser: {e}")
-                print(f"\nOpen in browser: {url}\n")
 
         # Step 7: Heavy initialization in background with progress reporting
         async def _send_progress(stage, message, percent=None):
