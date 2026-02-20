@@ -25,13 +25,14 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
+- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos.
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
 - **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
 - **Token HUD** with per-request and session-total usage reporting.
 
 ## Philosophy
 
-- **Symbol map, not full files** — A compact, reference-annotated map of your codebase gives the LLM structural context without burning tokens on full file contents.
+- **Symbol map, not full files** — A compact, reference-annotated map of your codebase gives the LLM structural context without burning tokens on full file contents. In document mode, the map switches to keyword-enriched document outlines with cross-reference links.
 - **Stability-based caching** — Content that stays unchanged across requests promotes to higher cache tiers, aligning with provider cache breakpoints (e.g., Anthropic's ephemeral caching). You pay to ingest once; subsequent requests hit cache.
 - **Deterministic edits** — The LLM proposes changes using anchored edit blocks with exact context matching. No fuzzy patching, no guessing.
 - **Visual SVG editing** — SVG files open in a dedicated viewer with pan/zoom and a structural editor. Select, drag, reshape, and duplicate elements directly — no external tools needed.
@@ -199,7 +200,9 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `app.json` | URL cache, history compaction settings | JSON |
 | `system.md` | Main LLM system prompt | Markdown |
 | `system_extra.md` | Additional project-specific instructions | Markdown |
+| `system_doc.md` | Document mode system prompt | Markdown |
 | `snippets.json` | Quick-insert prompt buttons | JSON |
+| `doc-snippets.json` | Document mode snippet buttons | JSON |
 | `compaction.md` | History compaction skill prompt | Markdown |
 | `review.md` | Code review system prompt | Markdown |
 | `review-snippets.json` | Review mode snippet buttons | JSON |
@@ -355,12 +358,27 @@ src/ac_dc/
     config/                      # Default configuration files
         app.json
         compaction.md
+        doc-snippets.json       # Document mode snippet buttons
         llm.json
         review-snippets.json
         review.md
         snippets.json
         system.md
+        system_doc.md            # Document mode system prompt
         system_extra.md
+        system_reminder.md       # Injected before each user message
+    doc_index/
+        __init__.py
+        cache.py                 # mtime-based document cache
+        formatter.py             # Compact outline text output
+        index.py                 # Orchestrator, repo-wide indexing
+        keyword_enricher.py      # Optional KeyBERT keyword extraction
+        reference_index.py       # Cross-file doc/code reference graph
+        extractors/
+            __init__.py
+            base.py              # Base extractor class
+            markdown_extractor.py
+            svg_extractor.py
     symbol_index/
         __init__.py
         cache.py                 # mtime-based symbol cache
