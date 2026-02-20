@@ -415,20 +415,23 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 
 Mode switching is a session-level action — it clears the current context and rebuilds with the appropriate index. Conversation history is preserved but the LLM is informed of the mode change via a system message.
 
-**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built **lazily on first switch to document mode**. This avoids penalising users who never use document mode with a ~65s startup cost. On first switch, the progress bar (described in Progress Reporting below) keeps the user informed during keyword extraction. Once built, both indexes are held in memory so subsequent mode switches are instant. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
+**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built **eagerly in the background after startup completes**. The build is deferred to after the "ready" signal so the startup overlay dismisses and the UI becomes interactive before heavy model loading (KeyBERT/PyTorch sentence-transformers) blocks the GIL and stalls WebSocket delivery. The `_start_background_doc_index()` call is made by `main.py` *after* `_send_progress("ready", ...)` — not inside `complete_deferred_init()` — so the startup overlay is guaranteed to dismiss before KeyBERT/PyTorch model loading blocks the GIL and stalls WebSocket message delivery. Once built, both indexes are held in memory so mode switches are instant. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
 
 **Dispatch mechanism in `_build_tiered_content()`:** The method checks `self._mode` (an enum: `Mode.CODE` or `Mode.DOC`) and calls the appropriate index. Both `SymbolIndex` and `DocIndex` expose the same two methods needed by tier assembly: `get_symbol_map()`/`get_doc_map()` for the full map and `get_file_symbol_block()`/`get_file_doc_block()` for per-file blocks. A shared interface is not needed — the dispatch is a simple if/else in one method. The formatter selection follows the same pattern: `CompactFormatter` for code, `DocFormatter` for documents.
 
 **File discovery in `DocIndex`:** The orchestrator scans the repo for `.md` files using the same `os.walk` pattern as `SymbolIndex._get_source_files()`, filtered by extension rather than `language_for_file()`. Files matching `.gitignore` patterns and the `.ac-dc/` directory are excluded, consistent with the code index.
 
 ```
-User clicks mode toggle
+Server startup
     │
-    ├── If first switch to document mode:
-    │     ├── Show progress bar via startupProgress events
-    │     ├── Build DocIndex (structure extraction + keyword enrichment, ~30-40s first run)
-    │     ├── Build DocReferenceIndex from extracted links
-    │     └── Initialize document-mode StabilityTracker from DocReferenceIndex
+    ├── Code index built, stability initialized, "ready" sent → startup overlay dismissed
+    └── _start_background_doc_index() called AFTER "ready"
+          ├── Show header progress bar via startupProgress/compactionEvent events
+          ├── Build DocIndex (structure extraction + keyword enrichment)
+          ├── Build DocReferenceIndex from extracted links
+          └── Send doc_index_ready compaction event → header progress bar dismissed, mode toggle enabled
+
+User clicks mode toggle (doc index already built)
     │
     ├── Re-index doc files (mtime-based — only changed files re-parsed)
     ├── Clear file context (selected files)
@@ -439,7 +442,7 @@ User clicks mode toggle
     └── Insert system message: "Switched to document mode"
 ```
 
-The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified.
+The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified. The re-index runs with progress reporting via `startupProgress` events so the header progress bar shows activity during the switch. A final `doc_index_ready` compaction event clears the progress bar after the switch completes.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 
@@ -563,7 +566,7 @@ Phases reported via `startupProgress`:
 
 **What is NOT used for doc index progress:**
 
-- **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed.
+- **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed. The `_start_background_doc_index()` call is made by `main.py` *after* `_send_progress("ready", ...)` — not inside `complete_deferred_init()`. This ordering guarantees the startup overlay dismisses and the UI becomes fully interactive before KeyBERT/PyTorch model loading blocks the GIL and stalls WebSocket message delivery.
 - **No blocking mode-switch overlay** — the `mode-switch-overlay` div in `ac-dialog.js` is not shown for background doc index builds. It exists for future use (e.g., blocking mode switches that require user action) but document indexing is fully non-blocking.
 
 **Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress.

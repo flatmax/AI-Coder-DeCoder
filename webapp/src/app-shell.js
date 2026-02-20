@@ -462,6 +462,20 @@ class AcApp extends JRPCClient {
    */
   startupProgress(stage, message, percent) {
     console.log(`startupProgress: stage=${stage}, message=${message}, percent=${percent}, _startupVisible=${this._startupVisible}`);
+
+    // doc_index is a background task — don't let it stall the startup overlay.
+    // Forward its progress to the dialog header bar only.
+    if (stage === 'doc_index') {
+      // Only forward in-progress updates; the completion signal comes
+      // via compaction-event (doc_index_ready) which the dialog handles.
+      if (percent < 100) {
+        window.dispatchEvent(new CustomEvent('mode-switch-progress', {
+          detail: { message: message || '', percent: percent || 0 },
+        }));
+      }
+      return true;
+    }
+
     this._startupMessage = message || '';
     if (typeof percent === 'number') {
       this._startupPercent = Math.min(100, Math.max(0, percent));
@@ -473,16 +487,6 @@ class AcApp extends JRPCClient {
         console.log('startupProgress: dismissing overlay now');
         this._startupVisible = false;
       }, 400);
-    }
-
-    // Forward doc_index progress to dialog's header progress bar.
-    // During startup the startup overlay is visible, but the dialog is
-    // already rendered underneath — keep it informed so the header bar
-    // updates as soon as the overlay dismisses.
-    if (stage === 'doc_index') {
-      window.dispatchEvent(new CustomEvent('mode-switch-progress', {
-        detail: { message: message || '', percent: percent || 0 },
-      }));
     }
 
     return true;

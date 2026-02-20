@@ -494,6 +494,9 @@ def main(args=None):
         await _send_progress("session_restore", "Restoring session...", 30)
         llm_service.complete_deferred_init(symbol_index)
 
+        # NOTE: doc index build is deferred to after "ready" signal below,
+        # so the startup overlay dismisses before heavy model loading starts.
+
         # Index repo (the heaviest step — parses all source files)
         if symbol_index:
             await _send_progress("indexing", "Indexing repository...", 50)
@@ -513,6 +516,11 @@ def main(args=None):
 
         await _send_progress("ready", "Ready", 100)
         logger.info("Startup complete — all services initialized")
+
+        # Start background doc index build AFTER "ready" so the startup
+        # overlay dismisses before heavy model loading (KeyBERT/PyTorch)
+        # blocks the GIL and stalls WebSocket delivery.
+        llm_service._start_background_doc_index()
 
         # Serve forever
         try:

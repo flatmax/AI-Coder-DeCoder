@@ -312,10 +312,9 @@ class LLMService:
         self._init_complete = True
         logger.info("Deferred initialization complete")
 
-        # Start building document index eagerly in the background so it's
-        # ready when the user wants to switch to document mode.  The build
-        # runs in a background asyncio task and doesn't block code-mode usage.
-        self._start_background_doc_index()
+        # Doc index build is started by main.py AFTER the "ready" signal
+        # so the startup overlay dismisses before heavy model loading
+        # (KeyBERT/PyTorch) blocks the GIL and stalls WebSocket delivery.
 
     def _start_background_doc_index(self):
         """Kick off doc index build in background if not already done."""
@@ -479,22 +478,60 @@ class LLMService:
                 "building": True,
             }
 
-        # Doc index is ready — perform the actual mode switch
-        return self._finalize_doc_mode_switch()
+        # Doc index is ready — re-index changed files with progress, then switch
+        if self._doc_index:
+            try:
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            "Re-indexing documents…", 10,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0)
+
+                self._doc_index.index_repo()
+
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            "Switching to document mode…", 90,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0)
+            except Exception as e:
+                logger.warning(f"Doc re-index on mode switch failed: {e}")
+
+        result = self._finalize_doc_mode_switch()
+
+        # Signal completion so header progress bar clears
+        if self._event_callback:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_ready",
+                    {
+                        "stage": "doc_index_ready",
+                        "message": "Switched to document mode",
+                        "mode_available": True,
+                    },
+                )
+            except Exception:
+                pass
+
+        return result
 
     def _finalize_doc_mode_switch(self):
-        """Complete the switch to document mode (doc index must be ready)."""
+        """Complete the switch to document mode (doc index must be ready).
+
+        Note: index_repo() is called by _switch_to_doc_mode() before this
+        method, with progress reporting.  Don't duplicate it here.
+        """
         # Clear file context
         self._context.file_context.clear()
         self._selected_files = []
-
-        # Re-index doc files so any manual edits since the last build are
-        # picked up (mtime-based cache ensures only changed files are re-parsed).
-        if self._doc_index:
-            try:
-                self._doc_index.index_repo()
-            except Exception as e:
-                logger.warning(f"Doc re-index on mode switch failed: {e}")
 
         # Swap system prompt
         self._context.set_system_prompt(self._config.get_doc_system_prompt())

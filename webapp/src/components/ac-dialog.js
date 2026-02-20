@@ -110,6 +110,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       display: flex;
       gap: 4px;
       margin-left: auto;
+      flex-shrink: 0;
     }
 
     .header-action {
@@ -147,8 +148,9 @@ export class AcDialog extends RpcMixin(LitElement) {
       align-items: center;
       gap: 6px;
       margin-right: 8px;
-      flex-shrink: 1;
+      flex-shrink: 10;
       min-width: 0;
+      max-width: 240px;
       overflow: hidden;
     }
     .header-progress-label {
@@ -388,14 +390,17 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
       window.addEventListener('mode-switch-progress', (e) => {
+        if (this._docIndexReady) return;
         const { message, percent } = e.detail || {};
+        // Don't re-enable the overlay if percent indicates completion
+        if (typeof percent === 'number' && percent >= 100) return;
         this._docIndexBuilding = true;
         this._modeSwitching = true;
         if (message !== undefined) this._modeSwitchMessage = message;
         if (typeof percent === 'number') this._modeSwitchPercent = percent;
       });
       window.addEventListener('compaction-event', (e) => {
-        const data = e.detail?.data;
+        const data = e.detail?.event;
         if (!data) return;
         if (data.stage === 'doc_index_ready') {
           // Background doc index build complete — doc mode now available
@@ -404,14 +409,17 @@ export class AcDialog extends RpcMixin(LitElement) {
           this._modeSwitching = false;
           this._modeSwitchMessage = '';
           this._modeSwitchPercent = 0;
+          this.requestUpdate();
           dispatchToast(data.message || '📝 Document index ready — doc mode available', 'info');
         } else if (data.stage === 'doc_index_failed') {
           this._docIndexBuilding = false;
           this._modeSwitching = false;
           this._modeSwitchMessage = '';
           this._modeSwitchPercent = 0;
+          this.requestUpdate();
           dispatchToast(data.message || 'Document index build failed', 'error');
         } else if (data.stage === 'doc_index_progress') {
+          if (this._docIndexReady) return;
           // Background doc index build progress — update overlay bar
           this._docIndexBuilding = true;
           this._modeSwitching = true;
@@ -463,6 +471,13 @@ export class AcDialog extends RpcMixin(LitElement) {
         if (result.mode) this._mode = result.mode;
         this._docIndexReady = !!result.doc_index_ready;
         this._docIndexBuilding = !!result.doc_index_building;
+        // If backend says ready, clear any lingering switch overlay
+        if (this._docIndexReady) {
+          this._modeSwitching = false;
+          this._modeSwitchMessage = '';
+          this._modeSwitchPercent = 0;
+          this._docIndexBuilding = false;
+        }
       }
     } catch (e) {
       // Ignore — RPC may not be ready
@@ -864,7 +879,7 @@ export class AcDialog extends RpcMixin(LitElement) {
           `)}
         </div>
 
-        ${this._modeSwitching ? html`
+        ${this._modeSwitching && !this._docIndexReady ? html`
           <div class="header-progress">
             <span class="header-progress-label">${this._modeSwitchMessage || 'Building…'}</span>
             <div class="header-progress-bar">
