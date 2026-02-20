@@ -356,11 +356,17 @@ MMR significantly reduces keyword permutations. Two further improvements — con
 
 2. **Section size signal** (implemented). Each heading is annotated with `~Nln` showing the line count from that heading to the next. This is computed during extraction at zero cost from the `start_line` delta between consecutive headings. Sections under 5 lines are omitted to reduce noise (the absence of `~Nln` itself signals a trivially short section). This helps the LLM budget file-loading decisions — a `~200ln` section is a significant context investment, while a `~12ln` section is cheap.
 
-3. **Generic keywords for short sections** (not yet addressed). Sections with little text produce generic keywords because the embedding model has less signal to differentiate. MMR helps by forcing diversity, but very short sections (near the `min_section_chars` threshold) may still produce uninformative keywords. Increasing `min_section_chars` would skip these sections entirely; alternatively, a future enhancement could fall back to simple TF-IDF extraction for sections below a character threshold, since TF-IDF is better at surfacing rare terms from short text.
+3. **Generic keywords for short sections** (implemented). Sections with little text produce generic keywords because the embedding model has less signal to differentiate. MMR helps by forcing diversity, but very short sections (near the `min_section_chars` threshold) may still produce uninformative keywords. The enricher applies a **TF-IDF fallback** for sections below `keywords_tfidf_fallback_chars` (default: 150 characters): instead of calling KeyBERT's embedding-based extraction, it uses `TfidfVectorizer` from scikit-learn (already a transitive dependency of keybert) fitted on **all section texts in the document as a corpus**, extracting the highest-scoring terms for the target section. This surfaces terms that are distinctive to the short section relative to its siblings — TF-IDF penalises corpus-wide frequency directly, whereas embedding similarity tends to select generic terms that are semantically close to a short passage's overall meaning. The corpus is built from all cleaned section texts (both short and long) collected during the enrichment pass, so even short sections benefit from contrastive scoring against the full document. The threshold and fallback are configured via `app.json` (`keywords_tfidf_fallback_chars`). Sections below `min_section_chars` are still skipped entirely.
 
-4. **Incidental terms from examples** (implemented). When a section contains worked examples with specific values (model names, token counts, configuration snippets), KeyBERT may select those concrete terms over the conceptual terms that actually describe the section's purpose. For instance, a section explaining a clustering algorithm with an Opus token-budget example may surface "opus" as a keyword instead of "orphan files" or "connected components". The enricher strips fenced code blocks (`` ``` `` … `` ``` ``) and inline code spans (`` `…` ``) from section text before passing it to KeyBERT, so the transformer focuses on explanatory prose rather than example data. Stripping is applied to a copy of the section text used only for embedding — the original content is not modified. The regex is lightweight: fenced blocks are removed with a multiline match on triple-backtick/tilde boundaries, and inline spans with a single-pass substitution. Sections that become empty after stripping (i.e., sections that are *entirely* code) fall back to the unstripped text so they still produce keywords rather than being silently skipped.
+4. **Incidental terms from examples** (implemented). When a section contains worked examples with specific values (model names, token counts, configuration snippets), KeyBERT may select those concrete terms over the conceptual terms that actually describe the section's purpose. For instance, a section explaining a clustering algorithm with an Opus token-budget example may surface "opus" as a keyword instead of "orphan files" or "connected components". The enricher applies two layers of filtering:
+
+   **Layer 1 — Code stripping:** Fenced code blocks (`` ``` `` … `` ``` ``) and inline code spans (`` `…` ``) are stripped from section text before passing it to KeyBERT, so the transformer focuses on explanatory prose rather than example data. Stripping is applied to a copy of the section text used only for embedding — the original content is not modified. The regex is lightweight: fenced blocks are removed with a multiline match on triple-backtick/tilde boundaries, and inline spans with a single-pass substitution. Sections that become empty after stripping (i.e., sections that are *entirely* code) fall back to the unstripped text so they still produce keywords rather than being silently skipped.
+
+   **Layer 2 — Corpus-aware stopwords:** After KeyBERT extracts candidate keywords, the enricher filters out terms that appear in more than `keywords_max_doc_freq` fraction of sections across the entire document (default: 0.6). Terms like "diff viewer", "file picker", or "selection" that pervade a UI spec are corpus-frequent — they describe the document's domain, not any specific section's distinctive content. The document frequency is computed once per `enrich_all()` call from the batch of section texts and applied as a post-filter on each section's keyword list. This is cheap — it reuses the already-extracted candidate lists and requires only a term→count dictionary built during the batch phase. The filter runs *after* KeyBERT scoring so that MMR diversity still operates on the full candidate set; only the final output is pruned. If pruning would remove all keywords for a section, the top keyword is retained regardless of document frequency (a section should never be left entirely without keywords due to filtering).
 
 5. **Adaptive `top_n` for large sections** (implemented). Sections describing multi-pathway decision logic (e.g., "graduate via path A, B, or C depending on X") compress poorly into 3 keywords because the distinctive terms are spread across branches. The enricher uses an adaptive `top_n`: sections with `section_lines >= 15` use `top_n + 2` (default: 5 keywords), while shorter sections use the base `top_n` (default: 3). This captures vocabulary from multiple branches at a modest token cost of ~2–4 extra tokens per large section. The threshold and bonus are not separately configurable — they are hardcoded in the enricher as a simple heuristic. The base `top_n` remains configurable via `app.json`.
+
+6. **Future: Sibling-contrastive re-ranking** (not yet addressed). The TF-IDF fallback (item 3) already provides contrastive keyword extraction for short sections by fitting the vectorizer on all section texts as a corpus. A natural extension would apply the same principle to *all* sections as a **re-ranking step** after KeyBERT extraction: for each KeyBERT candidate keyword, compute its TF-IDF score across sibling sections and boost candidates that are distinctive (high TF-IDF in the target section, low in siblings). This would address cases where KeyBERT selects semantically relevant but non-distinctive terms for medium-to-large sections — e.g., selecting "value tracked" for a section about stability counters when "hash mismatch" would be more distinctive. The mechanism is cheap (reuses the already-fitted `TfidfVectorizer` from the short-section fallback) and requires no new dependencies. It is deferred because the corpus-frequency post-filter (item 4, Layer 2) already removes the worst offenders, and the remaining quality gap is acceptable for an initial release.
 
 ### Integration: `keyword_enricher.py`
 
@@ -381,6 +387,8 @@ KeywordEnricher:
     _ngram_range: (int, int) # (1, 2) for single words and bigrams
     _min_section_chars: int  # skip keyword extraction for very short sections (default: 50)
     _diversity: float        # MMR diversity (0.0 = no diversity, 1.0 = max; default: 0.5)
+    _tfidf_fallback_chars: int  # sections below this use TF-IDF instead of KeyBERT (default: 150)
+    _max_doc_freq: float     # corpus-frequency ceiling for keyword filtering (default: 0.6)
 
     enrich(outline: DocOutline, full_text: string) -> DocOutline:
         full_text_lines = full_text.splitlines()
@@ -390,6 +398,9 @@ KeywordEnricher:
         batch_texts = []
         batch_top_ns = []
         batch_headings = []
+        all_cleaned_texts = []      # all sections (both short and long) for TF-IDF corpus
+        all_cleaned_headings = []
+        all_cleaned_top_ns = []
         for i, heading in enumerate(all_headings):
             end_line = all_headings[i+1].start_line if i+1 < len(all_headings) else len(full_text_lines)
             section_text = "\n".join(full_text_lines[heading.start_line:end_line])
@@ -401,13 +412,27 @@ KeywordEnricher:
             if not cleaned.strip():
                 cleaned = section_text  # fallback: section is entirely code
 
-            batch_texts.append(cleaned)
-            batch_headings.append(heading)
-
             # Adaptive top_n: large sections get more keywords
             section_lines = end_line - heading.start_line
             effective_top_n = _top_n + 2 if section_lines >= 15 else _top_n
-            batch_top_ns.append(effective_top_n)
+
+            all_cleaned_texts.append(cleaned)
+            all_cleaned_headings.append(heading)
+            all_cleaned_top_ns.append(effective_top_n)
+
+            # Route: short sections use TF-IDF fallback, others go to KeyBERT batch
+            if len(cleaned) >= _tfidf_fallback_chars:
+                batch_texts.append(cleaned)
+                batch_headings.append(heading)
+                batch_top_ns.append(effective_top_n)
+
+        # TF-IDF fallback for short sections — now that we have the full corpus
+        tfidf_corpus = [t for t in all_cleaned_texts] if all_cleaned_texts else []
+        for heading, cleaned, effective_top_n in zip(all_cleaned_headings, all_cleaned_texts, all_cleaned_top_ns):
+            if len(cleaned) < _tfidf_fallback_chars:
+                heading.keywords = [
+                    kw for kw, score in _extract_tfidf_keywords(cleaned, effective_top_n, tfidf_corpus)
+                ]
 
         if not batch_texts:
             return outline
@@ -423,10 +448,54 @@ KeywordEnricher:
         if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
             all_keywords = [all_keywords]
 
+        # Build document-frequency map for corpus-aware filtering
+        term_doc_count = {}  # term → number of sections containing it
+        for text in batch_texts:
+            seen = set()
+            for word in text.lower().split():
+                if word not in seen:
+                    term_doc_count[word] = term_doc_count.get(word, 0) + 1
+                    seen.add(word)
+        doc_freq_threshold = len(batch_texts) * _max_doc_freq
+
         for heading, keywords, effective_n in zip(batch_headings, all_keywords, batch_top_ns):
-            heading.keywords = [kw for kw, score in keywords[:effective_n] if score > 0.3]
+            filtered = [
+                kw for kw, score in keywords[:effective_n]
+                if score > 0.3 and not _is_corpus_frequent(kw, term_doc_count, doc_freq_threshold)
+            ]
+            # Never leave a section with zero keywords due to filtering
+            if not filtered and keywords:
+                filtered = [keywords[0][0]]
+            heading.keywords = filtered
 
         return outline
+
+    _is_corpus_frequent(kw: string, term_doc_count: dict, threshold: int) -> bool:
+        # A keyword (possibly a bigram) is corpus-frequent if ALL its constituent
+        # unigrams exceed threshold. This uses unigram document frequencies only —
+        # matching KeyBERT's bigram tokenization would add complexity for marginal
+        # benefit. The ALL-must-exceed rule means a bigram like "tier promotion" is
+        # only filtered if both "tier" AND "promotion" are individually pervasive.
+        # A bigram with one rare constituent (e.g., "cascade demotion") survives.
+        return all(term_doc_count.get(w, 0) > threshold for w in kw.lower().split())
+
+    _extract_tfidf_keywords(text: string, top_n: int, corpus: list[string]) -> list[(string, float)]:
+        # Fallback for short sections where embeddings produce generic keywords.
+        # Uses sklearn's TfidfVectorizer (transitive dep of keybert) fitted on all
+        # section texts as the corpus, so IDF penalises terms common across sections.
+        # The target section must be included in corpus (it is by construction).
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        vec = TfidfVectorizer(ngram_range=_ngram_range, stop_words="english")
+        try:
+            tfidf = vec.fit_transform(corpus)
+        except ValueError:
+            return []  # empty vocabulary after stop words
+        # Find the row corresponding to the target section
+        target_idx = corpus.index(text)
+        feature_names = vec.get_feature_names_out()
+        scores = tfidf.toarray()[target_idx]
+        ranked = sorted(zip(feature_names, scores), key=lambda x: -x[1])
+        return ranked[:top_n]
 
     _strip_code(text: string) -> string:
         # Remove fenced code blocks (```…``` or ~~~…~~~)
@@ -581,7 +650,9 @@ Keyword enrichment is controlled via `app.json`:
     "keywords_ngram_range": [1, 2],
     "keywords_min_section_chars": 50,
     "keywords_min_score": 0.3,
-    "keywords_diversity": 0.5
+    "keywords_diversity": 0.5,
+    "keywords_tfidf_fallback_chars": 150,
+    "keywords_max_doc_freq": 0.6
   }
 }
 ```
@@ -595,6 +666,8 @@ Keyword enrichment is controlled via `app.json`:
 | `keywords_min_section_chars` | int | `50` | Skip keyword extraction for very short sections |
 | `keywords_min_score` | float | `0.3` | Minimum relevance score to include a keyword |
 | `keywords_diversity` | float | `0.5` | MMR diversity penalty (0.0 = pure relevance, 1.0 = max diversity). Higher values push keywords apart in embedding space, reducing permutations |
+| `keywords_tfidf_fallback_chars` | int | `150` | Sections below this character count use TF-IDF extraction instead of KeyBERT embeddings. TF-IDF surfaces rare-but-present terms more reliably than embeddings for short text |
+| `keywords_max_doc_freq` | float | `0.6` | Corpus-frequency ceiling. Keywords where all constituent terms appear in more than this fraction of sections are filtered out. Removes pervasive domain terms ("diff viewer", "file picker") that don't disambiguate |
 
 ## Integration with Cache Tiering
 
