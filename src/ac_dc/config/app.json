@@ -1,13 +1,23 @@
 {
-    "url_cache": {
-        "path": "/tmp/ac-dc-url-cache",
-        "ttl_hours": 24
-    },
-    "history_compaction": {
-        "enabled": true,
-        "compaction_trigger_tokens": 24000,
-        "verbatim_window_tokens": 4000,
-        "summary_budget_tokens": 500,
-        "min_verbatim_exchanges": 2
-    }
+  "history_compaction": {
+    "enabled": true,
+    "compaction_trigger_tokens": 24000,
+    "verbatim_window_tokens": 4000,
+    "summary_budget_tokens": 500,
+    "min_verbatim_exchanges": 2
+  },
+  "url_cache": {
+    "ttl_hours": 24
+  },
+  "doc_index": {
+    "keyword_model": "all-mpnet-base-v2",
+    "keywords_enabled": true,
+    "keywords_top_n": 3,
+    "keywords_ngram_range": [1, 2],
+    "keywords_min_section_chars": 50,
+    "keywords_min_score": 0.3,
+    "keywords_diversity": 0.5,
+    "keywords_tfidf_fallback_chars": 150,
+    "keywords_max_doc_freq": 0.6
+  }
 }

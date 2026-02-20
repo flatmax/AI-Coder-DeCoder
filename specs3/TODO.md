@@ -168,12 +168,18 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Review snippets** — Separate `review-snippets.json` config file, full replacement of snippet drawer when review active (not merged), `get_snippets()` checks `_review_active`
 - [x] **Read-only edit mode** — Skip `apply_edits_to_repo` when `_review_active`, disable commit button in UI, edit blocks still rendered for reference
 
-### Future: Document Mode
-- [ ] **Markdown extractor** — Regex-based heading and link extraction, `DocOutline` data model (`doc_index/extractors/markdown_extractor.py`)
-- [ ] **Document formatter** — Compact text output for document outlines, parallel to `compact_format.py` (`doc_index/formatter.py`)
-- [ ] **Document reference index** — Cross-references: doc↔doc links, doc→code links (`doc_index/reference_index.py`)
-- [ ] **Cache tier integration** — Document outline blocks tracked by stability tracker alongside code symbol blocks, intermingled in tiered content
-- [ ] **Document mode toggle** — Flag controlling verbosity: code mode shows full symbols + heading outlines, document mode shows file names + expanded doc outlines
+### Phase 11: Document Mode (partial)
+- [x] **Markdown extractor** — Regex-based heading and link extraction, `DocOutline` data model (`doc_index/extractors/markdown_extractor.py`)
+- [x] **SVG extractor** — XML-based extraction of titles, descriptions, text elements, groups, links (`doc_index/extractors/svg_extractor.py`)
+- [x] **Document formatter** — Compact text output for document outlines, parallel to `compact_format.py` (`doc_index/formatter.py`)
+- [x] **Document reference index** — Cross-references: doc↔doc links, doc→code links (`doc_index/reference_index.py`)
+- [x] **Document cache** — mtime-based per-file caching with disk persistence (`doc_index/cache.py`)
+- [x] **Keyword enricher** — Optional KeyBERT-based keyword extraction with progress callbacks (`doc_index/keyword_enricher.py`)
+- [x] **Document index** — Orchestrator: repo-wide indexing, doc map generation, signature hashes (`doc_index/index.py`)
+- [x] **Cache tier integration** — Document outline blocks tracked by stability tracker alongside code symbol blocks, intermingled in tiered content
+- [x] **Document mode toggle** — Flag controlling verbosity: code mode shows full symbols + heading outlines, document mode shows file names + expanded doc outlines
+
+### Future: Additional Document Extractors
 - [ ] **DOCX extractor** — Optional `python-docx` dependency, heading extraction by style, hyperlinks (`doc_index/extractors/docx_extractor.py`)
 - [ ] **XLSX extractor** — Optional `openpyxl` dependency, sheet names, dimensions, header rows (`doc_index/extractors/xlsx_extractor.py`)
 - [ ] **PDF extractor** — Optional `pymupdf`/`pdfplumber` dependency, TOC extraction, page count (`doc_index/extractors/pdf_extractor.py`)

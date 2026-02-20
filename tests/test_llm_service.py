@@ -395,3 +395,118 @@ class TestHistorySearch:
         service._context.add_message("user", "hello")
         results = service.history_search("")
         assert len(results) == 0
+
+
+# === Mode Switching ===
+
+
+class TestModeSwitch:
+    def test_get_mode_default(self, service):
+        """Default mode is code."""
+        result = service.get_mode()
+        assert result["mode"] == "code"
+
+    @pytest.mark.asyncio
+    async def test_switch_mode_invalid(self, service):
+        """Invalid mode returns error."""
+        result = await service.switch_mode("invalid")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_switch_mode_same_mode(self, service):
+        """Switching to current mode is a no-op."""
+        result = await service.switch_mode("code")
+        assert result["mode"] == "code"
+        assert "Already" in result.get("message", "")
+
+    def test_switch_to_code_from_doc(self, service):
+        """_switch_to_code_mode restores code mode."""
+        service._context.set_mode("doc")
+        result = service._switch_to_code_mode()
+        assert result["mode"] == "code"
+
+
+# === Review State ===
+
+
+class TestReviewState:
+    def test_get_review_state_inactive(self, service):
+        """Review state inactive by default."""
+        result = service.get_review_state()
+        assert result["active"] is False
+
+    def test_get_review_file_diff_no_review(self, service):
+        """get_review_file_diff returns error when no review active."""
+        result = service.get_review_file_diff("test.py")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_end_review_no_active(self, service):
+        """end_review returns error when no review active."""
+        result = await service.end_review()
+        assert "error" in result
+
+
+# === Session Management ===
+
+
+class TestSessionManagement:
+    def test_get_history_status(self, service):
+        """get_history_status returns required keys."""
+        result = service.get_history_status()
+        assert "session_id" in result
+        assert "message_count" in result
+        assert "enabled" in result
+
+    def test_history_list_sessions(self, service):
+        """history_list_sessions returns a list."""
+        result = service.history_list_sessions()
+        assert isinstance(result, list)
+
+    def test_history_new_session(self, service):
+        """history_new_session returns new session_id."""
+        result = service.history_new_session()
+        assert "session_id" in result
+
+    def test_get_snippets_code_mode(self, service):
+        """get_snippets returns list in code mode."""
+        snippets = service.get_snippets()
+        assert isinstance(snippets, list)
+
+    def test_complete_deferred_init_idempotent(self, service):
+        """complete_deferred_init is idempotent when already complete."""
+        service.complete_deferred_init()
+        assert service.init_complete is True
+
+
+# === Tiered Content Building ===
+
+
+class TestBuildTieredContent:
+    def test_returns_none_when_not_initialized(self, service):
+        """_build_tiered_content returns None when stability not initialized."""
+        service._stability_initialized = False
+        result = service._build_tiered_content()
+        assert result is None
+
+    def test_returns_dict_when_initialized(self, service):
+        """_build_tiered_content returns tier dict when initialized."""
+        service._stability_initialized = True
+        result = service._build_tiered_content()
+        assert isinstance(result, dict)
+        assert "l0" in result
+        assert "l1" in result
+        assert "l2" in result
+        assert "l3" in result
+
+    def test_tier_keys_have_required_fields(self, service):
+        """Each tier in tiered content has required fields."""
+        service._stability_initialized = True
+        result = service._build_tiered_content()
+        for key in ("l0", "l1", "l2", "l3"):
+            tier = result[key]
+            assert "symbols" in tier
+            assert "files" in tier
+            assert "history" in tier
+            assert "graduated_files" in tier
+            assert "graduated_history_indices" in tier

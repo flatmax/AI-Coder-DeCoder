@@ -250,6 +250,7 @@ export class SvgEditor {
     this._marqueeRect = null;    // the visible SVG <rect> overlay
     this._marqueeStart = null;   // { x, y } in SVG coords
     this._marqueeActive = false;
+    this._marqueePendingToggle = null; // element to toggle-in if drag is tiny (deferred shift+click)
 
     // Text editing state
     this._textEditEl = null;      // the <text> element being edited
@@ -604,54 +605,51 @@ export class SvgEditor {
     // Second: hit-test for an element
     const target = this._hitTest(screenX, screenY);
 
-    if (!target) {
-      if (isShift) {
-        // Shift+click on empty space — start marquee selection
-        e.preventDefault();
-        e.stopPropagation();
+    // --- Shift key handling ---
+    if (isShift) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (target) {
+        if (this._multiSelected.has(target)) {
+          // Shift+click on already-selected element — toggle it OUT immediately
+          this._multiSelected.delete(target);
+          if (this._selected === target) {
+            const remaining = [...this._multiSelected];
+            this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+          }
+          if (this._multiSelected.size === 0) {
+            this._deselect();
+          } else {
+            this._renderHandles();
+            this._onSelect(this._selected);
+          }
+          // No marquee — toggle-out is a discrete action
+          return;
+        }
+
+        // Shift+click on unselected element — defer the toggle-in.
+        // If the user drags (real marquee), the toggle is discarded.
+        // If the drag is tiny (< 5px), _finishMarquee applies the toggle.
+        this._marqueePendingToggle = target;
         this._startMarquee(svgPt);
         return;
       }
-      // Clicked on empty space — deselect all
+
+      // Shift+click on empty space — start marquee (may deselect on tiny drag)
+      this._marqueePendingToggle = null;
+      this._startMarquee(svgPt);
+      return;
+    }
+
+    // --- No target, no shift ---
+    if (!target) {
       this._deselect();
       return;
     }
 
     e.preventDefault();
     e.stopPropagation();
-
-    if (isShift) {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Shift+click on an already-selected element — toggle it out
-      if (this._multiSelected.has(target)) {
-        this._multiSelected.delete(target);
-        if (this._selected === target) {
-          const remaining = [...this._multiSelected];
-          this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
-        }
-        if (this._multiSelected.size === 0) {
-          this._deselect();
-        } else {
-          this._renderHandles();
-          this._onSelect(this._selected);
-        }
-        return;
-      }
-
-      // Shift+click on an unselected element — toggle it in
-      if (!this._selected) this._selected = target;
-      this._multiSelected.add(target);
-      this._renderHandles();
-      this._onSelect(this._selected);
-
-      // Start marquee tracking so shift+drag still works for area selection.
-      // On pointer-up, the tiny-marquee fallback is skipped since we already toggled.
-      this._marqueeClickTarget = null;
-      this._startMarquee(svgPt);
-      return;
-    }
 
     // If clicking an element that's already part of a multi-selection,
     // start a multi-drag without breaking the selection.
@@ -676,12 +674,7 @@ export class SvgEditor {
     } else if (tag === 'path' && model.endpoints) {
       this._startPathDrag(target, svgPt);
     } else if (model.drag) {
-      // If we're clicking an element that's part of a multi-selection, do multi-drag
-      if (this._multiSelected.size > 1 && this._multiSelected.has(target)) {
-        this._startMultiDrag(svgPt);
-      } else {
-        this._startElementDrag(target, svgPt);
-      }
+      this._startElementDrag(target, svgPt);
     }
   }
 
@@ -1050,6 +1043,7 @@ export class SvgEditor {
 
   /**
    * Start drawing a selection rectangle from the given SVG point.
+   * _marqueePendingToggle must be set by the caller before calling this.
    */
   _startMarquee(svgPt) {
     this._marqueeStart = { x: svgPt.x, y: svgPt.y };
@@ -1129,12 +1123,14 @@ export class SvgEditor {
    */
   _finishMarquee(svgPt) {
     const start = this._marqueeStart;
+    const pendingToggle = this._marqueePendingToggle;
+
     if (!start) {
       this._cancelMarquee();
       return;
     }
 
-    // Compute the marquee bounds in SVG coords
+    // Compute the marquee bounds in SVG root coords
     const mx1 = Math.min(start.x, svgPt.x);
     const my1 = Math.min(start.y, svgPt.y);
     const mx2 = Math.max(start.x, svgPt.x);
@@ -1143,130 +1139,115 @@ export class SvgEditor {
     // Remove the visual marquee rect
     this._cancelMarquee();
 
-    // Minimum drag distance to count as a marquee (prevent accidental tiny drags)
+    // Minimum drag distance to count as a real marquee
     const minSize = this._screenDistToSvgDist(5);
     if ((mx2 - mx1) < minSize && (my2 - my1) < minSize) {
-      // Too small — treat as a Shift+click toggle on the element under cursor
-      const clickTarget = this._marqueeClickTarget;
-      this._marqueeClickTarget = null;
-      if (clickTarget) {
-        if (this._multiSelected.has(clickTarget)) {
-          this._multiSelected.delete(clickTarget);
-          if (this._selected === clickTarget) {
-            const remaining = [...this._multiSelected];
-            this._selected = remaining.length > 0 ? remaining[remaining.length - 1] : null;
-          }
-          if (this._multiSelected.size === 0) {
-            this._deselect();
-            return;
-          }
-          this._renderHandles();
-          this._onSelect(this._selected);
-        } else {
-          if (!this._selected) this._selected = clickTarget;
-          this._multiSelected.add(clickTarget);
-          this._renderHandles();
-          this._onSelect(this._selected);
-        }
+      // Tiny drag — not a real marquee.
+      if (pendingToggle) {
+        // Shift+click on element with no meaningful drag — apply deferred toggle-in
+        if (!this._selected) this._selected = pendingToggle;
+        this._multiSelected.add(pendingToggle);
+        this._renderHandles();
+        this._onSelect(this._selected);
+        return;
       }
+      // Shift+click on empty space with no meaningful drag — deselect all
+      this._deselect();
       return;
     }
 
-    this._marqueeClickTarget = null;
+    // --- Real marquee drag: collect elements whose bboxes overlap ---
+    // Determine drag direction: forward = left-to-right (containment mode)
+    const isForward = svgPt.x >= start.x && svgPt.y >= start.y;
 
-    // Find all editable elements whose bounding boxes overlap the marquee
+    const hits = this._collectMarqueeHits(mx1, my1, mx2, my2, isForward);
+
+    if (hits.length === 0) return;
+
+    // Add hits to multi-selection (shift = additive)
+    for (const el of hits) {
+      this._multiSelected.add(el);
+    }
+
+    // Ensure we have a primary selection
+    if (!this._selected || !this._multiSelected.has(this._selected)) {
+      this._selected = hits[hits.length - 1];
+    }
+
+    this._renderHandles();
+    this._onSelect(this._selected);
+  }
+
+  /**
+   * Collect editable elements whose transformed bounding boxes overlap
+   * the marquee rectangle (in SVG root coordinates).
+   *
+   * @param {number} mx1 - marquee left
+   * @param {number} my1 - marquee top
+   * @param {number} mx2 - marquee right
+   * @param {number} my2 - marquee bottom
+   * @param {boolean} isForward - true = containment mode, false = crossing mode
+   * @returns {Element[]}
+   */
+  _collectMarqueeHits(mx1, my1, mx2, my2, isForward) {
     const hits = [];
+
+    const testElement = (el) => {
+      const model = _getInteractionModel(el);
+      if (!model.drag) return;
+
+      try {
+        const bbox = el.getBBox();
+        if (bbox.width === 0 && bbox.height === 0) return;
+
+        // Transform bbox corners into SVG root coordinate space
+        const tl = this._localToSvgRoot(el, bbox.x, bbox.y);
+        const tr = this._localToSvgRoot(el, bbox.x + bbox.width, bbox.y);
+        const br = this._localToSvgRoot(el, bbox.x + bbox.width, bbox.y + bbox.height);
+        const bl = this._localToSvgRoot(el, bbox.x, bbox.y + bbox.height);
+
+        // Compute axis-aligned bounding box of transformed corners
+        const bx1 = Math.min(tl.x, tr.x, br.x, bl.x);
+        const by1 = Math.min(tl.y, tr.y, br.y, bl.y);
+        const bx2 = Math.max(tl.x, tr.x, br.x, bl.x);
+        const by2 = Math.max(tl.y, tr.y, br.y, bl.y);
+
+        if (isForward) {
+          // Containment mode — element must be fully inside marquee
+          if (bx1 >= mx1 && by1 >= my1 && bx2 <= mx2 && by2 <= my2) {
+            hits.push(el);
+          }
+        } else {
+          // Crossing mode — any intersection counts (AABB overlap)
+          if (bx1 <= mx2 && bx2 >= mx1 && by1 <= my2 && by2 >= my1) {
+            hits.push(el);
+          }
+        }
+      } catch {
+        // getBBox can fail for hidden elements
+      }
+    };
+
     const children = this._svg.children;
     for (let i = 0; i < children.length; i++) {
       const el = children[i];
       // Skip our overlays
       if (el.classList && el.classList.contains(HANDLE_CLASS)) continue;
       if (el.id === HANDLE_GROUP_ID) continue;
-      // Skip non-editable elements
       const tag = el.tagName.toLowerCase();
       if (['defs', 'style', 'metadata', 'title', 'desc'].includes(tag)) continue;
-      const model = _getInteractionModel(el);
-      if (!model.drag) continue;
 
-      // Check bounding box overlap
-      try {
-        const bbox = el.getBBox();
-        if (bbox.width === 0 && bbox.height === 0) continue;
+      testElement(el);
 
-        const bx1 = bbox.x;
-        const by1 = bbox.y;
-        const bx2 = bbox.x + bbox.width;
-        const by2 = bbox.y + bbox.height;
-
-        // AABB intersection test
-        if (bx1 <= mx2 && bx2 >= mx1 && by1 <= my2 && by2 >= my1) {
-          hits.push(el);
-        }
-      } catch {
-        // getBBox can fail for hidden elements
-      }
-    }
-
-    // Also check nested elements inside <g> groups (one level deep)
-    for (let i = 0; i < children.length; i++) {
-      const el = children[i];
-      if (el.tagName.toLowerCase() !== 'g') continue;
-      if (el.classList && el.classList.contains(HANDLE_CLASS)) continue;
-      if (el.id === HANDLE_GROUP_ID) continue;
-
-      for (let j = 0; j < el.children.length; j++) {
-        const child = el.children[j];
-        const childModel = _getInteractionModel(child);
-        if (!childModel.drag) continue;
-
-        try {
-          const bbox = child.getBBox();
-          if (bbox.width === 0 && bbox.height === 0) continue;
-
-          const bx1 = bbox.x;
-          const by1 = bbox.y;
-          const bx2 = bbox.x + bbox.width;
-          const by2 = bbox.y + bbox.height;
-
-          if (bx1 <= mx2 && bx2 >= mx1 && by1 <= my2 && by2 >= my1) {
-            hits.push(child);
-          }
-        } catch {
-          // skip
+      // Also check nested elements inside <g> groups (one level deep)
+      if (tag === 'g') {
+        for (let j = 0; j < el.children.length; j++) {
+          testElement(el.children[j]);
         }
       }
     }
 
-    if (hits.length === 0) return;
-
-    // Determine drag direction: forward = left-to-right (containment mode)
-    const isForward = svgPt.x >= start.x && svgPt.y >= start.y;
-
-    // In containment mode (forward), filter to only fully enclosed elements
-    const selected = isForward
-      ? hits.filter(el => {
-        try {
-          const bbox = el.getBBox();
-          return bbox.x >= mx1 && bbox.y >= my1
-            && (bbox.x + bbox.width) <= mx2 && (bbox.y + bbox.height) <= my2;
-        } catch { return false; }
-      })
-      : hits;  // crossing mode — any intersection counts
-
-    if (selected.length === 0) return;
-
-    // Add hits to multi-selection (Shift means additive)
-    for (const el of selected) {
-      this._multiSelected.add(el);
-    }
-
-    // Ensure we have a primary selection
-    if (!this._selected || !this._multiSelected.has(this._selected)) {
-      this._selected = selected[selected.length - 1];
-    }
-
-    this._renderHandles();
-    this._onSelect(this._selected);
+    return hits;
   }
 
   /**
@@ -1279,7 +1260,7 @@ export class SvgEditor {
     }
     this._marqueeStart = null;
     this._marqueeActive = false;
-    this._marqueeClickTarget = null;
+    this._marqueePendingToggle = null;
     this._svg.style.cursor = '';
   }
 
@@ -1432,6 +1413,24 @@ export class SvgEditor {
     return this._screenDistToSvgDist(HANDLE_RADIUS);
   }
 
+  /**
+   * Transform a point from an element's local coordinate space into the
+   * SVG root coordinate space.  Accounts for ancestor <g> transforms so
+   * overlay handles align with the visually-rendered position.
+   */
+  _localToSvgRoot(el, lx, ly) {
+    const ctm = el.getCTM();
+    const svgCtm = this._svg.getCTM();
+    if (ctm && svgCtm) {
+      const m = svgCtm.inverse().multiply(ctm);
+      return {
+        x: m.a * lx + m.c * ly + m.e,
+        y: m.b * lx + m.d * ly + m.f,
+      };
+    }
+    return { x: lx, y: ly };
+  }
+
   _createHandle(parent, cx, cy, type, index, shape = 'circle') {
     const ns = 'http://www.w3.org/2000/svg';
     const r = this._getHandleRadius();
@@ -1474,14 +1473,17 @@ export class SvgEditor {
   _renderLineHandles(g, el) {
     const x1 = _num(el, 'x1'), y1 = _num(el, 'y1');
     const x2 = _num(el, 'x2'), y2 = _num(el, 'y2');
-    this._createHandle(g, x1, y1, 'endpoint', 0);
-    this._createHandle(g, x2, y2, 'endpoint', 1);
+    const p1 = this._localToSvgRoot(el, x1, y1);
+    const p2 = this._localToSvgRoot(el, x2, y2);
+    this._createHandle(g, p1.x, p1.y, 'endpoint', 0);
+    this._createHandle(g, p2.x, p2.y, 'endpoint', 1);
   }
 
   _renderPolyHandles(g, el) {
     const points = _parsePoints(el);
     points.forEach((p, i) => {
-      this._createHandle(g, p.x, p.y, 'endpoint', i);
+      const sp = this._localToSvgRoot(el, p.x, p.y);
+      this._createHandle(g, sp.x, sp.y, 'endpoint', i);
     });
   }
 
@@ -1496,7 +1498,8 @@ export class SvgEditor {
       { x: x, y: y + h },
     ];
     corners.forEach((c, i) => {
-      this._createHandle(g, c.x, c.y, 'resize-corner', i, 'rect');
+      const sp = this._localToSvgRoot(el, c.x, c.y);
+      this._createHandle(g, sp.x, sp.y, 'resize-corner', i, 'rect');
     });
   }
 
@@ -1510,7 +1513,8 @@ export class SvgEditor {
       { x: cx, y: cy - r },
     ];
     edges.forEach((p, i) => {
-      this._createHandle(g, p.x, p.y, 'resize-edge', i, 'rect');
+      const sp = this._localToSvgRoot(el, p.x, p.y);
+      this._createHandle(g, sp.x, sp.y, 'resize-edge', i, 'rect');
     });
   }
 
@@ -1525,7 +1529,8 @@ export class SvgEditor {
       { x: cx, y: cy - ry },
     ];
     edges.forEach((p, i) => {
-      this._createHandle(g, p.x, p.y, 'resize-edge', i, 'rect');
+      const sp = this._localToSvgRoot(el, p.x, p.y);
+      this._createHandle(g, sp.x, sp.y, 'resize-edge', i, 'rect');
     });
   }
 
@@ -1549,11 +1554,13 @@ export class SvgEditor {
           if (i >= 2 && points[i - 2].type === 'endpoint') ep = points[i - 2];
         }
         if (ep) {
+          const sp1 = this._localToSvgRoot(el, points[i].x, points[i].y);
+          const sp2 = this._localToSvgRoot(el, ep.x, ep.y);
           const line = document.createElementNS(ns, 'line');
-          line.setAttribute('x1', points[i].x);
-          line.setAttribute('y1', points[i].y);
-          line.setAttribute('x2', ep.x);
-          line.setAttribute('y2', ep.y);
+          line.setAttribute('x1', sp1.x);
+          line.setAttribute('y1', sp1.y);
+          line.setAttribute('x2', sp2.x);
+          line.setAttribute('y2', sp2.y);
           line.setAttribute('stroke', '#4fc3f7');
           line.setAttribute('stroke-width', sw);
           line.setAttribute('stroke-opacity', '0.4');
@@ -1569,9 +1576,10 @@ export class SvgEditor {
 
     // Draw handles — endpoints as circles, control points as diamonds
     points.forEach((p, i) => {
+      const sp = this._localToSvgRoot(el, p.x, p.y);
       const handleType = p.type === 'control' ? 'path-control' : 'path-point';
       const shape = p.type === 'control' ? 'diamond' : 'circle';
-      this._createHandle(g, p.x, p.y, handleType, i, shape);
+      this._createHandle(g, sp.x, sp.y, handleType, i, shape);
     });
 
     // Store point metadata on the handle group for drag lookup

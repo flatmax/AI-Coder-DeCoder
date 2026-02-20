@@ -1,0 +1,1 @@
+"""Document index — structural outlines for markdown files."""

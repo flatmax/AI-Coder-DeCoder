@@ -40,6 +40,7 @@ The root component extends `JRPCClient`, managing the WebSocket connection and r
 - Route `file-save` events to Repo or Settings RPC
 - Trigger token HUD on `streamComplete`
 - Handle reconnection with exponential backoff
+- Re-layout viewers on window resize (RAF-throttled to avoid jank — see [Window Resize Handling](#window-resize-handling))
 
 ### Server Callbacks
 
@@ -204,6 +205,16 @@ Post-edit refresh (`stream-complete` with `files_modified`, or `files-modified` 
 
 See [Diff Viewer](diff_viewer.md) for the Monaco editor and [SVG Viewer](svg_viewer.md) for the SVG diff viewer.
 
+## Window Resize Handling
+
+Window resize events (display change, maximize, laptop lid reopen) trigger Monaco `layout()` to recalculate the editor dimensions. This is **throttled to one layout per animation frame** via `requestAnimationFrame` to prevent jank:
+
+- A pending RAF handle (`_resizeRAF`) gates the handler — subsequent resize events within the same frame are dropped
+- The RAF callback clears the handle before calling `layout()`, re-arming for the next frame
+- The handle is cancelled in `disconnectedCallback` to prevent stale callbacks
+
+Without this throttle, rapid resize events can cause a feedback loop: scroll → layout shift → resize event → `layout()` → forced reflow → scroll position recalculated → visible jank. This is especially problematic when horizontal scroll state is being persisted, as the viewport save queries (`getScrollTop`, `getScrollLeft`, `getPosition`) force synchronous layout.
+
 ## File and Viewport Persistence
 
 The app shell persists the last-opened file and its viewport state to localStorage, restoring them on page refresh for seamless continuity.
@@ -218,7 +229,7 @@ The app shell persists the last-opened file and its viewport state to localStora
 ### Save Triggers
 
 - **File path**: saved on every `navigate-file` event, immediately before routing to the viewer
-- **Viewport state**: saved on `beforeunload` (page refresh/close) and before navigating away from the current file. SVG files are excluded (SVG zoom restore is not yet supported)
+- **Viewport state**: saved on `beforeunload` (page refresh/close) and before navigating away from the current file. SVG files are excluded (SVG zoom restore is not yet supported). The pre-navigation save is wrapped in a try/catch to prevent Monaco layout query failures from blocking file navigation
 - The diff viewer's `getViewportState()` returns the modified editor's `scrollTop`, `scrollLeft`, cursor `lineNumber`, and `column`
 
 ### Restore Flow

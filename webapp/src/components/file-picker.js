@@ -24,6 +24,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     _contextMenu: { type: Object, state: true }, // {x, y, node, isDir}
     _contextInput: { type: Object, state: true }, // {type, path, value}
     _activeInViewer: { type: String, state: true },
+    _branch: { type: String, state: true },          // current git branch
+    _branchDetached: { type: Boolean, state: true },
     _sortMode: { type: String, state: true },       // 'name' | 'mtime' | 'size'
     _sortAscending: { type: Boolean, state: true },
   };
@@ -170,6 +172,35 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     }
     .node-name.untracked {
       color: var(--accent-green);
+    }
+
+    /* Branch badge next to repo name */
+    .branch-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 1px 8px 1px 6px;
+      margin-left: 6px;
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex-shrink: 0;
+      line-height: 1.4;
+    }
+    .branch-badge.detached {
+      color: var(--accent-orange);
+      border-color: rgba(240, 136, 62, 0.3);
+    }
+    .branch-icon {
+      font-size: 0.65rem;
+      flex-shrink: 0;
     }
 
     /* Badges */
@@ -325,6 +356,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     this._contextMenu = null;
     this._contextInput = null;
     this._activeInViewer = '';
+    this._branch = '';
+    this._branchDetached = false;
     this._allFilePaths = [];
     this._flatVisible = [];
     this._initialAutoSelect = false;
@@ -404,6 +437,26 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       this._staged = result.staged || [];
       this._untracked = result.untracked || [];
       this._diffStats = result.diff_stats || {};
+
+      // Fetch current branch
+      try {
+        const branchResult = await this.rpcExtract('Repo.get_current_branch');
+        if (branchResult && !branchResult.error) {
+          const name = typeof branchResult === 'string' ? branchResult : (branchResult.branch || '');
+          this._branchDetached = (name === 'HEAD');
+          if (this._branchDetached) {
+            // Detached HEAD — show short SHA instead
+            try {
+              const sha = await this.rpcExtract('Repo.resolve_ref', 'HEAD');
+              this._branch = (typeof sha === 'string' ? sha : '').slice(0, 7) || 'detached';
+            } catch { this._branch = 'detached'; }
+          } else {
+            this._branch = name;
+          }
+        }
+      } catch (e) {
+        // Non-critical — leave branch empty
+      }
 
       // Collect all file paths
       this._allFilePaths = [];
@@ -856,6 +909,13 @@ export class AcFilePicker extends RpcMixin(LitElement) {
         />
 
         <span class="node-name ${isDir ? 'dir' : ''}${!isDir && gitStatus ? ` ${gitStatus}` : ''}">${node.name}</span>
+
+        ${isDir && node.path === '' && this._branch ? html`
+          <span class="branch-badge ${this._branchDetached ? 'detached' : ''}"
+                title="${this._branchDetached ? 'Detached HEAD' : 'Branch'}: ${this._branch}">
+            <span class="branch-icon">⎇</span>${this._branch}
+          </span>
+        ` : nothing}
 
         <span class="badges">
           ${!isDir && node.lines > 0 ? html`

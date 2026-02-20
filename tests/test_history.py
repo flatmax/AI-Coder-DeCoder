@@ -226,6 +226,40 @@ class TestImagePersistence:
         assert "image_refs" not in msg
 
 
+class TestImageUtilities:
+    def test_parse_data_uri(self):
+        """_parse_data_uri extracts mime type and raw bytes."""
+        import base64
+        from ac_dc.history_store import _parse_data_uri
+        img_data = base64.b64encode(b"hello").decode()
+        data_uri = f"data:image/png;base64,{img_data}"
+        result = _parse_data_uri(data_uri)
+        assert result is not None
+        mime, raw = result
+        assert mime == "image/png"
+        assert raw == b"hello"
+
+    def test_parse_data_uri_invalid(self):
+        """_parse_data_uri returns (None, None) for non-data URIs."""
+        from ac_dc.history_store import _parse_data_uri
+        result = _parse_data_uri("not-a-data-uri")
+        assert result == (None, None)
+
+    def test_data_uri_hash_deterministic(self):
+        """_data_uri_hash is deterministic."""
+        from ac_dc.history_store import _data_uri_hash
+        h1 = _data_uri_hash("data:image/png;base64,abc123")
+        h2 = _data_uri_hash("data:image/png;base64,abc123")
+        assert h1 == h2
+
+    def test_data_uri_hash_different_inputs(self):
+        """_data_uri_hash differs for different inputs."""
+        from ac_dc.history_store import _data_uri_hash
+        h1 = _data_uri_hash("data:image/png;base64,abc")
+        h2 = _data_uri_hash("data:image/png;base64,xyz")
+        assert h1 != h2
+
+
 # ============================================================
 # Topic Detector Tests
 # ============================================================
