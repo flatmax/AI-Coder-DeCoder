@@ -559,6 +559,8 @@ Phases reported via `startupProgress`:
 3. When `compactionEvent` with `stage === "doc_index_ready"` fires, the dialog clears the progress bar (`_modeSwitching = false`, `_docIndexBuilding = false`) and shows a toast: "📝 Document index ready — doc mode available".
 4. The mode toggle button in the dialog header shows a pulsing `⏳` icon while `_docIndexBuilding` is true, switching to `📝` when the index is ready.
 
+**Resilient state recovery:** The `doc_index_ready` compaction event may be missed if the browser connects after the background build completes, or if a WebSocket reconnection drops the event. To handle this, `_refreshMode()` — which queries the server-side `get_mode()` RPC for the authoritative `doc_index_ready` flag — is called not only on initial RPC connection but also on `stream-complete` and `state-loaded` events. This ensures the mode toggle icon reflects reality after the next user interaction even if the one-shot completion event was lost.
+
 **What is NOT used for doc index progress:**
 
 - **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed.
