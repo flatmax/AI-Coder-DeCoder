@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
-- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos.
+- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. Install `pip install ac-dc[docs]` for keyword extraction support (optional — document mode works without it).
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
 - **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
 - **Token HUD** with per-request and session-total usage reporting.
@@ -101,6 +101,8 @@ cd /path/to/your/project
 ```
 
 AC⚡DC opens your browser and connects via WebSocket. The terminal stays running as the backend.
+
+> **Note:** The standalone binary includes full document mode support (heading outlines, cross-references, cache tiering), but keyword-enriched headings require the Python `keybert` package which is not bundled. If you want keyword extraction for better disambiguation of repetitive document structures, [run from source](#running-from-source) and install with `pip install ac-dc[docs]`.
 
 ### Provider Configuration
 
@@ -269,6 +271,9 @@ cd AI-Coder-DeCoder
 
 # Install Python dependencies (with dev extras)
 pip install -e ".[dev]"
+
+# Optional: install document mode keyword extraction (KeyBERT + sentence-transformers)
+pip install -e ".[docs]"
 
 # Install webapp dependencies
 npm install
