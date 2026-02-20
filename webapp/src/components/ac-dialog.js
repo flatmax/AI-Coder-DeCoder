@@ -901,7 +901,7 @@ export class AcDialog extends RpcMixin(LitElement) {
             ?disabled=${this._docIndexBuilding}
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onModeToggle()}>
-            ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : this._docIndexReady ? '📝' : '💻'}
+            ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
           </button>
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
