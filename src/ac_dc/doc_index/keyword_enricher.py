@@ -38,10 +38,12 @@ class KeywordEnricher:
         if self._available is not None:
             return self._available
 
+        logger.info(f"Initializing KeyBERT with model: {self._model_name}")
+
         if progress_callback:
             progress_callback(
                 "doc_index",
-                f"Loading keyword model ({self._model_name})...",
+                f"Loading keyword model ({self._model_name})…",
                 2,
             )
 
@@ -56,22 +58,35 @@ class KeywordEnricher:
             try:
                 from sentence_transformers import SentenceTransformer
                 from huggingface_hub import try_to_load_from_cache
-                probe = try_to_load_from_cache(self._model_name, "config.json")
+                probe = try_to_load_from_cache(
+                    f"sentence-transformers/{self._model_name}", "config.json"
+                )
                 if probe is None:
                     _downloading = True
             except Exception:
                 # Probe failed — not critical; proceed with init anyway
                 pass
 
-            if _downloading and progress_callback:
-                progress_callback(
-                    "doc_index",
-                    f"Downloading keyword model ({self._model_name}) — this is a one-time download...",
-                    3,
-                )
+            if _downloading:
                 logger.info(
                     f"Sentence-transformer model '{self._model_name}' not cached — downloading"
                 )
+                if progress_callback:
+                    progress_callback(
+                        "doc_index",
+                        f"Downloading keyword model ({self._model_name}) — one-time download…",
+                        3,
+                    )
+            else:
+                logger.info(
+                    f"Sentence-transformer model '{self._model_name}' found in cache"
+                )
+                if progress_callback:
+                    progress_callback(
+                        "doc_index",
+                        f"Loading keyword model from cache…",
+                        5,
+                    )
 
             self._kw_model = KeyBERT(model=self._model_name)
             self._available = True
@@ -80,7 +95,7 @@ class KeywordEnricher:
             if progress_callback:
                 progress_callback(
                     "doc_index",
-                    "Keyword model loaded",
+                    "Keyword model ready",
                     10,
                 )
         except ImportError:

@@ -475,8 +475,11 @@ class AcApp extends JRPCClient {
       }, 400);
     }
 
-    // Forward doc_index progress to mode-switch overlay when startup is done
-    if (!this._startupVisible && stage === 'doc_index') {
+    // Forward doc_index progress to dialog's header progress bar.
+    // During startup the startup overlay is visible, but the dialog is
+    // already rendered underneath — keep it informed so the header bar
+    // updates as soon as the overlay dismisses.
+    if (stage === 'doc_index') {
       window.dispatchEvent(new CustomEvent('mode-switch-progress', {
         detail: { message: message || '', percent: percent || 0 },
       }));

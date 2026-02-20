@@ -143,41 +143,141 @@ class TestDocOutline:
 
 class TestDocCache:
 
-    def test_put_get_roundtrip(self):
-        cache = DocCache()
+    def test_put_get_roundtrip(self, tmp_path):
+        cache = DocCache(repo_root=str(tmp_path))
         outline = DocOutline(path="test.md", headings=[DocHeading(text="T", level=1)])
         cache.put("test.md", 100.0, outline)
         result = cache.get("test.md", 100.0)
         assert result is not None
         assert result.path == "test.md"
 
-    def test_stale_mtime(self):
-        cache = DocCache()
+    def test_stale_mtime(self, tmp_path):
+        cache = DocCache(repo_root=str(tmp_path))
         outline = DocOutline(path="test.md")
         cache.put("test.md", 100.0, outline)
         assert cache.get("test.md", 200.0) is None
 
-    def test_keyword_model_mismatch(self):
-        cache = DocCache()
+    def test_keyword_model_mismatch(self, tmp_path):
+        cache = DocCache(repo_root=str(tmp_path))
         outline = DocOutline(path="test.md")
         cache.put("test.md", 100.0, outline, keyword_model="model-a")
         assert cache.get("test.md", 100.0, keyword_model="model-b") is None
         assert cache.get("test.md", 100.0, keyword_model="model-a") is not None
 
-    def test_invalidate(self):
-        cache = DocCache()
+    def test_invalidate(self, tmp_path):
+        cache = DocCache(repo_root=str(tmp_path))
         outline = DocOutline(path="test.md")
         cache.put("test.md", 100.0, outline)
         cache.invalidate("test.md")
         assert cache.get("test.md", 100.0) is None
 
-    def test_content_hash(self):
-        cache = DocCache()
+    def test_content_hash(self, tmp_path):
+        cache = DocCache(repo_root=str(tmp_path))
         outline = DocOutline(path="test.md", headings=[DocHeading(text="T", level=1)])
         cache.put("test.md", 100.0, outline)
         h = cache.get_hash("test.md")
         assert h is not None
         assert len(h) == 16
+
+    def test_disk_persistence_survives_restart(self, tmp_path):
+        """Cached outlines persist to disk and reload on new DocCache instance."""
+        outline = DocOutline(
+            path="doc.md",
+            headings=[DocHeading(text="Title", level=1, keywords=["kw1", "kw2"])],
+            links=[DocLink(target="other.md", source_heading="Title")],
+        )
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 42.0, outline, keyword_model="test-model")
+
+        # Create a new cache instance (simulates restart)
+        cache2 = DocCache(repo_root=str(tmp_path))
+        result = cache2.get("doc.md", 42.0, keyword_model="test-model")
+        assert result is not None
+        assert result.path == "doc.md"
+        assert result.headings[0].text == "Title"
+        assert result.headings[0].keywords == ["kw1", "kw2"]
+        assert result.links[0].target == "other.md"
+
+    def test_disk_persistence_stale_mtime_after_restart(self, tmp_path):
+        """Disk-cached entry rejected when mtime doesn't match."""
+        outline = DocOutline(path="doc.md")
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 42.0, outline)
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        assert cache2.get("doc.md", 42.0) is not None
+        assert cache2.get("doc.md", 99.0) is None
+
+    def test_disk_persistence_model_mismatch_after_restart(self, tmp_path):
+        """Disk-cached entry rejected when keyword model changed."""
+        outline = DocOutline(path="doc.md")
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 42.0, outline, keyword_model="model-a")
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        assert cache2.get("doc.md", 42.0, keyword_model="model-a") is not None
+        assert cache2.get("doc.md", 42.0, keyword_model="model-b") is None
+
+    def test_invalidate_removes_sidecar(self, tmp_path):
+        """Invalidate removes both in-memory and disk entry."""
+        outline = DocOutline(path="doc.md")
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 42.0, outline)
+        cache1.invalidate("doc.md")
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        assert cache2.get("doc.md", 42.0) is None
+
+    def test_clear_removes_all_sidecars(self, tmp_path):
+        """Clear removes all disk entries."""
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("a.md", 1.0, DocOutline(path="a.md"))
+        cache1.put("b.md", 2.0, DocOutline(path="b.md"))
+        cache1.clear()
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        assert cache2.get("a.md", 1.0) is None
+        assert cache2.get("b.md", 2.0) is None
+
+    def test_hash_preserved_on_disk(self, tmp_path):
+        """Content hash survives disk round-trip."""
+        outline = DocOutline(path="doc.md", headings=[DocHeading(text="T", level=1)])
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 42.0, outline)
+        hash1 = cache1.get_hash("doc.md")
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        hash2 = cache2.get_hash("doc.md")
+        assert hash1 == hash2
+
+    def test_nested_headings_round_trip(self, tmp_path):
+        """Nested heading trees survive serialization."""
+        outline = DocOutline(
+            path="doc.md",
+            headings=[
+                DocHeading(text="H1", level=1, children=[
+                    DocHeading(text="H2", level=2, keywords=["nested"], children=[
+                        DocHeading(text="H3", level=3),
+                    ]),
+                ]),
+            ],
+        )
+        cache1 = DocCache(repo_root=str(tmp_path))
+        cache1.put("doc.md", 1.0, outline)
+
+        cache2 = DocCache(repo_root=str(tmp_path))
+        result = cache2.get("doc.md", 1.0)
+        assert result.headings[0].text == "H1"
+        assert result.headings[0].children[0].text == "H2"
+        assert result.headings[0].children[0].keywords == ["nested"]
+        assert result.headings[0].children[0].children[0].text == "H3"
+
+    def test_no_repo_root_still_works(self):
+        """Without repo_root, cache is in-memory only (no crash)."""
+        cache = DocCache()
+        outline = DocOutline(path="test.md")
+        cache.put("test.md", 1.0, outline)
+        assert cache.get("test.md", 1.0) is not None
 
 
 # === DocReferenceIndex Tests ===

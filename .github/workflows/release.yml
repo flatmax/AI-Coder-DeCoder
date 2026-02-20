@@ -170,6 +170,12 @@ jobs:
           
           - Run from within a git repository directory
           - Set your LLM API key (e.g., `ANTHROPIC_API_KEY` environment variable)
+          
+          ### Optional: Document Mode Keywords
+          
+          Document mode works out of the box with heading outlines and cross-references.
+          For keyword-enriched headings (better disambiguation of repeated structures),
+          install from source with: `pip install ac-dc[docs]`
           EOF
           
           # Substitute variables

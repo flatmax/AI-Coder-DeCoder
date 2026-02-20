@@ -192,6 +192,7 @@ class LLMService:
 
         # Document mode state
         self._doc_index = None
+        self._doc_index_building = False
         self._doc_stability_tracker = None
         self._doc_stability_initialized = False
 
@@ -311,6 +312,80 @@ class LLMService:
         self._init_complete = True
         logger.info("Deferred initialization complete")
 
+        # Start building document index eagerly in the background so it's
+        # ready when the user wants to switch to document mode.  The build
+        # runs in a background asyncio task and doesn't block code-mode usage.
+        self._start_background_doc_index()
+
+    def _start_background_doc_index(self):
+        """Kick off doc index build in background if not already done."""
+        if self._doc_index is not None or self._doc_index_building:
+            return
+        if not self._repo:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._build_doc_index_background_silent())
+            else:
+                logger.debug("Event loop not running — skipping background doc index")
+        except Exception as e:
+            logger.debug(f"Could not start background doc index: {e}")
+
+    async def _build_doc_index_background_silent(self):
+        """Build doc index in background without switching mode.
+
+        Sends progress toasts so the user knows it's happening.
+        When done, notifies frontend that doc mode is available.
+        """
+        try:
+            # Send initial toast so user knows it started
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_progress",
+                        {
+                            "stage": "doc_index_progress",
+                            "message": "📝 Building document index…",
+                            "percent": 0,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            await self._build_doc_index()
+
+            # Notify frontend that doc index is ready (mode not switched yet)
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_ready",
+                        {
+                            "stage": "doc_index_ready",
+                            "message": "📝 Document index ready — doc mode available",
+                            "mode_available": True,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            logger.info("Background doc index build complete — doc mode now available")
+
+        except Exception as e:
+            logger.error(f"Background doc index build failed: {e}")
+            self._doc_index_building = False
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_failed",
+                        {
+                            "stage": "doc_index_failed",
+                            "message": f"Document index build failed: {e}",
+                        },
+                    )
+                except Exception:
+                    pass
+
     @property
     def init_complete(self):
         """Whether heavy initialization has finished."""
@@ -351,7 +426,11 @@ class LLMService:
 
     def get_mode(self):
         """Return current mode."""
-        return {"mode": self._context.mode.value}
+        return {
+            "mode": self._context.mode.value,
+            "doc_index_ready": self._doc_index is not None and not self._doc_index_building,
+            "doc_index_building": self._doc_index_building,
+        }
 
     async def switch_mode(self, mode):
         """Switch between code and document modes.
@@ -380,10 +459,31 @@ class LLMService:
 
     async def _switch_to_doc_mode(self):
         """Switch from code mode to document mode."""
-        # Build doc index lazily on first switch
-        if self._doc_index is None:
-            await self._build_doc_index()
+        # If doc index is currently being built in the background, tell the
+        # user to wait — don't start a second build.
+        if self._doc_index_building:
+            return {
+                "mode": self._context.mode.value,
+                "message": "Document index is still building — please wait for it to finish.",
+                "building": True,
+            }
 
+        # If doc index hasn't been built yet, start the build now.
+        # This shouldn't normally happen (build starts at startup), but
+        # handles edge cases like missing repo at init time.
+        if self._doc_index is None:
+            self._start_background_doc_index()
+            return {
+                "mode": "code",
+                "message": "Document index build starting — you'll be notified when it's ready.",
+                "building": True,
+            }
+
+        # Doc index is ready — perform the actual mode switch
+        return self._finalize_doc_mode_switch()
+
+    def _finalize_doc_mode_switch(self):
+        """Complete the switch to document mode (doc index must be ready)."""
         # Clear file context
         self._context.file_context.clear()
         self._selected_files = []
@@ -421,7 +521,19 @@ class LLMService:
         self._context.add_message("system", "Switched to document mode.")
 
         logger.info("Switched to document mode")
-        return {"mode": "doc", "message": "Switched to document mode"}
+
+        result = {"mode": "doc", "message": "Switched to document mode"}
+
+        # Notify about degraded keyword enrichment
+        if self._doc_index and not self._doc_index.keywords_available:
+            result["keywords_available"] = False
+            result["keywords_message"] = (
+                "Document mode is active but keyword enrichment is unavailable "
+                "(keybert not installed). Headings will appear without keyword "
+                "annotations. Install with: pip install keybert sentence-transformers"
+            )
+
+        return result
 
     def _switch_to_code_mode(self):
         """Switch from document mode to code mode."""
@@ -449,31 +561,104 @@ class LLMService:
         if not self._repo:
             return
 
+        self._doc_index_building = True
+
         from .doc_index.index import DocIndex
 
         doc_config = self._config.doc_index_config
 
+        # Thread-safe progress: store last message so heartbeat can re-send it
+        _last_progress = {"message": "Building document index…", "percent": 0}
+
+        _loop = asyncio.get_event_loop()
+
         def _progress(stage, message, percent):
+            _last_progress["message"] = message
+            _last_progress["percent"] = percent
             if self._event_callback:
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(
-                            self._event_callback("startupProgress", stage, message, percent)
-                        )
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback("startupProgress", stage, message, percent),
+                        _loop,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback(
+                            "compactionEvent", "doc_index_progress",
+                            {
+                                "stage": "doc_index_progress",
+                                "message": f"📝 {message}",
+                                "percent": percent,
+                            },
+                        ),
+                        _loop,
+                    )
                 except Exception:
                     pass
 
-        _progress("doc_index", "Building document index...", 0)
+        # Send initial progress directly (we're still on the event loop thread)
+        if self._event_callback:
+            try:
+                await self._event_callback("startupProgress", "doc_index", "Building document index…", 0)
+                await self._event_callback(
+                    "compactionEvent", "doc_index_progress",
+                    {
+                        "stage": "doc_index_progress",
+                        "message": "📝 Building document index…",
+                        "percent": 0,
+                    },
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0)  # yield so progress event can be delivered
 
         self._doc_index = DocIndex(
             repo_root=str(self._repo.root),
             doc_config=doc_config,
         )
 
-        self._doc_index.index_repo(progress_callback=_progress)
+        # Run the blocking index_repo in executor so progress events can flow.
+        # A heartbeat task re-sends the latest progress every 2s so the UI
+        # stays alive during long blocking operations (model download/load).
+        _indexing_done = False
 
+        async def _heartbeat():
+            while not _indexing_done:
+                await asyncio.sleep(2)
+                if not _indexing_done and self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "startupProgress", "doc_index",
+                            _last_progress["message"],
+                            _last_progress["percent"],
+                        )
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_progress",
+                            {
+                                "stage": "doc_index_progress",
+                                "message": f"📝 {_last_progress['message']}",
+                                "percent": _last_progress["percent"],
+                            },
+                        )
+                    except Exception:
+                        pass
+
+        loop = asyncio.get_event_loop()
+        heartbeat_task = asyncio.ensure_future(_heartbeat())
+        try:
+            await loop.run_in_executor(
+                self._executor,
+                lambda: self._doc_index.index_repo(progress_callback=_progress),
+            )
+        finally:
+            _indexing_done = True
+            heartbeat_task.cancel()
+
+        self._doc_index_building = False
         logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")
+
+        # Check if keyword enrichment is available
+        if not self._doc_index.keywords_available:
+            logger.warning("Document mode running without keyword enrichment (keybert not installed)")
 
     # === Streaming Chat (RPC) ===
 

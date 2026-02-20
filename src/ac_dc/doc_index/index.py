@@ -39,7 +39,7 @@ class DocIndex:
         """
         self._root = Path(repo_root)
         self._config = doc_config or {}
-        self._cache = DocCache()
+        self._cache = DocCache(repo_root=repo_root)
         self._ref_index = DocReferenceIndex()
         self._formatter = DocFormatter(self._ref_index)
         self._all_outlines = {}  # path -> DocOutline
@@ -60,6 +60,13 @@ class DocIndex:
     @property
     def reference_index(self):
         return self._ref_index
+
+    @property
+    def keywords_available(self):
+        """Whether keyword enrichment is active (keybert installed and working)."""
+        if self._enricher is None:
+            return False
+        return self._enricher.available
 
     @property
     def cache(self):
@@ -140,8 +147,9 @@ class DocIndex:
             return self._all_outlines
 
         # Phase 1: Structure extraction (fast)
+        logger.info(f"Document index: extracting outlines from {total} files")
         if progress_callback:
-            progress_callback("doc_index", "Extracting document outlines...", 10)
+            progress_callback("doc_index", "Extracting document outlines…", 10)
 
         # Determine which files need (re)indexing
         needs_enrichment = []
@@ -186,8 +194,15 @@ class DocIndex:
                     pct,
                 )
 
+        logger.info(
+            f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
+            f"{total - len(needs_enrichment)} cached"
+        )
+
         # Phase 2: Keyword enrichment (slow)
         if needs_enrichment and self._enricher:
+            enrich_total = len(needs_enrichment)
+            logger.info(f"Keyword enrichment: {enrich_total} files to process")
             for i, (path, mtime, outline, text) in enumerate(needs_enrichment):
                 # On the first file, pass progress_callback so the enricher
                 # can report model loading / download progress (0–10%).
@@ -196,11 +211,14 @@ class DocIndex:
                 self._cache.put(path, mtime, outline, keyword_model=keyword_model)
                 self._all_outlines[path] = outline
 
+                pct = 30 + int(65 * (i + 1) / enrich_total)
+                logger.info(
+                    f"Keyword enrichment: {i + 1}/{enrich_total} — {path} ({pct}%)"
+                )
                 if progress_callback:
-                    pct = 30 + int(65 * (i + 1) / len(needs_enrichment))
                     progress_callback(
                         "doc_index",
-                        f"Extracting keywords... ({i + 1}/{len(needs_enrichment)} files)",
+                        f"Extracting keywords… ({i + 1}/{enrich_total} files) — {path}",
                         pct,
                     )
         elif needs_enrichment:
@@ -222,6 +240,8 @@ class DocIndex:
             f"Document index: {len(self._all_outlines)} files, "
             f"{len(needs_enrichment)} newly indexed"
         )
+
+        self._dump_to_tmp()
 
         return self._all_outlines
 
@@ -282,3 +302,21 @@ class DocIndex:
             self._all_outlines, exclude_files=exclude_files,
         )
         Path(output_path).write_text(text)
+
+    def _dump_to_tmp(self):
+        """Write all individual doc map entries to /tmp/doc_map_entries/."""
+        import shutil
+        out_dir = Path("/tmp/doc_map_entries")
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(parents=True)
+        # Write combined map
+        combined = self._formatter.format_all(self._all_outlines)
+        (out_dir / "combined.txt").write_text(combined)
+        # Write per-file entries
+        for path, outline in sorted(self._all_outlines.items()):
+            entry = self._formatter.format_file(path, outline)
+            if entry:
+                safe_name = path.replace("/", "__").replace("\\", "__")
+                (out_dir / f"{safe_name}.txt").write_text(entry)
+        logger.info("Doc map entries written to %s (%d files)", out_dir, len(self._all_outlines))

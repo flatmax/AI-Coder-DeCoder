@@ -255,11 +255,49 @@ KeyBERT depends on `sentence-transformers` which downloads the configured model 
 - If `keybert` is not installed, a warning is logged and headings are emitted without keywords
 - The model is initialized once and reused across all files in an indexing run
 
+### Graceful Degradation in Packaged Releases
+
+The PyInstaller release binaries do not bundle `keybert` or `sentence-transformers` (and their transitive dependency PyTorch, which adds 200MB+ CPU-only or 2–4GB with CUDA). Document mode remains fully functional without keywords — heading outlines, cross-reference links, reference counting, cache tiering, and the document-specific system prompt all work without any keyword library.
+
+When a user switches to document mode and keybert is not installed:
+
+1. **Backend:** `DocIndex.keywords_available` property returns `False`. The `_switch_to_doc_mode()` response includes `keywords_available: false` and a human-readable `keywords_message` explaining the limitation and how to install
+2. **Frontend:** The mode-switch handler in `ac-dialog.js` checks for `keywords_available === false` and shows a **warning toast** with the install instructions
+3. **Terminal:** A `logger.warning` is emitted during `_build_doc_index()` for server-side visibility
+
+The degradation is purely cosmetic — headings appear without `(keyword1, keyword2)` annotations. For most documents with descriptive heading text, the structural outline alone provides sufficient context for the LLM. Keyword enrichment is most valuable for documents with repetitive subheading patterns (API references, spec templates).
+
+Users running from source can install keyword support with:
+
+```bash
+pip install ac-dc[docs]
+# or
+uv sync --extra docs
+```
+
 ### Caching
 
 Keyword extraction results are cached alongside the structural outline using the same mtime-based cache as the symbol index. Since KeyBERT is deterministic (same input + same model → same output), content hashing works correctly for tier stability detection. Keyword extraction only re-runs when the file's mtime changes.
 
-**Model change invalidation:** The `DocCache` stores the `keyword_model` name used to generate each cached entry. On cache lookup, if the stored model name differs from the current `app.json` configuration, the entry is treated as stale and re-extracted. This ensures that changing `keyword_model` triggers a full re-enrichment without requiring a manual cache clear.
+**Disk persistence:** `DocCache` writes a JSON sidecar file per cached entry to `.ac-dc/doc_cache/` on every `put()`. On initialization, existing sidecar files are loaded back into the in-memory cache so that keyword-enriched outlines survive server restarts. This avoids the ~65s KeyBERT re-enrichment cost on every restart — only files whose mtime has changed since the last run need re-processing.
+
+Each sidecar file (`<safe_path>.json`) stores:
+- `path` — original relative file path
+- `mtime` — file modification time at indexing
+- `content_hash` — deterministic hash of the outline (for stability tracking)
+- `keyword_model` — name of the sentence-transformer model used
+- `outline` — serialized `DocOutline` (headings with keywords, links)
+
+The sidecar format uses compact JSON (`separators=(",", ":")`) to minimize disk usage. Corrupt sidecar files are silently removed on load. The `.ac-dc/` directory is already gitignored, so `doc_cache/` inside it requires no additional gitignore entries.
+
+**Cache lifecycle operations:**
+- `invalidate(path)` removes both the in-memory entry and the disk sidecar
+- `clear()` removes all sidecar files and clears the in-memory cache
+- `DocCache(repo_root=None)` falls back to in-memory-only behavior (no disk persistence) — used in tests and when repo root is unavailable
+
+**Model change invalidation:** The `DocCache` stores the `keyword_model` name used to generate each cached entry. On cache lookup, if the stored model name differs from the current `app.json` configuration, the entry is treated as stale and re-extracted. This ensures that changing `keyword_model` triggers a full re-enrichment without requiring a manual cache clear. This check applies to both in-memory and disk-loaded entries.
+
+**File deselection and re-indexing:** When a file is unchecked (removed from selected files / full-content context) and the doc map is rebuilt, `index_repo()` is called which checks the cache for each file. If the file was edited while in full-content context, its mtime will have changed and the stale cache entry is bypassed — the file is re-extracted and re-enriched. If the file was not modified, the disk-cached entry is used instantly.
 
 ### Performance
 
@@ -410,9 +448,9 @@ This enables the connected components algorithm to cluster related documents tog
 
 The document index shares the `symbol_index/cache.py` infrastructure via a base class extraction. `SymbolCache` is refactored into an abstract `BaseCache` with concrete subclasses:
 
-- `BaseCache` (in `src/ac_dc/base_cache.py`) — mtime-based get/put/invalidate, content hashing, `cached_files` property
-- `SymbolCache(BaseCache)` — existing code symbol caching (unchanged external API)
-- `DocCache(BaseCache)` — document outline caching with the same mtime semantics
+- `BaseCache` (in `src/ac_dc/base_cache.py`) — mtime-based get/put/invalidate, content hashing, `cached_files` property (in-memory only)
+- `SymbolCache(BaseCache)` — existing code symbol caching (unchanged external API, in-memory only — fast enough that disk persistence is unnecessary)
+- `DocCache(BaseCache)` — document outline caching with the same mtime semantics, plus disk persistence via JSON sidecar files in `.ac-dc/doc_cache/` (necessary because KeyBERT enrichment is expensive — ~40-60ms per section vs <5ms for tree-sitter parsing)
 
 This pattern extends to the formatter: a `BaseFormatter` (in `src/ac_dc/base_formatter.py`) provides common logic (path aliasing, reference counting integration), while `CompactFormatter` (in `symbol_index/compact_format.py`, unchanged external API) and `DocFormatter` (in `doc_index/formatter.py`) implement format-specific output. Mode-specific logic — such as test file collapsing for code — lives in the respective subclass. The legend is defined as an abstract method in the base class, implemented differently by each subclass to describe its own symbol vocabulary.
 
@@ -449,16 +487,38 @@ Configuration in `app.json`:
 
 ### Progress Reporting
 
-Document indexing with keyword extraction is slower than code indexing (~65s vs ~1-5s for a 50-doc repo on first run). A fine-grained progress bar in the UI keeps the user informed throughout.
+Document indexing with keyword extraction is slower than code indexing (~65s vs ~1-5s for a 50-doc repo on first run). The UI keeps the user informed without blocking interaction.
 
-**Backend progress events** — The document indexer emits progress via the existing `startupProgress(stage, message, percent)` server→client RPC push. This is the same mechanism already used by `app-shell.js` for initial load: the Python backend calls `self._event_callback('startupProgress', stage, message, percent)` on `LLMService`, which pushes to the frontend via jrpc-oo, and the `startupProgress` method on `AcApp` renders the progress bar. Phases:
+**Design principle — non-blocking feedback only.** Document index progress must never overlay or block the dialog panel. The dialog is the user's primary workspace; covering it with a loading overlay during a background build would be disruptive. All progress is communicated via two non-blocking channels:
+
+1. **Header progress bar** — a compact inline bar in the `ac-dialog` header, visible even when the dialog is minimized. Shows a short label and percentage fill.
+2. **Toasts** — milestone notifications ("Document index ready — doc mode available") via the global toast system.
+
+**Backend progress events** — The document indexer emits progress via the existing `startupProgress(stage, message, percent)` server→client RPC push, and also via `compactionEvent` for milestone notifications. The backend sends both channels so progress is reported regardless of whether the startup overlay is still visible:
+
+- `startupProgress("doc_index", message, percent)` — continuous progress updates
+- `compactionEvent("doc_index_progress", {stage, message, percent})` — same data via the compaction channel
+- `compactionEvent("doc_index_ready", {...})` — build complete milestone
+- `compactionEvent("doc_index_failed", {...})` — build failure notification
+
+Phases reported via `startupProgress`:
 
 1. **Model loading** (0–10%) — "Loading keyword model…" — emitted once when the sentence-transformer model initialises. On first-ever run this includes the ~420MB download, reported as a sub-progress if the model library exposes download callbacks.
 2. **Structure extraction** (10–30%) — "Extracting outlines… (12/50 files)" — fast phase, increments per file.
 3. **Keyword extraction** (30–95%) — "Extracting keywords… (8/50 files)" — the slow phase, increments per file. Each file completion updates the percentage proportionally (`30 + 65 * files_done / total_files`).
 4. **Cache write** (95–100%) — "Caching results…" — writing enriched outlines to the doc cache.
 
-**Frontend display** — The `app-shell.js` `startupProgress` handler already renders a progress bar with stage label and percentage. Document indexing reuses this exactly. The bar appears during initial index build and during re-indexing when many files have changed. For incremental updates (1-2 files changed), the operation is fast enough (<2s) that no progress bar is shown.
+**Frontend event flow:**
+
+1. `app-shell.js` receives `startupProgress` RPC calls. For `stage === "doc_index"`, it **always** dispatches a `mode-switch-progress` DOM event (regardless of whether the startup overlay is visible). This ensures the dialog header bar receives updates both during initial startup and during later re-indexing.
+2. `ac-dialog.js` listens for `mode-switch-progress` events and drives its header progress bar: sets `_docIndexBuilding = true`, `_modeSwitching = true`, and updates `_modeSwitchMessage` / `_modeSwitchPercent`.
+3. When `compactionEvent` with `stage === "doc_index_ready"` fires, the dialog clears the progress bar (`_modeSwitching = false`, `_docIndexBuilding = false`) and shows a toast: "📝 Document index ready — doc mode available".
+4. The mode toggle button in the dialog header shows a pulsing `⏳` icon while `_docIndexBuilding` is true, switching to `📝` when the index is ready.
+
+**What is NOT used for doc index progress:**
+
+- **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed.
+- **No blocking mode-switch overlay** — the `mode-switch-overlay` div in `ac-dialog.js` is not shown for background doc index builds. It exists for future use (e.g., blocking mode switches that require user action) but document indexing is fully non-blocking.
 
 **Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress.
 

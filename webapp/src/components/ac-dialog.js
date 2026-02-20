@@ -6,7 +6,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
-import { RpcMixin } from '../rpc-mixin.js';
+import { RpcMixin, dispatchToast } from '../rpc-mixin.js';
 
 // Import child components so custom elements are registered
 import './ac-files-tab.js';
@@ -37,6 +37,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     _modeSwitching: { type: Boolean, state: true },
     _modeSwitchMessage: { type: String, state: true },
     _modeSwitchPercent: { type: Number, state: true },
+    _docIndexReady: { type: Boolean, state: true },
+    _docIndexBuilding: { type: Boolean, state: true },
     _repoName: { type: String, state: true },
   };
 
@@ -125,6 +127,51 @@ export class AcDialog extends RpcMixin(LitElement) {
     }
     .header-action.review-active {
       color: var(--accent-primary);
+    }
+    .header-action.building {
+      opacity: 0.6;
+      animation: pulse-building 1.5s ease-in-out infinite;
+      cursor: wait;
+    }
+    .header-action:disabled {
+      pointer-events: none;
+    }
+    @keyframes pulse-building {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 0.9; }
+    }
+
+    /* Header-inline progress bar (visible even when minimized) */
+    .header-progress {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-right: 8px;
+      flex-shrink: 1;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .header-progress-label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 180px;
+    }
+    .header-progress-bar {
+      width: 60px;
+      min-width: 40px;
+      height: 4px;
+      background: var(--bg-secondary);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .header-progress-fill {
+      height: 100%;
+      background: var(--accent-primary);
+      border-radius: 2px;
+      transition: width 0.4s ease;
     }
 
     /* Content area */
@@ -273,6 +320,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._modeSwitching = false;
     this._modeSwitchMessage = '';
     this._modeSwitchPercent = 0;
+    this._docIndexReady = false;
+    this._docIndexBuilding = false;
     this._repoName = null;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
@@ -340,8 +389,35 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
       window.addEventListener('mode-switch-progress', (e) => {
         const { message, percent } = e.detail || {};
+        this._docIndexBuilding = true;
+        this._modeSwitching = true;
         if (message !== undefined) this._modeSwitchMessage = message;
         if (typeof percent === 'number') this._modeSwitchPercent = percent;
+      });
+      window.addEventListener('compaction-event', (e) => {
+        const data = e.detail?.data;
+        if (!data) return;
+        if (data.stage === 'doc_index_ready') {
+          // Background doc index build complete — doc mode now available
+          this._docIndexReady = true;
+          this._docIndexBuilding = false;
+          this._modeSwitching = false;
+          this._modeSwitchMessage = '';
+          this._modeSwitchPercent = 0;
+          dispatchToast(data.message || '📝 Document index ready — doc mode available', 'info');
+        } else if (data.stage === 'doc_index_failed') {
+          this._docIndexBuilding = false;
+          this._modeSwitching = false;
+          this._modeSwitchMessage = '';
+          this._modeSwitchPercent = 0;
+          dispatchToast(data.message || 'Document index build failed', 'error');
+        } else if (data.stage === 'doc_index_progress') {
+          // Background doc index build progress — update overlay bar
+          this._docIndexBuilding = true;
+          this._modeSwitching = true;
+          if (data.message) this._modeSwitchMessage = data.message;
+          if (typeof data.percent === 'number') this._modeSwitchPercent = data.percent;
+        }
       });
     }
   }
@@ -383,44 +459,56 @@ export class AcDialog extends RpcMixin(LitElement) {
   async _refreshMode() {
     try {
       const result = await this.rpcExtract('LLMService.get_mode');
-      if (result && result.mode) {
-        this._mode = result.mode;
+      if (result) {
+        if (result.mode) this._mode = result.mode;
+        this._docIndexReady = !!result.doc_index_ready;
+        this._docIndexBuilding = !!result.doc_index_building;
       }
     } catch (e) {
       // Ignore — RPC may not be ready
     }
     // Also restore persisted mode preference and sync if needed
     const saved = this._loadPref(this._modeKey(), null);
-    if (saved && saved !== this._mode) {
+    if (saved && saved !== this._mode && this._docIndexReady) {
       await this._switchMode(saved);
     }
   }
 
   async _switchMode(mode) {
     if (mode === this._mode) return;
-    this._modeSwitching = true;
-    this._modeSwitchMessage = mode === 'doc' ? 'Building document index...' : 'Switching to code mode...';
-    this._modeSwitchPercent = 0;
+
     try {
       const result = await this.rpcExtract('LLMService.switch_mode', mode);
-      if (result && !result.error) {
-        this._mode = result.mode || mode;
-        this._savePref(this._modeKey(), this._mode);
-        // Notify children to refresh snippets and context
-        window.dispatchEvent(new CustomEvent('mode-changed', {
-          detail: { mode: this._mode },
-        }));
-      } else if (result?.error) {
-        window.dispatchEvent(new CustomEvent('ac-toast', {
-          detail: { message: result.error, type: 'error' },
-        }));
+      if (!result) return;
+
+      if (result.building) {
+        // Index still building — toast and stay in current mode
+        dispatchToast('Document index is still building — please wait…', 'info');
+        return;
+      }
+
+      if (result.error) {
+        dispatchToast(result.error, 'error');
+        return;
+      }
+
+      // Successful switch
+      this._mode = result.mode || mode;
+      this._savePref(this._modeKey(), this._mode);
+      window.dispatchEvent(new CustomEvent('mode-changed', {
+        detail: { mode: this._mode },
+      }));
+
+      if (result.keywords_available === false) {
+        dispatchToast(
+          result.keywords_message ||
+            'Keyword enrichment unavailable — headings shown without keywords. '
+            + 'Install with: pip install keybert sentence-transformers',
+          'warning',
+        );
       }
     } catch (e) {
-      window.dispatchEvent(new CustomEvent('ac-toast', {
-        detail: { message: `Mode switch failed: ${e.message || e}`, type: 'error' },
-      }));
-    } finally {
-      this._modeSwitching = false;
+      dispatchToast(`Mode switch failed: ${e.message || e}`, 'error');
     }
   }
 
@@ -776,13 +864,29 @@ export class AcDialog extends RpcMixin(LitElement) {
           `)}
         </div>
 
+        ${this._modeSwitching ? html`
+          <div class="header-progress">
+            <span class="header-progress-label">${this._modeSwitchMessage || 'Building…'}</span>
+            <div class="header-progress-bar">
+              <div class="header-progress-fill" style="width: ${this._modeSwitchPercent}%"></div>
+            </div>
+          </div>
+        ` : ''}
+
         <div class="header-actions">
-          <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''}"
-            title="${this._mode === 'code' ? 'Switch to Document mode' : 'Switch to Code mode'}"
+          <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''} ${this._docIndexBuilding ? 'building' : ''}"
+            title="${this._docIndexBuilding
+              ? 'Document index building…'
+              : this._mode === 'doc'
+                ? 'Switch to Code mode'
+                : this._docIndexReady
+                  ? 'Switch to Document mode'
+                  : 'Document index not ready'}"
             aria-label="${this._mode === 'code' ? 'Switch to document mode' : 'Switch to code mode'}"
+            ?disabled=${this._docIndexBuilding}
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onModeToggle()}>
-            ${this._mode === 'code' ? '💻' : '📝'}
+            ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : this._docIndexReady ? '📝' : '💻'}
           </button>
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
@@ -802,15 +906,6 @@ export class AcDialog extends RpcMixin(LitElement) {
       </div>
 
       <div class="content ${this.minimized ? 'minimized' : ''}">
-        ${this._modeSwitching ? html`
-          <div class="mode-switch-overlay">
-            <div class="mode-switch-msg">${this._modeSwitchMessage}</div>
-            <div class="mode-switch-bar">
-              <div class="mode-switch-fill" style="width: ${this._modeSwitchPercent}%"></div>
-            </div>
-          </div>
-        ` : ''}
-
         <!-- Files tab (always rendered) -->
         <div class="tab-panel ${this.activeTab === 'files' ? 'active' : ''}"
              role="tabpanel" id="panel-files" aria-labelledby="tab-files">
