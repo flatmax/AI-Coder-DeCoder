@@ -15,12 +15,13 @@ class KeywordEnricher:
 
     def __init__(self, model_name="all-mpnet-base-v2", top_n=3,
                  ngram_range=(1, 2), min_section_chars=50,
-                 min_score=0.3):
+                 min_score=0.3, diversity=0.5):
         self._model_name = model_name
         self._top_n = top_n
         self._ngram_range = tuple(ngram_range)
         self._min_section_chars = min_section_chars
         self._min_score = min_score
+        self._diversity = diversity
         self._kw_model = None
         self._available = None  # None = not yet checked
 
@@ -164,6 +165,8 @@ class KeywordEnricher:
                 batch_texts,
                 top_n=self._top_n,
                 keyphrase_ngram_range=self._ngram_range,
+                use_mmr=True,
+                diversity=self._diversity,
             )
 
             # When given a single document, KeyBERT returns a flat list
@@ -185,6 +188,8 @@ class KeywordEnricher:
                         section_text,
                         top_n=self._top_n,
                         keyphrase_ngram_range=self._ngram_range,
+                        use_mmr=True,
+                        diversity=self._diversity,
                     )
                     heading.keywords = [
                         kw for kw, score in keywords

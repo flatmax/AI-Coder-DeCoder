@@ -54,6 +54,7 @@ class DocIndex:
                 ngram_range=tuple(self._config.get("keywords_ngram_range", [1, 2])),
                 min_section_chars=self._config.get("keywords_min_section_chars", 50),
                 min_score=self._config.get("keywords_min_score", 0.3),
+                diversity=self._config.get("keywords_diversity", 0.5),
             )
         else:
             self._enricher = None

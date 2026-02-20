@@ -53,13 +53,23 @@ DocHeading:
     keywords: string[]      # KeyBERT-extracted terms, e.g. ["OAuth2", "bearer token", "expiry"]
     start_line: integer     # line number where this heading appears (for keyword enricher slicing)
     children: DocHeading[]  # nested sub-headings
+    outgoing_refs: DocSectionRef[]  # links FROM this section to other doc sections
+    incoming_ref_count: int # number of sections in other docs that link TO this section (0 = leaf)
+    content_types: string[] # detected content patterns, e.g. ["table", "code", "formula"]
+    section_lines: int      # line count from this heading to the next (0 = unknown)
 
 DocLink:
     target: string          # relative path or URL
+    target_heading: string  # heading anchor in target doc, if present (e.g. "History-Compaction-Interaction")
     source_heading: string  # text of the heading under which this link appears (for reference index context)
+
+DocSectionRef:
+    target_path: string     # e.g. "cache_tiering.md"
+    target_heading: string  # e.g. "History Compaction Interaction" (null if link is doc-level)
 
 DocOutline:
     path: string
+    doc_type: string        # "spec" | "guide" | "reference" | "decision" | "readme" | "notes" | "unknown"
     headings: DocHeading[]
     links: DocLink[]
 
@@ -67,53 +77,69 @@ DocOutline:
 
 ## Compact Output Format
 
-The formatter produces text blocks structurally similar to code symbol map output. These blocks flow into the same cache tier system. Headings are enriched with KeyBERT keywords in parentheses to disambiguate sections with identical subheading structures.
+The formatter produces text blocks structurally similar to code symbol map output. These blocks flow into the same cache tier system. The format is enriched with several annotations designed to make the outlines maximally useful for LLM navigation and reasoning:
+
+- **KeyBERT keywords** in parentheses disambiguate sections with identical subheading structures
+- **Section-level cross-references** (`→target.md#Section`) show where each section links, enabling concept tracing without loading full files
+- **Incoming reference counts** (`←N`) on sections show conceptual weight — which sections are most depended-on across the documentation
+- **Document type tags** (`[spec]`, `[guide]`, etc.) help the LLM calibrate tone and format for responses
 
 ### Markdown Example
 
 ```
-specs3/3-llm-engine/context_and_history.md:
-  # Context & History
-  ## ContextManager (FileContext, token budget, shed) →src/ac_dc/context.py
-  ## History Compaction (trigger threshold, verbatim window)
-    ### Topic Detection (LLM boundary, confidence score)
-    ### Verbatim Window (recent exchanges, min preserved)
-  ## Token Budget (remaining, cache target, prompt estimate)
+specs3/3-llm-engine/context_and_history.md [spec]:
+  # Context & History ~280ln ←5
+  ## ContextManager (FileContext, token budget, shed) [code] ~85ln ←3 →src/ac_dc/context.py
+  ## History Compaction (trigger threshold, verbatim window) [code] ~120ln ←2
+    ### Topic Detection (LLM boundary, confidence score) ~45ln
+      →cache_tiering.md#History-Compaction-Interaction
+    ### Verbatim Window (recent exchanges, min preserved) ~30ln
+  ## Token Budget (remaining, cache target, prompt estimate) [table] ~40ln
+    →prompt_assembly.md#History-Placement
   links: prompt_assembly.md, cache_tiering.md
 ```
+
+Key features visible here:
+- `[spec]` — document type annotation after the path
+- `←5` on `# Context & History` — 5 other sections across the docs link to this document
+- `←3` on `## ContextManager` — 3 sections specifically reference this section
+- `→cache_tiering.md#History-Compaction-Interaction` — section-level outgoing link (not just document-level)
+- `→src/ac_dc/context.py` — doc→code cross-reference
 
 ### Repeated-Structure Example
 
 When documents share identical subheading patterns (API references, specs), keywords are essential for disambiguation:
 
 ```
-docs/api-reference.md:
-  ## Authentication (OAuth2, bearer token, expiry)
-    ### Overview (token flow, grant types)
-    ### Parameters (client_id, scope, redirect_uri)
-    ### Examples (curl, Python requests)
-    ### Error Codes (401, 403, token_expired)
-  ## Users (profile, CRUD, role assignment)
-    ### Overview (account lifecycle, signup)
-    ### Parameters (email, display_name, role)
-    ### Examples (create user, update role)
-    ### Error Codes (404, duplicate_email, validation)
+docs/api-reference.md [reference]:
+  ## Authentication (OAuth2, bearer token, expiry) ~95ln ←4
+    ### Overview (token flow, grant types) ~20ln
+    ### Parameters (client_id, scope, redirect_uri) [table] ~35ln ←2
+    ### Examples (curl, Python requests) [code] ~25ln
+    ### Error Codes (401, 403, token_expired) [table] ~15ln
+  ## Users (profile, CRUD, role assignment) ~80ln ←1
+    ### Overview (account lifecycle, signup) ~18ln
+    ### Parameters (email, display_name, role) [table] ~30ln
+    ### Examples (create user, update role) [code] ~22ln
+    ### Error Codes (404, duplicate_email, validation) [table] ~10ln
 ```
 
-Without keywords, every `### Overview` / `### Parameters` / `### Error Codes` looks identical to the LLM.
+Without keywords, every `### Overview` / `### Parameters` / `### Error Codes` looks identical to the LLM. Without section-level `←N` counts, there's no way to know that `Authentication.Parameters` is referenced twice by other docs while `Users.Parameters` is not referenced at all.
 
 ### Converted DOCX Example
 
 A `.docx` file converted via `pandoc -f docx -t markdown` and indexed as markdown:
 
 ```
-docs/architecture.md:
-  # System Architecture
-  ## Component Overview (services, databases, message queues)
-  ## Data Flow (ingestion, transformation, storage)
-    ### Input Pipeline (REST API, file upload, webhooks)
-    ### Processing (validation, enrichment, dedup)
-  ## Deployment (Docker, Kubernetes, CI/CD)
+docs/architecture.md [spec]:
+  # System Architecture ~180ln ←3
+  ## Component Overview (services, databases, message queues) [table] ~60ln ←2
+  ## Data Flow (ingestion, transformation, storage) ~75ln ←1
+    ### Input Pipeline (REST API, file upload, webhooks) [code] ~30ln
+      →api-spec.md#REST-Endpoints
+    ### Processing (validation, enrichment, dedup) ~25ln
+  ## Deployment (Docker, Kubernetes, CI/CD) [code] ~45ln
+    →diagrams/flow.md
   links: api-spec.md, diagrams/flow.md
 ```
 
@@ -122,15 +148,44 @@ docs/architecture.md:
 A CSV converted to a markdown table (or summarised in a README):
 
 ```
-data/README.md:
+data/README.md [reference]:
   # Data Files
   ## users.csv (id, name, email, role, created_at — 12,400 rows)
   ## budget.xlsx (3 sheets: Q1 Revenue, Q2 Forecast, Lookups)
 ```
 
+### Format Annotations Reference
+
+| Annotation | Syntax | Meaning |
+|---|---|---|
+| Document type | `[spec]` after path | Classification of the document's role |
+| Keywords | `(keyword1, keyword2)` after heading text | KeyBERT-extracted terms for disambiguation |
+| Content type | `[table]` `[code]` `[formula]` after keywords | Detected content patterns in section |
+| Section size | `~Nln` after content types | Line count of section (omitted if < 5 lines) |
+| Incoming refs | `←N` after size | Number of sections in other docs that link to this section |
+| Outgoing section ref | `→target.md#Section` indented under heading | Section-level link to another document's heading |
+| Outgoing doc ref | `→target.md` indented under heading | Document-level link (no specific section target) |
+| Outgoing code ref | `→src/file.py` indented under heading | Doc→code cross-reference |
+
+### Document Type Detection
+
+Document type is inferred heuristically from the file path, heading structure, and content signals:
+
+| Type | Detection heuristics |
+|---|---|
+| `spec` | Path contains `spec`, `specs`, `rfc`, `design`; or has numbered section headings |
+| `guide` | Path contains `guide`, `tutorial`, `howto`, `getting-started`; or has step-by-step headings |
+| `reference` | Path contains `reference`, `api`, `endpoints`; or has highly repetitive subheading structure |
+| `decision` | Path contains `adr`, `decision`; or has "Status", "Context", "Decision" headings (ADR format) |
+| `readme` | Filename is `README.md` (case-insensitive) |
+| `notes` | Path contains `notes`, `meeting`, `minutes`, `journal` |
+| `unknown` | No heuristic matches — the default |
+
+Detection runs during extraction (no additional pass needed) and is stored in `DocOutline.doc_type`. The heuristic is conservative — `unknown` is fine; the type annotation is a hint, not a gate.
+
 ## Line Numbers
 
-Line numbers are **not included** in the document index output. This mirrors the code symbol map's context format — `get_symbol_map()` also omits line numbers (only the LSP variant `get_lsp_symbol_map()` includes them for editor features). Line numbers serve two purposes in code:
+Raw line numbers (e.g., `:42` per heading) are **not included** in the document index output. This mirrors the code symbol map's context format — `get_symbol_map()` also omits line numbers (only the LSP variant `get_lsp_symbol_map()` includes them for editor features). Line numbers serve two purposes in code:
 
 1. **LLM spatial hint** — rough sense of where things are and how large sections are
 2. **LSP features** — hover, go-to-definition, completions in the editor
@@ -140,7 +195,7 @@ For documents, neither purpose is compelling:
 - LSP hover/definition features are not applicable to documents
 - Heading nesting already conveys structure without positional metadata
 
-Omitting line numbers saves tokens — meaningful across a documentation-heavy repo with dozens of files.
+Omitting raw line numbers saves tokens — meaningful across a documentation-heavy repo with dozens of files. Note that `start_line` is still tracked internally on each `DocHeading` — it is used by the keyword enricher to slice section text and by `_annotate_sections()` to compute the `~Nln` section size annotations. Only the raw per-heading line numbers are omitted from the output; section sizes are included as they provide actionable budget information without the token cost of per-heading positions.
 
 ## Extractors — Markdown and SVG
 
@@ -260,9 +315,29 @@ from keybert import KeyBERT
 kw_model = KeyBERT()
 
 section_text = "The OAuth2 flow requires a client_id and scope parameter..."
-keywords = kw_model.extract_keywords(section_text, top_n=3, keyphrase_ngram_range=(1, 2))
-# [("OAuth2 flow", 0.72), ("client_id", 0.68), ("scope parameter", 0.61)]
+keywords = kw_model.extract_keywords(
+    section_text, top_n=3, keyphrase_ngram_range=(1, 2),
+    use_mmr=True, diversity=0.5
+)
+# [("OAuth2 flow", 0.72), ("client_id", 0.65), ("scope parameter", 0.58)]
 ```
+
+**Maximal Marginal Relevance (MMR):** By default, KeyBERT selects keywords purely by semantic similarity to the full section text. This produces near-duplicate keywords — e.g., "tier promote", "promotes tiers", "promotion tier" — because they all embed close to the same meaning. Enabling `use_mmr=True` applies Maximal Marginal Relevance: after selecting the most relevant keyword, each subsequent keyword is penalized for similarity to already-selected keywords. The `diversity` parameter (0.0–1.0) controls the penalty strength. At `diversity=0.5` (the default), keywords remain relevant to the section but are pushed apart in embedding space, producing more informative triples like "tier promotion", "cascade downward", "broken threshold" instead of three permutations of the same bigram.
+
+### Known Limitations & Future Improvements
+
+MMR significantly reduces keyword permutations. Two further improvements — content-type hints and section size signals — address additional limitations identified during LLM-side evaluation of the outline format:
+
+1. **Content-type hints** (implemented). The markdown extractor scans each section for structural content patterns and emits `[table]`, `[code]`, and `[formula]` annotations after the keywords. Detection uses lightweight regex matching during extraction — no additional dependencies:
+   - `[table]` — section contains a markdown table separator row (`|---|`)
+   - `[code]` — section contains a fenced code block (triple backticks or tildes)
+   - `[formula]` — section contains display math (`$$`) or inline math (`$...$`)
+
+   These hints let the LLM know that a section contains structured reference content (tables, code examples) without loading the file. For example, seeing `## Tier Structure [table] ~35ln` immediately signals a reference table worth loading.
+
+2. **Section size signal** (implemented). Each heading is annotated with `~Nln` showing the line count from that heading to the next. This is computed during extraction at zero cost from the `start_line` delta between consecutive headings. Sections under 5 lines are omitted to reduce noise. This helps the LLM budget file-loading decisions — a `~200ln` section is a significant context investment, while a `~12ln` section is cheap.
+
+3. **Generic keywords for short sections** (not yet addressed). Sections with little text produce generic keywords because the embedding model has less signal to differentiate. MMR helps by forcing diversity, but very short sections (near the `min_section_chars` threshold) may still produce uninformative keywords. Increasing `min_section_chars` would skip these sections entirely; alternatively, a future enhancement could fall back to simple TF-IDF extraction for sections below a character threshold, since TF-IDF is better at surfacing rare terms from short text.
 
 ### Integration: `keyword_enricher.py`
 
@@ -282,6 +357,7 @@ KeywordEnricher:
     _top_n: int              # keywords per section (default: 3)
     _ngram_range: (int, int) # (1, 2) for single words and bigrams
     _min_section_chars: int  # skip keyword extraction for very short sections (default: 50)
+    _diversity: float        # MMR diversity (0.0 = no diversity, 1.0 = max; default: 0.5)
 
     enrich(outline: DocOutline, full_text: string) -> DocOutline:
         full_text_lines = full_text.splitlines()
@@ -301,8 +377,11 @@ KeywordEnricher:
         if not batch_texts:
             return outline
 
-        # Single batched call — sentence-transformer batches all embeddings
-        all_keywords = _model.extract_keywords(batch_texts, top_n, ngram_range)
+        # Single batched call with MMR for keyword diversity
+        all_keywords = _model.extract_keywords(
+            batch_texts, top_n, ngram_range,
+            use_mmr=True, diversity=_diversity
+        )
 
         # Normalize: single doc returns flat list, not list-of-lists
         if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
@@ -316,7 +395,34 @@ KeywordEnricher:
 
 The enricher receives `full_text` as a separate parameter (not stored in the outline) to keep the cached `DocOutline` compact. Each `DocHeading` stores its `start_line`, and the enricher flattens the heading tree to compute section boundaries (each section runs from one heading's `start_line` to the next heading's `start_line`). The markdown extractor populates `start_line` during extraction at no additional cost.
 
-**Batched extraction** is the primary performance optimisation. When KeyBERT receives a list of documents, the underlying sentence-transformer encodes all section texts in a single forward pass rather than one pass per section. This typically yields 2–4× speedup over per-heading calls for documents with many sections.
+### Document Type Detection
+
+Document type (`DocOutline.doc_type`) is inferred during extraction as a lightweight heuristic — no KeyBERT or ML involved:
+
+```pseudo
+detect_doc_type(path: string, headings: DocHeading[]) -> string:
+    basename = lowercase(filename(path))
+    dir_parts = lowercase(directory_parts(path))
+
+    # Path-based detection (highest confidence)
+    if basename starts with "readme":     return "readme"
+    if basename starts with "adr-":       return "decision"
+    if "spec" or "rfc" in dir_parts:      return "spec"
+    if "guide" or "tutorial" in dir_parts: return "guide"
+    if "reference" or "api" in dir_parts: return "reference"
+    if "notes" or "meeting" in dir_parts: return "notes"
+
+    # Heading-based detection (fallback)
+    heading_texts = lowercase([h.text for h in flatten(headings)])
+    if "status" in heading_texts and "decision" in heading_texts:
+        return "decision"                 # ADR format
+    if any numbered headings (e.g. "1. ", "1.1 "):
+        return "spec"
+
+    return "unknown"
+```
+
+**Batched extraction** is the primary performance optimisation. When KeyBERT receives a list of documents, the underlying sentence-transformer encodes all section texts in a single forward pass rather than one pass per section. This typically yields 2–4× speedup over per-heading calls for documents with many sections. MMR adds negligible overhead — the diversity penalty is computed on the already-extracted embeddings, not via additional model forward passes.
 
 ### Lazy Loading
 
@@ -400,11 +506,23 @@ if self._doc_index:
 
 For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Batched extraction (see Integration section above) provides the primary speedup by letting the sentence-transformer encode all section texts in a single forward pass. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
-**Threaded cache writes:** During the enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool.
+**Threaded cache writes:** During the enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool for cache writes only. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
 
 ### Token Budget
 
-Keywords add ~3-8 tokens per heading. For a document with 20 headings, that's 60-160 extra tokens — a modest cost for significant disambiguation value.
+The enriched format adds tokens from three sources:
+
+| Annotation | Per heading | 20-heading document | Notes |
+|---|---|---|---|
+| Keywords | ~3-8 tokens | ~60-160 tokens | Most valuable for disambiguation |
+| Content types (`[table]` etc.) | ~2-4 tokens | ~20-40 tokens | Only on headings with detected content |
+| Section size (`~Nln`) | ~2 tokens | ~30-40 tokens | Omitted for sections under 5 lines |
+| Section refs (`→`) | ~5-10 tokens each | ~50-100 tokens | Only on headings that contain links |
+| Ref counts (`←N`) | ~2 tokens | ~10-20 tokens | Only on headings with incoming refs |
+| Doc type tag | ~2 tokens | ~2 tokens (once per file) | Minimal cost |
+| **Total overhead** | | **~170-360 tokens** | Per 20-heading document |
+
+For a 50-document repo, the full enriched index adds ~6,000-14,000 tokens — well within the budget freed by removing code symbols in document mode. In code mode, where doc outlines are not included, these tokens are never spent.
 
 ### Configuration
 
@@ -418,10 +536,21 @@ Keyword enrichment is controlled via `app.json`:
     "keywords_top_n": 3,
     "keywords_ngram_range": [1, 2],
     "keywords_min_section_chars": 50,
-    "keywords_min_score": 0.3
+    "keywords_min_score": 0.3,
+    "keywords_diversity": 0.5
   }
 }
 ```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `keyword_model` | string | `"all-mpnet-base-v2"` | Sentence-transformer model name |
+| `keywords_enabled` | bool | `true` | Enable/disable keyword extraction entirely |
+| `keywords_top_n` | int | `3` | Keywords per section |
+| `keywords_ngram_range` | [int, int] | `[1, 2]` | Unigrams and bigrams |
+| `keywords_min_section_chars` | int | `50` | Skip keyword extraction for very short sections |
+| `keywords_min_score` | float | `0.3` | Minimum relevance score to include a keyword |
+| `keywords_diversity` | float | `0.5` | MMR diversity penalty (0.0 = pure relevance, 1.0 = max diversity). Higher values push keywords apart in embedding space, reducing permutations |
 
 ## Integration with Cache Tiering
 
@@ -446,7 +575,7 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 ### What Changes in Document Mode
 
 1. **Symbol map removed** — no code symbols in context. The entire token budget is available for document outlines, selected document content, and conversation history
-2. **File tree unchanged** — all files remain visible. Users may need to reference code files while editing documentation (e.g., verifying what they're documenting). The tree is cheap in tokens and filtering it adds complexity for no benefit
+2. **File tree unchanged** — all files remain visible. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
 5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
@@ -528,17 +657,90 @@ The prompt includes awareness of the document index format so the LLM understand
 
 ## Cross-Reference Index
 
-The document reference index tracks three types of links:
+The document reference index tracks links at **section granularity**, not just document level. This is the key enabler for section-level `←N` counts and `→target.md#Section` annotations in the compact output.
 
-- **Doc → Doc**: `[link](other.md)` — analogous to imports between code files
-- **Doc → Code**: `[context](../src/context.py)` — documents referencing source files
+### Link Types
+
+- **Doc section → Doc section**: `[link](other.md#Section-Heading)` — a heading in one document links to a specific heading in another. The most valuable link type for concept tracing
+- **Doc section → Doc**: `[link](other.md)` — a heading links to another document without targeting a specific section. The link is associated with the source heading for context
+- **Doc → Code**: `[context](../src/context.py)` — documents referencing source files. Tracked at heading level (which section contains the link)
 - **Code → Doc**: Not extracted automatically, but could be inferred from comments containing doc paths
+
+### Section Anchor Resolution
+
+When a link target contains a fragment (`other.md#History-Compaction-Interaction`), the reference index resolves it to a specific `DocHeading` in the target document's outline. Resolution uses GitHub-style anchor slugging: lowercase, spaces→hyphens, strip punctuation. If the anchor doesn't match any heading in the target (typo, stale link), the link falls back to document-level and is flagged as `unresolved_anchor: true` for optional reporting.
+
+### Incoming Reference Counting
+
+Each `DocHeading` receives an `incoming_ref_count` — the number of sections in *other* documents that link to it (or to its parent document if the link has no fragment). Counting rules:
+
+- A link to `cache_tiering.md#Tier-Structure` increments the `incoming_ref_count` on the "Tier Structure" heading
+- A link to `cache_tiering.md` (no fragment) increments the count on the **top-level heading** (H1) of that document
+- Self-references (links within the same document) are excluded from the count
+- Multiple links from the same source section to the same target section count as one (deduplicated)
+
+Counts of zero are omitted from the formatter output (no `←0` annotations).
+
+### Implementation
 
 This is implemented as a separate `DocReferenceIndex` class in `doc_index/reference_index.py`, not a subclass of the code `ReferenceIndex`. The two indexes have different edge types (heading-level links vs symbol-level imports) and different build inputs. However, `DocReferenceIndex` exposes the same `connected_components()` and `file_ref_count()` protocol methods so the stability tracker's `initialize_from_reference_graph()` works with either index. The tracker calls only these two methods and never inspects the internal node types (`Symbol`/`CallSite` vs `DocHeading`/`DocLink`), so no modification to the tracker is needed — it operates on file-level connectivity, not symbol-level details.
 
 This enables the connected components algorithm to cluster related documents together for tier initialization. Doc→Code links are included as edges in the graph — if `specs/api.md` links to `src/api.py`, both files appear as nodes in the `DocReferenceIndex`. However, code files in this graph are leaf nodes (they have no outgoing edges since they aren't parsed by the doc extractor), so they serve only as clustering bridges: two documents that both reference the same source file will land in the same connected component.
 
+### Building the Section-Level Graph
+
+The reference index is built in two passes:
+
+1. **Collect**: iterate over all `DocOutline` objects, extracting every `DocLink` with its `source_heading` and `target_heading` fields. Build a mapping: `(source_path, source_heading) → [(target_path, target_heading)]`
+2. **Resolve**: for each link, look up the target path's `DocOutline` and resolve the `target_heading` anchor to a `DocHeading` node. Increment that heading's `incoming_ref_count`. Record the resolved link as a `DocSectionRef` on the source heading's `outgoing_refs` list
+
+This two-pass approach ensures all outlines are available before resolution begins (a link from doc A to doc B requires B's outline to resolve the heading anchor).
+
 ## Design Decisions
+
+### Formatter Output Assembly
+
+The `DocFormatter` assembles the compact output for each file in a defined order:
+
+1. **Path line** — file path followed by `[doc_type]:` tag (omitted if `unknown`)
+2. **Heading tree** — indented by level, each heading followed by:
+   - Keywords in parentheses `(kw1, kw2, kw3)` — omitted if no keywords extracted
+   - Incoming ref count `←N` — omitted if zero
+   - Outgoing section refs on indented lines below: `→target.md#Section-Heading`
+3. **Links line** — `links:` listing all document-level link targets (deduplicated), same as code format
+
+Outgoing section refs are rendered as indented children of the heading they appear under, prefixed with `→`. This keeps them visually associated with their source section while remaining distinct from child headings (which use `#` prefixes).
+
+```pseudo
+DocFormatter.format_file(outline: DocOutline, ref_index: DocReferenceIndex) -> string:
+    lines = []
+    type_tag = f" [{outline.doc_type}]" if outline.doc_type != "unknown" else ""
+    lines.append(f"{outline.path}{type_tag}:")
+
+    for heading in walk_tree(outline.headings):
+        indent = "  " * heading.level
+        kw_str = f" ({', '.join(heading.keywords)})" if heading.keywords else ""
+        ct_str = " " + " ".join(f"[{ct}]" for ct in heading.content_types) if heading.content_types else ""
+        sz_str = f" ~{heading.section_lines}ln" if heading.section_lines >= 5 else ""
+        ref_count = ref_index.incoming_count(outline.path, heading.text)
+        ref_str = f" ←{ref_count}" if ref_count > 0 else ""
+        lines.append(f"{indent}{'#' * heading.level} {heading.text}{kw_str}{ct_str}{sz_str}{ref_str}")
+
+        # Outgoing section refs, indented one level deeper
+        for ref in heading.outgoing_refs:
+            ref_indent = "  " * (heading.level + 1)
+            if ref.target_heading:
+                lines.append(f"{ref_indent}→{ref.target_path}#{ref.target_heading}")
+            else:
+                lines.append(f"{ref_indent}→{ref.target_path}")
+
+    # Document-level links summary
+    all_targets = deduplicate([link.target for link in outline.links])
+    if all_targets:
+        lines.append(f"  links: {', '.join(all_targets)}")
+
+    return "\n".join(lines)
+```
 
 ### Cache Infrastructure — Shared Base Class
 

@@ -5,6 +5,13 @@ from typing import List, Optional
 
 
 @dataclass
+class DocSectionRef:
+    """A resolved section-level cross-reference."""
+    target_path: str        # e.g. "cache_tiering.md"
+    target_heading: str = ""  # e.g. "History Compaction Interaction" (empty if doc-level)
+
+
+@dataclass
 class DocHeading:
     """A heading in a document outline."""
     text: str
@@ -12,11 +19,19 @@ class DocHeading:
     keywords: List[str] = field(default_factory=list)
     start_line: int = 0     # 0-indexed line number
     children: List["DocHeading"] = field(default_factory=list)
+    outgoing_refs: List[DocSectionRef] = field(default_factory=list)
+    incoming_ref_count: int = 0
+    content_types: List[str] = field(default_factory=list)  # e.g. ["table", "code", "formula"]
+    section_lines: int = 0  # line count of section (0 = unknown)
 
     def signature_hash_content(self):
         """Content used for stable hashing."""
         parts = [str(self.level), self.text]
         parts.extend(self.keywords)
+        parts.extend(self.content_types)
+        parts.append(str(self.section_lines))
+        for ref in self.outgoing_refs:
+            parts.append(f"ref:{ref.target_path}#{ref.target_heading}")
         for child in self.children:
             parts.append(child.signature_hash_content())
         return "|".join(parts)
@@ -26,6 +41,7 @@ class DocHeading:
 class DocLink:
     """A link found in a document."""
     target: str             # relative path or URL
+    target_heading: str = ""  # heading anchor in target, if present (e.g. "History-Compaction")
     source_heading: str = ""  # heading text under which link appears
 
 
@@ -33,6 +49,7 @@ class DocLink:
 class DocOutline:
     """Structural outline of a document."""
     path: str
+    doc_type: str = "unknown"  # "spec"|"guide"|"reference"|"decision"|"readme"|"notes"|"unknown"
     headings: List[DocHeading] = field(default_factory=list)
     links: List[DocLink] = field(default_factory=list)
 
@@ -52,7 +69,7 @@ class DocOutline:
 
     def signature_hash_content(self):
         """Content used for stable hashing."""
-        parts = [self.path]
+        parts = [self.path, self.doc_type]
         for h in self.headings:
             parts.append(h.signature_hash_content())
         for link in self.links:

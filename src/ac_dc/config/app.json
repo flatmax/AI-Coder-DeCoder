@@ -16,6 +16,7 @@
     "keywords_top_n": 3,
     "keywords_ngram_range": [1, 2],
     "keywords_min_section_chars": 50,
-    "keywords_min_score": 0.3
+    "keywords_min_score": 0.3,
+    "keywords_diversity": 0.5
   }
 }

@@ -161,6 +161,7 @@ class TestMarkdownExtractor:
         assert len(outline.headings[0].children) == 2
         assert outline.headings[0].children[0].text == "Section 1"
         assert outline.headings[0].children[1].text == "Section 2"
+        assert outline.doc_type == "unknown"
 
     def test_heading_levels(self):
         text = "# H1\n## H2\n### H3\n#### H4\n"
@@ -236,6 +237,70 @@ class TestMarkdownExtractor:
         assert len(outline.links) == 1
         assert outline.links[0].target == "https://example.com"
 
+    def test_link_target_heading_extracted(self):
+        text = "# Title\n\nSee [section](other.md#my-section)\n"
+        outline = self._extract(text)
+        assert len(outline.links) == 1
+        assert outline.links[0].target == "other.md#my-section"
+        assert outline.links[0].target_heading == "my-section"
+
+    def test_link_without_anchor_has_empty_target_heading(self):
+        text = "# Title\n\nSee [doc](other.md)\n"
+        outline = self._extract(text)
+        assert len(outline.links) == 1
+        assert outline.links[0].target_heading == ""
+
+
+# === Document Type Detection Tests ===
+
+class TestDocTypeDetection:
+
+    def _extract(self, text, path="test.md"):
+        ext = MarkdownExtractor()
+        return ext.extract(path, text)
+
+    def test_readme_detected(self):
+        outline = self._extract("# Project\n", path="README.md")
+        assert outline.doc_type == "readme"
+
+    def test_readme_case_insensitive(self):
+        outline = self._extract("# Project\n", path="readme.md")
+        assert outline.doc_type == "readme"
+
+    def test_spec_from_path(self):
+        outline = self._extract("# Spec\n", path="specs/api.md")
+        assert outline.doc_type == "spec"
+
+    def test_guide_from_path(self):
+        outline = self._extract("# Guide\n", path="guide/setup.md")
+        assert outline.doc_type == "guide"
+
+    def test_reference_from_path(self):
+        outline = self._extract("# API\n", path="reference/endpoints.md")
+        assert outline.doc_type == "reference"
+
+    def test_decision_from_adr_prefix(self):
+        outline = self._extract("# Decision\n", path="adr-001-use-keybert.md")
+        assert outline.doc_type == "decision"
+
+    def test_decision_from_headings(self):
+        text = "# ADR\n## Status\n## Decision\n## Consequences\n"
+        outline = self._extract(text)
+        assert outline.doc_type == "decision"
+
+    def test_notes_from_path(self):
+        outline = self._extract("# Notes\n", path="meeting/standup.md")
+        assert outline.doc_type == "notes"
+
+    def test_unknown_fallback(self):
+        outline = self._extract("# Something\n", path="random/file.md")
+        assert outline.doc_type == "unknown"
+
+    def test_numbered_headings_detected_as_spec(self):
+        text = "# Doc\n## 1. Introduction\n## 2. Requirements\n"
+        outline = self._extract(text)
+        assert outline.doc_type == "spec"
+
 
 # === DocOutline Data Model Tests ===
 
@@ -260,11 +325,13 @@ class TestDocOutline:
     def test_signature_hash_content(self):
         outline = DocOutline(
             path="test.md",
+            doc_type="spec",
             headings=[DocHeading(text="Title", level=1)],
             links=[DocLink(target="other.md")],
         )
         h = outline.signature_hash_content()
         assert "test.md" in h
+        assert "spec" in h
         assert "Title" in h
         assert "other.md" in h
 
@@ -311,10 +378,16 @@ class TestDocCache:
 
     def test_disk_persistence_survives_restart(self, tmp_path):
         """Cached outlines persist to disk and reload on new DocCache instance."""
+        from ac_dc.doc_index.extractors.base import DocSectionRef
         outline = DocOutline(
             path="doc.md",
-            headings=[DocHeading(text="Title", level=1, keywords=["kw1", "kw2"])],
-            links=[DocLink(target="other.md", source_heading="Title")],
+            doc_type="spec",
+            headings=[DocHeading(
+                text="Title", level=1, keywords=["kw1", "kw2"],
+                incoming_ref_count=2,
+                outgoing_refs=[DocSectionRef(target_path="other.md", target_heading="Details")],
+            )],
+            links=[DocLink(target="other.md#Details", target_heading="Details", source_heading="Title")],
         )
         cache1 = DocCache(repo_root=str(tmp_path))
         cache1.put("doc.md", 42.0, outline, keyword_model="test-model")
@@ -324,9 +397,15 @@ class TestDocCache:
         result = cache2.get("doc.md", 42.0, keyword_model="test-model")
         assert result is not None
         assert result.path == "doc.md"
+        assert result.doc_type == "spec"
         assert result.headings[0].text == "Title"
         assert result.headings[0].keywords == ["kw1", "kw2"]
-        assert result.links[0].target == "other.md"
+        assert result.headings[0].incoming_ref_count == 2
+        assert len(result.headings[0].outgoing_refs) == 1
+        assert result.headings[0].outgoing_refs[0].target_path == "other.md"
+        assert result.headings[0].outgoing_refs[0].target_heading == "Details"
+        assert result.links[0].target == "other.md#Details"
+        assert result.links[0].target_heading == "Details"
 
     def test_disk_persistence_stale_mtime_after_restart(self, tmp_path):
         """Disk-cached entry rejected when mtime doesn't match."""
@@ -418,10 +497,12 @@ class TestDocReferenceIndex:
         outlines = {
             "docs/a.md": DocOutline(
                 path="docs/a.md",
+                headings=[DocHeading(text="Intro", level=1)],
                 links=[DocLink(target="b.md", source_heading="Intro")],
             ),
             "docs/b.md": DocOutline(
                 path="docs/b.md",
+                headings=[DocHeading(text="See also", level=1)],
                 links=[DocLink(target="a.md", source_heading="See also")],
             ),
         }
@@ -429,6 +510,116 @@ class TestDocReferenceIndex:
         idx.build(outlines)
         assert idx.file_ref_count("docs/b.md") >= 1
         assert idx.file_ref_count("docs/a.md") >= 1
+
+    def test_section_level_incoming_ref_count(self):
+        """Links with heading anchors increment target heading's incoming_ref_count."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="Intro", level=1)],
+                links=[DocLink(
+                    target="b.md#my-section",
+                    target_heading="my-section",
+                    source_heading="Intro",
+                )],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[
+                    DocHeading(text="Top", level=1, children=[
+                        DocHeading(text="My Section", level=2),
+                    ]),
+                ],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        # The "My Section" heading should have incoming_ref_count = 1
+        my_section = outlines["b.md"].headings[0].children[0]
+        assert my_section.incoming_ref_count == 1
+
+    def test_doc_level_link_increments_h1(self):
+        """Links without anchors increment the top heading's incoming_ref_count."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="Source", level=1)],
+                links=[DocLink(target="b.md", source_heading="Source")],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="Target Top", level=1)],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        assert outlines["b.md"].headings[0].incoming_ref_count == 1
+
+    def test_outgoing_refs_populated(self):
+        """Source headings get outgoing_refs populated."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="Intro", level=1)],
+                links=[DocLink(
+                    target="b.md#details",
+                    target_heading="details",
+                    source_heading="Intro",
+                )],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="Details", level=1)],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        intro = outlines["a.md"].headings[0]
+        assert len(intro.outgoing_refs) == 1
+        assert intro.outgoing_refs[0].target_path == "b.md"
+        assert intro.outgoing_refs[0].target_heading == "details"
+
+    def test_self_links_excluded_from_section_refs(self):
+        """Self-references don't increment incoming_ref_count."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[
+                    DocHeading(text="Top", level=1, children=[
+                        DocHeading(text="Section", level=2),
+                    ]),
+                ],
+                links=[DocLink(
+                    target="a.md#section",
+                    target_heading="section",
+                    source_heading="Top",
+                )],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        section = outlines["a.md"].headings[0].children[0]
+        assert section.incoming_ref_count == 0
+
+    def test_deduplication_of_section_refs(self):
+        """Multiple links from same source heading to same target heading count as one."""
+        outlines = {
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="Intro", level=1)],
+                links=[
+                    DocLink(target="b.md#sec", target_heading="sec", source_heading="Intro"),
+                    DocLink(target="b.md#sec", target_heading="sec", source_heading="Intro"),
+                ],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="Sec", level=1)],
+            ),
+        }
+        idx = DocReferenceIndex()
+        idx.build(outlines)
+        assert outlines["b.md"].headings[0].incoming_ref_count == 1
 
     def test_bidirectional_components(self):
         outlines = {
@@ -451,7 +642,8 @@ class TestDocReferenceIndex:
         outlines = {
             "a.md": DocOutline(
                 path="a.md",
-                links=[DocLink(target="https://example.com")],
+                headings=[DocHeading(text="A", level=1)],
+                links=[DocLink(target="https://example.com", source_heading="A")],
             ),
         }
         idx = DocReferenceIndex()
@@ -462,7 +654,8 @@ class TestDocReferenceIndex:
         outlines = {
             "docs/spec.md": DocOutline(
                 path="docs/spec.md",
-                links=[DocLink(target="../src/main.py")],
+                headings=[DocHeading(text="Spec", level=1)],
+                links=[DocLink(target="../src/main.py", source_heading="Spec")],
             ),
         }
         idx = DocReferenceIndex()
@@ -492,6 +685,88 @@ class TestDocFormatter:
         assert "# Project" in result
         assert "## Install" in result
         assert "## Usage" in result
+
+    def test_doc_type_tag_in_output(self):
+        outlines = {
+            "spec.md": DocOutline(
+                path="spec.md",
+                doc_type="spec",
+                headings=[DocHeading(text="API Spec", level=1)],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "spec.md [spec]:" in result
+
+    def test_doc_type_unknown_omitted(self):
+        outlines = {
+            "misc.md": DocOutline(
+                path="misc.md",
+                doc_type="unknown",
+                headings=[DocHeading(text="Misc", level=1)],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "misc.md:" in result
+        assert "[unknown]" not in result
+
+    def test_incoming_ref_count_in_output(self):
+        outlines = {
+            "doc.md": DocOutline(
+                path="doc.md",
+                headings=[DocHeading(text="Title", level=1, incoming_ref_count=3)],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "←3" in result
+
+    def test_incoming_ref_count_zero_omitted(self):
+        outlines = {
+            "doc.md": DocOutline(
+                path="doc.md",
+                headings=[DocHeading(text="Title", level=1, incoming_ref_count=0)],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "←" not in result
+
+    def test_outgoing_section_refs_in_output(self):
+        from ac_dc.doc_index.extractors.base import DocSectionRef
+        outlines = {
+            "doc.md": DocOutline(
+                path="doc.md",
+                headings=[DocHeading(
+                    text="Title", level=1,
+                    outgoing_refs=[
+                        DocSectionRef(target_path="other.md", target_heading="Details"),
+                    ],
+                )],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "→other.md#Details" in result
+
+    def test_outgoing_doc_level_ref_no_heading(self):
+        from ac_dc.doc_index.extractors.base import DocSectionRef
+        outlines = {
+            "doc.md": DocOutline(
+                path="doc.md",
+                headings=[DocHeading(
+                    text="Title", level=1,
+                    outgoing_refs=[
+                        DocSectionRef(target_path="other.md", target_heading=""),
+                    ],
+                )],
+            ),
+        }
+        fmt = DocFormatter()
+        result = fmt.format_all(outlines)
+        assert "→other.md" in result
+        assert "#" not in result.split("→other.md")[1].split("\n")[0]
 
     def test_keywords_in_output(self):
         outlines = {
@@ -532,8 +807,16 @@ class TestDocFormatter:
     def test_ref_count_shown(self):
         ref_idx = DocReferenceIndex()
         outlines = {
-            "a.md": DocOutline(path="a.md", links=[DocLink(target="b.md")]),
-            "b.md": DocOutline(path="b.md", links=[DocLink(target="a.md")]),
+            "a.md": DocOutline(
+                path="a.md",
+                headings=[DocHeading(text="A", level=1)],
+                links=[DocLink(target="b.md", source_heading="A")],
+            ),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="B", level=1)],
+                links=[DocLink(target="a.md", source_heading="B")],
+            ),
         }
         ref_idx.build(outlines)
         fmt = DocFormatter(reference_index=ref_idx)
@@ -545,6 +828,7 @@ class TestDocFormatter:
         fmt = DocFormatter()
         result = fmt.format_all(outlines)
         assert "Document outline" in result
+        assert "←N=incoming refs" in result
 
     def test_chunks(self):
         outlines = {}
@@ -653,9 +937,13 @@ class TestDocReferenceIndexEdgeCases:
         outlines = {
             "a.md": DocOutline(
                 path="a.md",
-                links=[DocLink(target="b.md#section-1")],
+                headings=[DocHeading(text="Source", level=1)],
+                links=[DocLink(target="b.md#section-1", target_heading="section-1", source_heading="Source")],
             ),
-            "b.md": DocOutline(path="b.md"),
+            "b.md": DocOutline(
+                path="b.md",
+                headings=[DocHeading(text="Section 1", level=1)],
+            ),
         }
         idx = DocReferenceIndex()
         idx.build(outlines)
@@ -666,7 +954,8 @@ class TestDocReferenceIndexEdgeCases:
         outlines = {
             "a.md": DocOutline(
                 path="a.md",
-                links=[DocLink(target="#local-section")],
+                headings=[DocHeading(text="Top", level=1)],
+                links=[DocLink(target="#local-section", target_heading="local-section", source_heading="Top")],
             ),
         }
         idx = DocReferenceIndex()
@@ -678,7 +967,8 @@ class TestDocReferenceIndexEdgeCases:
         outlines = {
             "a.md": DocOutline(
                 path="a.md",
-                links=[DocLink(target="a.md")],
+                headings=[DocHeading(text="Top", level=1)],
+                links=[DocLink(target="a.md", source_heading="Top")],
             ),
         }
         idx = DocReferenceIndex()
@@ -690,7 +980,8 @@ class TestDocReferenceIndexEdgeCases:
         outlines = {
             "docs/a.md": DocOutline(
                 path="docs/a.md",
-                links=[DocLink(target="../../etc/passwd")],
+                headings=[DocHeading(text="Doc", level=1)],
+                links=[DocLink(target="../../etc/passwd", source_heading="Doc")],
             ),
         }
         idx = DocReferenceIndex()
@@ -700,8 +991,8 @@ class TestDocReferenceIndexEdgeCases:
 
     def test_files_referencing(self):
         outlines = {
-            "a.md": DocOutline(path="a.md", links=[DocLink(target="b.md")]),
-            "b.md": DocOutline(path="b.md"),
+            "a.md": DocOutline(path="a.md", headings=[DocHeading(text="A", level=1)], links=[DocLink(target="b.md", source_heading="A")]),
+            "b.md": DocOutline(path="b.md", headings=[DocHeading(text="B", level=1)]),
         }
         idx = DocReferenceIndex()
         idx.build(outlines)
@@ -710,8 +1001,8 @@ class TestDocReferenceIndexEdgeCases:
 
     def test_file_dependencies(self):
         outlines = {
-            "a.md": DocOutline(path="a.md", links=[DocLink(target="b.md")]),
-            "b.md": DocOutline(path="b.md"),
+            "a.md": DocOutline(path="a.md", headings=[DocHeading(text="A", level=1)], links=[DocLink(target="b.md", source_heading="A")]),
+            "b.md": DocOutline(path="b.md", headings=[DocHeading(text="B", level=1)]),
         }
         idx = DocReferenceIndex()
         idx.build(outlines)

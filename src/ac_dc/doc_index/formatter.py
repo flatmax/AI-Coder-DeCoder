@@ -1,14 +1,17 @@
 """Document outline formatter — compact map output for LLM context.
 
 Produces text blocks structurally similar to code symbol map output.
-Headings include KeyBERT keywords in parentheses for disambiguation.
+Headings include KeyBERT keywords, section-level cross-references,
+incoming reference counts, and document type annotations.
 """
 
 import os
 from collections import Counter
 
-DOC_LEGEND = """# Document outline: headings with keywords, links between docs
-# ##=heading level (keywords) →target_doc
+DOC_LEGEND = """# Document outline: headings with keywords, cross-references
+# [type] after path = doc type (spec, guide, reference, decision, readme, notes)
+# ##=heading level (keywords) [table] [code] [formula]=content hints ~Nln=section size
+# ←N=incoming refs →target#Section
 # links: comma-separated linked documents"""
 
 DOC_LEGEND_WITH_ALIASES = DOC_LEGEND  # aliases appended dynamically
@@ -71,9 +74,12 @@ class DocFormatter:
         """Format a single document outline block."""
         lines = []
 
-        # File header with ref count
+        # File header with doc type tag and ref count
+        header = self._alias_path(path)
+        if outline.doc_type and outline.doc_type != "unknown":
+            header += f" [{outline.doc_type}]"
+        header += ":"
         ref_count = self._ref_index.file_ref_count(path) if self._ref_index else 0
-        header = self._alias_path(path) + ":"
         if ref_count > 0:
             header += f" ←{ref_count}"
         lines.append(header)
@@ -102,7 +108,29 @@ class DocFormatter:
         if heading.keywords:
             line += f" ({', '.join(heading.keywords)})"
 
+        # Add content-type hints
+        if heading.content_types:
+            line += " " + " ".join(f"[{ct}]" for ct in heading.content_types)
+
+        # Add section size hint (omit for very small sections)
+        if heading.section_lines >= 5:
+            line += f" ~{heading.section_lines}ln"
+
+        # Add incoming ref count if non-zero
+        if heading.incoming_ref_count > 0:
+            line += f" ←{heading.incoming_ref_count}"
+
         lines.append(line)
+
+        # Outgoing section refs, indented one level deeper
+        if heading.outgoing_refs:
+            ref_prefix = "  " * (indent + 1)
+            for ref in heading.outgoing_refs:
+                ref_target = self._alias_path(ref.target_path)
+                if ref.target_heading:
+                    lines.append(f"{ref_prefix}→{ref_target}#{ref.target_heading}")
+                else:
+                    lines.append(f"{ref_prefix}→{ref_target}")
 
         # Children
         for child in heading.children:

@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 from ..base_cache import BaseCache
-from .extractors.base import DocHeading, DocLink, DocOutline
+from .extractors.base import DocHeading, DocLink, DocOutline, DocSectionRef
 
 logger = logging.getLogger(__name__)
 
@@ -31,37 +31,71 @@ def _outline_to_dict(outline):
         }
         if h.keywords:
             d["keywords"] = h.keywords
+        if h.outgoing_refs:
+            d["outgoing_refs"] = [
+                {"target_path": r.target_path, "target_heading": r.target_heading}
+                for r in h.outgoing_refs
+            ]
+        if h.incoming_ref_count:
+            d["incoming_ref_count"] = h.incoming_ref_count
+        if h.content_types:
+            d["content_types"] = h.content_types
+        if h.section_lines:
+            d["section_lines"] = h.section_lines
         if h.children:
             d["children"] = [_heading_to_dict(c) for c in h.children]
         return d
 
-    return {
+    d = {
         "path": outline.path,
         "headings": [_heading_to_dict(h) for h in outline.headings],
         "links": [
-            {"target": lnk.target, "source_heading": lnk.source_heading}
+            {
+                "target": lnk.target,
+                "target_heading": lnk.target_heading,
+                "source_heading": lnk.source_heading,
+            }
             for lnk in outline.links
         ],
     }
+    if outline.doc_type != "unknown":
+        d["doc_type"] = outline.doc_type
+    return d
 
 
 def _dict_to_outline(d):
     """Deserialize a dict back to a DocOutline."""
 
     def _dict_to_heading(hd):
+        outgoing_refs = [
+            DocSectionRef(
+                target_path=r["target_path"],
+                target_heading=r.get("target_heading", ""),
+            )
+            for r in hd.get("outgoing_refs", [])
+        ]
         return DocHeading(
             text=hd["text"],
             level=hd["level"],
             start_line=hd.get("start_line", 0),
             keywords=hd.get("keywords", []),
             children=[_dict_to_heading(c) for c in hd.get("children", [])],
+            outgoing_refs=outgoing_refs,
+            incoming_ref_count=hd.get("incoming_ref_count", 0),
+            content_types=hd.get("content_types", []),
+            section_lines=hd.get("section_lines", 0),
         )
 
     return DocOutline(
         path=d["path"],
+        doc_type=d.get("doc_type", "unknown"),
         headings=[_dict_to_heading(h) for h in d.get("headings", [])],
         links=[
-            DocLink(target=lnk["target"], source_heading=lnk.get("source_heading", ""))
+            DocLink(
+                target=lnk["target"],
+                target_heading=lnk.get("target_heading", ""),
+                source_heading=lnk.get("source_heading", ""),
+            )
             for lnk in d.get("links", [])
         ],
     )
