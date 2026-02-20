@@ -62,6 +62,7 @@ DocLink:
     target: string          # relative path or URL
     target_heading: string  # heading anchor in target doc, if present (e.g. "History-Compaction-Interaction")
     source_heading: string  # text of the heading under which this link appears (for reference index context)
+    is_image: boolean       # true for ![alt](path) image references, false for [text](path) links
 
 DocSectionRef:
     target_path: string     # e.g. "cache_tiering.md"
@@ -220,9 +221,27 @@ The document index supports **markdown** (`.md`) and **SVG** (`.svg`) files. Bot
 
 | Format | Library | Extracts |
 |---|---|---|
-| Markdown (`.md`) | None (regex) | Headings, links |
+| Markdown (`.md`) | None (regex) | Headings, links, image references |
 | SVG (`.svg`) | `xml.etree.ElementTree` (stdlib) | Title, desc, text labels, group structure, links |
 | Markdown (post-processing) | `keybert` | Per-section keyword extraction |
+
+### Image References
+
+Image references are extracted as `DocLink` entries with `is_image: true`, ensuring that doc→SVG and doc→image cross-references appear in the reference index. This enables:
+
+- **`←N` counts on SVG files** — an architecture diagram embedded by 5 documents gets `←5`, signalling its centrality
+- **`→` outgoing refs in the outline** — a section embedding `![diagram](assets/flow.svg)` shows `→assets/flow.svg` under that heading
+- **Connected components** — documents and the SVGs they embed cluster together for tier initialization
+
+Rather than pattern-matching every possible markdown and HTML image syntax, the extractor uses a **path-extension scan**: each line is matched against `[\w./-]+\.svg` (and optionally other image extensions). This catches all embedding syntaxes — `![alt](path.svg)`, `<img src="path.svg">`, `<source srcset="path.svg">`, reference-style definitions, and even plain-text mentions — without needing per-syntax regexes.
+
+Matched paths are validated against the repository file tree (via `Repo.get_flat_file_list()`) to filter out false positives (e.g., a prose mention of "the old layout.svg was removed"). Only paths that resolve to an existing repo file become `DocLink` entries. This validation is cheap — the flat file list is already cached by the repo layer.
+
+All matched references are stored as `DocLink` with `is_image: true`. The `is_image` flag allows the formatter to optionally annotate image refs differently in future (e.g., `→[img] assets/flow.svg`), though the current formatter treats them identically to regular links.
+
+External URLs containing `.svg` (e.g., `https://img.shields.io/badge/coverage.svg`) are excluded by the repo file tree validation — they don't match any local path.
+
+**What this approach deliberately does not capture:** image alt text (`![alt text](path)`) and HTML attributes (`width`, `height`, `class`). Neither is needed — alt text is redundant with the SVG's own extracted labels (via `SvgExtractor`), and display attributes are irrelevant to the document reference graph. The path-extension scan trades syntactic precision for robustness: it catches every embedding syntax (including future ones) with a single regex and zero false positives.
 
 ### SVG Indexing Lifecycle
 
@@ -335,9 +354,13 @@ MMR significantly reduces keyword permutations. Two further improvements — con
 
    These hints let the LLM know that a section contains structured reference content (tables, code examples) without loading the file. For example, seeing `## Tier Structure [table] ~35ln` immediately signals a reference table worth loading.
 
-2. **Section size signal** (implemented). Each heading is annotated with `~Nln` showing the line count from that heading to the next. This is computed during extraction at zero cost from the `start_line` delta between consecutive headings. Sections under 5 lines are omitted to reduce noise. This helps the LLM budget file-loading decisions — a `~200ln` section is a significant context investment, while a `~12ln` section is cheap.
+2. **Section size signal** (implemented). Each heading is annotated with `~Nln` showing the line count from that heading to the next. This is computed during extraction at zero cost from the `start_line` delta between consecutive headings. Sections under 5 lines are omitted to reduce noise (the absence of `~Nln` itself signals a trivially short section). This helps the LLM budget file-loading decisions — a `~200ln` section is a significant context investment, while a `~12ln` section is cheap.
 
 3. **Generic keywords for short sections** (not yet addressed). Sections with little text produce generic keywords because the embedding model has less signal to differentiate. MMR helps by forcing diversity, but very short sections (near the `min_section_chars` threshold) may still produce uninformative keywords. Increasing `min_section_chars` would skip these sections entirely; alternatively, a future enhancement could fall back to simple TF-IDF extraction for sections below a character threshold, since TF-IDF is better at surfacing rare terms from short text.
+
+4. **Incidental terms from examples** (implemented). When a section contains worked examples with specific values (model names, token counts, configuration snippets), KeyBERT may select those concrete terms over the conceptual terms that actually describe the section's purpose. For instance, a section explaining a clustering algorithm with an Opus token-budget example may surface "opus" as a keyword instead of "orphan files" or "connected components". The enricher strips fenced code blocks (`` ``` `` … `` ``` ``) and inline code spans (`` `…` ``) from section text before passing it to KeyBERT, so the transformer focuses on explanatory prose rather than example data. Stripping is applied to a copy of the section text used only for embedding — the original content is not modified. The regex is lightweight: fenced blocks are removed with a multiline match on triple-backtick/tilde boundaries, and inline spans with a single-pass substitution. Sections that become empty after stripping (i.e., sections that are *entirely* code) fall back to the unstripped text so they still produce keywords rather than being silently skipped.
+
+5. **Adaptive `top_n` for large sections** (implemented). Sections describing multi-pathway decision logic (e.g., "graduate via path A, B, or C depending on X") compress poorly into 3 keywords because the distinctive terms are spread across branches. The enricher uses an adaptive `top_n`: sections with `section_lines >= 15` use `top_n + 2` (default: 5 keywords), while shorter sections use the base `top_n` (default: 3). This captures vocabulary from multiple branches at a modest token cost of ~2–4 extra tokens per large section. The threshold and bonus are not separately configurable — they are hardcoded in the enricher as a simple heuristic. The base `top_n` remains configurable via `app.json`.
 
 ### Integration: `keyword_enricher.py`
 
@@ -365,21 +388,34 @@ KeywordEnricher:
 
         # Collect eligible sections for batched extraction
         batch_texts = []
+        batch_top_ns = []
         batch_headings = []
         for i, heading in enumerate(all_headings):
             end_line = all_headings[i+1].start_line if i+1 < len(all_headings) else len(full_text_lines)
             section_text = "\n".join(full_text_lines[heading.start_line:end_line])
             if len(section_text) < _min_section_chars:
                 skip
-            batch_texts.append(section_text)
+
+            # Strip code blocks/spans so KeyBERT focuses on prose
+            cleaned = _strip_code(section_text)
+            if not cleaned.strip():
+                cleaned = section_text  # fallback: section is entirely code
+
+            batch_texts.append(cleaned)
             batch_headings.append(heading)
+
+            # Adaptive top_n: large sections get more keywords
+            section_lines = end_line - heading.start_line
+            effective_top_n = _top_n + 2 if section_lines >= 15 else _top_n
+            batch_top_ns.append(effective_top_n)
 
         if not batch_texts:
             return outline
 
-        # Single batched call with MMR for keyword diversity
+        # Batched call uses max(top_ns) — we trim per-heading below
+        max_top_n = max(batch_top_ns)
         all_keywords = _model.extract_keywords(
-            batch_texts, top_n, ngram_range,
+            batch_texts, max_top_n, ngram_range,
             use_mmr=True, diversity=_diversity
         )
 
@@ -387,10 +423,18 @@ KeywordEnricher:
         if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
             all_keywords = [all_keywords]
 
-        for heading, keywords in zip(batch_headings, all_keywords):
-            heading.keywords = [kw for kw, score in keywords if score > 0.3]
+        for heading, keywords, effective_n in zip(batch_headings, all_keywords, batch_top_ns):
+            heading.keywords = [kw for kw, score in keywords[:effective_n] if score > 0.3]
 
         return outline
+
+    _strip_code(text: string) -> string:
+        # Remove fenced code blocks (```…``` or ~~~…~~~)
+        # Non-greedy .*? with DOTALL matches the shortest span between matching fences
+        text = re.sub(r'(?m)^[ \t]*(`{3,}|~{3,})[^\n]*\n(.*?\n)?[ \t]*\1[ \t]*$', '', text, flags=re.DOTALL)
+        # Remove inline code spans (`…`)
+        text = re.sub(r'`[^`\n]+`', '', text)
+        return text
 ```
 
 The enricher receives `full_text` as a separate parameter (not stored in the outline) to keep the cached `DocOutline` compact. Each `DocHeading` stores its `start_line`, and the enricher flattens the heading tree to compute section boundaries (each section runs from one heading's `start_line` to the next heading's `start_line`). The markdown extractor populates `start_line` during extraction at no additional cost.
@@ -522,7 +566,7 @@ The enriched format adds tokens from three sources:
 | Doc type tag | ~2 tokens | ~2 tokens (once per file) | Minimal cost |
 | **Total overhead** | | **~170-360 tokens** | Per 20-heading document |
 
-For a 50-document repo, the full enriched index adds ~6,000-14,000 tokens — well within the budget freed by removing code symbols in document mode. In code mode, where doc outlines are not included, these tokens are never spent.
+For a 50-document repo, the full enriched index adds ~6,000-14,000 tokens — well within the budget freed by removing code symbols in document mode. In code mode, where doc outlines are not included, these tokens are never spent. There is headroom to increase `top_n` from 3 to 4–5 for larger sections without exceeding budget — the additional ~2,000–4,000 tokens across 50 documents would improve keyword quality for sections with branching logic or worked examples.
 
 ### Configuration
 
@@ -546,7 +590,7 @@ Keyword enrichment is controlled via `app.json`:
 |---|---|---|---|
 | `keyword_model` | string | `"all-mpnet-base-v2"` | Sentence-transformer model name |
 | `keywords_enabled` | bool | `true` | Enable/disable keyword extraction entirely |
-| `keywords_top_n` | int | `3` | Keywords per section |
+| `keywords_top_n` | int | `3` | Keywords per section. Consider 4–5 for repos with complex spec documents |
 | `keywords_ngram_range` | [int, int] | `[1, 2]` | Unigrams and bigrams |
 | `keywords_min_section_chars` | int | `50` | Skip keyword extraction for very short sections |
 | `keywords_min_score` | float | `0.3` | Minimum relevance score to include a keyword |
