@@ -6,6 +6,7 @@ No tree-sitter dependency — uses regex-based extraction only.
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .cache import DocCache
@@ -200,27 +201,56 @@ class DocIndex:
         )
 
         # Phase 2: Keyword enrichment (slow)
+        # Uses a small thread pool to overlap disk cache writes with the
+        # CPU-bound sentence-transformer embedding.  The real speed win is
+        # batched extraction inside KeywordEnricher.enrich() — threading
+        # here just keeps cache I/O off the critical path.
         if needs_enrichment and self._enricher:
             enrich_total = len(needs_enrichment)
             logger.info(f"Keyword enrichment: {enrich_total} files to process")
-            for i, (path, mtime, outline, text) in enumerate(needs_enrichment):
-                # On the first file, pass progress_callback so the enricher
-                # can report model loading / download progress (0–10%).
-                enrich_cb = progress_callback if i == 0 else None
-                outline = self._enricher.enrich(outline, text, progress_callback=enrich_cb)
-                self._cache.put(path, mtime, outline, keyword_model=keyword_model)
-                self._all_outlines[path] = outline
 
-                pct = 30 + int(65 * (i + 1) / enrich_total)
-                logger.info(
-                    f"Keyword enrichment: {i + 1}/{enrich_total} — {path} ({pct}%)"
+            # Trigger model init (may download) on the first file with the
+            # progress callback, then enrich remaining files without it.
+            first_path, first_mtime, first_outline, first_text = needs_enrichment[0]
+            first_outline = self._enricher.enrich(
+                first_outline, first_text, progress_callback=progress_callback,
+            )
+            self._cache.put(first_path, first_mtime, first_outline, keyword_model=keyword_model)
+            self._all_outlines[first_path] = first_outline
+
+            if progress_callback:
+                pct = 30 + int(65 * 1 / enrich_total)
+                progress_callback(
+                    "doc_index",
+                    f"Extracting keywords… (1/{enrich_total} files) — {first_path}",
+                    pct,
                 )
-                if progress_callback:
-                    progress_callback(
-                        "doc_index",
-                        f"Extracting keywords… ({i + 1}/{enrich_total} files) — {path}",
-                        pct,
-                    )
+            logger.info(f"Keyword enrichment: 1/{enrich_total} — {first_path}")
+
+            # Process remaining files with a thread pool for cache write overlap
+            remaining = needs_enrichment[1:]
+            if remaining:
+                n_workers = min(4, len(remaining))
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    for i, (path, mtime, outline, text) in enumerate(remaining, start=2):
+                        outline = self._enricher.enrich(outline, text)
+                        self._all_outlines[path] = outline
+                        # Fire-and-forget disk cache write in a thread
+                        pool.submit(
+                            self._cache.put, path, mtime, outline,
+                            keyword_model,
+                        )
+
+                        pct = 30 + int(65 * i / enrich_total)
+                        logger.info(
+                            f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)"
+                        )
+                        if progress_callback:
+                            progress_callback(
+                                "doc_index",
+                                f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
+                                pct,
+                            )
         elif needs_enrichment:
             # No enricher — just cache the outlines as-is
             for path, mtime, outline, text in needs_enrichment:
