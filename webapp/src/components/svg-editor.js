@@ -250,7 +250,7 @@ export class SvgEditor {
     this._marqueeRect = null;    // the visible SVG <rect> overlay
     this._marqueeStart = null;   // { x, y } in SVG coords
     this._marqueeActive = false;
-    this._marqueeAlreadyToggled = false; // true when shift+click already toggled an element
+    this._marqueePendingToggle = null; // element to toggle-in if drag is tiny (deferred shift+click)
 
     // Text editing state
     this._textEditEl = null;      // the <text> element being edited
@@ -628,22 +628,16 @@ export class SvgEditor {
           return;
         }
 
-        // Shift+click on unselected element — toggle it IN immediately
-        if (!this._selected) this._selected = target;
-        this._multiSelected.add(target);
-        this._renderHandles();
-        this._onSelect(this._selected);
-
-        // Also start marquee tracking so shift+drag from this point does
-        // area selection.  Record that we already toggled this target so
-        // _finishMarquee won't double-toggle on a tiny drag.
-        this._marqueeAlreadyToggled = true;
+        // Shift+click on unselected element — defer the toggle-in.
+        // If the user drags (real marquee), the toggle is discarded.
+        // If the drag is tiny (< 5px), _finishMarquee applies the toggle.
+        this._marqueePendingToggle = target;
         this._startMarquee(svgPt);
         return;
       }
 
       // Shift+click on empty space — start marquee (may deselect on tiny drag)
-      this._marqueeAlreadyToggled = false;
+      this._marqueePendingToggle = null;
       this._startMarquee(svgPt);
       return;
     }
@@ -1049,7 +1043,7 @@ export class SvgEditor {
 
   /**
    * Start drawing a selection rectangle from the given SVG point.
-   * _marqueeAlreadyToggled must be set by the caller before calling this.
+   * _marqueePendingToggle must be set by the caller before calling this.
    */
   _startMarquee(svgPt) {
     this._marqueeStart = { x: svgPt.x, y: svgPt.y };
@@ -1129,7 +1123,7 @@ export class SvgEditor {
    */
   _finishMarquee(svgPt) {
     const start = this._marqueeStart;
-    const alreadyToggled = this._marqueeAlreadyToggled;
+    const pendingToggle = this._marqueePendingToggle;
 
     if (!start) {
       this._cancelMarquee();
@@ -1149,9 +1143,12 @@ export class SvgEditor {
     const minSize = this._screenDistToSvgDist(5);
     if ((mx2 - mx1) < minSize && (my2 - my1) < minSize) {
       // Tiny drag — not a real marquee.
-      if (alreadyToggled) {
-        // Shift+click on element: toggle was already applied in _onPointerDown.
-        // Nothing more to do.
+      if (pendingToggle) {
+        // Shift+click on element with no meaningful drag — apply deferred toggle-in
+        if (!this._selected) this._selected = pendingToggle;
+        this._multiSelected.add(pendingToggle);
+        this._renderHandles();
+        this._onSelect(this._selected);
         return;
       }
       // Shift+click on empty space with no meaningful drag — deselect all
@@ -1263,7 +1260,7 @@ export class SvgEditor {
     }
     this._marqueeStart = null;
     this._marqueeActive = false;
-    this._marqueeAlreadyToggled = false;
+    this._marqueePendingToggle = null;
     this._svg.style.cursor = '';
   }
 
