@@ -10,6 +10,16 @@ example data (model names, token counts, config snippets).
 
 Adaptive top_n: sections with >= 15 lines get top_n + 2 keywords to
 capture vocabulary from multi-pathway decision logic.
+
+TF-IDF fallback: short sections (below tfidf_fallback_chars) use
+TfidfVectorizer fitted on all section texts as a corpus instead of
+KeyBERT embeddings — surfaces terms distinctive to the section relative
+to its siblings.
+
+Corpus-frequency filtering: after KeyBERT extraction, keywords whose
+constituent unigrams all appear in more than max_doc_freq fraction of
+sections are filtered out — removes pervasive domain terms that don't
+disambiguate.
 """
 
 import logging
@@ -35,13 +45,16 @@ class KeywordEnricher:
 
     def __init__(self, model_name="all-mpnet-base-v2", top_n=3,
                  ngram_range=(1, 2), min_section_chars=50,
-                 min_score=0.3, diversity=0.5):
+                 min_score=0.3, diversity=0.5,
+                 tfidf_fallback_chars=150, max_doc_freq=0.6):
         self._model_name = model_name
         self._top_n = top_n
         self._ngram_range = tuple(ngram_range)
         self._min_section_chars = min_section_chars
         self._min_score = min_score
         self._diversity = diversity
+        self._tfidf_fallback_chars = tfidf_fallback_chars
+        self._max_doc_freq = max_doc_freq
         self._kw_model = None
         self._available = None  # None = not yet checked
 
@@ -144,6 +157,15 @@ class KeywordEnricher:
         Adaptive top_n: sections with >= 15 lines get top_n + 2 keywords
         to capture vocabulary from multi-pathway decision logic.
 
+        TF-IDF fallback: short sections (below tfidf_fallback_chars) use
+        TfidfVectorizer fitted on all section texts as a corpus instead of
+        KeyBERT — surfaces terms distinctive to the section relative to
+        its siblings.
+
+        Corpus-frequency filtering: after KeyBERT extraction, keywords
+        whose constituent unigrams all exceed max_doc_freq fraction of
+        sections are filtered out — removes pervasive domain terms.
+
         Args:
             outline: DocOutline with headings (modified in place)
             full_text: full document text (for slicing sections)
@@ -160,10 +182,13 @@ class KeywordEnricher:
         lines = full_text.splitlines()
         all_headings = outline.all_headings_flat
 
-        # Collect eligible sections for batched extraction
-        batch_texts = []
+        # Collect eligible sections — both short (TF-IDF) and long (KeyBERT)
+        batch_texts = []       # sections for KeyBERT batched extraction
         batch_top_ns = []
         batch_headings = []
+        all_cleaned_texts = []     # all sections for TF-IDF corpus
+        all_cleaned_headings = []
+        all_cleaned_top_ns = []
 
         for i, heading in enumerate(all_headings):
             # Determine section boundaries
@@ -183,9 +208,6 @@ class KeywordEnricher:
             if not cleaned.strip():
                 cleaned = section_text  # fallback: section is entirely code
 
-            batch_texts.append(cleaned)
-            batch_headings.append(heading)
-
             # Adaptive top_n: large sections get more keywords
             section_lines = end - start
             effective_top_n = (
@@ -193,7 +215,30 @@ class KeywordEnricher:
                 if section_lines >= _LARGE_SECTION_LINES
                 else self._top_n
             )
-            batch_top_ns.append(effective_top_n)
+
+            # Track all sections for TF-IDF corpus
+            all_cleaned_texts.append(cleaned)
+            all_cleaned_headings.append(heading)
+            all_cleaned_top_ns.append(effective_top_n)
+
+            # Route: short sections use TF-IDF fallback, others go to KeyBERT
+            if len(cleaned) >= self._tfidf_fallback_chars:
+                batch_texts.append(cleaned)
+                batch_headings.append(heading)
+                batch_top_ns.append(effective_top_n)
+
+        # TF-IDF fallback for short sections — uses full corpus for contrast
+        if all_cleaned_texts:
+            for heading, cleaned, effective_top_n in zip(
+                all_cleaned_headings, all_cleaned_texts, all_cleaned_top_ns
+            ):
+                if len(cleaned) < self._tfidf_fallback_chars:
+                    heading.keywords = [
+                        kw for kw, score in _extract_tfidf_keywords(
+                            cleaned, effective_top_n,
+                            all_cleaned_texts, self._ngram_range,
+                        )
+                    ]
 
         if not batch_texts:
             return outline
@@ -218,13 +263,29 @@ class KeywordEnricher:
             if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
                 all_keywords = [all_keywords]
 
+            # Build document-frequency map for corpus-aware filtering.
+            # Uses unigram frequencies from all KeyBERT batch sections.
+            term_doc_count = {}  # term → number of sections containing it
+            for text in batch_texts:
+                seen = set()
+                for word in text.lower().split():
+                    if word not in seen:
+                        term_doc_count[word] = term_doc_count.get(word, 0) + 1
+                        seen.add(word)
+            doc_freq_threshold = len(batch_texts) * self._max_doc_freq
+
             for heading, keywords, effective_n in zip(
                 batch_headings, all_keywords, batch_top_ns
             ):
-                heading.keywords = [
+                filtered = [
                     kw for kw, score in keywords[:effective_n]
                     if score > self._min_score
+                    and not _is_corpus_frequent(kw, term_doc_count, doc_freq_threshold)
                 ]
+                # Never leave a section with zero keywords due to filtering
+                if not filtered and keywords:
+                    filtered = [keywords[0][0]]
+                heading.keywords = filtered
         except Exception as e:
             logger.debug(f"Batched keyword extraction failed: {e}")
             # Fall back to per-heading extraction
@@ -257,6 +318,72 @@ class KeywordEnricher:
         if self._available is None:
             self._init_model()
         return self._available
+
+
+def _is_corpus_frequent(kw, term_doc_count, threshold):
+    """Check if a keyword is corpus-frequent (pervasive domain term).
+
+    A keyword (possibly a bigram) is corpus-frequent if ALL its constituent
+    unigrams exceed the document-frequency threshold. This uses unigram
+    frequencies only — matching KeyBERT's bigram tokenization would add
+    complexity for marginal benefit.
+
+    The ALL-must-exceed rule means a bigram like "tier promotion" is only
+    filtered if both "tier" AND "promotion" are individually pervasive.
+    A bigram with one rare constituent (e.g., "cascade demotion") survives.
+
+    Args:
+        kw: keyword string (unigram or bigram)
+        term_doc_count: dict mapping unigram → number of sections containing it
+        threshold: maximum allowed document count
+
+    Returns:
+        True if the keyword should be filtered out
+    """
+    return all(
+        term_doc_count.get(w, 0) > threshold
+        for w in kw.lower().split()
+    )
+
+
+def _extract_tfidf_keywords(text, top_n, corpus, ngram_range):
+    """Extract keywords using TF-IDF fitted on a corpus of sibling sections.
+
+    Fallback for short sections where embedding-based extraction produces
+    generic keywords. TF-IDF penalises terms common across the corpus,
+    surfacing terms distinctive to the target section.
+
+    Args:
+        text: the target section text
+        top_n: maximum keywords to return
+        corpus: list of all section texts (includes the target)
+        ngram_range: tuple (min_n, max_n) for n-gram extraction
+
+    Returns:
+        list of (keyword, score) tuples, sorted by score descending
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except ImportError:
+        logger.debug("sklearn not available for TF-IDF fallback")
+        return []
+
+    vec = TfidfVectorizer(ngram_range=ngram_range, stop_words="english")
+    try:
+        tfidf = vec.fit_transform(corpus)
+    except ValueError:
+        return []  # empty vocabulary after stop words
+
+    # Find the row corresponding to the target section
+    try:
+        target_idx = corpus.index(text)
+    except ValueError:
+        return []
+
+    feature_names = vec.get_feature_names_out()
+    scores = tfidf.toarray()[target_idx]
+    ranked = sorted(zip(feature_names, scores), key=lambda x: -x[1])
+    return ranked[:top_n]
 
 
 def _strip_code(text):

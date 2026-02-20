@@ -56,6 +56,8 @@ class DocIndex:
                 min_section_chars=self._config.get("keywords_min_section_chars", 50),
                 min_score=self._config.get("keywords_min_score", 0.3),
                 diversity=self._config.get("keywords_diversity", 0.5),
+                tfidf_fallback_chars=self._config.get("keywords_tfidf_fallback_chars", 150),
+                max_doc_freq=self._config.get("keywords_max_doc_freq", 0.6),
             )
         else:
             self._enricher = None
