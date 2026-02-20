@@ -221,9 +221,11 @@ The keyword enricher runs as a post-processing step after structural extraction:
 
 1. **Extractor** produces a `DocOutline` with headings, links, and raw section text
 2. **KeywordEnricher** receives the outline and the full document text
-3. For each heading, it slices the text from that heading to the next heading at the same or higher level
-4. KeyBERT extracts top-N keywords (default: 3) from each section slice
-5. Keywords are attached to the heading and passed to the formatter
+3. All eligible sections (above `min_section_chars`) are collected into a batch
+4. KeyBERT extracts keywords for all sections in a single `extract_keywords()` call — the underlying sentence-transformer batches all embeddings in one forward pass
+5. Keywords are attached to their respective headings and passed to the formatter
+
+If the batched call fails (e.g., KeyBERT version incompatibility), the enricher falls back to per-heading extraction automatically.
 
 ```pseudo
 KeywordEnricher:
@@ -235,17 +237,37 @@ KeywordEnricher:
     enrich(outline: DocOutline, full_text: string) -> DocOutline:
         full_text_lines = full_text.splitlines()
         all_headings = _flatten(outline.headings)  # recursive tree→list
+
+        # Collect eligible sections for batched extraction
+        batch_texts = []
+        batch_headings = []
         for i, heading in enumerate(all_headings):
             end_line = all_headings[i+1].start_line if i+1 < len(all_headings) else len(full_text_lines)
             section_text = "\n".join(full_text_lines[heading.start_line:end_line])
             if len(section_text) < _min_section_chars:
                 skip
-            keywords = _model.extract_keywords(section_text, top_n, ngram_range)
+            batch_texts.append(section_text)
+            batch_headings.append(heading)
+
+        if not batch_texts:
+            return outline
+
+        # Single batched call — sentence-transformer batches all embeddings
+        all_keywords = _model.extract_keywords(batch_texts, top_n, ngram_range)
+
+        # Normalize: single doc returns flat list, not list-of-lists
+        if batch_texts and all_keywords and not isinstance(all_keywords[0], list):
+            all_keywords = [all_keywords]
+
+        for heading, keywords in zip(batch_headings, all_keywords):
             heading.keywords = [kw for kw, score in keywords if score > 0.3]
+
         return outline
 ```
 
 The enricher receives `full_text` as a separate parameter (not stored in the outline) to keep the cached `DocOutline` compact. Each `DocHeading` stores its `start_line`, and the enricher flattens the heading tree to compute section boundaries (each section runs from one heading's `start_line` to the next heading's `start_line`). The markdown extractor populates `start_line` during extraction at no additional cost.
+
+**Batched extraction** is the primary performance optimisation. When KeyBERT receives a list of documents, the underlying sentence-transformer encodes all section texts in a single forward pass rather than one pass per section. This typically yields 2–4× speedup over per-heading calls for documents with many sections.
 
 ### Lazy Loading
 
@@ -299,6 +321,22 @@ The sidecar format uses compact JSON (`separators=(",", ":")`) to minimize disk 
 
 **File deselection and re-indexing:** When a file is unchecked (removed from selected files / full-content context) and the doc map is rebuilt, `index_repo()` is called which checks the cache for each file. If the file was edited while in full-content context, its mtime will have changed and the stale cache entry is bypassed — the file is re-extracted and re-enriched. If the file was not modified, the disk-cached entry is used instantly.
 
+**Edit-driven invalidation:** When the LLM applies edit blocks that modify files, `_stream_chat` explicitly invalidates both the symbol index and the doc index caches for all modified files. This ensures the next `index_repo()` call re-parses modified documents regardless of mtime granularity:
+
+```python
+# Invalidate symbol cache for modified files
+if self._symbol_index:
+    for path in modified:
+        self._symbol_index.invalidate_file(path)
+
+# Invalidate doc index cache for modified doc files
+if self._doc_index:
+    for path in modified:
+        self._doc_index.invalidate_file(path)
+```
+
+**Manual edits in the diff editor:** When a user manually edits and saves a `.md` file in the Monaco diff editor, no index invalidation occurs immediately — the save goes directly to `Repo.write_file`. The mtime change is detected lazily: the next `index_repo()` call (triggered by a chat request or mode switch) sees the new mtime, cache-misses, and re-parses the file. This is correct because mtime-based cache validation catches all disk writes. Explicit invalidation (as above) is only needed for LLM edits as a belt-and-suspenders measure alongside mtime checks.
+
 ### Performance
 
 | Operation | Time (mpnet-base default) | Notes |
@@ -307,10 +345,13 @@ The sidecar format uses compact JSON (`separators=(",", ":")`) to minimize disk 
 | Model load (cached) | ~400ms | sentence-transformers caches locally |
 | Markdown structure extraction (one file) | <5ms | Regex-based, no dependencies |
 | Extract keywords (one section) | ~40-60ms | Depends on section length |
-| Full document (20 sections) | ~1s | Parallelizable if needed |
-| Full repo (50 docs) | ~50-65s | First run; subsequent runs check mtime and skip unchanged files |
+| Extract keywords (batched, 20 sections) | ~300-500ms | 2-4× faster than 20 individual calls |
+| Full document (20 sections) | ~500ms | With batched extraction |
+| Full repo (50 docs) | ~30-40s | First run with batched extraction; subsequent runs check mtime and skip unchanged files |
 
-For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
+For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Batched extraction (see Integration section above) provides the primary speedup by letting the sentence-transformer encode all section texts in a single forward pass. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
+
+**Threaded cache writes:** During the enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool.
 
 ### Token Budget
 
@@ -385,10 +426,11 @@ User clicks mode toggle
     │
     ├── If first switch to document mode:
     │     ├── Show progress bar via startupProgress events
-    │     ├── Build DocIndex (structure extraction + keyword enrichment, ~65s first run)
+    │     ├── Build DocIndex (structure extraction + keyword enrichment, ~30-40s first run)
     │     ├── Build DocReferenceIndex from extracted links
     │     └── Initialize document-mode StabilityTracker from DocReferenceIndex
     │
+    ├── Re-index doc files (mtime-based — only changed files re-parsed)
     ├── Clear file context (selected files)
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (snippets.json → doc-snippets.json)
@@ -396,6 +438,8 @@ User clicks mode toggle
     ├── Rebuild tier content from doc_index instead of symbol_index
     └── Insert system message: "Switched to document mode"
 ```
+
+The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 
@@ -468,12 +512,12 @@ The existing `search_files` in `repo.py` (grep over file content) is used as-is 
 
 The sentence-transformer model used by KeyBERT is configurable via `app.json`. The default is `all-mpnet-base-v2` — the highest quality English model. Load time (~5s first run, ~400ms cached) is acceptable given the fine-grained progress reporting described below. Comparative performance for a 50-document repo (1000 sections):
 
-| Model | Size | Load (first) | Load (cached) | Per-section | Full repo (1000 sections) |
+| Model | Size | Load (first) | Load (cached) | Per-section | Full repo (1000 sections, batched) |
 |---|---|---|---|---|---|
-| `all-MiniLM-L6-v2` | 80MB | ~2s | ~200ms | ~20-30ms | ~25s |
-| `all-MiniLM-L12-v2` | 120MB | ~2.5s | ~250ms | ~25-40ms | ~30s |
-| `all-mpnet-base-v2` (default) | 420MB | ~5s | ~400ms | ~40-60ms | ~65s |
-| `all-distilroberta-v1` | 290MB | ~4s | ~350ms | ~35-50ms | ~45s |
+| `all-MiniLM-L6-v2` | 80MB | ~2s | ~200ms | ~20-30ms | ~15s |
+| `all-MiniLM-L12-v2` | 120MB | ~2.5s | ~250ms | ~25-40ms | ~18s |
+| `all-mpnet-base-v2` (default) | 420MB | ~5s | ~400ms | ~40-60ms | ~35s |
+| `all-distilroberta-v1` | 290MB | ~4s | ~350ms | ~35-50ms | ~25s |
 
 Configuration in `app.json`:
 

@@ -488,6 +488,14 @@ class LLMService:
         self._context.file_context.clear()
         self._selected_files = []
 
+        # Re-index doc files so any manual edits since the last build are
+        # picked up (mtime-based cache ensures only changed files are re-parsed).
+        if self._doc_index:
+            try:
+                self._doc_index.index_repo()
+            except Exception as e:
+                logger.warning(f"Doc re-index on mode switch failed: {e}")
+
         # Swap system prompt
         self._context.set_system_prompt(self._config.get_doc_system_prompt())
 
@@ -955,6 +963,11 @@ class LLMService:
                     if self._symbol_index:
                         for path in modified:
                             self._symbol_index.invalidate_file(path)
+
+                    # Invalidate doc index cache for modified doc files
+                    if self._doc_index:
+                        for path in modified:
+                            self._doc_index.invalidate_file(path)
 
                     # Auto-add not-in-context files to selected files
                     files_auto_added = []
