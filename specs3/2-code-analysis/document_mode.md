@@ -730,10 +730,13 @@ User clicks mode toggle (doc index already built)
     │
     ├── Re-index doc files (mtime-based — only changed files re-parsed)
     ├── Clear file context (selected files)
+    ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (snippets.json → doc-snippets.json)
     ├── Switch stability tracker to doc-mode instance (separate state per mode)
+    ├── Update stability with current context (run _update_stability)
     ├── Rebuild tier content from doc_index instead of symbol_index
+    ├── Frontend: mode-changed event triggers cache/context tab refresh
     └── Insert system message: "Switched to document mode"
 ```
 

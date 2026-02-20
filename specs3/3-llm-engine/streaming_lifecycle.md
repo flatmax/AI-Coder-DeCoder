@@ -324,6 +324,12 @@ Session total: 182,756
 - Returns total_tokens, max_input_tokens, model, session_totals
 - Session totals initially zero
 
+### Mode Switch Effects
+- Mode switch clears selected files and broadcasts filesChanged to frontend
+- Cache tab and context tab listen for mode-changed and files-changed events, triggering refresh
+- Stability tracker switches to mode-specific instance; _update_stability runs immediately
+- Context breakdown reflects new mode's index (symbol map or doc map) after switch
+
 ### Shell Command Detection
 - Extracts from ```bash blocks, $ prefix, > prefix
 - Comments skipped, non-command text returns empty

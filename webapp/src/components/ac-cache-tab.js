@@ -337,18 +337,21 @@ export class AcCacheTab extends RpcMixin(LitElement) {
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('files-changed', this._onFilesChanged);
+    window.addEventListener('mode-changed', this._onModeChanged);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('files-changed', this._onFilesChanged);
+    window.removeEventListener('mode-changed', this._onModeChanged);
   }
 
   onRpcReady() {
@@ -364,6 +367,14 @@ export class AcCacheTab extends RpcMixin(LitElement) {
   }
 
   _onFilesChanged() {
+    if (this._isTabActive()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
+  _onModeChanged() {
     if (this._isTabActive()) {
       this._refresh();
     } else {

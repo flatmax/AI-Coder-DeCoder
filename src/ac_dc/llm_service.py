@@ -464,9 +464,18 @@ class LLMService:
             return {"mode": new_mode.value, "message": "Already in this mode"}
 
         if new_mode == Mode.DOC:
-            return await self._switch_to_doc_mode()
+            result = await self._switch_to_doc_mode()
         else:
-            return self._switch_to_code_mode()
+            result = self._switch_to_code_mode()
+
+        # Broadcast cleared file selection so frontend picker stays in sync
+        if self._event_callback:
+            try:
+                await self._event_callback("filesChanged", list(self._selected_files))
+            except Exception as e:
+                logger.warning(f"Failed to broadcast filesChanged on mode switch: {e}")
+
+        return result
 
     async def _switch_to_doc_mode(self):
         """Switch from code mode to document mode."""
@@ -597,6 +606,12 @@ class LLMService:
         # Insert system message
         self._context.add_message("system", "Switched to document mode.")
 
+        # Run stability update so cache/context tabs have tier data immediately
+        try:
+            self._update_stability()
+        except Exception as e:
+            logger.warning(f"Post-switch stability update failed: {e}")
+
         logger.info("Switched to document mode")
 
         result = {"mode": "doc", "message": "Switched to document mode"}
@@ -629,6 +644,12 @@ class LLMService:
 
         # Insert system message
         self._context.add_message("system", "Switched to code mode.")
+
+        # Run stability update so cache/context tabs have tier data immediately
+        try:
+            self._update_stability()
+        except Exception as e:
+            logger.warning(f"Post-switch stability update failed: {e}")
 
         logger.info("Switched to code mode")
         return {"mode": "code", "message": "Switched to code mode"}
