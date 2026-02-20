@@ -413,6 +413,19 @@ def main(args=None):
         server.add_class(repo)
         server.add_class(settings)
 
+        # Step 5.5: Create LLM service and restore last session BEFORE the
+        # server starts accepting connections.  This way get_current_state()
+        # returns previous session messages as soon as the browser connects.
+        # litellm import happens here — if provider SDK init hangs (e.g.
+        # boto3 credential chain) the server won't start, but that is
+        # preferable to the browser connecting and seeing no history.
+        from ac_dc.llm_service import LLMService
+        llm_service = LLMService(
+            config, repo=repo, symbol_index=None, deferred_init=True,
+        )
+        llm_service._restore_last_session()
+        server.add_class(llm_service)
+
         await server.start()
 
         version = _get_version()
@@ -435,15 +448,6 @@ def main(args=None):
             except Exception as e:
                 logger.warning(f"Failed to open browser: {e}")
                 print(f"\nOpen in browser: {url}\n")
-
-        # Step 6.5: Create LLM service AFTER browser opens
-        # litellm import and provider SDK init (e.g. boto3 credential chain)
-        # can hang with misconfigured credentials — don't block browser launch
-        from ac_dc.llm_service import LLMService
-        llm_service = LLMService(
-            config, repo=repo, symbol_index=None, deferred_init=True,
-        )
-        server.add_class(llm_service)
 
         # Wire up callbacks
         async def chunk_callback(request_id, content):
@@ -493,7 +497,9 @@ def main(args=None):
             logger.warning(f"Symbol index unavailable: {e}")
 
         # Complete deferred initialization with symbol index
-        await _send_progress("session_restore", "Restoring session...", 30)
+        # (session already restored above before server.start — this
+        # wires up the symbol index and remaining heavy init)
+        await _send_progress("session_restore", "Completing initialization...", 30)
         llm_service.complete_deferred_init(symbol_index)
 
         # NOTE: doc index build is deferred to after "ready" signal below,

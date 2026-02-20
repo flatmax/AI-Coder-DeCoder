@@ -301,6 +301,9 @@ class LLMService:
         Called by main.py after the WebSocket server is running and the
         browser is connected, so progress can be reported to the user.
 
+        Session restore is handled separately (before server.start) so
+        that get_current_state() returns history immediately on connect.
+
         Args:
             symbol_index: SymbolIndex instance (may be None if unavailable)
         """
@@ -310,8 +313,10 @@ class LLMService:
         if symbol_index is not None:
             self._symbol_index = symbol_index
 
-        # Restore last session
-        self._restore_last_session()
+        # Restore last session only if not already done (main.py calls
+        # _restore_last_session() before server.start for early availability)
+        if not self._context.get_history():
+            self._restore_last_session()
 
         # Initialize stability tracker eagerly now that symbol index is available
         self._try_initialize_stability()
