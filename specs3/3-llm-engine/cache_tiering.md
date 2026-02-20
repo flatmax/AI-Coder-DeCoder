@@ -122,6 +122,12 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet `cache_target_tokens`. Symbols are selected by reference count descending (most-referenced first) from the reference index. A conservative per-symbol token estimate (400 tokens) is used during seeding since real token counts aren't available until the first update — this prevents over-seeding L0 when placeholder tokens are too small. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
 
+### Post-Initialization Token Measurement
+
+After `initialize_from_reference_graph` completes, `_measure_tracker_tokens()` iterates all `symbol:` items and replaces their placeholder `tokens=0` with real token counts from the formatted symbol/doc blocks. This ensures the cache viewer tab can display per-item token counts and per-tier totals immediately — without waiting for the first chat request to trigger `_update_stability()`. Content hashes are also updated from signature hashes during measurement for accurate stability tracking.
+
+This measurement runs in both the code path (`_try_initialize_stability` and `complete_deferred_init`) and the document path (`_finalize_doc_mode_switch`).
+
 ### Clustering Algorithm
 
 1. **Build mutual reference graph** — bidirectional edges only (A refs B AND B refs A)

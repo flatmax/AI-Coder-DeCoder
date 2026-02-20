@@ -266,6 +266,10 @@ class LLMService:
             self._stability_initialized = True
             logger.info(f"Stability tracker initialized with {len(self._stability_tracker.items)} items")
 
+            # Measure token counts for all initialized items so the cache
+            # tab can display per-item tokens before the first chat request.
+            self._measure_tracker_tokens(self._stability_tracker, self._symbol_index)
+
             # Seed system:prompt into L0
             # Hash only the system prompt text (not legend) for stability —
             # the legend includes path aliases that change when exclude_files
@@ -308,6 +312,9 @@ class LLMService:
 
         # Restore last session
         self._restore_last_session()
+
+        # Initialize stability tracker eagerly now that symbol index is available
+        self._try_initialize_stability()
 
         self._init_complete = True
         logger.info("Deferred initialization complete")
@@ -553,6 +560,9 @@ class LLMService:
                 )
                 self._doc_stability_initialized = True
                 logger.info(f"Doc stability tracker initialized with {len(self._doc_stability_tracker.items)} items")
+
+                # Measure token counts for all initialized items
+                self._measure_tracker_tokens(self._doc_stability_tracker, self._doc_index)
             except Exception as e:
                 logger.warning(f"Doc stability initialization failed: {e}")
 
@@ -1566,20 +1576,37 @@ class LLMService:
 
         counter = self._context.counter
 
-        system_tokens = counter.count(self._config.get_system_prompt())
+        # Use mode-appropriate prompt and index
+        is_doc = self._context.mode == Mode.DOC
+        if is_doc:
+            system_tokens = counter.count(self._config.get_doc_system_prompt())
+        else:
+            system_tokens = counter.count(self._config.get_system_prompt())
+
         legend_tokens = 0
-        if self._symbol_index:
+        symbol_map_tokens = 0
+        symbol_map_files = 0
+
+        if is_doc and self._doc_index:
+            legend = self._doc_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+            sm = self._doc_index.get_doc_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+                symbol_map_files = len(self._doc_index._all_outlines)
+        elif self._symbol_index:
             legend = self._symbol_index.get_legend()
             if legend:
                 legend_tokens = counter.count(legend)
-
-        symbol_map_tokens = 0
-        if self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
+                symbol_map_files = len(self._symbol_index._all_symbols)
 
         # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
@@ -1736,6 +1763,7 @@ class LLMService:
 
         return {
             "model": counter.model_name,
+            "mode": self._context.mode.value,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
             "cache_hit_rate": cache_hit_rate,
@@ -1745,6 +1773,7 @@ class LLMService:
                 "system": system_tokens,
                 "legend": legend_tokens,
                 "symbol_map": symbol_map_tokens,
+                "symbol_map_files": symbol_map_files,
                 "files": file_tokens,
                 "file_count": len(file_details),
                 "file_details": file_details,
@@ -1775,10 +1804,18 @@ class LLMService:
         cache_read = usage.get("cache_read_tokens", 0)
         cache_write = usage.get("cache_write_tokens", 0)
 
-        # Gather per-tier data
-        system_tokens = counter.count(self._config.get_system_prompt())
+        # Gather per-tier data (mode-aware)
+        is_doc_hud = self._context.mode == Mode.DOC
+        if is_doc_hud:
+            system_tokens = counter.count(self._config.get_doc_system_prompt())
+        else:
+            system_tokens = counter.count(self._config.get_system_prompt())
         legend_tokens = 0
-        if self._symbol_index:
+        if is_doc_hud and self._doc_index:
+            legend = self._doc_index.get_legend()
+            if legend:
+                legend_tokens = counter.count(legend)
+        elif self._symbol_index:
             legend = self._symbol_index.get_legend()
             if legend:
                 legend_tokens = counter.count(legend)
@@ -1807,7 +1844,13 @@ class LLMService:
         else:
             # No tracker — show everything as active
             symbol_map_tokens = 0
-            if self._symbol_index:
+            if is_doc_hud and self._doc_index:
+                sm = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if sm:
+                    symbol_map_tokens = counter.count(sm)
+            elif self._symbol_index:
                 sm = self._symbol_index.get_symbol_map(
                     exclude_files=set(self._selected_files)
                 )
@@ -1886,9 +1929,16 @@ class LLMService:
         # --- Token Usage ---
         logger.info(f"Model: {counter.model_name}")
 
-        # Category breakdown
+        # Category breakdown (mode-aware)
+        is_doc = self._context.mode == Mode.DOC
         symbol_map_tokens = 0
-        if self._symbol_index:
+        if is_doc and self._doc_index:
+            sm = self._doc_index.get_doc_map(
+                exclude_files=set(self._selected_files)
+            )
+            if sm:
+                symbol_map_tokens = counter.count(sm)
+        elif self._symbol_index:
             sm = self._symbol_index.get_symbol_map(
                 exclude_files=set(self._selected_files)
             )
@@ -1898,8 +1948,9 @@ class LLMService:
         history_tokens = self._context.history_token_count()
         max_tokens = counter.max_input_tokens
 
+        map_label = "Doc Map:" if is_doc else "Symbol Map:"
         logger.info(f"System:      {system_tokens + legend_tokens:>8,}")
-        logger.info(f"Symbol Map:  {symbol_map_tokens:>8,}")
+        logger.info(f"{map_label:<13}{symbol_map_tokens:>8,}")
         logger.info(f"Files:       {file_tokens:>8,}")
         logger.info(f"History:     {history_tokens:>8,}")
         logger.info(f"Total:       {total:>8,} / {max_tokens:,}")
@@ -1937,6 +1988,38 @@ class LLMService:
             # Print promotions first, then demotions
             for (icon, from_t, to_t), keys in sorted(grouped.items(), key=lambda x: x[0][0]):
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
+
+    def _measure_tracker_tokens(self, tracker, index):
+        """Measure token counts for all symbol: items in a tracker.
+
+        Called after initialize_from_reference_graph so the cache tab
+        can display per-item tokens before the first chat request.
+        Items are initialized with tokens=0; this fills in real counts.
+        """
+        if not tracker or not index:
+            return
+        counter = self._context.counter
+        measured = 0
+        for key, item in tracker._items.items():
+            if item.tokens > 0:
+                continue  # already measured
+            if key.startswith("symbol:"):
+                path = key.split(":", 1)[1]
+                if hasattr(index, 'get_file_symbol_block'):
+                    block = index.get_file_symbol_block(path)
+                elif hasattr(index, 'get_file_doc_block'):
+                    block = index.get_file_doc_block(path)
+                else:
+                    block = None
+                if block:
+                    item.tokens = counter.count(block)
+                    # Update content hash from signature hash for stability
+                    sig_hash = index.get_signature_hash(path)
+                    if sig_hash:
+                        item.content_hash = sig_hash
+                    measured += 1
+        if measured:
+            logger.info(f"Measured tokens for {measured} tracker items")
 
     def _print_init_hud(self):
         """Print tier distribution after initialization."""

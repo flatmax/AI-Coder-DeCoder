@@ -498,8 +498,10 @@ export class AcContextTab extends RpcMixin(LitElement) {
       },
       {
         key: 'symbol_map',
-        icon: '📦',
-        name: `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
+        icon: this._data?.mode === 'doc' ? '📝' : '📦',
+        name: this._data?.mode === 'doc'
+          ? `Doc Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`
+          : `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
         tokens: b.symbol_map || 0,
         details: b.symbol_map_chunks || null,
       },
@@ -569,7 +571,9 @@ export class AcContextTab extends RpcMixin(LitElement) {
         key: c.key,
         pct: (c.tokens / total) * 100,
         color: CAT_COLORS[c.key]?.bar || '#666',
-        label: CAT_COLORS[c.key]?.label || c.key,
+        label: c.key === 'symbol_map'
+          ? (this._data?.mode === 'doc' ? 'Doc Map' : 'Symbols')
+          : (CAT_COLORS[c.key]?.label || c.key),
         tokens: c.tokens,
       }));
 
@@ -708,7 +712,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
         ${this._renderBudget()}
         ${this._data ? html`
           <div class="model-info">
-            <span>Model: ${this._data.model || '—'}</span>
+            <span>Model: ${this._data.model || '—'}${this._data.mode === 'doc' ? ' · 📝 Doc Mode' : ''}</span>
             ${(() => {
               const rate = this._data.provider_cache_rate ?? this._data.cache_hit_rate;
               return rate != null ? html`

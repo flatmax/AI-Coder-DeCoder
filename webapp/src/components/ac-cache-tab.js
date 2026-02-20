@@ -581,7 +581,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
                 <div class="tier-item">
                   <span class="item-icon">📦</span>
                   <span class="item-name" style="color: var(--text-muted); font-style: italic;"
-                    >${unmeasured.length} pre-indexed symbols (awaiting measurement)</span>
+                    >${unmeasured.length} pre-indexed ${this._data?.mode === 'doc' ? 'documents' : 'symbols'} (awaiting measurement)</span>
                 </div>
               ` : nothing}
               ${contents.length === 0 ? html`
