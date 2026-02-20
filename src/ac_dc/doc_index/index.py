@@ -113,8 +113,8 @@ class DocIndex:
         extractor = extractor_cls()
         outline = extractor.extract(path, text)
 
-        # Enrich with keywords
-        if self._enricher:
+        # Enrich with keywords (skip SVG — text labels are already keywords)
+        if self._enricher and ext != '.svg':
             outline = self._enricher.enrich(outline, text)
 
         # Cache
@@ -185,7 +185,13 @@ class DocIndex:
 
             extractor = extractor_cls()
             outline = extractor.extract(path, text)
-            needs_enrichment.append((path, mtime, outline, text))
+
+            # SVG text labels are already terse keywords — skip enrichment
+            if ext == '.svg':
+                self._cache.put(path, mtime, outline, keyword_model=keyword_model)
+                self._all_outlines[path] = outline
+            else:
+                needs_enrichment.append((path, mtime, outline, text))
 
             if progress_callback:
                 pct = 10 + int(20 * (i + 1) / total)

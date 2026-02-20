@@ -33,9 +33,10 @@ src/ac_dc/doc_index/
     reference_index.py    # DocReferenceIndex — doc↔doc and doc→code links
     index.py              # DocIndex — orchestrator (parallels symbol_index/index.py)
     extractors/
-        __init__.py       # EXTRACTORS registry: {'.md': MarkdownExtractor} (v1 has one entry; mirrors symbol_index pattern for future extension)
+        __init__.py       # EXTRACTORS registry: {'.md': MarkdownExtractor, '.svg': SvgExtractor}
         base.py           # BaseDocExtractor — extract(path) → DocOutline
         markdown_extractor.py
+        svg_extractor.py  # stdlib xml.etree.ElementTree — text labels, groups, links
 ```
 
 **Why separate from `symbol_index/`:**
@@ -141,14 +142,61 @@ For documents, neither purpose is compelling:
 
 Omitting line numbers saves tokens — meaningful across a documentation-heavy repo with dozens of files.
 
-## Extractors — Markdown Only (v1)
+## Extractors — Markdown and SVG
 
-The initial implementation supports **markdown files only** (`.md` extension). All other file formats — including plain text (`.txt`), reStructuredText (`.rst`), and binary document formats — are ignored by the document indexer. They remain visible in the file tree and can be loaded into context as selected files, but produce no structural outline. No external parsing libraries are required — heading extraction is a simple line-by-line scan for `#` prefixes, and link extraction uses a basic regex for `[text](target)` patterns.
+The document index supports **markdown** (`.md`) and **SVG** (`.svg`) files. Both produce structural outlines that flow through the same cache, formatter, reference index, and tier system. No external parsing libraries are required — markdown uses line-by-line regex scanning, SVG uses stdlib `xml.etree.ElementTree`.
+
+**SVG extraction is doc-mode only.** The document index is only consulted when `self._mode == Mode.DOC`. In code mode, SVG files are visible in the file tree and can be opened in the SVG viewer/editor, but they produce no structural outline in the symbol map context. This is deliberate:
+
+- **In code mode, SVGs are implementation artifacts** — the LLM cares about the code that generates or uses the SVG, not the SVG's visual content. The symbol index already captures usage via imports and references.
+- **In doc mode, SVGs are documentation** — architecture diagrams, flowcharts, and annotated illustrations are core documentation content. Knowing that `architecture.svg` contains boxes labeled "LLM Service", "Context Manager", "Symbol Index" with their relationships provides the same structural awareness the doc index gives for markdown files.
+- **No token budget pressure in code mode** — code mode's budget is already tight with symbol maps and tiered code content. SVG outlines would consume tokens for content that isn't actionable (the LLM edits SVGs via the SVG editor, not via text edit blocks against raw XML).
+
+**What the SVG extractor produces:**
+- `<title>` → top-level heading (level 1)
+- `<desc>` → description heading (level 2)
+- `<text>`/`<tspan>` content → leaf headings (visible labels, annotations)
+- `<g>` groups with `id`/`aria-label`/`inkscape:label` → structural headings containing their text children
+- `<a>` links (excluding internal `#fragment` links) → `DocLink` entries for cross-reference tracking
+- Duplicate text labels are deduplicated
+- `<defs>`, `<style>`, `<script>`, `<metadata>` are skipped
+
+**No keyword enrichment for SVG.** SVG text labels are already terse identifiers ("LLM Service", "streaming · edits · review"). Running KeyBERT on them would be redundant — the labels *are* the keywords. SVG files are explicitly skipped before the enrichment phase in `index_repo()` and `index_file()` — they are cached immediately after extraction without being added to the `needs_enrichment` queue. This avoids the ~6-8s per-file overhead of calling into KeyBERT even when `min_section_chars` would skip all sections.
 
 | Format | Library | Extracts |
 |---|---|---|
 | Markdown (`.md`) | None (regex) | Headings, links |
+| SVG (`.svg`) | `xml.etree.ElementTree` (stdlib) | Title, desc, text labels, group structure, links |
 | Markdown (post-processing) | `keybert` | Per-section keyword extraction |
+
+### SVG Indexing Lifecycle
+
+SVG files follow the same indexing lifecycle as markdown files — they are discovered, extracted, cached, and invalidated through identical code paths. The `EXTRACTORS` registry maps `.svg` → `SvgExtractor`, so any code that iterates over supported extensions automatically includes SVGs.
+
+**When SVGs are indexed:**
+
+| Trigger | SVGs indexed? | Mechanism |
+|---|---|---|
+| Server startup (background) | ✅ | `_build_doc_index()` → `index_repo()` discovers `.svg` via `EXTRACTORS` |
+| Switch to doc mode | ✅ | `_switch_to_doc_mode()` → `index_repo()` re-indexes changed files |
+| Every chat in doc mode | ✅ | `_stream_chat()` → `index_repo()` (mtime-based cache — only changed files re-parsed) |
+| LLM edits an SVG | ✅ | Explicit `invalidate_file()` in `_stream_chat` + next `index_repo()` |
+| User edits SVG in viewer | ✅ (lazy) | Mtime change on disk detected on next `index_repo()` call |
+| Chat in code mode | ❌ | Doc index not consulted — SVG outlines not in context |
+
+**Mtime-based cache** — `DocCache.get(path, mtime)` returns the cached outline if the mtime matches. When `index_repo()` runs, each `.svg` file is checked against the cache; only files with changed mtimes are re-parsed by `SvgExtractor`. This makes re-indexing after saves effectively free for unchanged files.
+
+**Explicit invalidation on LLM edits** — After edit blocks are applied in `_stream_chat()`, modified files are invalidated in both the symbol index and doc index:
+
+```python
+if self._doc_index:
+    for path in modified:
+        self._doc_index.invalidate_file(path)
+```
+
+This ensures the next `index_repo()` re-parses any SVG the LLM just edited, regardless of mtime granularity.
+
+**Manual edits in the SVG editor** — When a user edits and saves an SVG via the SVG viewer/editor (`SvgViewer._save()`), the file's mtime changes on disk. No explicit invalidation fires — the mtime change is detected lazily by the next `index_repo()` call (triggered by the next chat message). This is the same lazy-detection pattern used for markdown files edited in Monaco, as described in the Caching section above. The SVG outline may be stale only until the next chat message.
 
 ### Non-Markdown Documents — Convert First
 
@@ -187,6 +235,7 @@ Dedicated extractors for other text formats and binary formats may be added in a
 ```
 extractors/
     markdown_extractor.py   # v1 — regex-based, no dependencies
+    svg_extractor.py        # v1 — stdlib xml.etree.ElementTree
     docx_extractor.py       # future — python-docx
     xlsx_extractor.py       # future — openpyxl
     pdf_extractor.py        # future — pymupdf or pdfplumber

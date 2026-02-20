@@ -14,6 +14,136 @@ from ac_dc.doc_index.reference_index import DocReferenceIndex
 from ac_dc.doc_index.index import DocIndex
 
 
+# === SVG Extractor Tests ===
+
+class TestSvgExtractor:
+    """Tests for SVG document extraction."""
+
+    def _extract(self, text, path="test.svg"):
+        from ac_dc.doc_index.extractors.svg_extractor import SvgExtractor
+        return SvgExtractor().extract(path, text)
+
+    def test_title_extracted(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg"><title>My Diagram</title></svg>'
+        outline = self._extract(svg)
+        assert len(outline.headings) == 1
+        assert outline.headings[0].text == "My Diagram"
+        assert outline.headings[0].level == 1
+
+    def test_desc_extracted(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg"><title>Diagram</title><desc>A description</desc></svg>'
+        outline = self._extract(svg)
+        top = outline.headings[0]
+        assert top.text == "Diagram"
+        assert len(top.children) == 1
+        assert top.children[0].text == "A description"
+
+    def test_text_elements_extracted(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg">
+            <text x="10" y="20">Hello World</text>
+            <text x="10" y="40">Second Label</text>
+        </svg>'''
+        outline = self._extract(svg)
+        all_texts = [h.text for h in outline.all_headings_flat]
+        assert "Hello World" in all_texts
+        assert "Second Label" in all_texts
+
+    def test_duplicate_text_deduplicated(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg">
+            <text x="10" y="20">Same Label</text>
+            <text x="50" y="20">Same Label</text>
+        </svg>'''
+        outline = self._extract(svg)
+        all_texts = [h.text for h in outline.all_headings_flat]
+        assert all_texts.count("Same Label") == 1
+
+    def test_group_with_id_becomes_heading(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg">
+            <g id="services">
+                <text x="10" y="20">API Gateway</text>
+                <text x="10" y="40">Auth Service</text>
+            </g>
+        </svg>'''
+        outline = self._extract(svg)
+        flat = outline.all_headings_flat
+        labels = [h.text for h in flat]
+        assert "services" in labels
+        # Group children should be nested
+        group = [h for h in flat if h.text == "services"][0]
+        child_texts = [c.text for c in group.children]
+        assert "API Gateway" in child_texts
+        assert "Auth Service" in child_texts
+
+    def test_link_extracted(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg"
+                      xmlns:xlink="http://www.w3.org/1999/xlink">
+            <a xlink:href="docs/spec.md"><text>See Spec</text></a>
+        </svg>'''
+        outline = self._extract(svg)
+        assert len(outline.links) == 1
+        assert outline.links[0].target == "docs/spec.md"
+
+    def test_internal_fragment_links_skipped(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg"
+                      xmlns:xlink="http://www.w3.org/1999/xlink">
+            <a xlink:href="#section1"><text>Internal</text></a>
+        </svg>'''
+        outline = self._extract(svg)
+        assert len(outline.links) == 0
+
+    def test_defs_skipped(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <text id="hidden">Should not appear</text>
+            </defs>
+            <text x="10" y="20">Visible</text>
+        </svg>'''
+        outline = self._extract(svg)
+        all_texts = [h.text for h in outline.all_headings_flat]
+        assert "Should not appear" not in all_texts
+        assert "Visible" in all_texts
+
+    def test_invalid_svg_returns_empty(self):
+        outline = self._extract("this is not svg")
+        assert len(outline.headings) == 0
+
+    def test_empty_svg(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+        outline = self._extract(svg, path="empty.svg")
+        # Should synthesise a filename-based heading
+        assert len(outline.headings) == 1
+        assert outline.headings[0].text == "empty.svg"
+
+    def test_tspan_text_collected(self):
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg">
+            <text x="10" y="20"><tspan>Part One</tspan> <tspan>Part Two</tspan></text>
+        </svg>'''
+        outline = self._extract(svg)
+        flat = outline.all_headings_flat
+        # The text element should collect all tspan content
+        combined = [h.text for h in flat]
+        assert any("Part One" in t and "Part Two" in t for t in combined)
+
+    def test_sample_svg(self):
+        """Integration test with the repo's sample.svg file."""
+        import os
+        sample = os.path.join(os.path.dirname(__file__), "sample.svg")
+        if not os.path.exists(sample):
+            pytest.skip("sample.svg not found")
+        with open(sample) as f:
+            text = f.read()
+        outline = self._extract(text, path="tests/sample.svg")
+        flat = outline.all_headings_flat
+        labels = [h.text for h in flat]
+        # Should find the main architecture components
+        assert any("Architecture" in t for t in labels)
+        assert any("LLM Service" in t for t in labels)
+        assert any("Context Manager" in t for t in labels)
+        assert any("Symbol Index" in t for t in labels)
+        assert any("Repo" in t for t in labels)
+        assert any("Webapp" in t for t in labels)
+
+
 # === Markdown Extractor Tests ===
 
 class TestMarkdownExtractor:

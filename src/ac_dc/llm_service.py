@@ -556,6 +556,23 @@ class LLMService:
             except Exception as e:
                 logger.warning(f"Doc stability initialization failed: {e}")
 
+        # Seed system:prompt into L0 for doc mode
+        try:
+            sys_prompt = self._config.get_doc_system_prompt() or ""
+            sys_legend = self._doc_index.get_legend() if self._doc_index else ""
+            sys_content = sys_prompt + sys_legend
+            if sys_content:
+                self._doc_stability_tracker._items["system:prompt"] = TrackedItem(
+                    key="system:prompt",
+                    tier=Tier.L0,
+                    n=TIER_CONFIG[Tier.L0]["entry_n"],
+                    content_hash=StabilityTracker.hash_content(sys_prompt),
+                    tokens=self._context.counter.count(sys_content),
+                )
+                logger.info("Seeded system:prompt into L0 for doc mode")
+        except Exception as e:
+            logger.warning(f"Failed to seed doc system prompt: {e}")
+
         # Switch tracker on context
         self._context.set_stability_tracker(self._doc_stability_tracker)
 
@@ -1475,7 +1492,7 @@ class LLMService:
         for key, item in tier_items.items():
             if key.startswith("system:"):
                 item_type = "system"
-                path = None
+                path = "system:prompt"
                 name = "System + Legend"
             elif key.startswith("file:"):
                 item_type = "files"
@@ -2228,6 +2245,56 @@ class LLMService:
         return "\n".join(parts)
 
     # === LSP Proxy Methods ===
+
+    def get_file_map_block(self, path):
+        """Return the map representation of a file or special block based on current mode.
+
+        Handles:
+        - system:prompt — returns system prompt + legend
+        - Regular files — symbol block (code mode) or doc outline block (doc mode)
+
+        Args:
+            path: relative file path or special key like "system:prompt"
+
+        Returns:
+            {path: str, content: str, mode: str} or {error: str}
+        """
+        if not path:
+            return {"error": "No path specified"}
+
+        mode = self._context.mode
+
+        # Special key: system prompt + legend
+        if path == "system:prompt":
+            parts = []
+            if mode == Mode.DOC:
+                prompt = self._config.get_doc_system_prompt() or ""
+                legend = self._doc_index.get_legend() if self._doc_index else ""
+            else:
+                prompt = self._config.get_system_prompt() or ""
+                legend = self._symbol_index.get_legend() if self._symbol_index else ""
+            if prompt:
+                parts.append("# System Prompt\n\n" + prompt)
+            if legend:
+                parts.append("\n# Legend\n\n" + legend)
+            content = "\n".join(parts)
+            if content:
+                return {"path": path, "content": content, "mode": mode.value}
+            return {"error": "No system prompt available"}
+
+        if mode == Mode.DOC and self._doc_index:
+            block = self._doc_index.get_file_doc_block(path)
+            if block:
+                return {"path": path, "content": block, "mode": "doc"}
+            return {"error": f"No document outline for {path}"}
+
+        if self._symbol_index:
+            block = self._symbol_index.get_file_symbol_block(path)
+            if block:
+                return {"path": path, "content": block, "mode": "code"}
+            return {"error": f"No symbol data for {path}"}
+
+        return {"error": "No index available"}
 
     def lsp_get_hover(self, path, line, col):
         """Proxy to SymbolIndex.lsp_get_hover for RPC access."""
