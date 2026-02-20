@@ -284,8 +284,6 @@ class DocIndex:
             f"{len(needs_enrichment)} newly indexed"
         )
 
-        self._dump_to_tmp()
-
         return self._all_outlines
 
     def _get_all_repo_files(self):
@@ -358,21 +356,3 @@ class DocIndex:
             self._all_outlines, exclude_files=exclude_files,
         )
         Path(output_path).write_text(text)
-
-    def _dump_to_tmp(self):
-        """Write all individual doc map entries to /tmp/doc_map_entries/."""
-        import shutil
-        out_dir = Path("/tmp/doc_map_entries")
-        if out_dir.exists():
-            shutil.rmtree(out_dir)
-        out_dir.mkdir(parents=True)
-        # Write combined map
-        combined = self._formatter.format_all(self._all_outlines)
-        (out_dir / "combined.txt").write_text(combined)
-        # Write per-file entries
-        for path, outline in sorted(self._all_outlines.items()):
-            entry = self._formatter.format_file(path, outline)
-            if entry:
-                safe_name = path.replace("/", "__").replace("\\", "__")
-                (out_dir / f"{safe_name}.txt").write_text(entry)
-        logger.info("Doc map entries written to %s (%d files)", out_dir, len(self._all_outlines))

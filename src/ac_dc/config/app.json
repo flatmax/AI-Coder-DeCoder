@@ -7,7 +7,6 @@
     "min_verbatim_exchanges": 2
   },
   "url_cache": {
-    "path": "/tmp/ac-dc-url-cache",
     "ttl_hours": 24
   },
   "doc_index": {
