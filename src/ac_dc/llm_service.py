@@ -2635,10 +2635,10 @@ class LLMService:
         Otherwise, returns standard coding snippets.
         """
         if self._review_active:
-            return self._config.get_review_snippets()
+            return self._config.get_snippets(mode="review")
         if self._context.mode == Mode.DOC:
-            return self._config.get_doc_snippets()
-        return self._config.get_snippets()
+            return self._config.get_snippets(mode="doc")
+        return self._config.get_snippets(mode="code")
 
     def _build_review_context(self):
         """Build review context string for prompt injection.

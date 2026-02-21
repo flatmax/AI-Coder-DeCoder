@@ -25,8 +25,6 @@ _MANAGED_FILES = {
     "review.md",
     "app.json",
     "snippets.json",
-    "review-snippets.json",
-    "doc-snippets.json",
 }
 
 # Files that users are expected to edit — never overwritten automatically.
@@ -78,9 +76,7 @@ class ConfigManager:
         "compaction": {"file": "compaction.md", "format": "markdown"},
         "snippets": {"file": "snippets.json", "format": "json"},
         "review": {"file": "review.md", "format": "markdown"},
-        "review_snippets": {"file": "review-snippets.json", "format": "json"},
         "system_doc": {"file": "system_doc.md", "format": "markdown"},
-        "doc_snippets": {"file": "doc-snippets.json", "format": "json"},
     }
 
     def __init__(self, repo_root=None):
@@ -343,41 +339,54 @@ class ConfigManager:
             return "\n\n" + content
         return ""
 
-    def get_snippets(self):
-        """Load prompt snippets with two-location fallback."""
+    def _load_all_snippets(self):
+        """Load snippets.json with two-location fallback.
+
+        Supports two formats:
+        - Nested (preferred): {"code": [...], "review": [...], "doc": [...]}
+        - Legacy flat: {"snippets": [{"mode": "code", ...}, ...]}
+
+        Returns the raw parsed dict.
+        """
         # Try repo-local first
         if self._repo_root:
             local_path = self._repo_root / ".ac-dc" / "snippets.json"
             if local_path.exists():
                 try:
-                    data = json.loads(local_path.read_text())
-                    return data.get("snippets", [])
+                    return json.loads(local_path.read_text())
                 except (json.JSONDecodeError, OSError):
                     pass
 
         # Fall back to config directory
-        data = self._load_json("snippets.json")
-        return data.get("snippets", [])
+        return self._load_json("snippets.json")
+
+    def get_snippets(self, mode=None):
+        """Load prompt snippets for a given mode.
+
+        Args:
+            mode: "code", "review", or "doc". If None, returns code-mode
+                  snippets (backwards compatible).
+
+        Supports two file formats:
+        - Nested: {"code": [...], "review": [...], "doc": [...]}
+        - Legacy flat: {"snippets": [{"mode": "code", ...}, ...]}
+        """
+        data = self._load_all_snippets()
+        target = mode or "code"
+
+        # Nested format: top-level keys are mode names
+        if target in data and isinstance(data[target], list):
+            return data[target]
+
+        # Legacy flat format: filter by "mode" field on each snippet
+        if "snippets" in data and isinstance(data["snippets"], list):
+            return [s for s in data["snippets"] if s.get("mode", "code") == target]
+
+        return []
 
     def get_review_snippets(self):
-        """Load review-specific snippets with two-location fallback.
-
-        Review snippets live in a dedicated file (review-snippets.json),
-        separate from the standard snippets.json. Same format: {snippets: [...]}.
-        """
-        # Try repo-local first
-        if self._repo_root:
-            local_path = self._repo_root / ".ac-dc" / "review-snippets.json"
-            if local_path.exists():
-                try:
-                    data = json.loads(local_path.read_text())
-                    return data.get("snippets", [])
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        # Fall back to config directory
-        data = self._load_json("review-snippets.json")
-        return data.get("snippets", [])
+        """Load review-specific snippets. Convenience wrapper."""
+        return self.get_snippets(mode="review")
 
     def get_doc_system_prompt(self):
         """Assemble document-mode system prompt from files."""
@@ -388,20 +397,8 @@ class ConfigManager:
         return main
 
     def get_doc_snippets(self):
-        """Load document-mode snippets with two-location fallback."""
-        # Try repo-local first
-        if self._repo_root:
-            local_path = self._repo_root / ".ac-dc" / "doc-snippets.json"
-            if local_path.exists():
-                try:
-                    data = json.loads(local_path.read_text())
-                    return data.get("snippets", [])
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        # Fall back to config directory
-        data = self._load_json("doc-snippets.json")
-        return data.get("snippets", [])
+        """Load document-mode snippets. Convenience wrapper."""
+        return self.get_snippets(mode="doc")
 
     def get_config_content(self, config_type):
         """Read a config file by type."""

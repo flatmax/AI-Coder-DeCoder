@@ -698,7 +698,7 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
 5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
-6. **Snippets swapped** — a separate `doc-snippets.json` with document-relevant quick actions: "Summarise this section", "Check cross-references", "Suggest restructuring", "Write an executive summary"
+6. **Snippets swapped** — `LLMService.get_snippets()` returns the `"doc"` array from the unified `snippets.json`, with document-relevant quick actions: "Summarise this section", "Check cross-references", "Suggest restructuring", "Write an executive summary"
 
 ### What Stays the Same
 
@@ -735,7 +735,7 @@ User clicks mode toggle (doc index already built)
     ├── Clear file context (selected files)
     ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
     ├── Swap system prompt (system.md → system_doc.md)
-    ├── Swap snippets (snippets.json → doc-snippets.json)
+    ├── Swap snippets (get_snippets returns "doc" array from unified snippets.json)
     ├── Switch stability tracker to doc-mode instance (separate state per mode)
     ├── Update stability with current context (run _update_stability)
     ├── Rebuild tier content from doc_index instead of symbol_index
@@ -753,7 +753,7 @@ The re-index step on every mode switch ensures that any files edited manually in
 
 ## System Prompt for Document Mode
 
-A separate `system_doc.md` prompt (in `src/ac_dc/config/system_doc.md`, alongside the existing `system.md`) optimised for document work. Document-mode snippets live in `src/ac_dc/config/doc-snippets.json` (alongside `snippets.json`). Key differences from the code prompt:
+A separate `system_doc.md` prompt (in `src/ac_dc/config/system_doc.md`, alongside the existing `system.md`) optimised for document work. Document-mode snippets live in the `"doc"` key of the unified `src/ac_dc/config/snippets.json`. Key differences from the code prompt:
 
 - No references to programming languages, frameworks, or debugging
 - Focus on: document structure, clarity, cross-referencing, consistency, writing style
@@ -764,18 +764,22 @@ The prompt includes awareness of the document index format so the LLM understand
 
 ## Document-Specific Snippets
 
-`doc-snippets.json` provides quick actions relevant to document workflows:
+Document-mode snippets live in the unified `snippets.json` file under the `"doc"` key, alongside `"code"` and `"review"` snippets. They provide quick actions relevant to document workflows:
 
 ```json
-[
-  {"label": "Summarise", "text": "Summarise this document in 3-5 bullet points"},
-  {"label": "Cross-refs", "text": "Check all cross-references in this document and flag any broken links"},
-  {"label": "Restructure", "text": "Suggest a better structure for this document"},
-  {"label": "Executive summary", "text": "Write an executive summary of this document"},
-  {"label": "TOC", "text": "Generate a table of contents for this document"},
-  {"label": "Consistency", "text": "Check this document for terminology inconsistencies"},
-  {"label": "Simplify", "text": "Rewrite this section in simpler language"}
-]
+{
+  "code": [...],
+  "review": [...],
+  "doc": [
+    {"icon": "📄", "tooltip": "Summarise", "message": "Summarise this document in 3-5 bullet points"},
+    {"icon": "🔗", "tooltip": "Cross-refs", "message": "Check all cross-references in this document and flag any broken links"},
+    {"icon": "🏗️", "tooltip": "Restructure", "message": "Suggest a better structure for this document"},
+    {"icon": "📋", "tooltip": "Executive summary", "message": "Write an executive summary of this document"},
+    {"icon": "📑", "tooltip": "TOC", "message": "Generate a table of contents for this document"},
+    {"icon": "🔍", "tooltip": "Consistency", "message": "Check this document for terminology inconsistencies"},
+    {"icon": "✏️", "tooltip": "Simplify", "message": "Rewrite this section in simpler language"}
+  ]
+}
 ```
 
 ## Cross-Reference Index

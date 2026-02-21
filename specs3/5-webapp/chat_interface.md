@@ -373,7 +373,7 @@ When review mode is active, a slim status bar appears above the chat input showi
 
 ### Review Snippets
 
-When `get_review_state().active` is true, review-specific snippets from the `review_snippets` config array are merged into the snippet drawer alongside standard snippets. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+When review mode is active, `LLMService.get_snippets()` returns review-specific snippets (from the `"review"` key in the unified `snippets.json`). The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
 
 ---
 

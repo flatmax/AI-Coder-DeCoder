@@ -12,12 +12,11 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 | App config | Application settings (URL cache, history compaction) | JSON |
 | System prompt | Main LLM instructions | Markdown |
 | Extra prompt | Additional instructions appended to system prompt | Markdown |
-| Prompt snippets | Quick-insert buttons for the UI | JSON |
+| Prompt snippets | Quick-insert buttons for the UI (all modes: code, review, doc) | JSON |
 | Compaction skill prompt | Template for history compaction summarization | Markdown |
 | Commit message prompt | System instructions for commit message generation | Markdown |
 | System reminder | Edit-format reinforcement appended to each user prompt | Markdown |
 | Review system prompt | System instructions for code review mode | Markdown |
-| Review snippets | Quick-insert buttons for review mode UI | JSON |
 
 ### LLM Config
 
@@ -53,19 +52,28 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 
 ### Prompt Snippets
 
+A single `snippets.json` file contains snippets for all modes (code, review, doc) in a nested structure:
+
 ```pseudo
 {
-    snippets: [
-        {
-            icon: "✂️",
-            tooltip: "Continue truncated edit",
-            message: "Your last edit was truncated, please continue."
-        }
+    code: [
+        {icon: "✂️", tooltip: "Continue truncated edit", message: "Your last edit was truncated, please continue."},
+        ...
+    ],
+    review: [
+        {icon: "🔍", tooltip: "Full review", message: "Give me a full review of this PR."},
+        ...
+    ],
+    doc: [
+        {icon: "📄", tooltip: "Summarise", message: "Summarise this document in 3-5 bullet points"},
+        ...
     ]
 }
 ```
 
-Default snippets: ✂️ Continue truncated edit, 🔍 Check context, ✏️ Fix malformed edits, ⏸️ Pause before implementing, ✅ Verify tests, 📦 Pre-commit checklist, 🏁 Pre-commit with plan completion.
+A legacy flat format (`{snippets: [{mode: "code", ...}, ...]}`) is also supported for backwards compatibility. Snippets without a `mode` field default to code mode.
+
+Default code snippets: ✂️ Continue truncated edit, 🔍 Check context, ✏️ Fix malformed edits, ⏸️ Pause before implementing, ✅ Verify tests, 📦 Pre-commit checklist, 🏁 Pre-commit with plan completion.
 
 ## Config Directory Resolution
 
@@ -85,7 +93,7 @@ Config directory relative to the application source.
 
 | Category | Files | Upgrade Behavior |
 |----------|-------|-----------------|
-| **Managed** | `system.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json`, `review-snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
+| **Managed** | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
 | **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
 
 ### Version-Aware Upgrade
@@ -113,7 +121,7 @@ Users who customized managed files directly (instead of using `system_extra.md`)
 - **App config** — loaded once and cached in memory; force-reload available. Downstream consumers (e.g., `HistoryCompactor`) must read config values through `ConfigManager` properties rather than capturing snapshot dicts at construction time, so that hot-reloaded values take effect immediately
 - **LLM config** — read on init and on explicit reload; env vars applied on load
 - **System prompts** — read fresh from files; concatenated at assembly time (each request). Edits take effect on the next LLM request without restart
-- **Snippets** — loaded on request with two-location fallback: `{repo_root}/.ac-dc/snippets.json` first, then app config directory `snippets.json`
+- **Snippets** — loaded on request with two-location fallback: `{repo_root}/.ac-dc/snippets.json` first, then app config directory `snippets.json`. A single file contains snippets for all modes (code, review, doc) in a nested structure; `get_snippets(mode)` returns the appropriate array
 
 ## Token Counter Data Sources
 
@@ -134,12 +142,11 @@ A whitelisted set of config types can be read, written, and reloaded:
 |-----|-------------|
 | `litellm` | LLM provider config |
 | `app` | Application settings |
-| `snippets` | Prompt snippet buttons |
+| `snippets` | Prompt snippet buttons (all modes: code, review, doc) |
 | `system` | Main system prompt |
 | `system_extra` | Extra system prompt |
 | `compaction` | Compaction skill prompt |
 | `review` | Review system prompt |
-| `review_snippets` | Review snippet buttons |
 
 Only these types are accepted — arbitrary file paths are rejected.
 
@@ -169,10 +176,9 @@ Only these types are accepted — arbitrary file paths are rejected.
 | `Settings.reload_llm_config()` | Hot-reload LLM config and apply |
 | `Settings.reload_app_config()` | Hot-reload app config |
 | `Settings.get_config_info()` | Current model names and config paths |
-| `Settings.get_snippets()` | Load prompt snippets |
-| `Settings.get_review_snippets()` | Load review-specific prompt snippets |
+| `Settings.get_snippets()` | Load prompt snippets (code mode — backwards compatible) |
 
-**Note:** Snippet loading during active sessions is handled by `LLMService.get_snippets()`, which checks review mode state and delegates to the appropriate config method. The `Settings.get_snippets()` and `Settings.get_review_snippets()` methods provide direct access without mode awareness.
+**Note:** Snippet loading during active sessions is handled by `LLMService.get_snippets()`, which checks review/doc mode state and calls `ConfigManager.get_snippets(mode=...)` with the appropriate mode. All modes' snippets live in a single `snippets.json` file with a nested structure (`{"code": [...], "review": [...], "doc": [...]}`).
 
 ### Config Editing Flow
 
@@ -190,5 +196,5 @@ A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first ru
 |------|---------|-----------|
 | `history.jsonl` | Persistent conversation history | Append-only |
 | `symbol_map.txt` | Current symbol map | Rebuilt on startup and before each LLM request |
-| `snippets.json` | Per-repo prompt snippets (optional) | User-managed |
+| `snippets.json` | Per-repo prompt snippets override (optional, all modes) | User-managed |
 | `images/` | Persisted chat images | Write on paste, read on session load |
