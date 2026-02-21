@@ -673,9 +673,9 @@ Keyword enrichment is controlled via `app.json`:
 
 Document outline blocks integrate with the existing stability tracker and cache tier system with no special treatment:
 
-1. **Stability tracker** tracks doc files by key (e.g., `file:specs3/README.md`), same as code files
+1. **Stability tracker** tracks doc files by key (e.g., `doc:specs3/README.md`), same pattern as code files (`sym:src/foo.py`)
 2. **Tier graduation** works identically — a frequently referenced doc promotes from L3 → L2 → L1
-3. **`_build_tiered_content()`** assembles blocks from whichever index is active for the current mode — doc outline blocks in document mode, code symbol blocks in code mode. The two are never intermingled; the mode toggle is a full context switch
+3. **`_build_tiered_content()`** dispatches on key prefix — `sym:` items query the symbol index, `doc:` items query the doc index. In normal (single-mode) operation, only one prefix is present. When cross-reference mode is active (see [Cache Tiering — Cross-Reference Mode](../3-llm-engine/cache_tiering.md#cross-reference-mode)), both prefixes coexist in the tracker and the same tier can contain a mix of `sym:` and `doc:` items
 4. **Content hashing** detects when a doc's structure changes (heading added/removed), triggering demotion back to active tier
 
 Documents tend to change less frequently than code, so they would naturally stabilize at higher tiers quickly — a good fit for the caching model.
@@ -687,11 +687,13 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 | Mode | Symbol map | Document index | File tree | System prompt |
 |---|---|---|---|---|
 | Code (default) | Full symbol detail | Not included | All files | Code-oriented |
+| Code + cross-ref | Full symbol detail | Added via cross-ref toggle | All files | Code-oriented (unchanged) |
 | Document | Not included | Full outlines: headings + KeyBERT keywords + links + first-paragraph summaries | All files (unchanged) | Document-oriented |
+| Document + cross-ref | Added via cross-ref toggle | Full outlines | All files (unchanged) | Document-oriented (unchanged) |
 
 ### What Changes in Document Mode
 
-1. **Symbol map removed** — no code symbols in context. The entire token budget is available for document outlines, selected document content, and conversation history
+1. **Symbol map removed** — no code symbols in context (unless cross-reference mode is enabled — see [Cache Tiering — Cross-Reference Mode](../3-llm-engine/cache_tiering.md#cross-reference-mode)). The entire token budget is available for document outlines, selected document content, and conversation history
 2. **File tree unchanged** — all files remain visible. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
@@ -728,6 +730,7 @@ Server startup
 
 User clicks mode toggle (doc index already built)
     │
+    ├── Reset cross-reference toggle to OFF (remove cross-ref items from tracker if active)
     ├── Re-index doc files (mtime-based — only changed files re-parsed)
     ├── Clear file context (selected files)
     ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
@@ -736,7 +739,7 @@ User clicks mode toggle (doc index already built)
     ├── Switch stability tracker to doc-mode instance (separate state per mode)
     ├── Update stability with current context (run _update_stability)
     ├── Rebuild tier content from doc_index instead of symbol_index
-    ├── Frontend: mode-changed event triggers cache/context tab refresh
+    ├── Frontend: mode-changed event triggers cache/context tab refresh, resets cross-ref checkbox
     └── Insert system message: "Switched to document mode"
 ```
 

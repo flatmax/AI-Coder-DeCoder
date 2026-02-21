@@ -30,6 +30,8 @@ Before computing the breakdown, `get_context_breakdown()` synchronizes the in-me
 | `symbol_map` tokens | `SymbolIndex.get_symbol_map()` | `DocIndex.get_doc_map()` |
 | `symbol_map_files` | `len(_all_symbols)` | `len(_all_outlines)` |
 
+When cross-reference mode is active, `legend` tokens include both legends, and `symbol_map` tokens include both the primary index map and the cross-referenced index map. The `symbol_map_files` count sums both indexes.
+
 This ensures the context breakdown and terminal HUD report accurate token counts for the active mode rather than always using the code index.
 
 `LLMService.get_context_breakdown()` returns:
@@ -38,6 +40,7 @@ This ensures the context breakdown and terminal HUD report accurate token counts
 {
     model: string,
     mode: string,                    // "code" or "doc" — current operating mode
+    cross_ref_enabled: boolean,      // true if cross-reference mode is active
     total_tokens: integer,
     max_input_tokens: integer,
     cache_hit_rate: float,           // cached_tokens / total_tokens
@@ -175,7 +178,7 @@ Model: provider/model    Total: 38.7K
 | urls | 🔗 | Title + tokens |
 | history | 💬 | Message count + tokens |
 
-**Mode-aware labels:** When `mode === "doc"`, the cache viewer shows "pre-indexed documents" instead of "pre-indexed symbols" for unmeasured tier items, and uses the 📝 icon for symbol-type entries. The context viewer shows "Doc Map" instead of "Symbol Map" for the symbol_map category, and the stacked bar legend label adapts similarly.
+**Mode-aware labels:** When `mode === "doc"`, the cache viewer shows "pre-indexed documents" instead of "pre-indexed symbols" for unmeasured tier items, and uses the 📝 icon for symbol-type entries. The context viewer shows "Doc Map" instead of "Symbol Map" for the symbol_map category, and the stacked bar legend label adapts similarly. When cross-reference mode is active, both `sym:` and `doc:` items appear in the cache viewer — `sym:` items use the 📦 icon and `doc:` items use the 📝 icon, regardless of the current mode.
 
 ### Stability Bars
 
@@ -313,7 +316,7 @@ Cache:         read: 21,640, write: 48,070
 Session total: 182,756
 ```
 
-Category breakdown counted independently from tier data. In document mode, "Symbol Map" is labelled "Doc Map" and the system prompt tokens reflect the document system prompt. `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
+Category breakdown counted independently from tier data. In document mode, "Symbol Map" is labelled "Doc Map" and the system prompt tokens reflect the document system prompt. When cross-reference mode is active, an additional line shows the cross-referenced index's token count (e.g., `Doc Index: 8,234` in code mode, or `Symbol Map: 12,456` in document mode). `Last request` shows provider-reported input/output tokens. `Cache` line shows read and/or write counts (omitted if both zero). `Session total` is the cumulative sum of all token usage fields (input + output + cache read + cache write).
 
 ### Tier Changes
 

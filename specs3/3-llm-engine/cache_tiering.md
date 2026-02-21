@@ -96,21 +96,69 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 ## Item Removal
 
-- **File unchecked** — `file:{path}` entry removed from its tier (causing a cache miss); the `symbol:{path}` entry **remains in whichever tier it has earned** independently (it was always tracked separately). The symbol block is no longer excluded from the symbol map output since the full file content is no longer in context
+- **File unchecked** — `file:{path}` entry removed from its tier (causing a cache miss); the `sym:{path}` (or `doc:{path}`) entry **remains in whichever tier it has earned** independently (it was always tracked separately). The index block is no longer excluded from the symbol map / doc index output since the full file content is no longer in context
 - **File deleted** — both file and symbol entries removed entirely
 - Either causes a cache miss in the affected tier
 
 **Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
+
+## Cross-Reference Mode
+
+A UI toggle lets the user add the *other* mode's index alongside the primary one:
+
+| Primary Mode | Toggle Label | Effect |
+|---|---|---|
+| Code | **+doc index** | Doc-index file blocks (`doc:` keys) are added to the stability tracker |
+| Document | **+code symbols** | Symbol-map file blocks (`sym:` keys) are added to the stability tracker |
+
+#### Activation
+
+A separate initialization pass runs for the cross-reference items, appending them to existing tier assignments without disturbing the primary index's items. The same reference-graph initialization algorithm is used (§ Initialization from Reference Graph) with the cross-reference index's reference graph. Cross-ref items receive the standard `entry_n` for their assigned tier.
+
+#### Legends
+
+Both the symbol-map legend and the doc-index legend are placed in L0 (they are small, stable, and don't change). The system prompt does not change — the user is still coding (code mode) or documenting (doc mode).
+
+#### Tiered Assembly
+
+`_build_tiered_content` dispatches on key prefix (`sym:` vs `doc:`) to determine which index provides the content block, regardless of the current mode. This means the same tier can contain a mix of `sym:` and `doc:` items.
+
+#### Deactivation
+
+When the toggle is turned OFF:
+
+1. All cross-reference items are removed from the stability tracker (items whose prefix doesn't match the primary mode's prefix)
+2. Affected tiers are marked as broken
+3. No rebalancing cascade is run — keep it simple
+4. A toast notifies the user
+
+#### Readiness
+
+The toggle is hidden (not just disabled) until the cross-reference index is ready:
+
+- In code mode: hidden until the doc index has finished building (`_doc_index is not None and not _doc_index_building`)
+- In document mode: always available (symbol index is initialized at startup)
+
+The backend exposes readiness via the `cross_ref_ready` field in `get_current_state`.
+
+#### Key Prefix Convention
+
+| Prefix | Index | Provider |
+|---|---|---|
+| `sym:` | Symbol index | `symbol_index.get_file_symbol_block()` |
+| `doc:` | Doc index | `doc_index.get_file_doc_block()` |
+
+Content dispatch is prefix-based, not mode-based. This allows both indexes to coexist in the tracker without collisions.
 
 ## The Active Items List
 
 On each request, the system builds an active items list — the set of items explicitly in active (uncached) context:
 
 1. **Selected file paths** — files the user has checked in the file picker
-2. **Symbol entries for selected files** — `symbol:{path}` for each selected file (excluded from symbol map output since full content is present)
+2. **Index entries for selected files** — `sym:{path}` (code mode) or `doc:{path}` (document mode) for each selected file (excluded from symbol map / doc index output since full content is present)
 3. **Non-graduating history messages** — `history:N` entries not yet graduated
 
-Symbol entries for **unselected** files are never in this list — they live in whichever cached tier they've earned through initialization or promotion.
+Index entries for **unselected** files are never in this list — they live in whichever cached tier they've earned through initialization or promotion.
 
 When a selected file graduates to L3, its full content moves from the "Working Files" (uncached active) prompt section to the L3 cached block. The symbol map exclusion for that file is lifted since it's no longer in the active section.
 
@@ -120,11 +168,11 @@ On startup, tier assignments are initialized from the cross-file reference graph
 
 ### L0 Seeding
 
-L0 is seeded at initialization with the system prompt, symbol legend, and enough high-connectivity symbols to meet `cache_target_tokens`. Symbols are selected by reference count descending (most-referenced first) from the reference index. A conservative per-symbol token estimate (400 tokens) is used during seeding since real token counts aren't available until the first update — this prevents over-seeding L0 when placeholder tokens are too small. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
+L0 is seeded at initialization with the system prompt, index legend (symbol-map legend in code mode, doc-index legend in document mode, or both when cross-reference mode is active), and enough high-connectivity index entries to meet `cache_target_tokens`. Entries are selected by reference count descending (most-referenced first) from the reference index. A conservative per-entry token estimate (400 tokens) is used during seeding since real token counts aren't available until the first update — this prevents over-seeding L0 when placeholder tokens are too small. This ensures L0 is a functional cache block from the first request rather than requiring multiple promotion cycles.
 
 ### Post-Initialization Token Measurement
 
-After `initialize_from_reference_graph` completes, `_measure_tracker_tokens()` iterates all `symbol:` items and replaces their placeholder `tokens=0` with real token counts from the formatted symbol/doc blocks. This ensures the cache viewer tab can display per-item token counts and per-tier totals immediately — without waiting for the first chat request to trigger `_update_stability()`. Content hashes are also updated from signature hashes during measurement for accurate stability tracking.
+After `initialize_from_reference_graph` completes, `_measure_tracker_tokens()` iterates all `sym:` and `doc:` items and replaces their placeholder `tokens=0` with real token counts from the formatted symbol/doc blocks. This ensures the cache viewer tab can display per-item token counts and per-tier totals immediately — without waiting for the first chat request to trigger `_update_stability()`. Content hashes are also updated from signature hashes during measurement for accurate stability tracking.
 
 This measurement runs in both the code path (`_try_initialize_stability` and `complete_deferred_init`) and the document path (`_finalize_doc_mode_switch`).
 
@@ -135,7 +183,7 @@ This measurement runs in both the code path (`_try_initialize_stability` and `co
 3. **Distribute across L1, L2, L3** — greedy bin-packing by cluster size, each cluster stays together
 4. **Distribute orphan files** — files not in any connected component (no mutual references) are distributed into the smallest tier via the same greedy bin-packing. This is critical because `connected_components()` only returns files with bidirectional references — files with only one-way references or no references at all would otherwise be untracked at initialization, causing them to register as new active items on every request and never stabilize.
 
-**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and symbol legend are seeded into L0, along with enough high-connectivity symbols (by `file_ref_count` descending) to meet `cache_target_tokens` (model-aware: 4505 for Opus 4.6, 1126 for Sonnet). This ensures L0 is immediately cacheable from the first request. Only symbol entries are initialized (file entries start in active). **L0-seeded symbols are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
+**L0 is never assigned by clustering** — content must be earned through promotion, with one exception: during initialization, the system prompt and index legend are seeded into L0, along with enough high-connectivity index entries (by `file_ref_count` descending) to meet `cache_target_tokens` (model-aware: 4505 for Opus 4.6, 1126 for Sonnet). This ensures L0 is immediately cacheable from the first request. Only index entries are initialized (file entries start in active). **L0-seeded entries are excluded from the subsequent L1/L2/L3 clustering distribution** to avoid double-placement.
 
 After distribution, tiers below `cache_target_tokens` are merged into the smallest other tier to avoid wasting cache breakpoints on underfilled tiers.
 
@@ -181,9 +229,9 @@ Log promotions/demotions for frontend display. Store current active items for ne
 
 The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
 
-## Symbol Map Exclusion
+## Index Exclusion
 
-When a file is in active context (selected), its symbol map entry is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted.
+When a file is in active context (selected), its index entry (`sym:` or `doc:`) is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted. This applies independently to both primary and cross-reference index entries.
 
 ## History Compaction Interaction
 
@@ -199,6 +247,6 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 - N is capped at promotion threshold when tier above is stable
 - Underfilled tiers demote one level down
 - Stale items (deleted files) are removed; affected tier marked broken
-- A file never appears as both symbol block and full content — when full content is in any tier, the symbol block is excluded
+- A file never appears as both index block and full content — when full content is in any tier, the index block (`sym:` or `doc:`) is excluded
 - History purge after compaction removes all `history:*` entries from tracker
 - Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate

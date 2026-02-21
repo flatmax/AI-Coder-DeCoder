@@ -202,11 +202,12 @@ for path in selected_files:
             "tokens": counter.count(content)
         }
 
-# 2. Symbol blocks for selected files
+# 2. Index entries for selected files (sym: in code mode, doc: in document mode)
 for path in selected_files:
-    block = symbol_index.get_file_symbol_block(path)
+    prefix = "sym:" if mode == "code" else "doc:"
+    block = index.get_file_block(path)  # symbol_index or doc_index per mode
     if block:
-        active_items["symbol:" + path] = {
+        active_items[prefix + path] = {
             "hash": sha256(block),
             "tokens": counter.count(block)
         }
@@ -309,7 +310,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name
+- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_ready, cross_ref_enabled
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 
 ### Streaming Guards
@@ -329,6 +330,8 @@ Session total: 182,756
 - Cache tab and context tab listen for mode-changed and files-changed events, triggering refresh
 - Stability tracker switches to mode-specific instance; _update_stability runs immediately
 - Context breakdown reflects new mode's index (symbol map or doc map) after switch
+- Cross-reference toggle resets to OFF on mode switch (cross-ref items from previous mode are removed)
+- Cross-ref readiness re-evaluated after mode switch (doc index may still be building)
 
 ### Shell Command Detection
 - Extracts from ```bash blocks, $ prefix, > prefix
@@ -354,6 +357,16 @@ Session total: 182,756
 - Auto-added files broadcast via filesChanged callback
 - files_auto_added in streamComplete lists paths that were auto-added
 - Review mode skips all edit application (existing behavior unchanged)
+
+### Cross-Reference Toggle
+- `set_cross_reference(true)` runs initialization pass for the other index's items
+- `set_cross_reference(false)` removes cross-ref items from tracker, marks affected tiers as broken
+- `get_current_state` includes `cross_ref_ready` and `cross_ref_enabled` fields
+- Cross-ref items use `sym:` or `doc:` prefix matching the cross-referenced index
+- Both legends appear in L0 when cross-ref is enabled
+- Toggle is rejected (no-op) when cross-ref index is not ready
+- Mode switch resets cross-ref to disabled
+- Token usage toast shown on activation indicating additional token cost
 
 ### Ambiguous Anchor Retry
 - Failed edits with "Ambiguous anchor" in message trigger auto-populated retry prompt in chat input

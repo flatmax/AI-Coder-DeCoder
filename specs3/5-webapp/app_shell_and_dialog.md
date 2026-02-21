@@ -165,7 +165,14 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 |---------|---------|
 | Left | Active tab label; click toggles minimize |
 | Center | Tab icon buttons |
-| Right | Review toggle (👁️), minimize button |
+| Right | Cross-ref toggle, review toggle (👁️), minimize button |
+
+**Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **hidden** (not just disabled) until the cross-reference index is ready — in code mode this means the doc index has finished building; in document mode the symbol index is always available so the checkbox appears immediately. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+
+The dialog tracks cross-ref state via `_crossRefEnabled` and `_crossRefReady` properties, synced from:
+- `onRpcReady` / `state-loaded`: reads `cross_ref_ready` and `cross_ref_enabled` from `get_current_state()`
+- `compactionEvent` with `stage === "doc_index_ready"`: sets `_crossRefReady = true` (in code mode)
+- `mode-changed` event: resets `_crossRefEnabled = false`, re-evaluates `_crossRefReady`
 
 The review toggle button (👁️) appears in the header actions area on all tabs. When review mode is inactive, clicking it switches to the Files tab and opens the review selector. When review mode is active, the button is visually highlighted (`review-active` class) and clicking it calls `_exitReview()` on the files tab. This provides quick access to review without navigating to the Files tab first.
 

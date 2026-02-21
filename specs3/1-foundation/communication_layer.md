@@ -301,7 +301,7 @@ Three top-level service classes, registered via `add_class()`:
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `LLMService.get_current_state` | `() → {messages, selected_files, streaming_active, session_id, repo_name}` | Full state snapshot |
+| `LLMService.get_current_state` | `() → {messages, selected_files, streaming_active, session_id, repo_name, cross_ref_ready, cross_ref_enabled}` | Full state snapshot |
 | `LLMService.set_selected_files` | `(files) → [string]` | Update file selection |
 | `LLMService.get_selected_files` | `() → [string]` | Current selection |
 | `LLMService.chat_streaming` | `(request_id, message, files?, images?) → {status}` | Start streaming chat |
@@ -333,6 +333,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.lsp_get_definition` | `(path, line, col) → {file, range}` | Go to definition |
 | `LLMService.lsp_get_references` | `(path, line, col) → [{file, range}]` | Find references |
 | `LLMService.lsp_get_completions` | `(path, line, col, prefix?) → [{label, kind, detail}]` | Code completions |
+| `LLMService.set_cross_reference` | `(enabled) → {status, cross_ref_enabled, message?}` | Enable/disable cross-reference mode. No-op if cross-ref index not ready |
 
 ### Settings Methods
 
