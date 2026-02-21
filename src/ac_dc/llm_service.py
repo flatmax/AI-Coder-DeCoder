@@ -350,8 +350,12 @@ class LLMService:
     async def _build_doc_index_background_silent(self):
         """Build doc index in background without switching mode.
 
-        Sends progress toasts so the user knows it's happening.
-        When done, notifies frontend that doc mode is available.
+        Two-phase approach per spec:
+        Phase 1: Fast structural extraction (~250ms) → doc index is usable
+                 immediately with unenriched outlines. Sends doc_index_ready.
+        Phase 2: Background keyword enrichment — replaces cache entries as
+                 each file completes. Does NOT block mode switching or
+                 cross-reference availability.
         """
         try:
             # Send initial toast so user knows it started
@@ -368,7 +372,11 @@ class LLMService:
                 except Exception:
                     pass
 
-            await self._build_doc_index()
+            # Phase 1: Fast structural extraction + reference index
+            needs_enrichment = await self._build_doc_index_structure()
+
+            # Mark doc index as ready — mode switching and cross-ref now available
+            self._doc_index_building = False
 
             # Notify frontend that doc index is ready (mode not switched yet)
             if self._event_callback:
@@ -384,7 +392,11 @@ class LLMService:
                 except Exception:
                     pass
 
-            logger.info("Background doc index build complete — doc mode now available")
+            logger.info("Background doc index structure complete — doc mode now available")
+
+            # Phase 2: Background keyword enrichment (non-blocking)
+            if needs_enrichment:
+                await self._build_doc_index_enrichment(needs_enrichment)
 
         except Exception as e:
             logger.error(f"Background doc index build failed: {e}")
@@ -445,7 +457,7 @@ class LLMService:
         """Return current mode."""
         return {
             "mode": self._context.mode.value,
-            "doc_index_ready": self._doc_index is not None and not self._doc_index_building,
+            "doc_index_ready": self._doc_index is not None,
             "doc_index_building": self._doc_index_building,
             "cross_ref_ready": self._is_cross_ref_ready(),
             "cross_ref_enabled": self._cross_ref_enabled,
@@ -454,13 +466,15 @@ class LLMService:
     def _is_cross_ref_ready(self):
         """Check if the cross-reference index is available for the current mode.
 
-        In code mode: doc index must be built and not building.
+        In code mode: doc index must exist (structural pass complete).
+                      Keyword enrichment may still be running — that's fine,
+                      unenriched outlines are usable for cross-reference.
         In document mode: symbol index is always available (built at startup).
         """
         if self._context.mode == Mode.DOC:
             return self._symbol_index is not None and self._stability_initialized
         else:
-            return self._doc_index is not None and not self._doc_index_building
+            return self._doc_index is not None
 
     def set_cross_reference(self, enabled):
         """Enable or disable cross-reference mode. (RPC)
@@ -691,12 +705,14 @@ class LLMService:
         Returns:
             {mode: str, message: str}
         """
+        logger.info(f"switch_mode called: {mode} (current: {self._context.mode.value})")
         try:
             new_mode = Mode(mode)
         except ValueError:
             return {"error": f"Invalid mode: {mode}. Use 'code' or 'doc'."}
 
         if new_mode == self._context.mode:
+            logger.info(f"Already in {mode} mode — no switch needed")
             return {"mode": new_mode.value, "message": "Already in this mode"}
 
         # Reset cross-reference mode before switching —
@@ -713,12 +729,18 @@ class LLMService:
 
     async def _switch_to_doc_mode(self):
         """Switch from code mode to document mode."""
-        # If doc index is currently being built in the background, tell the
-        # user to wait — don't start a second build.
+        logger.info(
+            f"_switch_to_doc_mode: doc_index={self._doc_index is not None}, "
+            f"doc_index_building={self._doc_index_building}"
+        )
+        # If structural extraction is still in progress, tell user to wait.
+        # (Keyword enrichment running in background is fine — unenriched
+        # outlines are usable immediately.)
         if self._doc_index_building:
+            logger.info("Doc index still building — rejecting mode switch")
             return {
                 "mode": self._context.mode.value,
-                "message": "Document index is still building — please wait for it to finish.",
+                "message": "Document index structure is still being extracted — please wait a moment.",
                 "building": True,
             }
 
@@ -726,6 +748,7 @@ class LLMService:
         # This shouldn't normally happen (build starts at startup), but
         # handles edge cases like missing repo at init time.
         if self._doc_index is None:
+            logger.info("Doc index is None — starting background build")
             self._start_background_doc_index()
             return {
                 "mode": "code",
@@ -733,27 +756,17 @@ class LLMService:
                 "building": True,
             }
 
-        # Doc index is ready — re-index changed files using per-file async
-        # enrichment so the event loop stays responsive (same pattern as
-        # _build_doc_index).  Without this, a single blocking index_repo()
-        # call holds the GIL during sentence-transformer inference and
-        # stalls all WebSocket I/O.
+        # Doc index is ready — do a fast structural re-extraction for any
+        # mtime-changed files, then switch immediately.  Do NOT run keyword
+        # enrichment here — the background enrichment task handles that.
+        # Running enrichment in the mode-switch path would block for tens of
+        # seconds competing with the background task for executor workers.
         if self._doc_index:
             try:
                 loop = asyncio.get_event_loop()
                 doc_index = self._doc_index
 
-                if self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            "Re-indexing documents…", 10,
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0)
-
-                # Phase 1: Structure extraction (fast)
+                # Phase 1: Fast structure re-extraction (mtime-based, <5ms/file)
                 doc_index._repo_files = await loop.run_in_executor(
                     self._executor, doc_index._get_all_repo_files,
                 )
@@ -769,101 +782,44 @@ class LLMService:
                 total = len(doc_files)
                 needs_enrichment = []
                 if total > 0:
+                    # Use _extract_outlines_structure_only to avoid cache
+                    # misses due to keyword_model mismatch on unenriched entries.
+                    # This only re-parses files whose mtime changed; files with
+                    # any cached outline (enriched or not) are used as-is.
                     needs_enrichment = await loop.run_in_executor(
                         self._executor,
-                        lambda: doc_index._extract_outlines(doc_files, total),
+                        lambda: doc_index._extract_outlines_structure_only(doc_files, total),
                     )
                     await asyncio.sleep(0)
 
-                # Phase 2: Per-file enrichment with event loop yields
-                keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
+                # Cache unenriched outlines for newly-changed files so they're
+                # immediately available for the doc map and tier assembly.
+                for path, mtime, outline, text in needs_enrichment:
+                    doc_index._cache.put(path, mtime, outline, keyword_model=None)
+                    doc_index._all_outlines[path] = outline
 
+                # Queue changed files for background enrichment (non-blocking)
                 if needs_enrichment and doc_index._enricher:
-                    enrich_total = len(needs_enrichment)
-                    logger.info(f"Mode switch: {enrich_total} files need enrichment")
-
-                    # Send enrichment queued toast
                     pending_paths = [p for p, m, o, t in needs_enrichment]
-                    if self._event_callback and pending_paths:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", "doc_index_enrichment",
-                                {"stage": "doc_enrichment_queued", "files": pending_paths},
-                            )
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0)
-
-                    for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
-                        pct = 10 + int(75 * i / enrich_total)
-                        if self._event_callback:
+                    enrichment_queue = doc_index.queue_enrichment(pending_paths)
+                    if enrichment_queue and self._event_callback:
+                        ep = [p for p, m, o, t in enrichment_queue]
+                        if ep:
                             try:
                                 await self._event_callback(
-                                    "startupProgress", "doc_index",
-                                    f"Extracting keywords… ({i}/{enrich_total}) — {path}",
-                                    pct,
+                                    "compactionEvent", "doc_index_enrichment",
+                                    {"stage": "doc_enrichment_queued", "files": ep},
                                 )
                             except Exception:
                                 pass
+                    # Enrichment runs in the background — don't await it here
 
-                        try:
-                            await loop.run_in_executor(
-                                self._executor,
-                                lambda p=path, m=mtime, o=outline, t=text: (
-                                    doc_index.enrich_single_file(p, m, o, t,
-                                                                 keyword_model=keyword_model)
-                                ),
-                            )
-                            # Per-file done toast event
-                            if self._event_callback:
-                                try:
-                                    await self._event_callback(
-                                        "compactionEvent", "doc_index_enrichment",
-                                        {"stage": "doc_enrichment_file_done", "file": path},
-                                    )
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            logger.warning(f"Mode switch enrichment failed for {path}: {e}")
-                            if self._event_callback:
-                                try:
-                                    await self._event_callback(
-                                        "compactionEvent", "doc_index_enrichment",
-                                        {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
-                                    )
-                                except Exception:
-                                    pass
-                        await asyncio.sleep(0)
-
-                    # Enrichment complete toast
-                    if self._event_callback:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", "doc_index_enrichment",
-                                {"stage": "doc_enrichment_complete"},
-                            )
-                        except Exception:
-                            pass
-                elif needs_enrichment:
-                    for path, mtime, outline, text in needs_enrichment:
-                        doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
-                        doc_index._all_outlines[path] = outline
-
-                # Phase 3: Build reference index
+                # Phase 2: Rebuild reference index (fast, <50ms)
                 await loop.run_in_executor(
                     self._executor, doc_index._finalize_index,
                 )
                 await asyncio.sleep(0)
 
-                if self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            "Switching to document mode…", 90,
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0)
             except Exception as e:
                 logger.warning(f"Doc re-index on mode switch failed: {e}")
 
@@ -988,10 +944,19 @@ class LLMService:
         logger.info("Switched to code mode")
         return {"mode": "code", "message": "Switched to code mode"}
 
-    async def _build_doc_index(self):
-        """Build the document index lazily on first switch to doc mode."""
+    async def _build_doc_index_structure(self):
+        """Phase 1: Fast structural extraction of document outlines.
+
+        Creates the DocIndex, extracts all outlines (using cache where
+        available), builds the reference index. After this completes the
+        doc index is usable for mode switching and cross-reference —
+        outlines just won't have keyword annotations until Phase 2.
+
+        Returns:
+            list of (path, mtime, outline, text) tuples needing enrichment
+        """
         if not self._repo:
-            return
+            return []
 
         self._doc_index_building = True
 
@@ -999,15 +964,10 @@ class LLMService:
 
         doc_config = self._config.doc_index_config
 
-        # Thread-safe progress: store last message so heartbeat can re-send it
-        _last_progress = {"message": "Building document index…", "percent": 0}
-
         _loop = asyncio.get_event_loop()
 
         def _progress(stage, message, percent):
             """Send progress from either a thread (executor) or the event loop."""
-            _last_progress["message"] = message
-            _last_progress["percent"] = percent
             if self._event_callback:
                 try:
                     asyncio.run_coroutine_threadsafe(
@@ -1052,7 +1012,7 @@ class LLMService:
         loop = asyncio.get_event_loop()
         doc_index = self._doc_index  # local ref for lambdas
 
-        # Phase 1: Structure extraction in executor (fast, mostly I/O).
+        # Structure extraction in executor (fast, mostly I/O).
         # Populates cached outlines and returns files needing enrichment.
         _progress("doc_index", "Extracting document outlines…", 10)
 
@@ -1084,104 +1044,150 @@ class LLMService:
             f"{total - len(needs_enrichment)} cached"
         )
 
-        # Phase 2: Keyword enrichment — one file at a time in executor,
-        # with asyncio.sleep(0) between each so the event loop can process
-        # WebSocket frames.  This prevents GIL starvation during the
-        # sentence-transformer inference that otherwise blocks all I/O.
-        keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
+        # For files that need enrichment, cache unenriched outlines now so
+        # they're immediately available for the doc map and cross-reference.
+        # Enrichment will replace these cache entries in Phase 2.
+        for path, mtime, outline, text in needs_enrichment:
+            doc_index._cache.put(path, mtime, outline, keyword_model=None)
+            doc_index._all_outlines[path] = outline
 
-        if needs_enrichment and doc_index._enricher:
-            enrich_total = len(needs_enrichment)
-            logger.info(f"Keyword enrichment: {enrich_total} files to process")
-
-            # Send enrichment queued toast event
-            pending_paths = [p for p, m, o, t in needs_enrichment]
-            if self._event_callback and pending_paths:
-                try:
-                    await self._event_callback(
-                        "compactionEvent", "doc_index_enrichment",
-                        {"stage": "doc_enrichment_queued", "files": pending_paths},
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(0)
-
-            for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
-                pct = 30 + int(65 * i / enrich_total)
-                _progress(
-                    "doc_index",
-                    f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
-                    pct,
-                )
-
-                # Pass progress_callback only for first file (triggers model init)
-                cb = _progress if i == 1 else None
-                try:
-                    await loop.run_in_executor(
-                        self._executor,
-                        lambda p=path, m=mtime, o=outline, t=text, c=cb: (
-                            doc_index.enrich_single_file(p, m, o, t,
-                                                         keyword_model=keyword_model,
-                                                         progress_callback=c)
-                        ),
-                    )
-                    logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
-
-                    # Send per-file done event
-                    if self._event_callback:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", "doc_index_enrichment",
-                                {"stage": "doc_enrichment_file_done", "file": path},
-                            )
-                        except Exception:
-                            pass
-                except Exception as e:
-                    logger.warning(f"Keyword enrichment failed for {path}: {e}")
-                    if self._event_callback:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", "doc_index_enrichment",
-                                {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
-                            )
-                        except Exception:
-                            pass
-
-                # Yield to event loop between files — this is the key fix
-                # that prevents GIL starvation of WebSocket delivery
-                await asyncio.sleep(0)
-
-            # Send enrichment complete event
-            if self._event_callback:
-                try:
-                    await self._event_callback(
-                        "compactionEvent", "doc_index_enrichment",
-                        {"stage": "doc_enrichment_complete"},
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(0)
-        elif needs_enrichment:
-            # No enricher — cache outlines as-is
-            for path, mtime, outline, text in needs_enrichment:
-                doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
-                doc_index._all_outlines[path] = outline
-
-        # Phase 3: Build reference index
-        _progress("doc_index", "Building cross-references...", 96)
+        # Build reference index from all outlines (enriched + unenriched)
+        _progress("doc_index", "Building cross-references...", 90)
         await loop.run_in_executor(
             self._executor, doc_index._finalize_index,
         )
         await asyncio.sleep(0)
 
-        _progress("doc_index", "Document indexing complete", 100)
+        _progress("doc_index", "Document structure ready", 100)
+        logger.info(f"Document index structure built: {len(doc_index._all_outlines)} files")
 
-        self._doc_index_building = False
-        logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")
+        return needs_enrichment
 
-        # Check if keyword enrichment is available
-        if not self._doc_index.keywords_available:
-            logger.warning("Document mode running without keyword enrichment (keybert not installed)")
+    async def _build_doc_index_enrichment(self, needs_enrichment):
+        """Phase 2: Background keyword enrichment.
+
+        Runs after the doc index is already marked as ready. Enriches
+        files one at a time, replacing unenriched cache entries with
+        keyword-annotated versions. Rebuilds the reference index after
+        all files are enriched.
+
+        Does not block mode switching, cross-reference, or chat.
+        """
+        if not self._doc_index or not needs_enrichment:
+            return
+
+        doc_index = self._doc_index
+        if not doc_index._enricher:
+            logger.info("No keyword enricher available — skipping enrichment phase")
+            if not doc_index.keywords_available:
+                logger.warning("Document mode running without keyword enrichment (keybert not installed)")
+            return
+
+        loop = asyncio.get_event_loop()
+        keyword_model = doc_index._enricher.model_name
+        enrich_total = len(needs_enrichment)
+        logger.info(f"Background keyword enrichment: {enrich_total} files to process")
+
+        _loop = asyncio.get_event_loop()
+
+        def _progress(stage, message, percent):
+            """Send progress from either a thread (executor) or the event loop."""
+            if self._event_callback:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback("startupProgress", stage, message, percent),
+                        _loop,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback(
+                            "compactionEvent", "doc_index_progress",
+                            {
+                                "stage": "doc_index_progress",
+                                "message": f"📝 {message}",
+                                "percent": percent,
+                            },
+                        ),
+                        _loop,
+                    )
+                except Exception:
+                    pass
+
+        # Send enrichment queued toast event
+        pending_paths = [p for p, m, o, t in needs_enrichment]
+        if self._event_callback and pending_paths:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_enrichment",
+                    {"stage": "doc_enrichment_queued", "files": pending_paths},
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0)
+
+        for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
+            pct = int(100 * i / enrich_total)
+            _progress(
+                "doc_index",
+                f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
+                pct,
+            )
+
+            # Pass progress_callback only for first file (triggers model init)
+            cb = _progress if i == 1 else None
+            try:
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda p=path, m=mtime, o=outline, t=text, c=cb: (
+                        doc_index.enrich_single_file(p, m, o, t,
+                                                     keyword_model=keyword_model,
+                                                     progress_callback=c)
+                    ),
+                )
+                logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
+
+                # Send per-file done event
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_enrichment",
+                            {"stage": "doc_enrichment_file_done", "file": path},
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Keyword enrichment failed for {path}: {e}")
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_enrichment",
+                            {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                        )
+                    except Exception:
+                        pass
+
+            # Yield to event loop between files — prevents GIL starvation
+            await asyncio.sleep(0)
+
+        # Rebuild reference index with enriched outlines
+        try:
+            await loop.run_in_executor(
+                self._executor, doc_index._finalize_index,
+            )
+        except Exception as e:
+            logger.warning(f"Post-enrichment reference index rebuild failed: {e}")
+
+        # Send enrichment complete event
+        if self._event_callback:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_enrichment",
+                    {"stage": "doc_enrichment_complete"},
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0)
+
+        logger.info(f"Keyword enrichment complete: {enrich_total} files")
 
     # === Streaming Chat (RPC) ===
 
@@ -1273,15 +1279,22 @@ class LLMService:
                 ]
                 await asyncio.sleep(0)
 
-                # Structure extraction — uses cache, only re-parses changed files
+                # Structure extraction — uses structure_only to avoid
+                # blocking on keyword enrichment during chat requests.
+                # Accepts any cached outline regardless of keyword model.
                 total = len(doc_files)
                 needs_enrichment = []
                 if total > 0:
                     needs_enrichment = await loop.run_in_executor(
                         self._executor,
-                        lambda: doc_index._extract_outlines(doc_files, total),
+                        lambda: doc_index._extract_outlines_structure_only(doc_files, total),
                     )
                     await asyncio.sleep(0)
+
+                # Cache unenriched outlines for newly-changed files
+                for path, mtime, outline, text in needs_enrichment:
+                    doc_index._cache.put(path, mtime, outline, keyword_model=None)
+                    doc_index._all_outlines[path] = outline
 
                 # Finalize reference index
                 await loop.run_in_executor(
@@ -1289,50 +1302,21 @@ class LLMService:
                 )
                 await asyncio.sleep(0)
 
-                # Queue changed files for background enrichment with toast events
+                # Queue changed files for background enrichment (non-blocking)
                 if needs_enrichment and doc_index._enricher:
-                    keyword_model = doc_index._enricher.model_name
                     pending_paths = [p for p, m, o, t in needs_enrichment]
-                    if self._event_callback and pending_paths:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", request_id,
-                                {"stage": "doc_enrichment_queued", "files": pending_paths},
-                            )
-                        except Exception:
-                            pass
-
-                    for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
-                        await loop.run_in_executor(
-                            self._executor,
-                            lambda p=path, m=mtime, o=outline, t=text: (
-                                doc_index.enrich_single_file(p, m, o, t,
-                                                             keyword_model=keyword_model)
-                            ),
-                        )
-                        if self._event_callback:
+                    enrichment_queue = doc_index.queue_enrichment(pending_paths)
+                    if enrichment_queue and self._event_callback:
+                        ep = [p for p, m, o, t in enrichment_queue]
+                        if ep:
                             try:
                                 await self._event_callback(
                                     "compactionEvent", request_id,
-                                    {"stage": "doc_enrichment_file_done", "file": path},
+                                    {"stage": "doc_enrichment_queued", "files": ep},
                                 )
                             except Exception:
                                 pass
-                        await asyncio.sleep(0)
-
-                    if self._event_callback:
-                        try:
-                            await self._event_callback(
-                                "compactionEvent", request_id,
-                                {"stage": "doc_enrichment_complete"},
-                            )
-                        except Exception:
-                            pass
-                elif needs_enrichment:
-                    keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
-                    for path, mtime, outline, text in needs_enrichment:
-                        doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
-                        doc_index._all_outlines[path] = outline
+                    # Enrichment will happen in the background — don't block chat
 
                 symbol_map = self._doc_index.get_doc_map(
                     exclude_files=set(self._selected_files)

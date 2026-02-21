@@ -335,7 +335,9 @@ Session total: 182,756
 - Stability tracker switches to mode-specific instance; _update_stability runs immediately
 - Context breakdown reflects new mode's index (symbol map or doc map) after switch
 - Cross-reference toggle resets to OFF on mode switch (cross-ref items from previous mode are removed)
-- Mode switch is instant — structural re-extraction produces unenriched outlines immediately; changed files queued for background enrichment
+- Mode switch is instant — structural re-extraction produces unenriched outlines immediately; changed files queued for background enrichment with non-blocking header progress bar
+- Unenriched outlines are cached immediately so the doc map and cross-reference work without waiting for enrichment; enriched outlines replace cache entries as each file completes (no toast — progress shown in header bar only)
+- Mode switch RPC is guarded by `_modeSwitchInFlight` flag — `_refreshMode` skips both backend polling and saved-preference auto-switching while a switch is in flight, preventing a race where `doc_index_ready` triggers `_refreshMode` before the switch RPC returns and the preference is saved
 
 ### Shell Command Detection
 - Extracts from ```bash blocks, $ prefix, > prefix

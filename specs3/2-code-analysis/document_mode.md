@@ -607,7 +607,7 @@ if self._doc_index:
     self._doc_index.queue_enrichment(modified)            # background keyword pass
 ```
 
-The modified files immediately have fresh unenriched outlines (headings, links, section sizes) available for tier assembly. Keyword enrichment runs asynchronously — a persistent enrichment toast notifies the user which files are being enriched.
+The modified files immediately have fresh unenriched outlines (headings, links, section sizes) available for tier assembly. Keyword enrichment runs asynchronously — the header progress bar shows which file is being enriched.
 
 **Manual edits in the diff editor:** When a user manually edits and saves a `.md` file in the Monaco diff editor, no index invalidation occurs immediately — the save goes directly to `Repo.write_file`. The mtime change is detected lazily: the next `index_repo()` call (triggered by a chat request or mode switch) sees the new mtime, re-extracts the structural outline instantly, and queues the file for background enrichment. Explicit invalidation (as above) is only needed for LLM edits as a belt-and-suspenders measure alongside mtime checks.
 
@@ -637,38 +637,38 @@ For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexin
 When a file needs re-indexing (mtime changed, edit applied), the system:
 1. Extracts the structural outline synchronously (<5ms) and caches it immediately
 2. Queues the file for background keyword enrichment
-3. Shows a **persistent toast** listing files pending enrichment (see [Enrichment Toast](#enrichment-toast))
-4. When enrichment completes for a file, updates the cache and removes it from the toast
-5. The toast auto-dismisses when all pending files are enriched
+3. Shows enrichment progress in the **header progress bar** (see [Enrichment Progress Feedback](#enrichment-progress-feedback))
+4. When enrichment completes for a file, updates the cache entry with the enriched outline
+5. The header bar auto-dismisses when all pending files are enriched
 
-This means the LLM may see unenriched outlines (headings without keyword annotations) for recently-edited files. This is acceptable — the spec already establishes that document mode is fully functional without keywords (see [Graceful Degradation in Packaged Releases](#graceful-degradation-in-packaged-releases)). The quality difference is cosmetic: `## Tier Structure ~35ln` instead of `## Tier Structure (cached tier, llm request) [table] ~35ln`.
+This means the LLM may see unenriched outlines (headings without keyword annotations) for recently-edited files or during the initial background build. This is acceptable — the spec already establishes that document mode is fully functional without keywords (see [Graceful Degradation in Packaged Releases](#graceful-degradation-in-packaged-releases)). The quality difference is cosmetic: `## Tier Structure ~35ln` instead of `## Tier Structure (cached tier, llm request) [table] ~35ln`.
+
+**Cache entry replacement on enrichment completion.** When keyword enrichment completes for a file, `enrich_single_file()` calls `DocCache.put()` with the enriched outline and the `keyword_model` name. This **replaces** the unenriched cache entry (which was stored with `keyword_model=None`) both in memory and on disk (the JSON sidecar file is overwritten). The replacement is atomic from the perspective of any subsequent cache lookup — the next `cache.get(path, mtime, keyword_model)` returns the enriched outline. The `_all_outlines` dict in `DocIndex` is also updated in-place by `enrich_single_file()`, so `get_doc_map()` and `get_file_doc_block()` immediately reflect the enriched content.
+
+**No stability tracker demotion on enrichment.** The stability tracker uses content hashes to detect changes. When an unenriched outline is replaced by an enriched one, the content hash changes (keywords add text to the formatted block). This would normally trigger a demotion (hash mismatch → N reset). However, this is the expected behavior — the enriched block is a *better* version of the same content, and a single N reset is a minor cost. The item re-stabilizes within 3 requests. No special-casing is needed to suppress the demotion; the standard hash-mismatch → N=0 → re-graduate flow handles it correctly.
+
+**Reference index rebuild after enrichment.** After all files in a batch are enriched, the reference index is rebuilt (`_finalize_index()`) to pick up any changes in link extraction that may result from the enriched outlines. In practice, keyword enrichment does not change the heading or link structure — only the `keywords` field on each heading is populated — so the reference index rebuild is a no-op in terms of graph topology. It is included as a defensive measure.
 
 **Per-file async enrichment:** Background enrichment (both the initial build and queued re-enrichment of edited files) splits work into per-file `run_in_executor` calls with `await asyncio.sleep(0)` between files. This yields control to the event loop between GIL-heavy sentence-transformer inference calls, allowing WebSocket traffic to flow. Without this, a single blocking executor call holds the GIL for the entire enrichment duration, stalling all WebSocket I/O.
 
 The `DocIndex` exposes `enrich_single_file()` for this per-file pattern and `index_file_structure_only()` for instant unenriched extraction.
 
-### Enrichment Toast
+### Enrichment Progress Feedback
 
-When files are queued for background keyword enrichment, a **persistent toast** is shown in the chat panel's toast area. Unlike transient toasts (which auto-dismiss after a few seconds), this toast remains visible until all queued files have been enriched.
+When files are queued for background keyword enrichment, a **non-blocking header progress bar** in the `ac-dialog` header is the sole UI feedback channel. No toast is shown — toasts overlay the chat input area and obstruct interaction during the multi-minute enrichment phase.
 
-**Toast content:**
-- Icon: `⏳` (hourglass)
-- Title: `"Enriching document outlines..."`
-- Body: comma-separated list of filenames currently pending (e.g., `README.md, cache_tiering.md, prompt_assembly.md`)
-- As each file completes, it is removed from the list and replaced with a brief `✓ filename` flash
-- When all files complete, the toast transitions to a success state (`✅ Document outlines enriched`) and auto-dismisses after 3 seconds
+**Header progress bar.** A compact bar appears in the dialog header showing the current enrichment file and completion percentage (e.g., `📝 Extracting keywords… (5/33 files) — cache_tiering.md  [=====>  ]`). This is visible regardless of which tab is active or whether the dialog is minimized. The bar is driven by `doc_index_progress` events received after `doc_index_ready` (when `_docIndexReady` is true). It auto-dismisses on `doc_enrichment_complete`.
 
-**Backend mechanism:** The `LLMService` maintains an `_enrichment_queue` (a set of paths pending enrichment). When files are added to the queue, a `compactionEvent` with stage `doc_enrichment_queued` is sent, carrying the list of pending paths. As each file completes enrichment, a `doc_enrichment_file_done` event is sent with the completed path. When the queue empties, a `doc_enrichment_complete` event fires.
+**Backend mechanism:** The `LLMService` sends `doc_index_progress` events via `compactionEvent` with per-file `message` and `percent` fields during the enrichment phase. Additionally, `doc_enrichment_queued`, `doc_enrichment_file_done`, and `doc_enrichment_complete` events are sent for state tracking (the dialog uses these to manage the `_enrichingDocs` flag).
 
-**Frontend mechanism:** The chat panel listens for these compaction events and manages a dedicated persistent toast element. The toast is created on `doc_enrichment_queued`, updated on `doc_enrichment_file_done` (remove path from displayed list), and transitioned to success + auto-dismiss on `doc_enrichment_complete`.
+**Frontend mechanism:** The dialog (`ac-dialog`) manages the header progress bar via `_enrichingDocs` and `_modeSwitchMessage`/`_modeSwitchPercent` state. When `_enrichingDocs` is true and `_modeSwitchMessage` is non-empty, the header bar renders. On `doc_enrichment_complete`, `_enrichingDocs` clears and the bar disappears.
 
-**When the toast appears:**
-- During the initial background doc index build (all files pending)
-- When a file is unchecked after being edited (that file pending)
+**When the bar appears:**
+- During the initial background doc index build (all files pending enrichment)
 - When mode is switched and files need re-enrichment (those files pending)
-- When the LLM applies edit blocks to doc files (modified files pending)
+- When the LLM applies edit blocks to doc files (modified files queued for enrichment)
 
-**When the toast does NOT appear:**
+**When the bar does NOT appear:**
 - When KeyBERT is not installed (no enrichment possible — a separate one-time warning toast covers this)
 - When all files hit the mtime cache (nothing to enrich — the common case)
 
@@ -775,12 +775,15 @@ Server startup
     ├── Code index built, stability initialized, "ready" sent → startup overlay dismissed
     └── _start_background_doc_index() called AFTER "ready"
           ├── Phase 1: Structure extraction in executor (fast, I/O-bound)
-          │     └── All files get unenriched outlines immediately → doc mode toggle enabled
-          ├── Phase 2: Build DocReferenceIndex from extracted outlines (fast)
-          ├── Phase 3: Per-file keyword enrichment — each file in separate executor call
+          │     ├── All files get unenriched outlines cached immediately
+          │     ├── Build DocReferenceIndex from extracted outlines (fast)
+          │     ├── Set _doc_index_building = False → doc mode toggle + cross-ref enabled
+          │     └── Send doc_index_ready → frontend enables buttons
+          ├── Phase 2: Per-file keyword enrichment — each file in separate executor call
           │     ├── asyncio.sleep(0) between files → event loop processes WebSocket traffic
-          │     └── Persistent enrichment toast shows progress in chat panel
-          └── Send doc_enrichment_complete → toast auto-dismisses
+          │     ├── Each file: enrich_single_file() replaces unenriched cache entry
+          │     └── Header progress bar shows current file + percentage (non-blocking)
+          └── Send doc_enrichment_complete → header bar auto-dismisses
 
 User clicks mode toggle
     │
@@ -981,14 +984,25 @@ Document indexing has two phases with very different performance characteristics
 
 | Event stage | Payload | Purpose |
 |-------------|---------|---------|
-| `doc_enrichment_queued` | `{files: [path, ...]}` | Files pending enrichment — toast appears |
-| `doc_enrichment_file_done` | `{file: path}` | One file enriched — removed from toast |
-| `doc_enrichment_complete` | `{}` | All files enriched — toast auto-dismisses |
-| `doc_enrichment_failed` | `{file: path, error: msg}` | Enrichment failed for one file — toast shows warning |
+| `doc_enrichment_queued` | `{files: [path, ...]}` | Files pending enrichment — header bar activates |
+| `doc_enrichment_file_done` | `{file: path}` | One file enriched — header bar updates |
+| `doc_enrichment_complete` | `{}` | All files enriched — header bar auto-dismisses |
+| `doc_enrichment_failed` | `{file: path, error: msg}` | Enrichment failed for one file — logged to console |
 
-**No header progress bar needed.** The previous design used a header progress bar and `startupProgress` events because the doc index build gated the mode toggle. Since structural extraction is now instant and the mode toggle is enabled immediately, the header progress bar is unnecessary. The enrichment toast in the chat panel provides sufficient feedback for the background quality pass.
+**Header progress bar during enrichment.** Structural extraction completes instantly and enables the mode toggle and cross-reference checkbox immediately — no blocking overlay is needed for that phase. However, keyword enrichment runs in the background for several seconds to minutes (depending on repo size and model). A **non-blocking header progress bar** is shown in the dialog header during enrichment, displaying the current file and completion percentage. This bar does not block any UI interaction — the mode toggle, cross-reference checkbox, chat, and all tabs remain fully functional while enrichment runs. The bar auto-dismisses when enrichment completes (on `doc_enrichment_complete` event) or is hidden when the `_enrichingDocs` flag clears.
 
-**No resilient state recovery needed.** The previous design required `_refreshMode()` to recover from missed `doc_index_ready` events. Since the mode toggle is enabled as soon as structural extraction completes (which happens synchronously during the startup background build before any browser interaction is possible), there is no transient "not ready" state to recover from. If the browser connects after the build, the mode toggle is already enabled.
+The header progress bar is driven by `doc_index_progress` events received after the `doc_index_ready` event has already fired (i.e., `_docIndexReady` is true). Before `doc_index_ready`, progress events drive the blocking structural-extraction overlay. After `doc_index_ready`, they update the non-blocking header bar only. Crucially, `doc_index_progress` events in the enrichment phase also set `_enrichingDocs = true` — this ensures the bar recovers after a browser refresh, when the initial `doc_enrichment_queued` event was missed but progress events continue arriving from the backend.
+
+**Mode switch race prevention.** The `_switchMode()` method sets a `_modeSwitchInFlight` flag for the duration of the RPC call. While this flag is true, `_refreshMode()` returns immediately — it does not poll the backend for mode state and does not attempt to auto-switch based on saved preferences. This prevents a race condition where:
+
+1. User clicks mode toggle → `_switchMode('doc')` begins RPC call
+2. Backend switches to doc mode and sends `doc_index_ready` event
+3. `doc_index_ready` handler calls `_refreshMode()`
+4. `_refreshMode()` reads saved preference (still `'code'` — the save happens after the RPC returns)
+5. `_refreshMode()` sees backend is `'doc'` but pref is `'code'` → calls `_switchMode('code')` to "correct" the mismatch
+6. Mode bounces back to code immediately after switching to doc
+
+The `_modeSwitchInFlight` guard is checked at three points in `_refreshMode()`: at entry, after the `get_mode` await, and before the saved-preference auto-switch. The flag is cleared in a `finally` block to ensure cleanup even on errors.
 
 **Granularity** — Enrichment toast updates fire after each file completes keyword extraction. Per-file granularity gives smooth visual feedback (50 updates for 50 files) without excessive RPC overhead. During background enrichment, each file is a separate `run_in_executor` call with an `asyncio.sleep(0)` yield after completion, so events are delivered to the browser between files.
 

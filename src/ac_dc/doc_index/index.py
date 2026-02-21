@@ -236,6 +236,59 @@ class DocIndex:
 
         return needs_enrichment
 
+    def _extract_outlines_structure_only(self, doc_files, total, progress_callback=None):
+        """Extract outlines using any cached version (enriched or not).
+
+        Unlike _extract_outlines which checks keyword_model match,
+        this method accepts any cached outline regardless of enrichment
+        state. Only files with changed mtime are re-parsed.
+
+        Used by mode switching to avoid blocking on keyword enrichment.
+
+        Returns list of (path, mtime, outline, text) tuples for files
+        that had no cache entry at all (newly changed files).
+        """
+        needs_extraction = []
+
+        for i, path in enumerate(doc_files):
+            abs_path = self._root / path
+            if not abs_path.exists():
+                continue
+
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                continue
+
+            # Accept ANY cached outline (keyword_model=None skips model check)
+            cached = self._cache.get(path, mtime, keyword_model=None)
+            if cached:
+                self._all_outlines[path] = cached
+                continue
+
+            # No cache at all — need to extract structure
+            ext = abs_path.suffix.lower()
+            extractor_cls = EXTRACTORS.get(ext)
+            if not extractor_cls:
+                continue
+
+            try:
+                text = abs_path.read_text(errors="replace")
+            except OSError:
+                continue
+
+            extractor = extractor_cls()
+            outline = extractor.extract(path, text, repo_files=self._repo_files)
+
+            # SVG: cache immediately (no enrichment needed)
+            if ext == '.svg':
+                self._cache.put(path, mtime, outline, keyword_model=None)
+                self._all_outlines[path] = outline
+            else:
+                needs_extraction.append((path, mtime, outline, text))
+
+        return needs_extraction
+
     def _enrich_files(self, needs_enrichment, keyword_model, progress_callback=None):
         """Phase 2: Run keyword enrichment on extracted outlines.
 
