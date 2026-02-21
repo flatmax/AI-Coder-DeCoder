@@ -340,7 +340,7 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 
 | Side | Element | Action |
 |------|---------|--------|
-| Left | ✨ | New session |
+| Left | ✨ | New session (dispatches `session-loaded` to refresh history bar) |
 | Left | 📜 | Browse history |
 | Center | Search input | Case-insensitive substring search (see Chat Search below) |
 
