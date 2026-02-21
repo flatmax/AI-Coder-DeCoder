@@ -1210,6 +1210,111 @@ class TestDocFormatterEdgeCases:
         assert h3_indent > h2_indent
 
 
+class TestDocIndexStructureOnly:
+    """Tests for index_file_structure_only and queue_enrichment."""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        (tmp_path / "doc.md").write_text(
+            "# Title\n\n## Section\n\nSome content here.\n"
+        )
+        (tmp_path / "other.md").write_text("# Other\n\nText.\n")
+        (tmp_path / "diagram.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><title>Diagram</title></svg>'
+        )
+        return tmp_path
+
+    def test_structure_only_returns_outline(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        outline = idx.index_file_structure_only("doc.md")
+        assert outline is not None
+        assert outline.headings[0].text == "Title"
+
+    def test_structure_only_cached_without_keyword_model(self, repo):
+        """Structure-only outlines are cached with keyword_model=None."""
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        idx.index_file_structure_only("doc.md")
+        # Should be retrievable with keyword_model=None
+        mtime = (repo / "doc.md").stat().st_mtime
+        assert idx.cache.get("doc.md", mtime, keyword_model=None) is not None
+
+    def test_structure_only_stale_for_enriched_lookup(self, repo):
+        """Structure-only cache entry is stale when queried with a keyword model."""
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": True})
+        idx.index_file_structure_only("doc.md")
+        mtime = (repo / "doc.md").stat().st_mtime
+        # Querying with a model name should miss (triggers re-enrichment)
+        assert idx.cache.get("doc.md", mtime, keyword_model="all-mpnet-base-v2") is None
+
+    def test_structure_only_available_in_all_outlines(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        idx.index_file_structure_only("doc.md")
+        assert "doc.md" in idx._all_outlines
+        block = idx.get_file_doc_block("doc.md")
+        assert "Title" in block
+
+    def test_structure_only_nonexistent_returns_none(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        assert idx.index_file_structure_only("missing.md") is None
+
+    def test_structure_only_unsupported_ext_returns_none(self, repo):
+        (repo / "data.csv").write_text("a,b\n1,2\n")
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        assert idx.index_file_structure_only("data.csv") is None
+
+    def test_structure_only_svg_works(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        outline = idx.index_file_structure_only("diagram.svg")
+        assert outline is not None
+
+    def test_queue_enrichment_returns_unenriched_files(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": True})
+        # Extract structure only (no keywords)
+        idx.index_file_structure_only("doc.md")
+        idx.index_file_structure_only("other.md")
+        needs = idx.queue_enrichment(["doc.md", "other.md"])
+        assert len(needs) == 2
+        paths = [n[0] for n in needs]
+        assert "doc.md" in paths
+        assert "other.md" in paths
+
+    def test_queue_enrichment_skips_already_enriched(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        # Full index (with keywords_enabled=False, outlines are cached with model=None)
+        idx.index_file("doc.md")
+        # queue_enrichment with no enricher returns empty since cache matches
+        needs = idx.queue_enrichment(["doc.md"])
+        assert len(needs) == 0
+
+    def test_queue_enrichment_skips_svg(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": True})
+        idx.index_file_structure_only("diagram.svg")
+        needs = idx.queue_enrichment(["diagram.svg"])
+        assert len(needs) == 0
+
+    def test_queue_enrichment_skips_nonexistent(self, repo):
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": True})
+        needs = idx.queue_enrichment(["missing.md"])
+        assert len(needs) == 0
+
+    def test_queue_enrichment_skips_unsupported(self, repo):
+        (repo / "data.csv").write_text("a,b\n1,2\n")
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": True})
+        needs = idx.queue_enrichment(["data.csv"])
+        assert len(needs) == 0
+
+    def test_invalidate_then_structure_only(self, repo):
+        """Invalidate + structure_only cycle mimics edit-driven re-extraction."""
+        idx = DocIndex(str(repo), doc_config={"keywords_enabled": False})
+        idx.index_file("doc.md")
+        assert idx.get_file_doc_block("doc.md")
+        idx.invalidate_file("doc.md")
+        assert not idx.get_file_doc_block("doc.md")
+        outline = idx.index_file_structure_only("doc.md")
+        assert outline is not None
+        assert idx.get_file_doc_block("doc.md")
+
+
 class TestDocIndexFile:
 
     @pytest.fixture

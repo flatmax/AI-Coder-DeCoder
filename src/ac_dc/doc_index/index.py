@@ -401,6 +401,105 @@ class DocIndex:
         """Get content hash for a file's outline."""
         return self._cache.get_hash(path)
 
+    def index_file_structure_only(self, path):
+        """Extract and cache a file's structural outline without keyword enrichment.
+
+        Used for instant unenriched re-extraction after edits. The outline
+        is immediately available for tier assembly; keyword enrichment is
+        queued separately via queue_enrichment().
+
+        Args:
+            path: relative path from repo root
+
+        Returns:
+            DocOutline or None
+        """
+        abs_path = self._root / path
+        if not abs_path.exists():
+            return None
+
+        ext = abs_path.suffix.lower()
+        extractor_cls = EXTRACTORS.get(ext)
+        if not extractor_cls:
+            return None
+
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            return None
+
+        try:
+            text = abs_path.read_text(errors="replace")
+        except OSError:
+            return None
+
+        extractor = extractor_cls()
+        outline = extractor.extract(path, text, repo_files=self._repo_files)
+
+        # Cache without keyword enrichment — keyword_model=None so any
+        # subsequent get() with a real model name will treat this as stale
+        # and trigger re-enrichment.
+        self._cache.put(path, mtime, outline, keyword_model=None)
+        self._all_outlines[path] = outline
+
+        return outline
+
+    def queue_enrichment(self, paths):
+        """Queue files for background keyword enrichment.
+
+        Returns a list of (path, mtime, outline, text) tuples that need
+        enrichment. The caller (LLMService._build_doc_index) is responsible
+        for driving the actual enrichment loop with asyncio.sleep(0) between
+        files and sending progress events.
+
+        Args:
+            paths: iterable of relative file paths to re-enrich
+
+        Returns:
+            list of (path, mtime, outline, text) tuples ready for
+            enrich_single_file()
+        """
+        needs = []
+        keyword_model = self._enricher.model_name if self._enricher else None
+
+        for path in paths:
+            abs_path = self._root / path
+            if not abs_path.exists():
+                continue
+
+            ext = abs_path.suffix.lower()
+            if ext not in EXTRACTORS:
+                continue
+
+            # SVG text labels are already terse keywords — skip enrichment
+            if ext == '.svg':
+                continue
+
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                continue
+
+            # Check if already enriched with current model
+            cached = self._cache.get(path, mtime, keyword_model=keyword_model)
+            if cached:
+                continue
+
+            # Get the current outline (may be unenriched from
+            # index_file_structure_only)
+            outline = self._all_outlines.get(path)
+            if not outline:
+                continue
+
+            try:
+                text = abs_path.read_text(errors="replace")
+            except OSError:
+                continue
+
+            needs.append((path, mtime, outline, text))
+
+        return needs
+
     def invalidate_file(self, path):
         """Invalidate cache for a file."""
         self._cache.invalidate(path)

@@ -291,6 +291,9 @@ class ConfigManager:
             "keywords_ngram_range": [1, 2],
             "keywords_min_section_chars": 50,
             "keywords_min_score": 0.3,
+            "keywords_diversity": 0.5,
+            "keywords_tfidf_fallback_chars": 150,
+            "keywords_max_doc_freq": 0.6,
         })
 
     @property

@@ -1373,6 +1373,47 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const message = event?.message || '';
     if (stage === 'url_fetch' || stage === 'url_ready') {
       this._showToast(message, stage === 'url_ready' ? 'success' : '');
+    } else if (stage === 'doc_enrichment_queued') {
+      // Persistent enrichment toast — show pending files
+      const files = event?.files || [];
+      this._enrichmentPending = new Set(files);
+      this._enrichmentToast = {
+        message: `⏳ Enriching document outlines... ${files.join(', ')}`,
+        type: '',
+      };
+      this.requestUpdate();
+    } else if (stage === 'doc_enrichment_file_done') {
+      // Remove completed file from persistent toast
+      const file = event?.file;
+      if (this._enrichmentPending) {
+        this._enrichmentPending.delete(file);
+        if (this._enrichmentPending.size > 0) {
+          this._enrichmentToast = {
+            message: `⏳ Enriching document outlines... ${[...this._enrichmentPending].join(', ')}`,
+            type: '',
+          };
+        }
+        this.requestUpdate();
+      }
+    } else if (stage === 'doc_enrichment_complete') {
+      // Transition to success and auto-dismiss
+      this._enrichmentToast = {
+        message: '✅ Document outlines enriched',
+        type: 'success',
+      };
+      this._enrichmentPending = null;
+      this.requestUpdate();
+      setTimeout(() => {
+        this._enrichmentToast = null;
+        this.requestUpdate();
+      }, 3000);
+    } else if (stage === 'doc_enrichment_failed') {
+      // Show warning for failed file but keep toast alive
+      const file = event?.file;
+      if (this._enrichmentPending) {
+        this._enrichmentPending.delete(file);
+      }
+      this._showToast(`⚠️ Enrichment failed for ${file}: ${event?.error || 'unknown error'}`, 'error');
     } else if (stage === 'compacting') {
       this._showToast(message || '🗜️ Compacting history...', '');
     } else if (stage === 'compacted') {
@@ -2705,6 +2746,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
             </div>
           </div>
         </div>
+      ` : nothing}
+
+      <!-- Enrichment Toast (persistent) -->
+      ${this._enrichmentToast ? html`
+        <div class="toast ${this._enrichmentToast.type}" role="status">${this._enrichmentToast.message}</div>
       ` : nothing}
 
       <!-- Toast -->

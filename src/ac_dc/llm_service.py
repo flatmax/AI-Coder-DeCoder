@@ -9,7 +9,6 @@ Manages the full lifecycle of LLM interactions:
 """
 
 import asyncio
-import hashlib
 import logging
 import time
 import traceback
@@ -783,6 +782,18 @@ class LLMService:
                     enrich_total = len(needs_enrichment)
                     logger.info(f"Mode switch: {enrich_total} files need enrichment")
 
+                    # Send enrichment queued toast
+                    pending_paths = [p for p, m, o, t in needs_enrichment]
+                    if self._event_callback and pending_paths:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", "doc_index_enrichment",
+                                {"stage": "doc_enrichment_queued", "files": pending_paths},
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0)
+
                     for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
                         pct = 10 + int(75 * i / enrich_total)
                         if self._event_callback:
@@ -795,15 +806,44 @@ class LLMService:
                             except Exception:
                                 pass
 
-                        cb = None
-                        await loop.run_in_executor(
-                            self._executor,
-                            lambda p=path, m=mtime, o=outline, t=text: (
-                                doc_index.enrich_single_file(p, m, o, t,
-                                                             keyword_model=keyword_model)
-                            ),
-                        )
+                        try:
+                            await loop.run_in_executor(
+                                self._executor,
+                                lambda p=path, m=mtime, o=outline, t=text: (
+                                    doc_index.enrich_single_file(p, m, o, t,
+                                                                 keyword_model=keyword_model)
+                                ),
+                            )
+                            # Per-file done toast event
+                            if self._event_callback:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", "doc_index_enrichment",
+                                        {"stage": "doc_enrichment_file_done", "file": path},
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.warning(f"Mode switch enrichment failed for {path}: {e}")
+                            if self._event_callback:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", "doc_index_enrichment",
+                                        {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                                    )
+                                except Exception:
+                                    pass
                         await asyncio.sleep(0)
+
+                    # Enrichment complete toast
+                    if self._event_callback:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", "doc_index_enrichment",
+                                {"stage": "doc_enrichment_complete"},
+                            )
+                        except Exception:
+                            pass
                 elif needs_enrichment:
                     for path, mtime, outline, text in needs_enrichment:
                         doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
@@ -1054,6 +1094,18 @@ class LLMService:
             enrich_total = len(needs_enrichment)
             logger.info(f"Keyword enrichment: {enrich_total} files to process")
 
+            # Send enrichment queued toast event
+            pending_paths = [p for p, m, o, t in needs_enrichment]
+            if self._event_callback and pending_paths:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_enrichment",
+                        {"stage": "doc_enrichment_queued", "files": pending_paths},
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0)
+
             for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
                 pct = 30 + int(65 * i / enrich_total)
                 _progress(
@@ -1064,18 +1116,50 @@ class LLMService:
 
                 # Pass progress_callback only for first file (triggers model init)
                 cb = _progress if i == 1 else None
-                await loop.run_in_executor(
-                    self._executor,
-                    lambda p=path, m=mtime, o=outline, t=text, c=cb: (
-                        doc_index.enrich_single_file(p, m, o, t,
-                                                     keyword_model=keyword_model,
-                                                     progress_callback=c)
-                    ),
-                )
-                logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
+                try:
+                    await loop.run_in_executor(
+                        self._executor,
+                        lambda p=path, m=mtime, o=outline, t=text, c=cb: (
+                            doc_index.enrich_single_file(p, m, o, t,
+                                                         keyword_model=keyword_model,
+                                                         progress_callback=c)
+                        ),
+                    )
+                    logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
+
+                    # Send per-file done event
+                    if self._event_callback:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", "doc_index_enrichment",
+                                {"stage": "doc_enrichment_file_done", "file": path},
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Keyword enrichment failed for {path}: {e}")
+                    if self._event_callback:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", "doc_index_enrichment",
+                                {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                            )
+                        except Exception:
+                            pass
 
                 # Yield to event loop between files — this is the key fix
                 # that prevents GIL starvation of WebSocket delivery
+                await asyncio.sleep(0)
+
+            # Send enrichment complete event
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "compactionEvent", "doc_index_enrichment",
+                        {"stage": "doc_enrichment_complete"},
+                    )
+                except Exception:
+                    pass
                 await asyncio.sleep(0)
         elif needs_enrichment:
             # No enricher — cache outlines as-is
@@ -1170,13 +1254,86 @@ class LLMService:
             file_tree = ""
 
             if self._context.mode == Mode.DOC and self._doc_index:
-                # Document mode — use doc index for map.
-                # Run in executor so KeyBERT enrichment of changed files
-                # doesn't block the event loop / stall WebSocket delivery.
+                # Document mode — two-phase re-extraction per spec:
+                # Phase 1: Structure re-extraction (mtime-based, instant)
+                # Phase 2: Queue changed files for background enrichment
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    self._executor, self._doc_index.index_repo,
+                doc_index = self._doc_index
+
+                # Re-extract structures (fast, I/O-bound)
+                doc_index._repo_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_all_repo_files,
                 )
+                doc_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_doc_files,
+                )
+                doc_files = [
+                    f for f in doc_files
+                    if Path(f).suffix.lower() in EXTRACTORS
+                ]
+                await asyncio.sleep(0)
+
+                # Structure extraction — uses cache, only re-parses changed files
+                total = len(doc_files)
+                needs_enrichment = []
+                if total > 0:
+                    needs_enrichment = await loop.run_in_executor(
+                        self._executor,
+                        lambda: doc_index._extract_outlines(doc_files, total),
+                    )
+                    await asyncio.sleep(0)
+
+                # Finalize reference index
+                await loop.run_in_executor(
+                    self._executor, doc_index._finalize_index,
+                )
+                await asyncio.sleep(0)
+
+                # Queue changed files for background enrichment with toast events
+                if needs_enrichment and doc_index._enricher:
+                    keyword_model = doc_index._enricher.model_name
+                    pending_paths = [p for p, m, o, t in needs_enrichment]
+                    if self._event_callback and pending_paths:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", request_id,
+                                {"stage": "doc_enrichment_queued", "files": pending_paths},
+                            )
+                        except Exception:
+                            pass
+
+                    for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
+                        await loop.run_in_executor(
+                            self._executor,
+                            lambda p=path, m=mtime, o=outline, t=text: (
+                                doc_index.enrich_single_file(p, m, o, t,
+                                                             keyword_model=keyword_model)
+                            ),
+                        )
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "doc_enrichment_file_done", "file": path},
+                                )
+                            except Exception:
+                                pass
+                        await asyncio.sleep(0)
+
+                    if self._event_callback:
+                        try:
+                            await self._event_callback(
+                                "compactionEvent", request_id,
+                                {"stage": "doc_enrichment_complete"},
+                            )
+                        except Exception:
+                            pass
+                elif needs_enrichment:
+                    keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
+                    for path, mtime, outline, text in needs_enrichment:
+                        doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
+                        doc_index._all_outlines[path] = outline
+
                 symbol_map = self._doc_index.get_doc_map(
                     exclude_files=set(self._selected_files)
                 )
@@ -1433,10 +1590,62 @@ class LLMService:
                         for path in modified:
                             self._symbol_index.invalidate_file(path)
 
-                    # Invalidate doc index cache for modified doc files
+                    # Invalidate doc index cache and re-extract structure
+                    # for modified doc files (instant unenriched outline)
                     if self._doc_index:
                         for path in modified:
                             self._doc_index.invalidate_file(path)
+                            self._doc_index.index_file_structure_only(path)
+                        # Queue modified doc files for background enrichment
+                        enrichment_queue = self._doc_index.queue_enrichment(modified)
+                        if enrichment_queue:
+                            pending_paths = [p for p, m, o, t in enrichment_queue]
+                            if self._event_callback and pending_paths:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", request_id,
+                                        {"stage": "doc_enrichment_queued", "files": pending_paths},
+                                    )
+                                except Exception:
+                                    pass
+                            keyword_model = self._doc_index._enricher.model_name if self._doc_index._enricher else None
+                            loop = asyncio.get_event_loop()
+                            for path, mtime, outline, text in enrichment_queue:
+                                try:
+                                    await loop.run_in_executor(
+                                        self._executor,
+                                        lambda p=path, m=mtime, o=outline, t=text: (
+                                            self._doc_index.enrich_single_file(
+                                                p, m, o, t, keyword_model=keyword_model)
+                                        ),
+                                    )
+                                    if self._event_callback:
+                                        try:
+                                            await self._event_callback(
+                                                "compactionEvent", request_id,
+                                                {"stage": "doc_enrichment_file_done", "file": path},
+                                            )
+                                        except Exception:
+                                            pass
+                                except Exception as e:
+                                    logger.warning(f"Background enrichment failed for {path}: {e}")
+                                    if self._event_callback:
+                                        try:
+                                            await self._event_callback(
+                                                "compactionEvent", request_id,
+                                                {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                                            )
+                                        except Exception:
+                                            pass
+                                await asyncio.sleep(0)
+                            if self._event_callback:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", request_id,
+                                        {"stage": "doc_enrichment_complete"},
+                                    )
+                                except Exception:
+                                    pass
 
                     # Auto-add not-in-context files to selected files
                     files_auto_added = []
