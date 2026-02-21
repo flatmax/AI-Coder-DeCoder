@@ -109,7 +109,7 @@ class StabilityTracker:
         """
         to_remove = []
         for key, item in self._items.items():
-            if key.startswith("file:") or key.startswith("symbol:"):
+            if key.startswith("file:") or key.startswith("symbol:") or key.startswith("doc:"):
                 path = key.split(":", 1)[1]
                 if path not in existing_files:
                     to_remove.append(key)
@@ -140,7 +140,8 @@ class StabilityTracker:
         """
         active_keys = {item["key"] for item in active_items}
 
-        # Remove file: and history: items that are no longer active
+        # Remove file: and history: items that are no longer active.
+        # symbol: and doc: items persist (they represent repo structure).
         to_remove = []
         for key in self._items:
             if key.startswith("file:") and key not in active_keys:
@@ -478,7 +479,7 @@ class StabilityTracker:
 
     # === Initialization from Reference Graph ===
 
-    def initialize_from_reference_graph(self, ref_index, all_files, counter=None):
+    def initialize_from_reference_graph(self, ref_index, all_files, counter=None, key_prefix="symbol:"):
         """Initialize tier assignments from cross-file reference graph.
 
         No persistence — rebuilt fresh each session. Items receive their tier's
@@ -488,6 +489,7 @@ class StabilityTracker:
             ref_index: ReferenceIndex instance
             all_files: list of all source file paths
             counter: TokenCounter for estimating tokens (optional)
+            key_prefix: prefix for item keys (default "symbol:" for code, "doc:" for doc mode)
         """
         if not all_files:
             return
@@ -496,13 +498,13 @@ class StabilityTracker:
         # System prompt is seeded separately by LLMService; here we add symbols.
         l0_seeded = set()
         if ref_index and hasattr(ref_index, 'file_ref_count'):
-            l0_seeded = self._seed_l0_symbols(ref_index, all_files, counter)
+            l0_seeded = self._seed_l0_symbols(ref_index, all_files, counter, key_prefix=key_prefix)
 
         # Try clustering via mutual references (bidirectional edges)
         if ref_index and hasattr(ref_index, 'connected_components'):
             components = ref_index.connected_components()
             if components:
-                self._init_from_clusters(components, counter, all_files, exclude=l0_seeded)
+                self._init_from_clusters(components, counter, all_files, exclude=l0_seeded, key_prefix=key_prefix)
                 return
 
         # Fallback: sort by reference count descending
@@ -523,7 +525,7 @@ class StabilityTracker:
 
         for path, _refs in files_with_refs:
             tier = tiers[min(tier_idx, len(tiers) - 1)]
-            key = f"symbol:{path}"
+            key = f"{key_prefix}{path}"
             self._items[key] = TrackedItem(
                 key=key,
                 tier=tier,
@@ -540,7 +542,7 @@ class StabilityTracker:
                     tier_idx += 1
                     accumulated = 0
 
-    def _seed_l0_symbols(self, ref_index, all_files, counter):
+    def _seed_l0_symbols(self, ref_index, all_files, counter, key_prefix="symbol:"):
         """Seed L0 with high-connectivity symbols to meet provider cache minimum.
 
         Selects the top few high-connectivity symbols by reference count
@@ -571,7 +573,7 @@ class StabilityTracker:
         for path in ranked:
             if l0_tokens >= self._cache_target_tokens:
                 break
-            key = f"symbol:{path}"
+            key = f"{key_prefix}{path}"
             tokens = ESTIMATED_TOKENS_PER_SYMBOL
             self._items[key] = TrackedItem(
                 key=key,
@@ -588,7 +590,7 @@ class StabilityTracker:
 
         return seeded
 
-    def _init_from_clusters(self, components, counter, all_files=None, exclude=None):
+    def _init_from_clusters(self, components, counter, all_files=None, exclude=None, key_prefix="symbol:"):
         """Initialize from connected components.
 
         Greedy bin-packing by cluster size, each cluster stays together.
@@ -605,7 +607,7 @@ class StabilityTracker:
             for path in component:
                 if path in placed:
                     continue
-                key = f"symbol:{path}"
+                key = f"{key_prefix}{path}"
                 self._items[key] = TrackedItem(
                     key=key,
                     tier=target,
@@ -621,7 +623,7 @@ class StabilityTracker:
             for path in all_files:
                 if path not in placed:
                     target = min(tiers, key=lambda t: tier_sizes[t])
-                    key = f"symbol:{path}"
+                    key = f"{key_prefix}{path}"
                     self._items[key] = TrackedItem(
                         key=key,
                         tier=target,

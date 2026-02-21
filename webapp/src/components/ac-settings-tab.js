@@ -14,7 +14,7 @@ const CONFIG_CARDS = [
   { type: 'system', icon: '📝', label: 'System Prompt', format: 'markdown', reloadable: false },
   { type: 'system_extra', icon: '📎', label: 'System Extra', format: 'markdown', reloadable: false },
   { type: 'compaction', icon: '🗜️', label: 'Compaction Skill', format: 'markdown', reloadable: false },
-  { type: 'snippets', icon: '✂️', label: 'Snippets', format: 'json', reloadable: false },
+  { type: 'snippets', icon: '✂️', label: 'Snippets (all modes)', format: 'json', reloadable: false },
 ];
 
 export class AcSettingsTab extends RpcMixin(LitElement) {

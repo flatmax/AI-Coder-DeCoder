@@ -159,7 +159,33 @@ class DocIndex:
         if progress_callback:
             progress_callback("doc_index", "Extracting document outlines…", 10)
 
-        # Determine which files need (re)indexing
+        needs_enrichment = self._extract_outlines(doc_files, total, progress_callback)
+
+        logger.info(
+            f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
+            f"{total - len(needs_enrichment)} cached"
+        )
+
+        # Phase 2: Keyword enrichment (slow, GIL-heavy)
+        keyword_model = self._enricher.model_name if self._enricher else None
+        self._enrich_files(needs_enrichment, keyword_model, progress_callback)
+
+        # Phase 3: Build reference index
+        self._finalize_index(progress_callback)
+
+        logger.info(
+            f"Document index: {len(self._all_outlines)} files, "
+            f"{len(needs_enrichment)} newly indexed"
+        )
+
+        return self._all_outlines
+
+    def _extract_outlines(self, doc_files, total, progress_callback=None):
+        """Phase 1: Extract outlines from files, using cache where possible.
+
+        Returns list of (path, mtime, outline, text) tuples that still
+        need keyword enrichment.
+        """
         needs_enrichment = []
         keyword_model = self._enricher.model_name if self._enricher else None
 
@@ -208,17 +234,78 @@ class DocIndex:
                     pct,
                 )
 
-        logger.info(
-            f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
-            f"{total - len(needs_enrichment)} cached"
-        )
+        return needs_enrichment
 
-        # Phase 2: Keyword enrichment (slow)
-        # Uses a small thread pool to overlap disk cache writes with the
-        # CPU-bound sentence-transformer embedding.  The real speed win is
-        # batched extraction inside KeywordEnricher.enrich() — threading
-        # here just keeps cache I/O off the critical path.
-        if needs_enrichment and self._enricher:
+    def _extract_outlines_structure_only(self, doc_files, total, progress_callback=None):
+        """Extract outlines using any cached version (enriched or not).
+
+        Unlike _extract_outlines which checks keyword_model match,
+        this method accepts any cached outline regardless of enrichment
+        state. Only files with changed mtime are re-parsed.
+
+        Used by mode switching to avoid blocking on keyword enrichment.
+
+        Returns list of (path, mtime, outline, text) tuples for files
+        that had no cache entry at all (newly changed files).
+        """
+        needs_extraction = []
+
+        for i, path in enumerate(doc_files):
+            abs_path = self._root / path
+            if not abs_path.exists():
+                continue
+
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                continue
+
+            # Accept ANY cached outline (keyword_model=None skips model check)
+            cached = self._cache.get(path, mtime, keyword_model=None)
+            if cached:
+                self._all_outlines[path] = cached
+                continue
+
+            # No cache at all — need to extract structure
+            ext = abs_path.suffix.lower()
+            extractor_cls = EXTRACTORS.get(ext)
+            if not extractor_cls:
+                continue
+
+            try:
+                text = abs_path.read_text(errors="replace")
+            except OSError:
+                continue
+
+            extractor = extractor_cls()
+            outline = extractor.extract(path, text, repo_files=self._repo_files)
+
+            # SVG: cache immediately (no enrichment needed)
+            if ext == '.svg':
+                self._cache.put(path, mtime, outline, keyword_model=None)
+                self._all_outlines[path] = outline
+            else:
+                needs_extraction.append((path, mtime, outline, text))
+
+        return needs_extraction
+
+    def _enrich_files(self, needs_enrichment, keyword_model, progress_callback=None):
+        """Phase 2: Run keyword enrichment on extracted outlines.
+
+        Separated from index_repo so _build_doc_index can run extraction
+        in an executor (fast, I/O-bound) then call enrich_single_file
+        per-file from the async context with yields between each,
+        preventing GIL starvation of the event loop.
+
+        Args:
+            needs_enrichment: list of (path, mtime, outline, text) tuples
+            keyword_model: model name string or None
+            progress_callback: optional fn(stage, message, percent)
+        """
+        if not needs_enrichment:
+            return
+
+        if self._enricher:
             enrich_total = len(needs_enrichment)
             logger.info(f"Keyword enrichment: {enrich_total} files to process")
 
@@ -264,13 +351,14 @@ class DocIndex:
                                 f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
                                 pct,
                             )
-        elif needs_enrichment:
+        else:
             # No enricher — just cache the outlines as-is
             for path, mtime, outline, text in needs_enrichment:
                 self._cache.put(path, mtime, outline, keyword_model=keyword_model)
                 self._all_outlines[path] = outline
 
-        # Phase 3: Build reference index
+    def _finalize_index(self, progress_callback=None):
+        """Phase 3: Build reference index from accumulated outlines."""
         if progress_callback:
             progress_callback("doc_index", "Building cross-references...", 96)
 
@@ -279,12 +367,33 @@ class DocIndex:
         if progress_callback:
             progress_callback("doc_index", "Document indexing complete", 100)
 
-        logger.info(
-            f"Document index: {len(self._all_outlines)} files, "
-            f"{len(needs_enrichment)} newly indexed"
-        )
+    def enrich_single_file(self, path, mtime, outline, text, keyword_model=None,
+                           progress_callback=None):
+        """Enrich and cache a single file's outline.
 
-        return self._all_outlines
+        Called from LLMService._build_doc_index to process one file at a
+        time with asyncio.sleep(0) between files, giving the event loop
+        a chance to process WebSocket traffic between GIL-heavy enrichment.
+
+        Args:
+            path: relative file path
+            mtime: file modification time
+            outline: DocOutline from extraction phase
+            text: file text content
+            keyword_model: keyword model name or None
+            progress_callback: optional fn(stage, message, percent) —
+                               passed only for the first file to trigger
+                               model init with progress reporting.
+
+        Returns:
+            enriched DocOutline
+        """
+        if self._enricher:
+            outline = self._enricher.enrich(outline, text,
+                                            progress_callback=progress_callback)
+        self._cache.put(path, mtime, outline, keyword_model=keyword_model)
+        self._all_outlines[path] = outline
+        return outline
 
     def _get_all_repo_files(self):
         """Get set of all files in the repo (for image reference validation)."""
@@ -344,6 +453,105 @@ class DocIndex:
     def get_signature_hash(self, path):
         """Get content hash for a file's outline."""
         return self._cache.get_hash(path)
+
+    def index_file_structure_only(self, path):
+        """Extract and cache a file's structural outline without keyword enrichment.
+
+        Used for instant unenriched re-extraction after edits. The outline
+        is immediately available for tier assembly; keyword enrichment is
+        queued separately via queue_enrichment().
+
+        Args:
+            path: relative path from repo root
+
+        Returns:
+            DocOutline or None
+        """
+        abs_path = self._root / path
+        if not abs_path.exists():
+            return None
+
+        ext = abs_path.suffix.lower()
+        extractor_cls = EXTRACTORS.get(ext)
+        if not extractor_cls:
+            return None
+
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            return None
+
+        try:
+            text = abs_path.read_text(errors="replace")
+        except OSError:
+            return None
+
+        extractor = extractor_cls()
+        outline = extractor.extract(path, text, repo_files=self._repo_files)
+
+        # Cache without keyword enrichment — keyword_model=None so any
+        # subsequent get() with a real model name will treat this as stale
+        # and trigger re-enrichment.
+        self._cache.put(path, mtime, outline, keyword_model=None)
+        self._all_outlines[path] = outline
+
+        return outline
+
+    def queue_enrichment(self, paths):
+        """Queue files for background keyword enrichment.
+
+        Returns a list of (path, mtime, outline, text) tuples that need
+        enrichment. The caller (LLMService._build_doc_index) is responsible
+        for driving the actual enrichment loop with asyncio.sleep(0) between
+        files and sending progress events.
+
+        Args:
+            paths: iterable of relative file paths to re-enrich
+
+        Returns:
+            list of (path, mtime, outline, text) tuples ready for
+            enrich_single_file()
+        """
+        needs = []
+        keyword_model = self._enricher.model_name if self._enricher else None
+
+        for path in paths:
+            abs_path = self._root / path
+            if not abs_path.exists():
+                continue
+
+            ext = abs_path.suffix.lower()
+            if ext not in EXTRACTORS:
+                continue
+
+            # SVG text labels are already terse keywords — skip enrichment
+            if ext == '.svg':
+                continue
+
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                continue
+
+            # Check if already enriched with current model
+            cached = self._cache.get(path, mtime, keyword_model=keyword_model)
+            if cached:
+                continue
+
+            # Get the current outline (may be unenriched from
+            # index_file_structure_only)
+            outline = self._all_outlines.get(path)
+            if not outline:
+                continue
+
+            try:
+                text = abs_path.read_text(errors="replace")
+            except OSError:
+                continue
+
+            needs.append((path, mtime, outline, text))
+
+        return needs
 
     def invalidate_file(self, path):
         """Invalidate cache for a file."""

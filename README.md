@@ -25,14 +25,18 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
-- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. Install `pip install ac-dc[docs]` for keyword extraction support (optional — document mode works without it).
+- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. A cross-reference toggle lets the LLM see document outlines alongside the symbol map in code mode (and vice versa), so it can trace connections between code and documentation without a full mode switch. Install `pip install ac-dc[docs]` for keyword extraction support (optional — document mode works without it).
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
 - **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
 - **Token HUD** with per-request and session-total usage reporting.
 
 ## Philosophy
 
-- **Symbol map, not full files** — A compact, reference-annotated map of your codebase gives the LLM structural context without burning tokens on full file contents. In document mode, the map switches to keyword-enriched document outlines with cross-reference links.
+- **Structural maps, not full files** — The LLM gets compact, reference-annotated maps instead of raw file contents:
+  - **Code mode** — A tree-sitter symbol map of functions, classes, imports, and cross-file references gives the LLM codebase structure without burning tokens on full source files.
+  - **Document mode** — Keyword-enriched outlines of markdown and SVG files with cross-reference graphs replace code symbols, helping the LLM navigate doc-heavy repos.
+  - **Code mode + doc index** — A cross-reference toggle layers document outlines alongside the symbol map, so the LLM can trace how documentation references code without switching modes.
+  - **Document mode + symbol map** — The same toggle adds symbol maps to document context, so the LLM can follow code dependencies mentioned in documentation.
 - **Stability-based caching** — Content that stays unchanged across requests promotes to higher cache tiers, aligning with provider cache breakpoints (e.g., Anthropic's ephemeral caching). You pay to ingest once; subsequent requests hit cache.
 - **Deterministic edits** — The LLM proposes changes using anchored edit blocks with exact context matching. No fuzzy patching, no guessing.
 - **Visual SVG editing** — SVG files open in a dedicated viewer with pan/zoom and a structural editor. Select, drag, reshape, and duplicate elements directly — no external tools needed.
@@ -208,6 +212,8 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `compaction.md` | History compaction skill prompt | Markdown |
 | `review.md` | Code review system prompt | Markdown |
 | `review-snippets.json` | Review mode snippet buttons | JSON |
+| `commit.md` | Commit message generation prompt | Markdown |
+| `system_reminder.md` | Edit block reminder injected before each user message | Markdown |
 
 ### LLM Config Fields
 
@@ -346,6 +352,8 @@ specs3/                          # Specification documents
     6-deployment/
 src/ac_dc/
     __init__.py
+    __main__.py                  # Entry point for `python -m ac_dc`
+    base_cache.py                # Shared mtime-based in-memory cache base class
     config.py                    # Configuration loading and management
     context.py                   # Context manager, file context, prompt assembly
     edit_parser.py               # Edit block parsing, validation, application
@@ -362,6 +370,7 @@ src/ac_dc/
     url_handler.py               # URL detection, fetching, summarization
     config/                      # Default configuration files
         app.json
+        commit.md               # Commit message generation prompt
         compaction.md
         doc-snippets.json       # Document mode snippet buttons
         llm.json
@@ -371,7 +380,7 @@ src/ac_dc/
         system.md
         system_doc.md            # Document mode system prompt
         system_extra.md
-        system_reminder.md       # Injected before each user message
+        system_reminder.md       # Edit block reminder before each user message
     doc_index/
         __init__.py
         cache.py                 # mtime-based document cache
@@ -399,8 +408,10 @@ src/ac_dc/
             javascript_extractor.py
             c_extractor.py
 tests/
+    sample.svg                   # Test SVG for doc index extraction tests
     test_config.py
     test_context.py
+    test_doc_index.py            # Document index, extractors, cache, formatter
     test_edit_parser.py
     test_history.py
     test_llm_service.py
@@ -409,7 +420,10 @@ tests/
     test_stability_tracker.py
     test_symbol_index.py
     test_url_handler.py
+    test_history_browser.js      # Node.js tests for history browser utilities
 webapp/
+    index.html
+    vite.config.js               # Vite bundler configuration
     index.html
     src/
         app-shell.js             # Root component, WebSocket, event routing
@@ -438,6 +452,7 @@ webapp/
             speech-to-text.js    # Voice dictation
             token-hud.js         # Floating token usage overlay
             url-chips.js         # URL detection and fetch chips
+            url-content-dialog.js # URL content viewer modal
 ```
 
 ## License

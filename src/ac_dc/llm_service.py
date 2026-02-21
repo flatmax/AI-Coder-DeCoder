@@ -9,12 +9,12 @@ Manages the full lifecycle of LLM interactions:
 """
 
 import asyncio
-import hashlib
 import logging
 import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import litellm
 
@@ -30,6 +30,7 @@ from .history_compactor import HistoryCompactor
 from .history_store import HistoryStore
 from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier, TrackedItem
 from .token_counter import TokenCounter
+from .doc_index.extractors import EXTRACTORS
 from .url_cache import URLCache
 from .url_handler import URLService
 
@@ -196,6 +197,9 @@ class LLMService:
         self._doc_stability_tracker = None
         self._doc_stability_initialized = False
 
+        # Cross-reference mode state
+        self._cross_ref_enabled = False
+
         # Review mode state
         self._review_active = False
         self._saved_system_prompt = None  # original system prompt, saved during review
@@ -346,8 +350,12 @@ class LLMService:
     async def _build_doc_index_background_silent(self):
         """Build doc index in background without switching mode.
 
-        Sends progress toasts so the user knows it's happening.
-        When done, notifies frontend that doc mode is available.
+        Two-phase approach per spec:
+        Phase 1: Fast structural extraction (~250ms) → doc index is usable
+                 immediately with unenriched outlines. Sends doc_index_ready.
+        Phase 2: Background keyword enrichment — replaces cache entries as
+                 each file completes. Does NOT block mode switching or
+                 cross-reference availability.
         """
         try:
             # Send initial toast so user knows it started
@@ -364,7 +372,11 @@ class LLMService:
                 except Exception:
                     pass
 
-            await self._build_doc_index()
+            # Phase 1: Fast structural extraction + reference index
+            needs_enrichment = await self._build_doc_index_structure()
+
+            # Mark doc index as ready — mode switching and cross-ref now available
+            self._doc_index_building = False
 
             # Notify frontend that doc index is ready (mode not switched yet)
             if self._event_callback:
@@ -380,7 +392,11 @@ class LLMService:
                 except Exception:
                     pass
 
-            logger.info("Background doc index build complete — doc mode now available")
+            logger.info("Background doc index structure complete — doc mode now available")
+
+            # Phase 2: Background keyword enrichment (non-blocking)
+            if needs_enrichment:
+                await self._build_doc_index_enrichment(needs_enrichment)
 
         except Exception as e:
             logger.error(f"Background doc index build failed: {e}")
@@ -414,6 +430,8 @@ class LLMService:
             "repo_name": self._repo.root.name if self._repo else None,
             "init_complete": self._init_complete,
             "mode": self._context.mode.value,
+            "cross_ref_ready": self._is_cross_ref_ready(),
+            "cross_ref_enabled": self._cross_ref_enabled,
         }
 
     def set_selected_files(self, files):
@@ -439,15 +457,247 @@ class LLMService:
         """Return current mode."""
         return {
             "mode": self._context.mode.value,
-            "doc_index_ready": self._doc_index is not None and not self._doc_index_building,
+            "doc_index_ready": self._doc_index is not None,
             "doc_index_building": self._doc_index_building,
+            "cross_ref_ready": self._is_cross_ref_ready(),
+            "cross_ref_enabled": self._cross_ref_enabled,
         }
+
+    def _is_cross_ref_ready(self):
+        """Check if the cross-reference index is available for the current mode.
+
+        In code mode: doc index must exist (structural pass complete).
+                      Keyword enrichment may still be running — that's fine,
+                      unenriched outlines are usable for cross-reference.
+        In document mode: symbol index is always available (built at startup).
+        """
+        if self._context.mode == Mode.DOC:
+            return self._symbol_index is not None and self._stability_initialized
+        else:
+            return self._doc_index is not None
+
+    def set_cross_reference(self, enabled):
+        """Enable or disable cross-reference mode. (RPC)
+
+        When enabled, adds the other mode's index items to the stability tracker.
+        When disabled, removes cross-ref items and marks affected tiers as broken.
+
+        Args:
+            enabled: boolean
+
+        Returns:
+            {status, cross_ref_enabled, message?}
+        """
+        enabled = bool(enabled)
+
+        if enabled == self._cross_ref_enabled:
+            return {
+                "status": "no_change",
+                "cross_ref_enabled": self._cross_ref_enabled,
+            }
+
+        if enabled:
+            return self._enable_cross_reference()
+        else:
+            return self._disable_cross_reference()
+
+    def _enable_cross_reference(self):
+        """Enable cross-reference mode — add the other index's items to the tracker."""
+        if not self._is_cross_ref_ready():
+            return {
+                "status": "not_ready",
+                "cross_ref_enabled": False,
+                "message": "Cross-reference index is not ready yet.",
+            }
+
+        # Determine which index to cross-reference
+        if self._context.mode == Mode.CODE:
+            # Add doc index items to the code stability tracker
+            cross_index = self._doc_index
+            cross_ref_index = self._doc_index.reference_index if self._doc_index else None
+            prefix = "doc:"
+            tracker = self._stability_tracker
+        else:
+            # Add symbol index items to the doc stability tracker
+            cross_index = self._symbol_index
+            cross_ref_index = self._symbol_index.reference_index if self._symbol_index else None
+            prefix = "symbol:"
+            tracker = self._doc_stability_tracker
+
+        if not tracker or not cross_index:
+            return {
+                "status": "error",
+                "cross_ref_enabled": False,
+                "message": "Required index or tracker not available.",
+            }
+
+        # Get all files from the cross-reference index
+        if self._context.mode == Mode.CODE and self._doc_index:
+            all_cross_files = list(self._doc_index._all_outlines.keys())
+        elif self._context.mode == Mode.DOC and self._symbol_index:
+            all_cross_files = list(self._symbol_index._all_symbols.keys())
+        else:
+            all_cross_files = []
+
+        if not all_cross_files:
+            return {
+                "status": "error",
+                "cross_ref_enabled": False,
+                "message": "No files in cross-reference index.",
+            }
+
+        # Initialize cross-ref items using the same reference graph algorithm
+        # but into the existing tracker (appending, not replacing)
+        items_added = 0
+        if cross_ref_index and hasattr(cross_ref_index, 'connected_components'):
+            components = cross_ref_index.connected_components()
+            tiers = [Tier.L1, Tier.L2, Tier.L3]
+            tier_sizes = {t: 0 for t in tiers}
+            placed = set()
+
+            # Place clustered files
+            for component in sorted(components, key=len, reverse=True):
+                target = min(tiers, key=lambda t: tier_sizes[t])
+                for path in component:
+                    if path in placed:
+                        continue
+                    key = f"{prefix}{path}"
+                    if key not in tracker._items:
+                        tracker._items[key] = TrackedItem(
+                            key=key,
+                            tier=target,
+                            n=TIER_CONFIG[target]["entry_n"],
+                            content_hash="",
+                            tokens=0,
+                        )
+                        tier_sizes[target] += 1
+                        items_added += 1
+                    placed.add(path)
+
+            # Place orphan files
+            for path in all_cross_files:
+                if path not in placed:
+                    target = min(tiers, key=lambda t: tier_sizes[t])
+                    key = f"{prefix}{path}"
+                    if key not in tracker._items:
+                        tracker._items[key] = TrackedItem(
+                            key=key,
+                            tier=target,
+                            n=TIER_CONFIG[target]["entry_n"],
+                            content_hash="",
+                            tokens=0,
+                        )
+                        tier_sizes[target] += 1
+                        items_added += 1
+                    placed.add(path)
+        else:
+            # Fallback: distribute evenly
+            tiers = [Tier.L1, Tier.L2, Tier.L3]
+            for i, path in enumerate(all_cross_files):
+                target = tiers[i % len(tiers)]
+                key = f"{prefix}{path}"
+                if key not in tracker._items:
+                    tracker._items[key] = TrackedItem(
+                        key=key,
+                        tier=target,
+                        n=TIER_CONFIG[target]["entry_n"],
+                        content_hash="",
+                        tokens=0,
+                    )
+                    items_added += 1
+
+        # Measure token counts for the newly added items
+        self._measure_cross_ref_tokens(tracker, cross_index, prefix)
+
+        self._cross_ref_enabled = True
+
+        # Compute total token cost for the toast
+        cross_ref_tokens = sum(
+            item.tokens for key, item in tracker._items.items()
+            if key.startswith(prefix)
+        )
+
+        logger.info(
+            f"Cross-reference enabled: added {items_added} {prefix} items "
+            f"to tracker (~{cross_ref_tokens:,} tokens)"
+        )
+
+        return {
+            "status": "enabled",
+            "cross_ref_enabled": True,
+            "message": f"Cross-reference enabled: {items_added} items added (~{cross_ref_tokens:,} tokens).",
+            "items_added": items_added,
+            "tokens_added": cross_ref_tokens,
+        }
+
+    def _disable_cross_reference(self):
+        """Disable cross-reference mode — remove cross-ref items from tracker."""
+        if self._context.mode == Mode.CODE:
+            # Remove doc: items from code tracker
+            prefix = "doc:"
+            tracker = self._stability_tracker
+        else:
+            # Remove symbol: items from doc tracker
+            prefix = "symbol:"
+            tracker = self._doc_stability_tracker
+
+        if not tracker:
+            self._cross_ref_enabled = False
+            return {
+                "status": "disabled",
+                "cross_ref_enabled": False,
+            }
+
+        # Remove all items with the cross-ref prefix
+        to_remove = [k for k in tracker._items if k.startswith(prefix)]
+        for key in to_remove:
+            tier = tracker._items[key].tier
+            del tracker._items[key]
+            tracker._broken_tiers.add(tier)
+
+        self._cross_ref_enabled = False
+        logger.info(f"Cross-reference disabled: removed {len(to_remove)} {prefix} items")
+
+        return {
+            "status": "disabled",
+            "cross_ref_enabled": False,
+            "message": f"Cross-reference disabled: {len(to_remove)} items removed.",
+        }
+
+    def _measure_cross_ref_tokens(self, tracker, cross_index, prefix):
+        """Measure token counts for cross-reference items in a tracker."""
+        if not tracker or not cross_index:
+            return
+        counter = self._context.counter
+        measured = 0
+        for key, item in tracker._items.items():
+            if not key.startswith(prefix):
+                continue
+            if item.tokens > 0:
+                continue
+            path = key.split(":", 1)[1]
+            # Dispatch on prefix: doc: → get_file_doc_block, symbol: → get_file_symbol_block
+            if prefix == "doc:" and hasattr(cross_index, 'get_file_doc_block'):
+                block = cross_index.get_file_doc_block(path)
+            elif prefix == "symbol:" and hasattr(cross_index, 'get_file_symbol_block'):
+                block = cross_index.get_file_symbol_block(path)
+            else:
+                block = None
+            if block:
+                item.tokens = counter.count(block)
+                sig_hash = cross_index.get_signature_hash(path)
+                if sig_hash:
+                    item.content_hash = sig_hash
+                measured += 1
+        if measured:
+            logger.info(f"Measured tokens for {measured} cross-ref {prefix} items")
 
     async def switch_mode(self, mode):
         """Switch between code and document modes.
 
         Full context switch: clears file context, swaps system prompt,
         swaps snippets, switches stability tracker, rebuilds tier content.
+        Resets cross-reference mode to OFF.
 
         Args:
             mode: "code" or "doc"
@@ -455,27 +705,42 @@ class LLMService:
         Returns:
             {mode: str, message: str}
         """
+        logger.info(f"switch_mode called: {mode} (current: {self._context.mode.value})")
         try:
             new_mode = Mode(mode)
         except ValueError:
             return {"error": f"Invalid mode: {mode}. Use 'code' or 'doc'."}
 
         if new_mode == self._context.mode:
+            logger.info(f"Already in {mode} mode — no switch needed")
             return {"mode": new_mode.value, "message": "Already in this mode"}
 
+        # Reset cross-reference mode before switching —
+        # remove cross-ref items from the current tracker
+        if self._cross_ref_enabled:
+            self._disable_cross_reference()
+
         if new_mode == Mode.DOC:
-            return await self._switch_to_doc_mode()
+            result = await self._switch_to_doc_mode()
         else:
-            return self._switch_to_code_mode()
+            result = self._switch_to_code_mode()
+
+        return result
 
     async def _switch_to_doc_mode(self):
         """Switch from code mode to document mode."""
-        # If doc index is currently being built in the background, tell the
-        # user to wait — don't start a second build.
+        logger.info(
+            f"_switch_to_doc_mode: doc_index={self._doc_index is not None}, "
+            f"doc_index_building={self._doc_index_building}"
+        )
+        # If structural extraction is still in progress, tell user to wait.
+        # (Keyword enrichment running in background is fine — unenriched
+        # outlines are usable immediately.)
         if self._doc_index_building:
+            logger.info("Doc index still building — rejecting mode switch")
             return {
                 "mode": self._context.mode.value,
-                "message": "Document index is still building — please wait for it to finish.",
+                "message": "Document index structure is still being extracted — please wait a moment.",
                 "building": True,
             }
 
@@ -483,6 +748,7 @@ class LLMService:
         # This shouldn't normally happen (build starts at startup), but
         # handles edge cases like missing repo at init time.
         if self._doc_index is None:
+            logger.info("Doc index is None — starting background build")
             self._start_background_doc_index()
             return {
                 "mode": "code",
@@ -490,30 +756,70 @@ class LLMService:
                 "building": True,
             }
 
-        # Doc index is ready — re-index changed files with progress, then switch
+        # Doc index is ready — do a fast structural re-extraction for any
+        # mtime-changed files, then switch immediately.  Do NOT run keyword
+        # enrichment here — the background enrichment task handles that.
+        # Running enrichment in the mode-switch path would block for tens of
+        # seconds competing with the background task for executor workers.
         if self._doc_index:
             try:
-                if self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            "Re-indexing documents…", 10,
-                        )
-                    except Exception:
-                        pass
+                loop = asyncio.get_event_loop()
+                doc_index = self._doc_index
+
+                # Phase 1: Fast structure re-extraction (mtime-based, <5ms/file)
+                doc_index._repo_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_all_repo_files,
+                )
+                doc_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_doc_files,
+                )
+                doc_files = [
+                    f for f in doc_files
+                    if Path(f).suffix.lower() in EXTRACTORS
+                ]
+                await asyncio.sleep(0)
+
+                total = len(doc_files)
+                needs_enrichment = []
+                if total > 0:
+                    # Use _extract_outlines_structure_only to avoid cache
+                    # misses due to keyword_model mismatch on unenriched entries.
+                    # This only re-parses files whose mtime changed; files with
+                    # any cached outline (enriched or not) are used as-is.
+                    needs_enrichment = await loop.run_in_executor(
+                        self._executor,
+                        lambda: doc_index._extract_outlines_structure_only(doc_files, total),
+                    )
                     await asyncio.sleep(0)
 
-                self._doc_index.index_repo()
+                # Cache unenriched outlines for newly-changed files so they're
+                # immediately available for the doc map and tier assembly.
+                for path, mtime, outline, text in needs_enrichment:
+                    doc_index._cache.put(path, mtime, outline, keyword_model=None)
+                    doc_index._all_outlines[path] = outline
 
-                if self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            "Switching to document mode…", 90,
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0)
+                # Queue changed files for background enrichment (non-blocking)
+                if needs_enrichment and doc_index._enricher:
+                    pending_paths = [p for p, m, o, t in needs_enrichment]
+                    enrichment_queue = doc_index.queue_enrichment(pending_paths)
+                    if enrichment_queue and self._event_callback:
+                        ep = [p for p, m, o, t in enrichment_queue]
+                        if ep:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", "doc_index_enrichment",
+                                    {"stage": "doc_enrichment_queued", "files": ep},
+                                )
+                            except Exception:
+                                pass
+                    # Enrichment runs in the background — don't await it here
+
+                # Phase 2: Rebuild reference index (fast, <50ms)
+                await loop.run_in_executor(
+                    self._executor, doc_index._finalize_index,
+                )
+                await asyncio.sleep(0)
+
             except Exception as e:
                 logger.warning(f"Doc re-index on mode switch failed: {e}")
 
@@ -541,10 +847,6 @@ class LLMService:
         Note: index_repo() is called by _switch_to_doc_mode() before this
         method, with progress reporting.  Don't duplicate it here.
         """
-        # Clear file context
-        self._context.file_context.clear()
-        self._selected_files = []
-
         # Swap system prompt
         self._context.set_system_prompt(self._config.get_doc_system_prompt())
 
@@ -562,6 +864,7 @@ class LLMService:
                 all_files = list(self._doc_index._all_outlines.keys())
                 self._doc_stability_tracker.initialize_from_reference_graph(
                     ref_index, all_files, counter=self._context.counter,
+                    key_prefix="doc:",
                 )
                 self._doc_stability_initialized = True
                 logger.info(f"Doc stability tracker initialized with {len(self._doc_stability_tracker.items)} items")
@@ -597,6 +900,12 @@ class LLMService:
         # Insert system message
         self._context.add_message("system", "Switched to document mode.")
 
+        # Run stability update so cache/context tabs have tier data immediately
+        try:
+            self._update_stability()
+        except Exception as e:
+            logger.warning(f"Post-switch stability update failed: {e}")
+
         logger.info("Switched to document mode")
 
         result = {"mode": "doc", "message": "Switched to document mode"}
@@ -614,10 +923,6 @@ class LLMService:
 
     def _switch_to_code_mode(self):
         """Switch from document mode to code mode."""
-        # Clear file context
-        self._context.file_context.clear()
-        self._selected_files = []
-
         # Restore code system prompt
         self._context.set_system_prompt(self._config.get_system_prompt())
 
@@ -630,13 +935,28 @@ class LLMService:
         # Insert system message
         self._context.add_message("system", "Switched to code mode.")
 
+        # Run stability update so cache/context tabs have tier data immediately
+        try:
+            self._update_stability()
+        except Exception as e:
+            logger.warning(f"Post-switch stability update failed: {e}")
+
         logger.info("Switched to code mode")
         return {"mode": "code", "message": "Switched to code mode"}
 
-    async def _build_doc_index(self):
-        """Build the document index lazily on first switch to doc mode."""
+    async def _build_doc_index_structure(self):
+        """Phase 1: Fast structural extraction of document outlines.
+
+        Creates the DocIndex, extracts all outlines (using cache where
+        available), builds the reference index. After this completes the
+        doc index is usable for mode switching and cross-reference —
+        outlines just won't have keyword annotations until Phase 2.
+
+        Returns:
+            list of (path, mtime, outline, text) tuples needing enrichment
+        """
         if not self._repo:
-            return
+            return []
 
         self._doc_index_building = True
 
@@ -644,14 +964,10 @@ class LLMService:
 
         doc_config = self._config.doc_index_config
 
-        # Thread-safe progress: store last message so heartbeat can re-send it
-        _last_progress = {"message": "Building document index…", "percent": 0}
-
         _loop = asyncio.get_event_loop()
 
         def _progress(stage, message, percent):
-            _last_progress["message"] = message
-            _last_progress["percent"] = percent
+            """Send progress from either a thread (executor) or the event loop."""
             if self._event_callback:
                 try:
                     asyncio.run_coroutine_threadsafe(
@@ -693,49 +1009,185 @@ class LLMService:
             doc_config=doc_config,
         )
 
-        # Run the blocking index_repo in executor so progress events can flow.
-        # A heartbeat task re-sends the latest progress every 2s so the UI
-        # stays alive during long blocking operations (model download/load).
-        _indexing_done = False
+        loop = asyncio.get_event_loop()
+        doc_index = self._doc_index  # local ref for lambdas
 
-        async def _heartbeat():
-            while not _indexing_done:
-                await asyncio.sleep(2)
-                if not _indexing_done and self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            _last_progress["message"],
-                            _last_progress["percent"],
-                        )
-                        await self._event_callback(
+        # Structure extraction in executor (fast, mostly I/O).
+        # Populates cached outlines and returns files needing enrichment.
+        _progress("doc_index", "Extracting document outlines…", 10)
+
+        doc_index._repo_files = await loop.run_in_executor(
+            self._executor, doc_index._get_all_repo_files,
+        )
+        await asyncio.sleep(0)  # yield for WebSocket
+
+        doc_files = await loop.run_in_executor(
+            self._executor, doc_index._get_doc_files,
+        )
+        doc_files = [
+            f for f in doc_files
+            if Path(f).suffix.lower() in EXTRACTORS
+        ]
+        await asyncio.sleep(0)
+
+        total = len(doc_files)
+        needs_enrichment = []
+        if total > 0:
+            needs_enrichment = await loop.run_in_executor(
+                self._executor,
+                lambda: doc_index._extract_outlines(doc_files, total, _progress),
+            )
+            await asyncio.sleep(0)
+
+        logger.info(
+            f"Structure extraction complete: {len(needs_enrichment)} need enrichment, "
+            f"{total - len(needs_enrichment)} cached"
+        )
+
+        # For files that need enrichment, cache unenriched outlines now so
+        # they're immediately available for the doc map and cross-reference.
+        # Enrichment will replace these cache entries in Phase 2.
+        for path, mtime, outline, text in needs_enrichment:
+            doc_index._cache.put(path, mtime, outline, keyword_model=None)
+            doc_index._all_outlines[path] = outline
+
+        # Build reference index from all outlines (enriched + unenriched)
+        _progress("doc_index", "Building cross-references...", 90)
+        await loop.run_in_executor(
+            self._executor, doc_index._finalize_index,
+        )
+        await asyncio.sleep(0)
+
+        _progress("doc_index", "Document structure ready", 100)
+        logger.info(f"Document index structure built: {len(doc_index._all_outlines)} files")
+
+        return needs_enrichment
+
+    async def _build_doc_index_enrichment(self, needs_enrichment):
+        """Phase 2: Background keyword enrichment.
+
+        Runs after the doc index is already marked as ready. Enriches
+        files one at a time, replacing unenriched cache entries with
+        keyword-annotated versions. Rebuilds the reference index after
+        all files are enriched.
+
+        Does not block mode switching, cross-reference, or chat.
+        """
+        if not self._doc_index or not needs_enrichment:
+            return
+
+        doc_index = self._doc_index
+        if not doc_index._enricher:
+            logger.info("No keyword enricher available — skipping enrichment phase")
+            if not doc_index.keywords_available:
+                logger.warning("Document mode running without keyword enrichment (keybert not installed)")
+            return
+
+        loop = asyncio.get_event_loop()
+        keyword_model = doc_index._enricher.model_name
+        enrich_total = len(needs_enrichment)
+        logger.info(f"Background keyword enrichment: {enrich_total} files to process")
+
+        _loop = asyncio.get_event_loop()
+
+        def _progress(stage, message, percent):
+            """Send progress from either a thread (executor) or the event loop."""
+            if self._event_callback:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback("startupProgress", stage, message, percent),
+                        _loop,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self._event_callback(
                             "compactionEvent", "doc_index_progress",
                             {
                                 "stage": "doc_index_progress",
-                                "message": f"📝 {_last_progress['message']}",
-                                "percent": _last_progress["percent"],
+                                "message": f"📝 {message}",
+                                "percent": percent,
                             },
+                        ),
+                        _loop,
+                    )
+                except Exception:
+                    pass
+
+        # Send enrichment queued toast event
+        pending_paths = [p for p, m, o, t in needs_enrichment]
+        if self._event_callback and pending_paths:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_enrichment",
+                    {"stage": "doc_enrichment_queued", "files": pending_paths},
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0)
+
+        for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
+            pct = int(100 * i / enrich_total)
+            _progress(
+                "doc_index",
+                f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
+                pct,
+            )
+
+            # Pass progress_callback only for first file (triggers model init)
+            cb = _progress if i == 1 else None
+            try:
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda p=path, m=mtime, o=outline, t=text, c=cb: (
+                        doc_index.enrich_single_file(p, m, o, t,
+                                                     keyword_model=keyword_model,
+                                                     progress_callback=c)
+                    ),
+                )
+                logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
+
+                # Send per-file done event
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_enrichment",
+                            {"stage": "doc_enrichment_file_done", "file": path},
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Keyword enrichment failed for {path}: {e}")
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", "doc_index_enrichment",
+                            {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
                         )
                     except Exception:
                         pass
 
-        loop = asyncio.get_event_loop()
-        heartbeat_task = asyncio.ensure_future(_heartbeat())
+            # Yield to event loop between files — prevents GIL starvation
+            await asyncio.sleep(0)
+
+        # Rebuild reference index with enriched outlines
         try:
             await loop.run_in_executor(
-                self._executor,
-                lambda: self._doc_index.index_repo(progress_callback=_progress),
+                self._executor, doc_index._finalize_index,
             )
-        finally:
-            _indexing_done = True
-            heartbeat_task.cancel()
+        except Exception as e:
+            logger.warning(f"Post-enrichment reference index rebuild failed: {e}")
 
-        self._doc_index_building = False
-        logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")
+        # Send enrichment complete event
+        if self._event_callback:
+            try:
+                await self._event_callback(
+                    "compactionEvent", "doc_index_enrichment",
+                    {"stage": "doc_enrichment_complete"},
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0)
 
-        # Check if keyword enrichment is available
-        if not self._doc_index.keywords_available:
-            logger.warning("Document mode running without keyword enrichment (keybert not installed)")
+        logger.info(f"Keyword enrichment complete: {enrich_total} files")
 
     # === Streaming Chat (RPC) ===
 
@@ -808,8 +1260,64 @@ class LLMService:
             file_tree = ""
 
             if self._context.mode == Mode.DOC and self._doc_index:
-                # Document mode — use doc index for map
-                self._doc_index.index_repo()
+                # Document mode — two-phase re-extraction per spec:
+                # Phase 1: Structure re-extraction (mtime-based, instant)
+                # Phase 2: Queue changed files for background enrichment
+                loop = asyncio.get_event_loop()
+                doc_index = self._doc_index
+
+                # Re-extract structures (fast, I/O-bound)
+                doc_index._repo_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_all_repo_files,
+                )
+                doc_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_doc_files,
+                )
+                doc_files = [
+                    f for f in doc_files
+                    if Path(f).suffix.lower() in EXTRACTORS
+                ]
+                await asyncio.sleep(0)
+
+                # Structure extraction — uses structure_only to avoid
+                # blocking on keyword enrichment during chat requests.
+                # Accepts any cached outline regardless of keyword model.
+                total = len(doc_files)
+                needs_enrichment = []
+                if total > 0:
+                    needs_enrichment = await loop.run_in_executor(
+                        self._executor,
+                        lambda: doc_index._extract_outlines_structure_only(doc_files, total),
+                    )
+                    await asyncio.sleep(0)
+
+                # Cache unenriched outlines for newly-changed files
+                for path, mtime, outline, text in needs_enrichment:
+                    doc_index._cache.put(path, mtime, outline, keyword_model=None)
+                    doc_index._all_outlines[path] = outline
+
+                # Finalize reference index
+                await loop.run_in_executor(
+                    self._executor, doc_index._finalize_index,
+                )
+                await asyncio.sleep(0)
+
+                # Queue changed files for background enrichment (non-blocking)
+                if needs_enrichment and doc_index._enricher:
+                    pending_paths = [p for p, m, o, t in needs_enrichment]
+                    enrichment_queue = doc_index.queue_enrichment(pending_paths)
+                    if enrichment_queue and self._event_callback:
+                        ep = [p for p, m, o, t in enrichment_queue]
+                        if ep:
+                            try:
+                                await self._event_callback(
+                                    "compactionEvent", request_id,
+                                    {"stage": "doc_enrichment_queued", "files": ep},
+                                )
+                            except Exception:
+                                pass
+                    # Enrichment will happen in the background — don't block chat
+
                 symbol_map = self._doc_index.get_doc_map(
                     exclude_files=set(self._selected_files)
                 )
@@ -842,7 +1350,7 @@ class LLMService:
                                     key="system:prompt",
                                     tier=Tier.L0,
                                     n=TIER_CONFIG[Tier.L0]["entry_n"],
-                                    content_hash=StabilityTracker.hash_content(sys_content),
+                                    content_hash=StabilityTracker.hash_content(sys_prompt),
                                     tokens=self._context.counter.count(sys_content),
                                 )
                                 logger.info("Seeded system:prompt into L0")
@@ -940,12 +1448,45 @@ class LLMService:
                 symbol_map=symbol_map,
                 symbol_legend=symbol_legend,
             )
+
+            # When cross-reference mode is active, include both legends in L0
+            doc_legend = ""
+            if self._cross_ref_enabled:
+                if self._context.mode == Mode.CODE and self._doc_index:
+                    doc_legend = self._doc_index.get_legend() or ""
+                elif self._context.mode == Mode.DOC and self._symbol_index:
+                    doc_legend = self._symbol_index.get_legend() or ""
+
+            # Recompute symbol map with full tier exclusions — files in cached
+            # tiers already have their index blocks in tier content and must
+            # not also appear in the uncached symbol map (spec: "A File Never
+            # Appears Twice").
             if tiered_content:
+                tier_exclude = set(self._selected_files)
+                tracker = self._doc_stability_tracker if self._context.mode == Mode.DOC else self._stability_tracker
+                if tracker:
+                    for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                        for key in tracker.get_tier_items(tier):
+                            if key.startswith("symbol:") or key.startswith("doc:") or key.startswith("file:"):
+                                path = key.split(":", 1)[1]
+                                tier_exclude.add(path)
+
+                # Regenerate maps with full exclusions
+                if self._context.mode == Mode.DOC and self._doc_index:
+                    symbol_map = self._doc_index.get_doc_map(
+                        exclude_files=tier_exclude
+                    ) or ""
+                elif self._symbol_index:
+                    symbol_map = self._symbol_index.get_symbol_map(
+                        exclude_files=tier_exclude
+                    ) or ""
+
                 assembled = self._context.assemble_tiered_messages(
                     user_prompt=augmented_message,
                     images=images if images else None,
                     symbol_map=symbol_map,
                     symbol_legend=symbol_legend,
+                    doc_legend=doc_legend,
                     file_tree=file_tree,
                     tiered_content=tiered_content,
                 )
@@ -1033,10 +1574,62 @@ class LLMService:
                         for path in modified:
                             self._symbol_index.invalidate_file(path)
 
-                    # Invalidate doc index cache for modified doc files
+                    # Invalidate doc index cache and re-extract structure
+                    # for modified doc files (instant unenriched outline)
                     if self._doc_index:
                         for path in modified:
                             self._doc_index.invalidate_file(path)
+                            self._doc_index.index_file_structure_only(path)
+                        # Queue modified doc files for background enrichment
+                        enrichment_queue = self._doc_index.queue_enrichment(modified)
+                        if enrichment_queue:
+                            pending_paths = [p for p, m, o, t in enrichment_queue]
+                            if self._event_callback and pending_paths:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", request_id,
+                                        {"stage": "doc_enrichment_queued", "files": pending_paths},
+                                    )
+                                except Exception:
+                                    pass
+                            keyword_model = self._doc_index._enricher.model_name if self._doc_index._enricher else None
+                            loop = asyncio.get_event_loop()
+                            for path, mtime, outline, text in enrichment_queue:
+                                try:
+                                    await loop.run_in_executor(
+                                        self._executor,
+                                        lambda p=path, m=mtime, o=outline, t=text: (
+                                            self._doc_index.enrich_single_file(
+                                                p, m, o, t, keyword_model=keyword_model)
+                                        ),
+                                    )
+                                    if self._event_callback:
+                                        try:
+                                            await self._event_callback(
+                                                "compactionEvent", request_id,
+                                                {"stage": "doc_enrichment_file_done", "file": path},
+                                            )
+                                        except Exception:
+                                            pass
+                                except Exception as e:
+                                    logger.warning(f"Background enrichment failed for {path}: {e}")
+                                    if self._event_callback:
+                                        try:
+                                            await self._event_callback(
+                                                "compactionEvent", request_id,
+                                                {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                                            )
+                                        except Exception:
+                                            pass
+                                await asyncio.sleep(0)
+                            if self._event_callback:
+                                try:
+                                    await self._event_callback(
+                                        "compactionEvent", request_id,
+                                        {"stage": "doc_enrichment_complete"},
+                                    )
+                                except Exception:
+                                    pass
 
                     # Auto-add not-in-context files to selected files
                     files_auto_added = []
@@ -1302,20 +1895,28 @@ class LLMService:
         # Selected files have full content in context; their symbol/doc blocks
         # are excluded from the map to avoid redundancy. Per spec:
         # "A file never appears as both symbol block and full content."
+        #
+        # Key prefix convention:
+        # - Code mode primary items → symbol:{path}
+        # - Doc mode primary items → doc:{path}
+        # This prevents collisions when cross-reference mode adds the other
+        # index's items (doc: in code mode, symbol: in doc mode).
         if index:
             selected_set = set(self._selected_files)
+            primary_prefix = "doc:" if self._context.mode == Mode.DOC else "symbol:"
 
-            # Remove symbol entries for selected files — they now have file: entries
+            # Remove primary and cross-ref entries for selected files — they now have file: entries
             for path in selected_set:
-                sym_key = f"symbol:{path}"
-                if sym_key in tracker._items:
-                    tier = tracker._items[sym_key].tier
-                    del tracker._items[sym_key]
-                    tracker._broken_tiers.add(tier)
-                    tracker._changes.append({
-                        "action": "removed", "key": sym_key,
-                        "reason": "file selected — full content replaces symbol",
-                    })
+                for prefix in ("symbol:", "doc:"):
+                    entry_key = f"{prefix}{path}"
+                    if entry_key in tracker._items:
+                        tier = tracker._items[entry_key].tier
+                        del tracker._items[entry_key]
+                        tracker._broken_tiers.add(tier)
+                        tracker._changes.append({
+                            "action": "removed", "key": entry_key,
+                            "reason": f"file selected — full content replaces {prefix.rstrip(':')} entry",
+                        })
 
             # Get all indexed paths from the appropriate index
             if self._context.mode == Mode.DOC:
@@ -1325,7 +1926,7 @@ class LLMService:
 
             for path in all_indexed:
                 if path in selected_set:
-                    continue  # full file content is active; skip symbol entry
+                    continue  # full file content is active; skip index entry
                 if self._context.mode == Mode.DOC:
                     block = self._doc_index.get_file_doc_block(path) if self._doc_index else ""
                 else:
@@ -1337,10 +1938,46 @@ class LLMService:
                     # hash mismatches and mass demotions.
                     sig_hash = index.get_signature_hash(path)
                     active_items.append({
-                        "key": f"symbol:{path}",
+                        "key": f"{primary_prefix}{path}",
                         "content_hash": sig_hash or StabilityTracker.hash_content(block),
                         "tokens": counter.count(block),
                     })
+
+        # Cross-reference items — add the other index's items when cross-ref enabled
+        if self._cross_ref_enabled:
+            if self._context.mode == Mode.CODE and self._doc_index:
+                cross_index = self._doc_index
+                cross_prefix = "doc:"
+                all_cross = self._doc_index._all_outlines
+            elif self._context.mode == Mode.DOC and self._symbol_index:
+                cross_index = self._symbol_index
+                cross_prefix = "symbol:"
+                all_cross = self._symbol_index._all_symbols
+            else:
+                cross_index = None
+                cross_prefix = ""
+                all_cross = {}
+
+            if cross_index and all_cross:
+                for path in all_cross:
+                    key = f"{cross_prefix}{path}"
+                    # Only include if item exists in tracker (was initialized)
+                    if key not in tracker._items:
+                        continue
+                    # Dispatch on prefix: doc: → get_file_doc_block, symbol: → get_file_symbol_block
+                    if cross_prefix == "doc:" and hasattr(cross_index, 'get_file_doc_block'):
+                        block = cross_index.get_file_doc_block(path)
+                    elif cross_prefix == "symbol:" and hasattr(cross_index, 'get_file_symbol_block'):
+                        block = cross_index.get_file_symbol_block(path)
+                    else:
+                        block = None
+                    if block:
+                        sig_hash = cross_index.get_signature_hash(path)
+                        active_items.append({
+                            "key": key,
+                            "content_hash": sig_hash or StabilityTracker.hash_content(block),
+                            "tokens": counter.count(block),
+                        })
 
         # File entries for selected files
         for path in self._selected_files:
@@ -1426,14 +2063,17 @@ class LLMService:
                 if key.startswith("system:"):
                     # System prompt handled separately by assemble_tiered_messages
                     continue
-                elif key.startswith("symbol:"):
+                elif key.startswith("doc:"):
+                    # doc: prefix — always dispatches to doc_index
                     path = key.split(":", 1)[1]
-                    if self._context.mode == Mode.DOC:
-                        if self._doc_index:
-                            block = self._doc_index.get_file_doc_block(path)
-                            if block:
-                                symbol_parts.append(block)
-                    elif self._symbol_index:
+                    if self._doc_index:
+                        block = self._doc_index.get_file_doc_block(path)
+                        if block:
+                            symbol_parts.append(block)
+                elif key.startswith("symbol:"):
+                    # symbol: prefix — always dispatches to symbol_index
+                    path = key.split(":", 1)[1]
+                    if self._symbol_index:
                         block = self._symbol_index.get_file_symbol_block(path)
                         if block:
                             symbol_parts.append(block)
@@ -1517,6 +2157,10 @@ class LLMService:
                 item_type = "symbols"
                 path = key.split(":", 1)[1]
                 name = path
+            elif key.startswith("doc:"):
+                item_type = "doc_symbols"
+                path = key.split(":", 1)[1]
+                name = path
             elif key.startswith("history:"):
                 item_type = "history"
                 path = None
@@ -1547,8 +2191,8 @@ class LLMService:
                 "_sort_idx": sort_idx if item_type == "history" else 0,
             })
 
-        # Sort: system first, then symbols, files, history (numerically), other
-        type_order = {"system": 0, "symbols": 1, "files": 2, "history": 3, "other": 4}
+        # Sort: system first, then symbols/doc_symbols, files, history (numerically), other
+        type_order = {"system": 0, "symbols": 1, "doc_symbols": 1, "files": 2, "history": 3, "other": 4}
         contents.sort(key=lambda c: (
             type_order.get(c["type"], 99),
             c["_sort_idx"],
@@ -1612,6 +2256,29 @@ class LLMService:
             if sm:
                 symbol_map_tokens = counter.count(sm)
                 symbol_map_files = len(self._symbol_index._all_symbols)
+
+        # Cross-reference mode: include both legends and both maps
+        if self._cross_ref_enabled:
+            if self._context.mode == Mode.CODE and self._doc_index:
+                cross_legend = self._doc_index.get_legend()
+                if cross_legend:
+                    legend_tokens += counter.count(cross_legend)
+                cross_map = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_map:
+                    symbol_map_tokens += counter.count(cross_map)
+                    symbol_map_files += len(self._doc_index._all_outlines)
+            elif self._context.mode == Mode.DOC and self._symbol_index:
+                cross_legend = self._symbol_index.get_legend()
+                if cross_legend:
+                    legend_tokens += counter.count(cross_legend)
+                cross_map = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_map:
+                    symbol_map_tokens += counter.count(cross_map)
+                    symbol_map_files += len(self._symbol_index._all_symbols)
 
         # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
@@ -1769,6 +2436,7 @@ class LLMService:
         return {
             "model": counter.model_name,
             "mode": self._context.mode.value,
+            "cross_ref_enabled": self._cross_ref_enabled,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
             "cache_hit_rate": cache_hit_rate,
@@ -1956,6 +2624,29 @@ class LLMService:
         map_label = "Doc Map:" if is_doc else "Symbol Map:"
         logger.info(f"System:      {system_tokens + legend_tokens:>8,}")
         logger.info(f"{map_label:<13}{symbol_map_tokens:>8,}")
+
+        # Cross-reference index tokens
+        if self._cross_ref_enabled:
+            cross_map_tokens = 0
+            if is_doc and self._symbol_index:
+                cross_sm = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_sm:
+                    cross_map_tokens = counter.count(cross_sm)
+                cross_label = "Symbol Map:"
+            elif not is_doc and self._doc_index:
+                cross_sm = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_sm:
+                    cross_map_tokens = counter.count(cross_sm)
+                cross_label = "Doc Index:"
+            else:
+                cross_label = "Cross-ref:"
+            if cross_map_tokens:
+                logger.info(f"{cross_label:<13}{cross_map_tokens:>8,}")
+
         logger.info(f"Files:       {file_tokens:>8,}")
         logger.info(f"History:     {history_tokens:>8,}")
         logger.info(f"Total:       {total:>8,} / {max_tokens:,}")
@@ -1995,11 +2686,16 @@ class LLMService:
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
 
     def _measure_tracker_tokens(self, tracker, index):
-        """Measure token counts for all symbol: items in a tracker.
+        """Measure token counts for all symbol:/doc: items in a tracker.
 
         Called after initialize_from_reference_graph so the cache tab
         can display per-item tokens before the first chat request.
         Items are initialized with tokens=0; this fills in real counts.
+
+        The `index` parameter is the primary index for this tracker
+        (symbol_index for code tracker, doc_index for doc tracker).
+        Cross-reference items (wrong prefix for the passed index) are
+        skipped here — they are measured by _measure_cross_ref_tokens.
         """
         if not tracker or not index:
             return
@@ -2008,14 +2704,15 @@ class LLMService:
         for key, item in tracker._items.items():
             if item.tokens > 0:
                 continue  # already measured
-            if key.startswith("symbol:"):
+            if key.startswith("symbol:") or key.startswith("doc:"):
                 path = key.split(":", 1)[1]
-                if hasattr(index, 'get_file_symbol_block'):
-                    block = index.get_file_symbol_block(path)
-                elif hasattr(index, 'get_file_doc_block'):
+                # Dispatch on prefix — only measure items matching the index
+                if key.startswith("doc:") and hasattr(index, 'get_file_doc_block'):
                     block = index.get_file_doc_block(path)
+                elif key.startswith("symbol:") and hasattr(index, 'get_file_symbol_block'):
+                    block = index.get_file_symbol_block(path)
                 else:
-                    block = None
+                    continue  # cross-ref item — measured separately
                 if block:
                     item.tokens = counter.count(block)
                     # Update content hash from signature hash for stability
@@ -2251,10 +2948,10 @@ class LLMService:
         Otherwise, returns standard coding snippets.
         """
         if self._review_active:
-            return self._config.get_review_snippets()
+            return self._config.get_snippets(mode="review")
         if self._context.mode == Mode.DOC:
-            return self._config.get_doc_snippets()
-        return self._config.get_snippets()
+            return self._config.get_snippets(mode="doc")
+        return self._config.get_snippets(mode="code")
 
     def _build_review_context(self):
         """Build review context string for prompt injection.

@@ -203,7 +203,27 @@ When `streamComplete` delivers edit results containing **ambiguous anchor failur
 3. The edit summary banner appends a note: *"A retry prompt has been prepared in the input below."*
 4. The user can review, edit, augment, or discard the prompt before sending
 
-This is consistent with the not-in-context pattern: suggest an action but let the user control when and what to send. Only ambiguous anchor failures trigger this behavior — other failure types (anchor not found, old text mismatch) do not, since they typically require different remediation.
+This is consistent with the not-in-context pattern: suggest an action but let the user control when and what to send.
+
+### Old Text Mismatch Retry Prompt
+
+When `streamComplete` delivers edit results containing **old text mismatch failures** (status `failed`, message containing "Old text mismatch") where the target file is **already in the active context** (present in `selectedFiles`):
+
+1. A retry prompt is auto-composed listing each failed file with the error detail
+2. The prompt reminds the LLM that the file is already in context and asks it to re-read the actual file content before retrying
+3. The prompt is placed into the chat textarea (auto-resized) but **not sent**
+4. The edit summary banner appends a note: *"A retry prompt has been prepared in the input below."*
+
+**Template:**
+
+```
+The following edit(s) failed because the old text didn't match the actual file content. The file(s) are already in your context — please re-read them carefully and retry with the correct text:
+
+{file}: {error detail}
+...
+```
+
+Only in-context mismatch failures trigger this behavior. Mismatch failures on files that were auto-added (not-in-context) are covered by the not-in-context retry prompt instead. Anchor-not-found failures do not trigger this prompt since they indicate a different class of problem (the anchor text doesn't exist in the file at all).
 
 ### Dependencies
 
@@ -340,7 +360,7 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 
 | Side | Element | Action |
 |------|---------|--------|
-| Left | ✨ | New session |
+| Left | ✨ | New session (dispatches `session-loaded` to refresh history bar) |
 | Left | 📜 | Browse history |
 | Center | Search input | Case-insensitive substring search (see Chat Search below) |
 
@@ -373,7 +393,7 @@ When review mode is active, a slim status bar appears above the chat input showi
 
 ### Review Snippets
 
-When `get_review_state().active` is true, review-specific snippets from the `review_snippets` config array are merged into the snippet drawer alongside standard snippets. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+When review mode is active, `LLMService.get_snippets()` returns review-specific snippets (from the `"review"` key in the unified `snippets.json`). The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
 
 ---
 
@@ -389,7 +409,15 @@ The chat panel's `_showToast` only sets its local `_toast` property — it does 
 
 ### Compaction Event Toasts
 
-The chat panel's `_onCompactionEvent` handler routes `url_fetch` and `url_ready` stages to the local `_showToast()` — these appear as transient notifications during streaming rather than as compaction UI updates.
+The chat panel's `_onCompactionEvent` handler routes compaction event stages to appropriate toast types:
+
+- `url_fetch` and `url_ready` → transient local toast (during streaming)
+- `doc_enrichment_queued` → create persistent enrichment toast showing pending files
+- `doc_enrichment_file_done` → update persistent toast (remove completed file)
+- `doc_enrichment_complete` → transition persistent toast to success state, auto-dismiss after 3s
+- `doc_enrichment_failed` → show warning in persistent toast for the failed file
+
+See [Document Mode — Enrichment Toast](../2-code-analysis/document_mode.md#enrichment-toast) for the full persistent toast specification.
 
 ## History Browser
 
