@@ -468,13 +468,6 @@ class LLMService:
         else:
             result = self._switch_to_code_mode()
 
-        # Broadcast cleared file selection so frontend picker stays in sync
-        if self._event_callback:
-            try:
-                await self._event_callback("filesChanged", list(self._selected_files))
-            except Exception as e:
-                logger.warning(f"Failed to broadcast filesChanged on mode switch: {e}")
-
         return result
 
     async def _switch_to_doc_mode(self):
@@ -550,10 +543,6 @@ class LLMService:
         Note: index_repo() is called by _switch_to_doc_mode() before this
         method, with progress reporting.  Don't duplicate it here.
         """
-        # Clear file context
-        self._context.file_context.clear()
-        self._selected_files = []
-
         # Swap system prompt
         self._context.set_system_prompt(self._config.get_doc_system_prompt())
 
@@ -629,10 +618,6 @@ class LLMService:
 
     def _switch_to_code_mode(self):
         """Switch from document mode to code mode."""
-        # Clear file context
-        self._context.file_context.clear()
-        self._selected_files = []
-
         # Restore code system prompt
         self._context.set_system_prompt(self._config.get_system_prompt())
 
