@@ -29,6 +29,7 @@ Background task: _stream_chat
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Initialize stability tracker from reference graph (if not already done at startup)
+    ├─ Re-extract doc file structures if doc mode (mtime-based, instant; changed files queued for background enrichment)
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
     │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
@@ -203,6 +204,8 @@ for path in selected_files:
         }
 
 # 2. Index entries for selected files (sym: in code mode, doc: in document mode)
+#    In doc mode, get_file_block returns the current cached outline — enriched if
+#    available, unenriched (structure-only) if enrichment is still pending.
 for path in selected_files:
     prefix = "sym:" if mode == "code" else "doc:"
     block = index.get_file_block(path)  # symbol_index or doc_index per mode
@@ -310,7 +313,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_ready, cross_ref_enabled
+- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_enabled
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 
 ### Streaming Guards
@@ -331,7 +334,7 @@ Session total: 182,756
 - Stability tracker switches to mode-specific instance; _update_stability runs immediately
 - Context breakdown reflects new mode's index (symbol map or doc map) after switch
 - Cross-reference toggle resets to OFF on mode switch (cross-ref items from previous mode are removed)
-- Cross-ref readiness re-evaluated after mode switch (doc index may still be building)
+- Mode switch is instant — structural re-extraction produces unenriched outlines immediately; changed files queued for background enrichment
 
 ### Shell Command Detection
 - Extracts from ```bash blocks, $ prefix, > prefix
@@ -361,10 +364,9 @@ Session total: 182,756
 ### Cross-Reference Toggle
 - `set_cross_reference(true)` runs initialization pass for the other index's items
 - `set_cross_reference(false)` removes cross-ref items from tracker, marks affected tiers as broken
-- `get_current_state` includes `cross_ref_ready` and `cross_ref_enabled` fields
+- `get_current_state` includes `cross_ref_enabled` field
 - Cross-ref items use `sym:` or `doc:` prefix matching the cross-referenced index
 - Both legends appear in L0 when cross-ref is enabled
-- Toggle is rejected (no-op) when cross-ref index is not ready
 - Mode switch resets cross-ref to disabled
 - Token usage toast shown on activation indicating additional token cost
 

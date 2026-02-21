@@ -253,24 +253,26 @@ SVG files follow the same indexing lifecycle as markdown files — they are disc
 |---|---|---|
 | Server startup (background) | ✅ | `_build_doc_index()` → `index_repo()` discovers `.svg` via `EXTRACTORS` |
 | Switch to doc mode | ✅ | `_switch_to_doc_mode()` → `index_repo()` re-indexes changed files |
-| Every chat in doc mode | ✅ | `_stream_chat()` → `index_repo()` (mtime-based cache — only changed files re-parsed) |
-| LLM edits an SVG | ✅ | Explicit `invalidate_file()` in `_stream_chat` + next `index_repo()` |
-| User edits SVG in viewer | ✅ (lazy) | Mtime change on disk detected on next `index_repo()` call |
+| Every chat in doc mode | ✅ | `_stream_chat()` → structure re-extraction (mtime-based, instant); changed files queued for background enrichment |
+| LLM edits an SVG | ✅ | Explicit `invalidate_file()` + `index_file_structure_only()` in `_stream_chat`; queued for background enrichment |
+| User edits SVG in viewer | ✅ (lazy) | Mtime change on disk detected on next structure re-extraction |
 | Chat in code mode | ❌ | Doc index not consulted — SVG outlines not in context |
 
 **Mtime-based cache** — `DocCache.get(path, mtime)` returns the cached outline if the mtime matches. When `index_repo()` runs, each `.svg` file is checked against the cache; only files with changed mtimes are re-parsed by `SvgExtractor`. This makes re-indexing after saves effectively free for unchanged files.
 
-**Explicit invalidation on LLM edits** — After edit blocks are applied in `_stream_chat()`, modified files are invalidated in both the symbol index and doc index:
+**Explicit invalidation on LLM edits** — After edit blocks are applied in `_stream_chat()`, modified files are invalidated in both the symbol index and doc index, with structural outlines re-extracted immediately:
 
 ```python
 if self._doc_index:
     for path in modified:
         self._doc_index.invalidate_file(path)
+        self._doc_index.index_file_structure_only(path)
+    self._doc_index.queue_enrichment(modified)
 ```
 
-This ensures the next `index_repo()` re-parses any SVG the LLM just edited, regardless of mtime granularity.
+Modified files get fresh unenriched outlines instantly. Keyword enrichment is queued for the background.
 
-**Manual edits in the SVG editor** — When a user edits and saves an SVG via the SVG viewer/editor (`SvgViewer._save()`), the file's mtime changes on disk. No explicit invalidation fires — the mtime change is detected lazily by the next `index_repo()` call (triggered by the next chat message). This is the same lazy-detection pattern used for markdown files edited in Monaco, as described in the Caching section above. The SVG outline may be stale only until the next chat message.
+**Manual edits in the SVG editor** — When a user edits and saves an SVG via the SVG viewer/editor (`SvgViewer._save()`), the file's mtime changes on disk. No explicit invalidation fires — the mtime change is detected lazily by the next structure re-extraction (triggered by the next chat message). This is the same lazy-detection pattern used for markdown files edited in Monaco, as described in the Caching section above. The SVG outline may be stale only until the next chat message.
 
 ### Non-Markdown Documents — Convert First
 
@@ -551,9 +553,9 @@ The PyInstaller release binaries do not bundle `keybert` or `sentence-transforme
 
 When a user switches to document mode and keybert is not installed:
 
-1. **Backend:** `DocIndex.keywords_available` property returns `False`. The `_switch_to_doc_mode()` response includes `keywords_available: false` and a human-readable `keywords_message` explaining the limitation and how to install
-2. **Frontend:** The mode-switch handler in `ac-dialog.js` checks for `keywords_available === false` and shows a **warning toast** with the install instructions
-3. **Terminal:** A `logger.warning` is emitted during `_build_doc_index()` for server-side visibility
+1. **Backend:** `DocIndex.keywords_available` property returns `False`. The mode-switch response includes `keywords_available: false` and a human-readable `keywords_message` explaining the limitation and how to install
+2. **Frontend:** The mode-switch handler in `ac-dialog.js` checks for `keywords_available === false` and shows a **one-time warning toast** with the install instructions
+3. **Terminal:** A `logger.warning` is emitted during `_build_doc_index()` for server-side visibility. This replaces the persistent enrichment toast — when KeyBERT is not installed, no enrichment toast appears (there is nothing to enrich)
 
 The degradation is purely cosmetic — headings appear without `(keyword1, keyword2)` annotations. For most documents with descriptive heading text, the structural outline alone provides sufficient context for the LLM. Keyword enrichment is most valuable for documents with repetitive subheading patterns (API references, spec templates).
 
@@ -587,9 +589,9 @@ The sidecar format uses compact JSON (`separators=(",", ":")`) to minimize disk 
 
 **Model change invalidation:** The `DocCache` stores the `keyword_model` name used to generate each cached entry. On cache lookup, if the stored model name differs from the current `app.json` configuration, the entry is treated as stale and re-extracted. This ensures that changing `keyword_model` triggers a full re-enrichment without requiring a manual cache clear. This check applies to both in-memory and disk-loaded entries.
 
-**File deselection and re-indexing:** When a file is unchecked (removed from selected files / full-content context) and the doc map is rebuilt, `index_repo()` is called which checks the cache for each file. If the file was edited while in full-content context, its mtime will have changed and the stale cache entry is bypassed — the file is re-extracted and re-enriched. If the file was not modified, the disk-cached entry is used instantly.
+**File deselection and re-indexing:** When a file is unchecked (removed from selected files / full-content context) and the doc map is rebuilt, structure re-extraction runs which checks the cache for each file. If the file was edited while in full-content context, its mtime will have changed and the stale cache entry is bypassed — the file's structural outline is re-extracted instantly (<5ms) and the file is queued for background keyword enrichment. If the file was not modified, the disk-cached entry (including keywords) is used instantly.
 
-**Edit-driven invalidation:** When the LLM applies edit blocks that modify files, `_stream_chat` explicitly invalidates both the symbol index and the doc index caches for all modified files. This ensures the next `index_repo()` call re-parses modified documents regardless of mtime granularity:
+**Edit-driven invalidation:** When the LLM applies edit blocks that modify files, `_stream_chat` explicitly invalidates both the symbol index and the doc index caches for all modified files. The doc index then immediately re-extracts the structural outline (instant, <5ms) and queues the file for background keyword enrichment:
 
 ```python
 # Invalidate symbol cache for modified files
@@ -597,13 +599,17 @@ if self._symbol_index:
     for path in modified:
         self._symbol_index.invalidate_file(path)
 
-# Invalidate doc index cache for modified doc files
+# Invalidate doc index cache and re-extract structure for modified doc files
 if self._doc_index:
     for path in modified:
         self._doc_index.invalidate_file(path)
+        self._doc_index.index_file_structure_only(path)  # instant unenriched outline
+    self._doc_index.queue_enrichment(modified)            # background keyword pass
 ```
 
-**Manual edits in the diff editor:** When a user manually edits and saves a `.md` file in the Monaco diff editor, no index invalidation occurs immediately — the save goes directly to `Repo.write_file`. The mtime change is detected lazily: the next `index_repo()` call (triggered by a chat request or mode switch) sees the new mtime, cache-misses, and re-parses the file. This is correct because mtime-based cache validation catches all disk writes. Explicit invalidation (as above) is only needed for LLM edits as a belt-and-suspenders measure alongside mtime checks.
+The modified files immediately have fresh unenriched outlines (headings, links, section sizes) available for tier assembly. Keyword enrichment runs asynchronously — a persistent enrichment toast notifies the user which files are being enriched.
+
+**Manual edits in the diff editor:** When a user manually edits and saves a `.md` file in the Monaco diff editor, no index invalidation occurs immediately — the save goes directly to `Repo.write_file`. The mtime change is detected lazily: the next `index_repo()` call (triggered by a chat request or mode switch) sees the new mtime, re-extracts the structural outline instantly, and queues the file for background enrichment. Explicit invalidation (as above) is only needed for LLM edits as a belt-and-suspenders measure alongside mtime checks.
 
 ### Performance
 
@@ -619,15 +625,52 @@ if self._doc_index:
 
 For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Batched extraction (see Integration section above) provides the primary speedup by letting the sentence-transformer encode all section texts in a single forward pass. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
-**Threaded cache writes:** During the synchronous enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool for cache writes only. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
+**Threaded cache writes:** During the background enrichment phase, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
 
-**Per-file async enrichment (background build):** When `_build_doc_index()` runs during the background startup build, it splits enrichment into three async phases to prevent GIL starvation of the WebSocket event loop:
+**Two-phase indexing principle:** Structural extraction (headings, links, section sizes) is always **synchronous and instant** (<5ms per file via regex). Keyword enrichment is always **asynchronous and never blocks** any user-facing operation. This separation eliminates all blocking edge cases:
 
-1. **Structure extraction** — `_extract_outlines()` runs in a single `run_in_executor` call (fast, mostly I/O — file reads and cache lookups). Returns a list of files needing enrichment.
-2. **Per-file enrichment** — each file is enriched in a **separate** `run_in_executor` call with `await asyncio.sleep(0)` between files. This yields control to the event loop between GIL-heavy sentence-transformer inference calls (~10-15s each), allowing WebSocket traffic (page loads, RPC responses, `get_current_state`) to flow. Without this, a single blocking executor call holds the GIL for the entire ~50s enrichment duration, stalling all WebSocket I/O.
-3. **Reference index build** — `_finalize_index()` runs in executor (fast).
+- Mode switches are instant — unenriched outlines are available immediately
+- File unchecks never block — the stale outline is replaced by a fresh unenriched outline instantly
+- Chat requests never wait for enrichment — they use whatever outline is currently cached (enriched or not)
+- The LLM always has structural context; keywords are a progressive quality enhancement
 
-The `DocIndex` exposes `enrich_single_file()` for this per-file pattern. The synchronous `_enrich_files()` path (used by `index_repo()` for mode-switch re-indexing) remains unchanged — mode switches only re-enrich files whose mtime changed, which is typically zero or very few files and completes in under a second.
+When a file needs re-indexing (mtime changed, edit applied), the system:
+1. Extracts the structural outline synchronously (<5ms) and caches it immediately
+2. Queues the file for background keyword enrichment
+3. Shows a **persistent toast** listing files pending enrichment (see [Enrichment Toast](#enrichment-toast))
+4. When enrichment completes for a file, updates the cache and removes it from the toast
+5. The toast auto-dismisses when all pending files are enriched
+
+This means the LLM may see unenriched outlines (headings without keyword annotations) for recently-edited files. This is acceptable — the spec already establishes that document mode is fully functional without keywords (see [Graceful Degradation in Packaged Releases](#graceful-degradation-in-packaged-releases)). The quality difference is cosmetic: `## Tier Structure ~35ln` instead of `## Tier Structure (cached tier, llm request) [table] ~35ln`.
+
+**Per-file async enrichment:** Background enrichment (both the initial build and queued re-enrichment of edited files) splits work into per-file `run_in_executor` calls with `await asyncio.sleep(0)` between files. This yields control to the event loop between GIL-heavy sentence-transformer inference calls, allowing WebSocket traffic to flow. Without this, a single blocking executor call holds the GIL for the entire enrichment duration, stalling all WebSocket I/O.
+
+The `DocIndex` exposes `enrich_single_file()` for this per-file pattern and `index_file_structure_only()` for instant unenriched extraction.
+
+### Enrichment Toast
+
+When files are queued for background keyword enrichment, a **persistent toast** is shown in the chat panel's toast area. Unlike transient toasts (which auto-dismiss after a few seconds), this toast remains visible until all queued files have been enriched.
+
+**Toast content:**
+- Icon: `⏳` (hourglass)
+- Title: `"Enriching document outlines..."`
+- Body: comma-separated list of filenames currently pending (e.g., `README.md, cache_tiering.md, prompt_assembly.md`)
+- As each file completes, it is removed from the list and replaced with a brief `✓ filename` flash
+- When all files complete, the toast transitions to a success state (`✅ Document outlines enriched`) and auto-dismisses after 3 seconds
+
+**Backend mechanism:** The `LLMService` maintains an `_enrichment_queue` (a set of paths pending enrichment). When files are added to the queue, a `compactionEvent` with stage `doc_enrichment_queued` is sent, carrying the list of pending paths. As each file completes enrichment, a `doc_enrichment_file_done` event is sent with the completed path. When the queue empties, a `doc_enrichment_complete` event fires.
+
+**Frontend mechanism:** The chat panel listens for these compaction events and manages a dedicated persistent toast element. The toast is created on `doc_enrichment_queued`, updated on `doc_enrichment_file_done` (remove path from displayed list), and transitioned to success + auto-dismiss on `doc_enrichment_complete`.
+
+**When the toast appears:**
+- During the initial background doc index build (all files pending)
+- When a file is unchecked after being edited (that file pending)
+- When mode is switched and files need re-enrichment (those files pending)
+- When the LLM applies edit blocks to doc files (modified files pending)
+
+**When the toast does NOT appear:**
+- When KeyBERT is not installed (no enrichment possible — a separate one-time warning toast covers this)
+- When all files hit the mtime cache (nothing to enrich — the common case)
 
 ### Token Budget
 
@@ -720,7 +763,7 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 
 Mode switching is a session-level action — it clears the current context and rebuilds with the appropriate index. Conversation history is preserved but the LLM is informed of the mode change via a system message.
 
-**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously — the code index is built during startup (as today) and the doc index is built **eagerly in the background after startup completes**. The build is deferred to after the "ready" signal so the startup overlay dismisses and the UI becomes interactive before heavy model loading (KeyBERT/PyTorch sentence-transformers) blocks the GIL and stalls WebSocket delivery. The `_start_background_doc_index()` call is made by `main.py` *after* `_send_progress("ready", ...)` — not inside `complete_deferred_init()` — so the startup overlay is guaranteed to dismiss before KeyBERT/PyTorch model loading blocks the GIL and stalls WebSocket message delivery. Once built, both indexes are held in memory so mode switches are instant. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
+**Index lifecycle in `LLMService`:** Both `SymbolIndex` and `DocIndex` are held simultaneously. The code index is built during startup (as today). The doc index is built **eagerly in the background after startup completes**: structural extraction runs first (~250ms for 50 files, producing unenriched outlines), then keyword enrichment runs asynchronously per-file with progress reported via the persistent enrichment toast. The structural extraction completes before any user interaction is possible, so the doc mode toggle and cross-reference toggle are available immediately after startup. Once both indexes are built, they are held in memory so mode switches are instant. Memory overhead is modest: index data structures are dictionaries of small outline/symbol objects, not full file contents. The active mode determines which index feeds `_build_tiered_content()` and which formatter produces the map output.
 
 **Dispatch mechanism in `_build_tiered_content()`:** The method checks `self._mode` (an enum: `Mode.CODE` or `Mode.DOC`) and calls the appropriate index. Both `SymbolIndex` and `DocIndex` expose the same two methods needed by tier assembly: `get_symbol_map()`/`get_doc_map()` for the full map and `get_file_symbol_block()`/`get_file_doc_block()` for per-file blocks. A shared interface is not needed — the dispatch is a simple if/else in one method. The formatter selection follows the same pattern: `CompactFormatter` for code, `DocFormatter` for documents.
 
@@ -731,17 +774,19 @@ Server startup
     │
     ├── Code index built, stability initialized, "ready" sent → startup overlay dismissed
     └── _start_background_doc_index() called AFTER "ready"
-          ├── Show header progress bar via startupProgress/compactionEvent events
           ├── Phase 1: Structure extraction in executor (fast, I/O-bound)
-          ├── Phase 2: Per-file keyword enrichment — each file in separate executor call
-          │     └── asyncio.sleep(0) between files → event loop processes WebSocket traffic
-          ├── Phase 3: Build DocReferenceIndex from extracted links
-          └── Send doc_index_ready compaction event → header progress bar dismissed, mode toggle enabled
+          │     └── All files get unenriched outlines immediately → doc mode toggle enabled
+          ├── Phase 2: Build DocReferenceIndex from extracted outlines (fast)
+          ├── Phase 3: Per-file keyword enrichment — each file in separate executor call
+          │     ├── asyncio.sleep(0) between files → event loop processes WebSocket traffic
+          │     └── Persistent enrichment toast shows progress in chat panel
+          └── Send doc_enrichment_complete → toast auto-dismisses
 
-User clicks mode toggle (doc index already built)
+User clicks mode toggle
     │
     ├── Reset cross-reference toggle to OFF (remove cross-ref items from tracker if active)
-    ├── Re-index doc files (mtime-based — only changed files re-parsed)
+    ├── Re-extract doc file structures (mtime-based — only changed files re-parsed, instant)
+    ├── Queue changed files for background enrichment (enrichment toast if any)
     ├── Clear file context (selected files)
     ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
     ├── Swap system prompt (system.md → system_doc.md)
@@ -753,7 +798,7 @@ User clicks mode toggle (doc index already built)
     └── Insert system message: "Switched to document mode"
 ```
 
-The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified. When files do need re-enrichment (e.g., a markdown file was edited while in code mode), the mode switch uses the same **per-file async enrichment** pattern as the background build: structure extraction runs in a single executor call, then each file needing keyword enrichment runs in a **separate** `run_in_executor` call with `await asyncio.sleep(0)` between files. This prevents GIL starvation during sentence-transformer inference — without it, a single blocking `index_repo()` call would stall all WebSocket I/O for the entire enrichment duration (~10-15s per file). The re-index runs with progress reporting via `startupProgress` events so the header progress bar shows activity during the switch. A final `doc_index_ready` compaction event clears the progress bar after the switch completes.
+Mode switches are **instant** — the structural re-extraction (<5ms per changed file) produces unenriched outlines that are immediately usable for tier assembly. If any files need keyword re-enrichment (edited while in code mode), they are queued for background enrichment and a persistent toast informs the user. The mode switch does not wait for enrichment to complete.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 
@@ -922,42 +967,30 @@ Configuration in `app.json`:
 
 ### Progress Reporting
 
-Document indexing with keyword extraction is slower than code indexing (~65s vs ~1-5s for a 50-doc repo on first run). The UI keeps the user informed without blocking interaction.
+Document indexing has two phases with very different performance characteristics. The UI communicates both without blocking interaction.
 
-**Design principle — non-blocking feedback only.** Document index progress must never overlay or block the dialog panel. The dialog is the user's primary workspace; covering it with a loading overlay during a background build would be disruptive. All progress is communicated via two non-blocking channels:
+**Design principle — structure is instant, enrichment is progressive.** Structural extraction (headings, links) completes in <5ms per file and is always synchronous. Keyword enrichment (~500ms per file) is always asynchronous and communicated via the persistent enrichment toast (see [Enrichment Toast](#enrichment-toast)).
 
-1. **Header progress bar** — a compact inline bar in the `ac-dialog` header, visible even when the dialog is minimized. Shows a short label and percentage fill.
-2. **Toasts** — milestone notifications ("Document index ready — doc mode available") via the global toast system.
+**Startup sequence:**
 
-**Backend progress events** — The document indexer emits progress via the existing `startupProgress(stage, message, percent)` server→client RPC push, and also via `compactionEvent` for milestone notifications. The backend sends both channels so progress is reported regardless of whether the startup overlay is still visible:
+1. **Structure extraction** — runs in executor after "ready" signal. Completes in <250ms for 50 files. All unenriched outlines are immediately cached and the doc mode toggle is enabled. No progress reporting needed — it's too fast to warrant UI feedback.
+2. **Reference index build** — runs immediately after extraction. Also fast (<50ms). No progress reporting.
+3. **Keyword enrichment** — the slow phase. Each file queued for background enrichment. The persistent enrichment toast appears in the chat panel showing the list of files being processed. Files are removed from the toast as they complete.
 
-- `startupProgress("doc_index", message, percent)` — continuous progress updates
-- `compactionEvent("doc_index_progress", {stage, message, percent})` — same data via the compaction channel
-- `compactionEvent("doc_index_ready", {...})` — build complete milestone
-- `compactionEvent("doc_index_failed", {...})` — build failure notification
+**Backend enrichment events** — communicated via `compactionEvent`:
 
-Phases reported via `startupProgress`:
+| Event stage | Payload | Purpose |
+|-------------|---------|---------|
+| `doc_enrichment_queued` | `{files: [path, ...]}` | Files pending enrichment — toast appears |
+| `doc_enrichment_file_done` | `{file: path}` | One file enriched — removed from toast |
+| `doc_enrichment_complete` | `{}` | All files enriched — toast auto-dismisses |
+| `doc_enrichment_failed` | `{file: path, error: msg}` | Enrichment failed for one file — toast shows warning |
 
-1. **Model loading** (0–10%) — "Loading keyword model…" — emitted once when the sentence-transformer model initialises. On first-ever run this includes the ~420MB download, reported as a sub-progress if the model library exposes download callbacks.
-2. **Structure extraction** (10–30%) — "Extracting outlines… (12/50 files)" — fast phase, increments per file.
-3. **Keyword extraction** (30–95%) — "Extracting keywords… (8/50 files)" — the slow phase, increments per file. Each file completion updates the percentage proportionally (`30 + 65 * files_done / total_files`).
-4. **Cache write** (95–100%) — "Caching results…" — writing enriched outlines to the doc cache.
+**No header progress bar needed.** The previous design used a header progress bar and `startupProgress` events because the doc index build gated the mode toggle. Since structural extraction is now instant and the mode toggle is enabled immediately, the header progress bar is unnecessary. The enrichment toast in the chat panel provides sufficient feedback for the background quality pass.
 
-**Frontend event flow:**
+**No resilient state recovery needed.** The previous design required `_refreshMode()` to recover from missed `doc_index_ready` events. Since the mode toggle is enabled as soon as structural extraction completes (which happens synchronously during the startup background build before any browser interaction is possible), there is no transient "not ready" state to recover from. If the browser connects after the build, the mode toggle is already enabled.
 
-1. `app-shell.js` receives `startupProgress` RPC calls. For `stage === "doc_index"`, it **always** dispatches a `mode-switch-progress` DOM event (regardless of whether the startup overlay is visible). This ensures the dialog header bar receives updates both during initial startup and during later re-indexing.
-2. `ac-dialog.js` listens for `mode-switch-progress` events and drives its header progress bar: sets `_docIndexBuilding = true`, `_modeSwitching = true`, and updates `_modeSwitchMessage` / `_modeSwitchPercent`.
-3. When `compactionEvent` with `stage === "doc_index_ready"` fires, the dialog clears the progress bar (`_modeSwitching = false`, `_docIndexBuilding = false`) and shows a toast: "📝 Document index ready — doc mode available".
-4. The mode toggle button in the dialog header shows a pulsing `⏳` icon while `_docIndexBuilding` is true, switching to `📝` when the index is ready.
-
-**Resilient state recovery:** The `doc_index_ready` compaction event may be missed if the browser connects after the background build completes, or if a WebSocket reconnection drops the event. To handle this, `_refreshMode()` — which queries the server-side `get_mode()` RPC for the authoritative `doc_index_ready` flag — is called not only on initial RPC connection but also on `stream-complete` and `state-loaded` events. This ensures the mode toggle icon reflects reality after the next user interaction even if the one-shot completion event was lost.
-
-**What is NOT used for doc index progress:**
-
-- **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed. The `_start_background_doc_index()` call is made by `main.py` *after* `_send_progress("ready", ...)` — not inside `complete_deferred_init()`. This ordering guarantees the startup overlay dismisses and the UI becomes fully interactive before KeyBERT/PyTorch model loading blocks the GIL and stalls WebSocket message delivery.
-- **No blocking mode-switch overlay** — the `mode-switch-overlay` div in `ac-dialog.js` is not shown for background doc index builds. It exists for future use (e.g., blocking mode switches that require user action) but document indexing is fully non-blocking.
-
-**Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress. During the background build, each file is a separate `run_in_executor` call with an `asyncio.sleep(0)` yield after completion, so progress events are delivered to the browser *between* files rather than queuing behind a single long-running executor call.
+**Granularity** — Enrichment toast updates fire after each file completes keyword extraction. Per-file granularity gives smooth visual feedback (50 updates for 50 files) without excessive RPC overhead. During background enrichment, each file is a separate `run_in_executor` call with an `asyncio.sleep(0)` yield after completion, so events are delivered to the browser between files.
 
 ### Keywords — Always Included
 

@@ -134,12 +134,12 @@ When the toggle is turned OFF:
 
 #### Readiness
 
-The toggle is hidden (not just disabled) until the cross-reference index is ready:
+The toggle is always available once the initial startup completes:
 
-- In code mode: hidden until the doc index has finished building (`_doc_index is not None and not _doc_index_building`)
-- In document mode: always available (symbol index is initialized at startup)
+- In code mode: the doc index's structural extraction finishes within ~250ms of the "ready" signal, before any user interaction is possible. Keyword enrichment may still be in progress, but unenriched outlines are sufficient for cross-reference tier assembly.
+- In document mode: the symbol index is always available (initialized at startup).
 
-The backend exposes readiness via the `cross_ref_ready` field in `get_current_state`.
+No `cross_ref_ready` gating is needed — the toggle appears unconditionally after startup.
 
 #### Key Prefix Convention
 

@@ -1170,8 +1170,13 @@ class LLMService:
             file_tree = ""
 
             if self._context.mode == Mode.DOC and self._doc_index:
-                # Document mode — use doc index for map
-                self._doc_index.index_repo()
+                # Document mode — use doc index for map.
+                # Run in executor so KeyBERT enrichment of changed files
+                # doesn't block the event loop / stall WebSocket delivery.
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    self._executor, self._doc_index.index_repo,
+                )
                 symbol_map = self._doc_index.get_doc_map(
                     exclude_files=set(self._selected_files)
                 )

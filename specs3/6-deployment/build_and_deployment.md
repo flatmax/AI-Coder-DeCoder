@@ -72,9 +72,13 @@ The startup is split into two phases to give the user early feedback. The browse
 11. Index repository (parse all source files, heaviest step, runs in executor) — progress: 50%
 12. Initialize stability tracker (tier assignments, reference graph) — progress: 80%
 13. Signal ready — progress: 100%, browser dismisses startup overlay
-14. Serve forever
+14. Start background doc index build:
+    - Structure extraction (<250ms for 50 files) → doc mode toggle enabled immediately
+    - Reference index build (<50ms)
+    - Queue all files for background keyword enrichment → persistent enrichment toast in chat panel
+15. Serve forever
 
-Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes.
+Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 14 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
 
 ### Startup Overlay (Browser)
 
@@ -89,7 +93,7 @@ The browser shows a full-screen overlay with the AC⚡DC brand, a status message
 | `stability` | `Building cache tiers...` | 80% |
 | `ready` | `Ready` | 100% |
 
-The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not first connect), the overlay is not shown — only a "Reconnected" toast appears.
+The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not first connect), the overlay is not shown — only a "Reconnected" toast appears. Document index enrichment progress is communicated separately via the persistent enrichment toast in the chat panel (not the startup overlay).
 
 ### CLI Arguments
 

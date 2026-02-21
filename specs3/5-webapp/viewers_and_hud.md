@@ -40,7 +40,7 @@ This ensures the context breakdown and terminal HUD report accurate token counts
 {
     model: string,
     mode: string,                    // "code" or "doc" — current operating mode
-    cross_ref_enabled: boolean,      // true if cross-reference mode is active
+    cross_ref_enabled: boolean,      // true if cross-reference mode is active (cross-ref toggle always available after startup)
     total_tokens: integer,
     max_input_tokens: integer,
     cache_hit_rate: float,           // cached_tokens / total_tokens

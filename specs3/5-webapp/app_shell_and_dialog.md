@@ -59,7 +59,7 @@ Methods the server calls on the client (registered via `addClass`):
 
 **App Shell:** On `setupDone`: publish call proxy → fetch `LLMService.get_current_state()` → dispatch `state-loaded` event (window-level CustomEvent with full state object as detail). The state already contains messages from the server's auto-restored last session, so the browser renders the previous conversation immediately. After state is loaded, the app shell re-opens the last viewed file and restores its viewport state (see [File and Viewport Persistence](#file-and-viewport-persistence)).
 
-**Files Tab:** On RPC ready: load snippets, load file tree, load review state. On `state-loaded`: restore messages, selected files, streaming status, sync file picker, scroll chat to bottom.
+**Files Tab:** On RPC ready: load snippets, load file tree, load review state. On `state-loaded`: restore messages, selected files, streaming status, mode state, sync file picker, scroll chat to bottom.
 
 **RPC Deferral:** Some components defer their first RPC call to the next microtask (`Promise.resolve().then(...)`) in `onRpcReady()`. This ensures the `SharedRpc` call proxy has fully propagated to all listeners before any component issues requests. Without this, a component's `onRpcReady` might fire before sibling components have received the proxy, causing race conditions when calls trigger events that siblings need to handle.
 
@@ -167,12 +167,11 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 | Center | Tab icon buttons |
 | Right | Cross-ref toggle, review toggle (👁️), minimize button |
 
-**Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **hidden** (not just disabled) until the cross-reference index is ready — in code mode this means the doc index has finished building; in document mode the symbol index is always available so the checkbox appears immediately. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+**Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
 
-The dialog tracks cross-ref state via `_crossRefEnabled` and `_crossRefReady` properties, synced from:
-- `onRpcReady` / `state-loaded`: reads `cross_ref_ready` and `cross_ref_enabled` from `get_current_state()`
-- `compactionEvent` with `stage === "doc_index_ready"`: sets `_crossRefReady = true` (in code mode)
-- `mode-changed` event: resets `_crossRefEnabled = false`, re-evaluates `_crossRefReady`
+The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
+- `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
+- `mode-changed` event: resets `_crossRefEnabled = false`
 
 The review toggle button (👁️) appears in the header actions area on all tabs. When review mode is inactive, clicking it switches to the Files tab and opens the review selector. When review mode is active, the button is visually highlighted (`review-active` class) and clicking it calls `_exitReview()` on the files tab. This provides quick access to review without navigating to the Files tab first.
 

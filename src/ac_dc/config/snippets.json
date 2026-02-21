@@ -21,6 +21,7 @@
     {"icon": "📋", "tooltip": "Summarize changes", "message": "Summarize what this PR changes in 3-4 sentences."}
   ],
   "doc": [
+    {"icon": "🔍", "tooltip": "Check in your context for that content", "message": "You are asking for some content which I believe is already in your context, please check there."},
     {"icon": "📄", "tooltip": "Summarise", "message": "Summarise this document in 3-5 bullet points"},
     {"icon": "🔗", "tooltip": "Cross-refs", "message": "Check all cross-references in this document and flag any broken links"},
     {"icon": "🏗️", "tooltip": "Restructure", "message": "Suggest a better structure for this document"},

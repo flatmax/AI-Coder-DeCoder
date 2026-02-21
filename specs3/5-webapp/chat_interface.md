@@ -389,7 +389,15 @@ The chat panel's `_showToast` only sets its local `_toast` property — it does 
 
 ### Compaction Event Toasts
 
-The chat panel's `_onCompactionEvent` handler routes `url_fetch` and `url_ready` stages to the local `_showToast()` — these appear as transient notifications during streaming rather than as compaction UI updates.
+The chat panel's `_onCompactionEvent` handler routes compaction event stages to appropriate toast types:
+
+- `url_fetch` and `url_ready` → transient local toast (during streaming)
+- `doc_enrichment_queued` → create persistent enrichment toast showing pending files
+- `doc_enrichment_file_done` → update persistent toast (remove completed file)
+- `doc_enrichment_complete` → transition persistent toast to success state, auto-dismiss after 3s
+- `doc_enrichment_failed` → show warning in persistent toast for the failed file
+
+See [Document Mode — Enrichment Toast](../2-code-analysis/document_mode.md#enrichment-toast) for the full persistent toast specification.
 
 ## History Browser
 
