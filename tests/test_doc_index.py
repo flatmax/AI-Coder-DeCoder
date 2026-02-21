@@ -856,7 +856,11 @@ class TestDocFormatter:
         }
         fmt = DocFormatter()
         result = fmt.format_all(outlines)
-        assert "←" not in result
+        # Check that the file entry line doesn't have ←N (ignore legend lines)
+        file_lines = [l for l in result.splitlines()
+                      if l.strip() and not l.startswith("#")]
+        for line in file_lines:
+            assert "←" not in line, f"Unexpected ← in file line: {line}"
 
     def test_outgoing_section_refs_in_output(self):
         from ac_dc.doc_index.extractors.base import DocSectionRef

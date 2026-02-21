@@ -34,7 +34,8 @@ const TIER_LABELS = {
 const TYPE_ICONS = {
   system: '⚙️',
   legend: '📖',
-  symbols: '🗺️',
+  symbols: '📦',
+  doc_symbols: '📝',
   files: '📄',
   urls: '🔗',
   history: '💬',
@@ -592,7 +593,14 @@ export class AcCacheTab extends RpcMixin(LitElement) {
                 <div class="tier-item">
                   <span class="item-icon">📦</span>
                   <span class="item-name" style="color: var(--text-muted); font-style: italic;"
-                    >${unmeasured.length} pre-indexed ${this._data?.mode === 'doc' ? 'documents' : 'symbols'} (awaiting measurement)</span>
+                    >${unmeasured.length} pre-indexed ${(() => {
+                      // Check if unmeasured items include doc_symbols type
+                      const hasDoc = unmeasured.some(i => i.type === 'doc_symbols');
+                      const hasSym = unmeasured.some(i => i.type === 'symbols');
+                      if (hasDoc && hasSym) return 'symbols & documents';
+                      if (hasDoc) return 'documents';
+                      return this._data?.mode === 'doc' ? 'documents' : 'symbols';
+                    })()} (awaiting measurement)</span>
                 </div>
               ` : nothing}
               ${contents.length === 0 ? html`

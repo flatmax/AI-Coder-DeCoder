@@ -196,6 +196,9 @@ class LLMService:
         self._doc_stability_tracker = None
         self._doc_stability_initialized = False
 
+        # Cross-reference mode state
+        self._cross_ref_enabled = False
+
         # Review mode state
         self._review_active = False
         self._saved_system_prompt = None  # original system prompt, saved during review
@@ -414,6 +417,8 @@ class LLMService:
             "repo_name": self._repo.root.name if self._repo else None,
             "init_complete": self._init_complete,
             "mode": self._context.mode.value,
+            "cross_ref_ready": self._is_cross_ref_ready(),
+            "cross_ref_enabled": self._cross_ref_enabled,
         }
 
     def set_selected_files(self, files):
@@ -441,13 +446,243 @@ class LLMService:
             "mode": self._context.mode.value,
             "doc_index_ready": self._doc_index is not None and not self._doc_index_building,
             "doc_index_building": self._doc_index_building,
+            "cross_ref_ready": self._is_cross_ref_ready(),
+            "cross_ref_enabled": self._cross_ref_enabled,
         }
+
+    def _is_cross_ref_ready(self):
+        """Check if the cross-reference index is available for the current mode.
+
+        In code mode: doc index must be built and not building.
+        In document mode: symbol index is always available (built at startup).
+        """
+        if self._context.mode == Mode.DOC:
+            return self._symbol_index is not None and self._stability_initialized
+        else:
+            return self._doc_index is not None and not self._doc_index_building
+
+    def set_cross_reference(self, enabled):
+        """Enable or disable cross-reference mode. (RPC)
+
+        When enabled, adds the other mode's index items to the stability tracker.
+        When disabled, removes cross-ref items and marks affected tiers as broken.
+
+        Args:
+            enabled: boolean
+
+        Returns:
+            {status, cross_ref_enabled, message?}
+        """
+        enabled = bool(enabled)
+
+        if enabled == self._cross_ref_enabled:
+            return {
+                "status": "no_change",
+                "cross_ref_enabled": self._cross_ref_enabled,
+            }
+
+        if enabled:
+            return self._enable_cross_reference()
+        else:
+            return self._disable_cross_reference()
+
+    def _enable_cross_reference(self):
+        """Enable cross-reference mode — add the other index's items to the tracker."""
+        if not self._is_cross_ref_ready():
+            return {
+                "status": "not_ready",
+                "cross_ref_enabled": False,
+                "message": "Cross-reference index is not ready yet.",
+            }
+
+        # Determine which index to cross-reference
+        if self._context.mode == Mode.CODE:
+            # Add doc index items to the code stability tracker
+            cross_index = self._doc_index
+            cross_ref_index = self._doc_index.reference_index if self._doc_index else None
+            prefix = "doc:"
+            tracker = self._stability_tracker
+        else:
+            # Add symbol index items to the doc stability tracker
+            cross_index = self._symbol_index
+            cross_ref_index = self._symbol_index.reference_index if self._symbol_index else None
+            prefix = "symbol:"
+            tracker = self._doc_stability_tracker
+
+        if not tracker or not cross_index:
+            return {
+                "status": "error",
+                "cross_ref_enabled": False,
+                "message": "Required index or tracker not available.",
+            }
+
+        # Get all files from the cross-reference index
+        if self._context.mode == Mode.CODE and self._doc_index:
+            all_cross_files = list(self._doc_index._all_outlines.keys())
+        elif self._context.mode == Mode.DOC and self._symbol_index:
+            all_cross_files = list(self._symbol_index._all_symbols.keys())
+        else:
+            all_cross_files = []
+
+        if not all_cross_files:
+            return {
+                "status": "error",
+                "cross_ref_enabled": False,
+                "message": "No files in cross-reference index.",
+            }
+
+        # Initialize cross-ref items using the same reference graph algorithm
+        # but into the existing tracker (appending, not replacing)
+        items_added = 0
+        if cross_ref_index and hasattr(cross_ref_index, 'connected_components'):
+            components = cross_ref_index.connected_components()
+            tiers = [Tier.L1, Tier.L2, Tier.L3]
+            tier_sizes = {t: 0 for t in tiers}
+            placed = set()
+
+            # Place clustered files
+            for component in sorted(components, key=len, reverse=True):
+                target = min(tiers, key=lambda t: tier_sizes[t])
+                for path in component:
+                    if path in placed:
+                        continue
+                    key = f"{prefix}{path}"
+                    if key not in tracker._items:
+                        tracker._items[key] = TrackedItem(
+                            key=key,
+                            tier=target,
+                            n=TIER_CONFIG[target]["entry_n"],
+                            content_hash="",
+                            tokens=0,
+                        )
+                        tier_sizes[target] += 1
+                        items_added += 1
+                    placed.add(path)
+
+            # Place orphan files
+            for path in all_cross_files:
+                if path not in placed:
+                    target = min(tiers, key=lambda t: tier_sizes[t])
+                    key = f"{prefix}{path}"
+                    if key not in tracker._items:
+                        tracker._items[key] = TrackedItem(
+                            key=key,
+                            tier=target,
+                            n=TIER_CONFIG[target]["entry_n"],
+                            content_hash="",
+                            tokens=0,
+                        )
+                        tier_sizes[target] += 1
+                        items_added += 1
+                    placed.add(path)
+        else:
+            # Fallback: distribute evenly
+            tiers = [Tier.L1, Tier.L2, Tier.L3]
+            for i, path in enumerate(all_cross_files):
+                target = tiers[i % len(tiers)]
+                key = f"{prefix}{path}"
+                if key not in tracker._items:
+                    tracker._items[key] = TrackedItem(
+                        key=key,
+                        tier=target,
+                        n=TIER_CONFIG[target]["entry_n"],
+                        content_hash="",
+                        tokens=0,
+                    )
+                    items_added += 1
+
+        # Measure token counts for the newly added items
+        self._measure_cross_ref_tokens(tracker, cross_index, prefix)
+
+        self._cross_ref_enabled = True
+
+        # Compute total token cost for the toast
+        cross_ref_tokens = sum(
+            item.tokens for key, item in tracker._items.items()
+            if key.startswith(prefix)
+        )
+
+        logger.info(
+            f"Cross-reference enabled: added {items_added} {prefix} items "
+            f"to tracker (~{cross_ref_tokens:,} tokens)"
+        )
+
+        return {
+            "status": "enabled",
+            "cross_ref_enabled": True,
+            "message": f"Cross-reference enabled: {items_added} items added (~{cross_ref_tokens:,} tokens).",
+            "items_added": items_added,
+            "tokens_added": cross_ref_tokens,
+        }
+
+    def _disable_cross_reference(self):
+        """Disable cross-reference mode — remove cross-ref items from tracker."""
+        if self._context.mode == Mode.CODE:
+            # Remove doc: items from code tracker
+            prefix = "doc:"
+            tracker = self._stability_tracker
+        else:
+            # Remove symbol: items from doc tracker
+            prefix = "symbol:"
+            tracker = self._doc_stability_tracker
+
+        if not tracker:
+            self._cross_ref_enabled = False
+            return {
+                "status": "disabled",
+                "cross_ref_enabled": False,
+            }
+
+        # Remove all items with the cross-ref prefix
+        to_remove = [k for k in tracker._items if k.startswith(prefix)]
+        for key in to_remove:
+            tier = tracker._items[key].tier
+            del tracker._items[key]
+            tracker._broken_tiers.add(tier)
+
+        self._cross_ref_enabled = False
+        logger.info(f"Cross-reference disabled: removed {len(to_remove)} {prefix} items")
+
+        return {
+            "status": "disabled",
+            "cross_ref_enabled": False,
+            "message": f"Cross-reference disabled: {len(to_remove)} items removed.",
+        }
+
+    def _measure_cross_ref_tokens(self, tracker, cross_index, prefix):
+        """Measure token counts for cross-reference items in a tracker."""
+        if not tracker or not cross_index:
+            return
+        counter = self._context.counter
+        measured = 0
+        for key, item in tracker._items.items():
+            if not key.startswith(prefix):
+                continue
+            if item.tokens > 0:
+                continue
+            path = key.split(":", 1)[1]
+            # Dispatch on prefix: doc: → get_file_doc_block, symbol: → get_file_symbol_block
+            if prefix == "doc:" and hasattr(cross_index, 'get_file_doc_block'):
+                block = cross_index.get_file_doc_block(path)
+            elif prefix == "symbol:" and hasattr(cross_index, 'get_file_symbol_block'):
+                block = cross_index.get_file_symbol_block(path)
+            else:
+                block = None
+            if block:
+                item.tokens = counter.count(block)
+                sig_hash = cross_index.get_signature_hash(path)
+                if sig_hash:
+                    item.content_hash = sig_hash
+                measured += 1
+        if measured:
+            logger.info(f"Measured tokens for {measured} cross-ref {prefix} items")
 
     async def switch_mode(self, mode):
         """Switch between code and document modes.
 
         Full context switch: clears file context, swaps system prompt,
         swaps snippets, switches stability tracker, rebuilds tier content.
+        Resets cross-reference mode to OFF.
 
         Args:
             mode: "code" or "doc"
@@ -462,6 +697,11 @@ class LLMService:
 
         if new_mode == self._context.mode:
             return {"mode": new_mode.value, "message": "Already in this mode"}
+
+        # Reset cross-reference mode before switching —
+        # remove cross-ref items from the current tracker
+        if self._cross_ref_enabled:
+            self._disable_cross_reference()
 
         if new_mode == Mode.DOC:
             result = await self._switch_to_doc_mode()
@@ -560,6 +800,7 @@ class LLMService:
                 all_files = list(self._doc_index._all_outlines.keys())
                 self._doc_stability_tracker.initialize_from_reference_graph(
                     ref_index, all_files, counter=self._context.counter,
+                    key_prefix="doc:",
                 )
                 self._doc_stability_initialized = True
                 logger.info(f"Doc stability tracker initialized with {len(self._doc_stability_tracker.items)} items")
@@ -848,7 +1089,7 @@ class LLMService:
                                     key="system:prompt",
                                     tier=Tier.L0,
                                     n=TIER_CONFIG[Tier.L0]["entry_n"],
-                                    content_hash=StabilityTracker.hash_content(sys_content),
+                                    content_hash=StabilityTracker.hash_content(sys_prompt),
                                     tokens=self._context.counter.count(sys_content),
                                 )
                                 logger.info("Seeded system:prompt into L0")
@@ -946,12 +1187,45 @@ class LLMService:
                 symbol_map=symbol_map,
                 symbol_legend=symbol_legend,
             )
+
+            # When cross-reference mode is active, include both legends in L0
+            doc_legend = ""
+            if self._cross_ref_enabled:
+                if self._context.mode == Mode.CODE and self._doc_index:
+                    doc_legend = self._doc_index.get_legend() or ""
+                elif self._context.mode == Mode.DOC and self._symbol_index:
+                    doc_legend = self._symbol_index.get_legend() or ""
+
+            # Recompute symbol map with full tier exclusions — files in cached
+            # tiers already have their index blocks in tier content and must
+            # not also appear in the uncached symbol map (spec: "A File Never
+            # Appears Twice").
             if tiered_content:
+                tier_exclude = set(self._selected_files)
+                tracker = self._doc_stability_tracker if self._context.mode == Mode.DOC else self._stability_tracker
+                if tracker:
+                    for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+                        for key in tracker.get_tier_items(tier):
+                            if key.startswith("symbol:") or key.startswith("doc:") or key.startswith("file:"):
+                                path = key.split(":", 1)[1]
+                                tier_exclude.add(path)
+
+                # Regenerate maps with full exclusions
+                if self._context.mode == Mode.DOC and self._doc_index:
+                    symbol_map = self._doc_index.get_doc_map(
+                        exclude_files=tier_exclude
+                    ) or ""
+                elif self._symbol_index:
+                    symbol_map = self._symbol_index.get_symbol_map(
+                        exclude_files=tier_exclude
+                    ) or ""
+
                 assembled = self._context.assemble_tiered_messages(
                     user_prompt=augmented_message,
                     images=images if images else None,
                     symbol_map=symbol_map,
                     symbol_legend=symbol_legend,
+                    doc_legend=doc_legend,
                     file_tree=file_tree,
                     tiered_content=tiered_content,
                 )
@@ -1308,20 +1582,28 @@ class LLMService:
         # Selected files have full content in context; their symbol/doc blocks
         # are excluded from the map to avoid redundancy. Per spec:
         # "A file never appears as both symbol block and full content."
+        #
+        # Key prefix convention:
+        # - Code mode primary items → symbol:{path}
+        # - Doc mode primary items → doc:{path}
+        # This prevents collisions when cross-reference mode adds the other
+        # index's items (doc: in code mode, symbol: in doc mode).
         if index:
             selected_set = set(self._selected_files)
+            primary_prefix = "doc:" if self._context.mode == Mode.DOC else "symbol:"
 
-            # Remove symbol entries for selected files — they now have file: entries
+            # Remove primary and cross-ref entries for selected files — they now have file: entries
             for path in selected_set:
-                sym_key = f"symbol:{path}"
-                if sym_key in tracker._items:
-                    tier = tracker._items[sym_key].tier
-                    del tracker._items[sym_key]
-                    tracker._broken_tiers.add(tier)
-                    tracker._changes.append({
-                        "action": "removed", "key": sym_key,
-                        "reason": "file selected — full content replaces symbol",
-                    })
+                for prefix in ("symbol:", "doc:"):
+                    entry_key = f"{prefix}{path}"
+                    if entry_key in tracker._items:
+                        tier = tracker._items[entry_key].tier
+                        del tracker._items[entry_key]
+                        tracker._broken_tiers.add(tier)
+                        tracker._changes.append({
+                            "action": "removed", "key": entry_key,
+                            "reason": f"file selected — full content replaces {prefix.rstrip(':')} entry",
+                        })
 
             # Get all indexed paths from the appropriate index
             if self._context.mode == Mode.DOC:
@@ -1331,7 +1613,7 @@ class LLMService:
 
             for path in all_indexed:
                 if path in selected_set:
-                    continue  # full file content is active; skip symbol entry
+                    continue  # full file content is active; skip index entry
                 if self._context.mode == Mode.DOC:
                     block = self._doc_index.get_file_doc_block(path) if self._doc_index else ""
                 else:
@@ -1343,10 +1625,46 @@ class LLMService:
                     # hash mismatches and mass demotions.
                     sig_hash = index.get_signature_hash(path)
                     active_items.append({
-                        "key": f"symbol:{path}",
+                        "key": f"{primary_prefix}{path}",
                         "content_hash": sig_hash or StabilityTracker.hash_content(block),
                         "tokens": counter.count(block),
                     })
+
+        # Cross-reference items — add the other index's items when cross-ref enabled
+        if self._cross_ref_enabled:
+            if self._context.mode == Mode.CODE and self._doc_index:
+                cross_index = self._doc_index
+                cross_prefix = "doc:"
+                all_cross = self._doc_index._all_outlines
+            elif self._context.mode == Mode.DOC and self._symbol_index:
+                cross_index = self._symbol_index
+                cross_prefix = "symbol:"
+                all_cross = self._symbol_index._all_symbols
+            else:
+                cross_index = None
+                cross_prefix = ""
+                all_cross = {}
+
+            if cross_index and all_cross:
+                for path in all_cross:
+                    key = f"{cross_prefix}{path}"
+                    # Only include if item exists in tracker (was initialized)
+                    if key not in tracker._items:
+                        continue
+                    # Dispatch on prefix: doc: → get_file_doc_block, symbol: → get_file_symbol_block
+                    if cross_prefix == "doc:" and hasattr(cross_index, 'get_file_doc_block'):
+                        block = cross_index.get_file_doc_block(path)
+                    elif cross_prefix == "symbol:" and hasattr(cross_index, 'get_file_symbol_block'):
+                        block = cross_index.get_file_symbol_block(path)
+                    else:
+                        block = None
+                    if block:
+                        sig_hash = cross_index.get_signature_hash(path)
+                        active_items.append({
+                            "key": key,
+                            "content_hash": sig_hash or StabilityTracker.hash_content(block),
+                            "tokens": counter.count(block),
+                        })
 
         # File entries for selected files
         for path in self._selected_files:
@@ -1432,14 +1750,17 @@ class LLMService:
                 if key.startswith("system:"):
                     # System prompt handled separately by assemble_tiered_messages
                     continue
-                elif key.startswith("symbol:"):
+                elif key.startswith("doc:"):
+                    # doc: prefix — always dispatches to doc_index
                     path = key.split(":", 1)[1]
-                    if self._context.mode == Mode.DOC:
-                        if self._doc_index:
-                            block = self._doc_index.get_file_doc_block(path)
-                            if block:
-                                symbol_parts.append(block)
-                    elif self._symbol_index:
+                    if self._doc_index:
+                        block = self._doc_index.get_file_doc_block(path)
+                        if block:
+                            symbol_parts.append(block)
+                elif key.startswith("symbol:"):
+                    # symbol: prefix — always dispatches to symbol_index
+                    path = key.split(":", 1)[1]
+                    if self._symbol_index:
                         block = self._symbol_index.get_file_symbol_block(path)
                         if block:
                             symbol_parts.append(block)
@@ -1523,6 +1844,10 @@ class LLMService:
                 item_type = "symbols"
                 path = key.split(":", 1)[1]
                 name = path
+            elif key.startswith("doc:"):
+                item_type = "doc_symbols"
+                path = key.split(":", 1)[1]
+                name = path
             elif key.startswith("history:"):
                 item_type = "history"
                 path = None
@@ -1553,8 +1878,8 @@ class LLMService:
                 "_sort_idx": sort_idx if item_type == "history" else 0,
             })
 
-        # Sort: system first, then symbols, files, history (numerically), other
-        type_order = {"system": 0, "symbols": 1, "files": 2, "history": 3, "other": 4}
+        # Sort: system first, then symbols/doc_symbols, files, history (numerically), other
+        type_order = {"system": 0, "symbols": 1, "doc_symbols": 1, "files": 2, "history": 3, "other": 4}
         contents.sort(key=lambda c: (
             type_order.get(c["type"], 99),
             c["_sort_idx"],
@@ -1618,6 +1943,29 @@ class LLMService:
             if sm:
                 symbol_map_tokens = counter.count(sm)
                 symbol_map_files = len(self._symbol_index._all_symbols)
+
+        # Cross-reference mode: include both legends and both maps
+        if self._cross_ref_enabled:
+            if self._context.mode == Mode.CODE and self._doc_index:
+                cross_legend = self._doc_index.get_legend()
+                if cross_legend:
+                    legend_tokens += counter.count(cross_legend)
+                cross_map = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_map:
+                    symbol_map_tokens += counter.count(cross_map)
+                    symbol_map_files += len(self._doc_index._all_outlines)
+            elif self._context.mode == Mode.DOC and self._symbol_index:
+                cross_legend = self._symbol_index.get_legend()
+                if cross_legend:
+                    legend_tokens += counter.count(cross_legend)
+                cross_map = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_map:
+                    symbol_map_tokens += counter.count(cross_map)
+                    symbol_map_files += len(self._symbol_index._all_symbols)
 
         # Per-file token counts
         file_tokens = self._context.file_context.count_tokens(counter)
@@ -1775,6 +2123,7 @@ class LLMService:
         return {
             "model": counter.model_name,
             "mode": self._context.mode.value,
+            "cross_ref_enabled": self._cross_ref_enabled,
             "total_tokens": total,
             "max_input_tokens": counter.max_input_tokens,
             "cache_hit_rate": cache_hit_rate,
@@ -1962,6 +2311,29 @@ class LLMService:
         map_label = "Doc Map:" if is_doc else "Symbol Map:"
         logger.info(f"System:      {system_tokens + legend_tokens:>8,}")
         logger.info(f"{map_label:<13}{symbol_map_tokens:>8,}")
+
+        # Cross-reference index tokens
+        if self._cross_ref_enabled:
+            cross_map_tokens = 0
+            if is_doc and self._symbol_index:
+                cross_sm = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_sm:
+                    cross_map_tokens = counter.count(cross_sm)
+                cross_label = "Symbol Map:"
+            elif not is_doc and self._doc_index:
+                cross_sm = self._doc_index.get_doc_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if cross_sm:
+                    cross_map_tokens = counter.count(cross_sm)
+                cross_label = "Doc Index:"
+            else:
+                cross_label = "Cross-ref:"
+            if cross_map_tokens:
+                logger.info(f"{cross_label:<13}{cross_map_tokens:>8,}")
+
         logger.info(f"Files:       {file_tokens:>8,}")
         logger.info(f"History:     {history_tokens:>8,}")
         logger.info(f"Total:       {total:>8,} / {max_tokens:,}")
@@ -2001,11 +2373,16 @@ class LLMService:
                 logger.info(f"{icon} {from_t} → {to_t}: {len(keys)} items — {', '.join(keys)}")
 
     def _measure_tracker_tokens(self, tracker, index):
-        """Measure token counts for all symbol: items in a tracker.
+        """Measure token counts for all symbol:/doc: items in a tracker.
 
         Called after initialize_from_reference_graph so the cache tab
         can display per-item tokens before the first chat request.
         Items are initialized with tokens=0; this fills in real counts.
+
+        The `index` parameter is the primary index for this tracker
+        (symbol_index for code tracker, doc_index for doc tracker).
+        Cross-reference items (wrong prefix for the passed index) are
+        skipped here — they are measured by _measure_cross_ref_tokens.
         """
         if not tracker or not index:
             return
@@ -2014,14 +2391,15 @@ class LLMService:
         for key, item in tracker._items.items():
             if item.tokens > 0:
                 continue  # already measured
-            if key.startswith("symbol:"):
+            if key.startswith("symbol:") or key.startswith("doc:"):
                 path = key.split(":", 1)[1]
-                if hasattr(index, 'get_file_symbol_block'):
-                    block = index.get_file_symbol_block(path)
-                elif hasattr(index, 'get_file_doc_block'):
+                # Dispatch on prefix — only measure items matching the index
+                if key.startswith("doc:") and hasattr(index, 'get_file_doc_block'):
                     block = index.get_file_doc_block(path)
+                elif key.startswith("symbol:") and hasattr(index, 'get_file_symbol_block'):
+                    block = index.get_file_symbol_block(path)
                 else:
-                    block = None
+                    continue  # cross-ref item — measured separately
                 if block:
                     item.tokens = counter.count(block)
                     # Update content hash from signature hash for stability

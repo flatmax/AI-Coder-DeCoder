@@ -511,6 +511,7 @@ class ContextManager:
 
     def assemble_tiered_messages(self, user_prompt, images=None,
                                   symbol_map="", symbol_legend="",
+                                  doc_legend="",
                                   file_tree="",
                                   tiered_content=None):
         """Assemble message array with cache tier breakpoints.
@@ -520,6 +521,7 @@ class ContextManager:
             images: list of base64 image data URIs
             symbol_map: compact symbol map for active (non-tiered) display
             symbol_legend: legend text
+            doc_legend: document index legend text (included when cross-ref active)
             file_tree: flat file tree text
             tiered_content: dict with keys l0, l1, l2, l3, each containing:
                 {symbols: str, files: str, history: list[{role, content}]}
@@ -533,11 +535,17 @@ class ContextManager:
         # L0: System message
         l0 = tiers.get("l0", {})
         system_parts = [self._system_prompt]
-        if symbol_legend or symbol_map or l0.get("symbols"):
+        if symbol_legend or doc_legend or symbol_map or l0.get("symbols"):
             map_header = DOC_MAP_HEADER if self._mode == Mode.DOC else REPO_MAP_HEADER
             system_parts.append(map_header)
             if symbol_legend:
                 system_parts.append(symbol_legend)
+            if doc_legend:
+                # Cross-reference mode: include the other index's legend.
+                # Use the opposite header from the primary mode's header.
+                cross_header = REPO_MAP_HEADER if self._mode == Mode.DOC else DOC_MAP_HEADER
+                system_parts.append(cross_header)
+                system_parts.append(doc_legend)
             if l0.get("symbols"):
                 system_parts.append(l0["symbols"])
             elif symbol_map:
