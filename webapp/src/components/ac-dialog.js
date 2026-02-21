@@ -578,6 +578,8 @@ export class AcDialog extends RpcMixin(LitElement) {
       }
     } catch (e) {
       dispatchToast(`Mode switch failed: ${e.message || e}`, 'error');
+    } finally {
+      this._modeSwitchInFlight = false;
     }
   }
 
