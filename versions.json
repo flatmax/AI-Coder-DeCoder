@@ -1,6 +1,12 @@
 {
-  "latest": "aca47054",
+  "latest": "3889f038",
   "versions": [
+    {
+      "sha": "3889f038",
+      "full_sha": "3889f038392d9ca59c8997e90f4dae8b179c68b8",
+      "date": "2026-02-21T22:43:02Z",
+      "branch": "master"
+    },
     {
       "sha": "aca47054",
       "full_sha": "aca4705480af052e1a7a9e54648f4d9f94d1f46e",
@@ -113,12 +119,6 @@
       "sha": "30fb5fca",
       "full_sha": "30fb5fca680f3130401b458760f139360eeaa4da",
       "date": "2026-02-05T05:03:33Z",
-      "branch": "master"
-    },
-    {
-      "sha": "d023ee1c",
-      "full_sha": "d023ee1c903bf339eabad09c5630657184de4cfb",
-      "date": "2026-02-05T03:47:17Z",
       "branch": "master"
     }
   ]
