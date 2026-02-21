@@ -173,6 +173,7 @@ EditResult:
 7. Refresh file tree if `files_modified` is non-empty — dispatch `files-modified` event and reload repo file list
 8. Refresh repo file list (`get_flat_file_list`) for file mention detection of newly created files
 9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
+10. Check for old-text-mismatch failures on in-context files — auto-populate retry prompt asking the LLM to re-read the file content and retry
 
 ## URL Fetch Notifications During Streaming
 

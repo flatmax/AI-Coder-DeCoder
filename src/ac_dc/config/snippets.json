@@ -3,6 +3,7 @@
     {"icon": "✂️", "tooltip": "Your last edit was truncated", "message": "Your last edit was truncated, please continue."},
     {"icon": "🔍", "tooltip": "Check in your context for that content", "message": "You are asking for some content which I believe is already in your context, please check there."},
     {"icon": "✏️", "tooltip": "Tell AI to honor edit blocks.", "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."},
+    {"icon": "🔄", "tooltip": "Old text mismatch — retry from context", "message": "Your edit blocks failed with 'old text mismatch'. The files are in your context. Please re-read the actual file content carefully (character by character around the edit site) and retry with the correct old text. Copy-paste from the file — never type from memory."},
     {"icon": "⏸️", "tooltip": "Before you start implementing the plan...", "message": "Before you start implementing the plan, is there anything you would like to change ?"},
     {"icon": "✅", "tooltip": "Confirm tests are testing what was intended", "message": "All tests passed, can you confirm the tests are testing what you intended to test?"},
     {"icon": "📦", "tooltip": "Check if ready to commit and update plan", "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? What will be next?"},
