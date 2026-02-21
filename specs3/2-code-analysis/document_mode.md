@@ -619,7 +619,15 @@ if self._doc_index:
 
 For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Batched extraction (see Integration section above) provides the primary speedup by letting the sentence-transformer encode all section texts in a single forward pass. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
-**Threaded cache writes:** During the enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool for cache writes only. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
+**Threaded cache writes:** During the synchronous enrichment phase of `index_repo()`, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The first file is enriched synchronously (to trigger model loading with progress reporting); remaining files use the thread pool for cache writes only. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
+
+**Per-file async enrichment (background build):** When `_build_doc_index()` runs during the background startup build, it splits enrichment into three async phases to prevent GIL starvation of the WebSocket event loop:
+
+1. **Structure extraction** — `_extract_outlines()` runs in a single `run_in_executor` call (fast, mostly I/O — file reads and cache lookups). Returns a list of files needing enrichment.
+2. **Per-file enrichment** — each file is enriched in a **separate** `run_in_executor` call with `await asyncio.sleep(0)` between files. This yields control to the event loop between GIL-heavy sentence-transformer inference calls (~10-15s each), allowing WebSocket traffic (page loads, RPC responses, `get_current_state`) to flow. Without this, a single blocking executor call holds the GIL for the entire ~50s enrichment duration, stalling all WebSocket I/O.
+3. **Reference index build** — `_finalize_index()` runs in executor (fast).
+
+The `DocIndex` exposes `enrich_single_file()` for this per-file pattern. The synchronous `_enrich_files()` path (used by `index_repo()` for mode-switch re-indexing) remains unchanged — mode switches only re-enrich files whose mtime changed, which is typically zero or very few files and completes in under a second.
 
 ### Token Budget
 
@@ -724,8 +732,10 @@ Server startup
     ├── Code index built, stability initialized, "ready" sent → startup overlay dismissed
     └── _start_background_doc_index() called AFTER "ready"
           ├── Show header progress bar via startupProgress/compactionEvent events
-          ├── Build DocIndex (structure extraction + keyword enrichment)
-          ├── Build DocReferenceIndex from extracted links
+          ├── Phase 1: Structure extraction in executor (fast, I/O-bound)
+          ├── Phase 2: Per-file keyword enrichment — each file in separate executor call
+          │     └── asyncio.sleep(0) between files → event loop processes WebSocket traffic
+          ├── Phase 3: Build DocReferenceIndex from extracted links
           └── Send doc_index_ready compaction event → header progress bar dismissed, mode toggle enabled
 
 User clicks mode toggle (doc index already built)
@@ -743,7 +753,7 @@ User clicks mode toggle (doc index already built)
     └── Insert system message: "Switched to document mode"
 ```
 
-The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified. The re-index runs with progress reporting via `startupProgress` events so the header progress bar shows activity during the switch. A final `doc_index_ready` compaction event clears the progress bar after the switch completes.
+The re-index step on every mode switch ensures that any files edited manually in the diff editor (or modified by LLM edits while in code mode) are detected and re-parsed before the doc map is assembled. Since the mtime-based cache skips unchanged files, this step is fast (~<50ms) unless files were actually modified. When files do need re-enrichment (e.g., a markdown file was edited while in code mode), the mode switch uses the same **per-file async enrichment** pattern as the background build: structure extraction runs in a single executor call, then each file needing keyword enrichment runs in a **separate** `run_in_executor` call with `await asyncio.sleep(0)` between files. This prevents GIL starvation during sentence-transformer inference — without it, a single blocking `index_repo()` call would stall all WebSocket I/O for the entire enrichment duration (~10-15s per file). The re-index runs with progress reporting via `startupProgress` events so the header progress bar shows activity during the switch. A final `doc_index_ready` compaction event clears the progress bar after the switch completes.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 
@@ -947,7 +957,7 @@ Phases reported via `startupProgress`:
 - **No startup overlay** — the startup overlay (`startup-overlay` in `app-shell.js`) is only for initial server connection and code index setup. Document indexing runs in the background after the overlay has dismissed. The `_start_background_doc_index()` call is made by `main.py` *after* `_send_progress("ready", ...)` — not inside `complete_deferred_init()`. This ordering guarantees the startup overlay dismisses and the UI becomes fully interactive before KeyBERT/PyTorch model loading blocks the GIL and stalls WebSocket message delivery.
 - **No blocking mode-switch overlay** — the `mode-switch-overlay` div in `ac-dialog.js` is not shown for background doc index builds. It exists for future use (e.g., blocking mode switches that require user action) but document indexing is fully non-blocking.
 
-**Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress.
+**Granularity** — Progress updates fire after each file completes keyword extraction, not after each section. Per-file granularity gives smooth visual updates (50 increments for 50 files) without excessive RPC overhead. For large files with many sections, the keyword extraction step for that single file may take ~500ms — acceptable without sub-file progress. During the background build, each file is a separate `run_in_executor` call with an `asyncio.sleep(0)` yield after completion, so progress events are delivered to the browser *between* files rather than queuing behind a single long-running executor call.
 
 ### Keywords — Always Included
 

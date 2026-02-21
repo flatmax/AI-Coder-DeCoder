@@ -15,6 +15,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import litellm
 
@@ -30,6 +31,7 @@ from .history_compactor import HistoryCompactor
 from .history_store import HistoryStore
 from .stability_tracker import TIER_CONFIG, StabilityTracker, Tier, TrackedItem
 from .token_counter import TokenCounter
+from .doc_index.extractors import EXTRACTORS
 from .url_cache import URLCache
 from .url_handler import URLService
 
@@ -732,9 +734,16 @@ class LLMService:
                 "building": True,
             }
 
-        # Doc index is ready — re-index changed files with progress, then switch
+        # Doc index is ready — re-index changed files using per-file async
+        # enrichment so the event loop stays responsive (same pattern as
+        # _build_doc_index).  Without this, a single blocking index_repo()
+        # call holds the GIL during sentence-transformer inference and
+        # stalls all WebSocket I/O.
         if self._doc_index:
             try:
+                loop = asyncio.get_event_loop()
+                doc_index = self._doc_index
+
                 if self._event_callback:
                     try:
                         await self._event_callback(
@@ -745,7 +754,66 @@ class LLMService:
                         pass
                     await asyncio.sleep(0)
 
-                self._doc_index.index_repo()
+                # Phase 1: Structure extraction (fast)
+                doc_index._repo_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_all_repo_files,
+                )
+                doc_files = await loop.run_in_executor(
+                    self._executor, doc_index._get_doc_files,
+                )
+                doc_files = [
+                    f for f in doc_files
+                    if Path(f).suffix.lower() in EXTRACTORS
+                ]
+                await asyncio.sleep(0)
+
+                total = len(doc_files)
+                needs_enrichment = []
+                if total > 0:
+                    needs_enrichment = await loop.run_in_executor(
+                        self._executor,
+                        lambda: doc_index._extract_outlines(doc_files, total),
+                    )
+                    await asyncio.sleep(0)
+
+                # Phase 2: Per-file enrichment with event loop yields
+                keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
+
+                if needs_enrichment and doc_index._enricher:
+                    enrich_total = len(needs_enrichment)
+                    logger.info(f"Mode switch: {enrich_total} files need enrichment")
+
+                    for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
+                        pct = 10 + int(75 * i / enrich_total)
+                        if self._event_callback:
+                            try:
+                                await self._event_callback(
+                                    "startupProgress", "doc_index",
+                                    f"Extracting keywords… ({i}/{enrich_total}) — {path}",
+                                    pct,
+                                )
+                            except Exception:
+                                pass
+
+                        cb = None
+                        await loop.run_in_executor(
+                            self._executor,
+                            lambda p=path, m=mtime, o=outline, t=text: (
+                                doc_index.enrich_single_file(p, m, o, t,
+                                                             keyword_model=keyword_model)
+                            ),
+                        )
+                        await asyncio.sleep(0)
+                elif needs_enrichment:
+                    for path, mtime, outline, text in needs_enrichment:
+                        doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
+                        doc_index._all_outlines[path] = outline
+
+                # Phase 3: Build reference index
+                await loop.run_in_executor(
+                    self._executor, doc_index._finalize_index,
+                )
+                await asyncio.sleep(0)
 
                 if self._event_callback:
                     try:
@@ -897,6 +965,7 @@ class LLMService:
         _loop = asyncio.get_event_loop()
 
         def _progress(stage, message, percent):
+            """Send progress from either a thread (executor) or the event loop."""
             _last_progress["message"] = message
             _last_progress["percent"] = percent
             if self._event_callback:
@@ -940,42 +1009,88 @@ class LLMService:
             doc_config=doc_config,
         )
 
-        # Run the blocking index_repo in executor so progress events can flow.
-        # A heartbeat task re-sends the latest progress every 2s so the UI
-        # stays alive during long blocking operations (model download/load).
-        _indexing_done = False
-
-        async def _heartbeat():
-            while not _indexing_done:
-                await asyncio.sleep(2)
-                if not _indexing_done and self._event_callback:
-                    try:
-                        await self._event_callback(
-                            "startupProgress", "doc_index",
-                            _last_progress["message"],
-                            _last_progress["percent"],
-                        )
-                        await self._event_callback(
-                            "compactionEvent", "doc_index_progress",
-                            {
-                                "stage": "doc_index_progress",
-                                "message": f"📝 {_last_progress['message']}",
-                                "percent": _last_progress["percent"],
-                            },
-                        )
-                    except Exception:
-                        pass
-
         loop = asyncio.get_event_loop()
-        heartbeat_task = asyncio.ensure_future(_heartbeat())
-        try:
-            await loop.run_in_executor(
+        doc_index = self._doc_index  # local ref for lambdas
+
+        # Phase 1: Structure extraction in executor (fast, mostly I/O).
+        # Populates cached outlines and returns files needing enrichment.
+        _progress("doc_index", "Extracting document outlines…", 10)
+
+        doc_index._repo_files = await loop.run_in_executor(
+            self._executor, doc_index._get_all_repo_files,
+        )
+        await asyncio.sleep(0)  # yield for WebSocket
+
+        doc_files = await loop.run_in_executor(
+            self._executor, doc_index._get_doc_files,
+        )
+        doc_files = [
+            f for f in doc_files
+            if Path(f).suffix.lower() in EXTRACTORS
+        ]
+        await asyncio.sleep(0)
+
+        total = len(doc_files)
+        needs_enrichment = []
+        if total > 0:
+            needs_enrichment = await loop.run_in_executor(
                 self._executor,
-                lambda: self._doc_index.index_repo(progress_callback=_progress),
+                lambda: doc_index._extract_outlines(doc_files, total, _progress),
             )
-        finally:
-            _indexing_done = True
-            heartbeat_task.cancel()
+            await asyncio.sleep(0)
+
+        logger.info(
+            f"Structure extraction complete: {len(needs_enrichment)} need enrichment, "
+            f"{total - len(needs_enrichment)} cached"
+        )
+
+        # Phase 2: Keyword enrichment — one file at a time in executor,
+        # with asyncio.sleep(0) between each so the event loop can process
+        # WebSocket frames.  This prevents GIL starvation during the
+        # sentence-transformer inference that otherwise blocks all I/O.
+        keyword_model = doc_index._enricher.model_name if doc_index._enricher else None
+
+        if needs_enrichment and doc_index._enricher:
+            enrich_total = len(needs_enrichment)
+            logger.info(f"Keyword enrichment: {enrich_total} files to process")
+
+            for i, (path, mtime, outline, text) in enumerate(needs_enrichment, start=1):
+                pct = 30 + int(65 * i / enrich_total)
+                _progress(
+                    "doc_index",
+                    f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
+                    pct,
+                )
+
+                # Pass progress_callback only for first file (triggers model init)
+                cb = _progress if i == 1 else None
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda p=path, m=mtime, o=outline, t=text, c=cb: (
+                        doc_index.enrich_single_file(p, m, o, t,
+                                                     keyword_model=keyword_model,
+                                                     progress_callback=c)
+                    ),
+                )
+                logger.info(f"Keyword enrichment: {i}/{enrich_total} — {path} ({pct}%)")
+
+                # Yield to event loop between files — this is the key fix
+                # that prevents GIL starvation of WebSocket delivery
+                await asyncio.sleep(0)
+        elif needs_enrichment:
+            # No enricher — cache outlines as-is
+            for path, mtime, outline, text in needs_enrichment:
+                doc_index._cache.put(path, mtime, outline, keyword_model=keyword_model)
+                doc_index._all_outlines[path] = outline
+
+        # Phase 3: Build reference index
+        _progress("doc_index", "Building cross-references...", 96)
+        await loop.run_in_executor(
+            self._executor, doc_index._finalize_index,
+        )
+        await asyncio.sleep(0)
+
+        _progress("doc_index", "Document indexing complete", 100)
 
         self._doc_index_building = False
         logger.info(f"Document index built: {len(self._doc_index._all_outlines)} files")

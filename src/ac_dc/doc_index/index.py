@@ -159,7 +159,33 @@ class DocIndex:
         if progress_callback:
             progress_callback("doc_index", "Extracting document outlines…", 10)
 
-        # Determine which files need (re)indexing
+        needs_enrichment = self._extract_outlines(doc_files, total, progress_callback)
+
+        logger.info(
+            f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
+            f"{total - len(needs_enrichment)} cached"
+        )
+
+        # Phase 2: Keyword enrichment (slow, GIL-heavy)
+        keyword_model = self._enricher.model_name if self._enricher else None
+        self._enrich_files(needs_enrichment, keyword_model, progress_callback)
+
+        # Phase 3: Build reference index
+        self._finalize_index(progress_callback)
+
+        logger.info(
+            f"Document index: {len(self._all_outlines)} files, "
+            f"{len(needs_enrichment)} newly indexed"
+        )
+
+        return self._all_outlines
+
+    def _extract_outlines(self, doc_files, total, progress_callback=None):
+        """Phase 1: Extract outlines from files, using cache where possible.
+
+        Returns list of (path, mtime, outline, text) tuples that still
+        need keyword enrichment.
+        """
         needs_enrichment = []
         keyword_model = self._enricher.model_name if self._enricher else None
 
@@ -208,17 +234,25 @@ class DocIndex:
                     pct,
                 )
 
-        logger.info(
-            f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
-            f"{total - len(needs_enrichment)} cached"
-        )
+        return needs_enrichment
 
-        # Phase 2: Keyword enrichment (slow)
-        # Uses a small thread pool to overlap disk cache writes with the
-        # CPU-bound sentence-transformer embedding.  The real speed win is
-        # batched extraction inside KeywordEnricher.enrich() — threading
-        # here just keeps cache I/O off the critical path.
-        if needs_enrichment and self._enricher:
+    def _enrich_files(self, needs_enrichment, keyword_model, progress_callback=None):
+        """Phase 2: Run keyword enrichment on extracted outlines.
+
+        Separated from index_repo so _build_doc_index can run extraction
+        in an executor (fast, I/O-bound) then call enrich_single_file
+        per-file from the async context with yields between each,
+        preventing GIL starvation of the event loop.
+
+        Args:
+            needs_enrichment: list of (path, mtime, outline, text) tuples
+            keyword_model: model name string or None
+            progress_callback: optional fn(stage, message, percent)
+        """
+        if not needs_enrichment:
+            return
+
+        if self._enricher:
             enrich_total = len(needs_enrichment)
             logger.info(f"Keyword enrichment: {enrich_total} files to process")
 
@@ -264,13 +298,14 @@ class DocIndex:
                                 f"Extracting keywords… ({i}/{enrich_total} files) — {path}",
                                 pct,
                             )
-        elif needs_enrichment:
+        else:
             # No enricher — just cache the outlines as-is
             for path, mtime, outline, text in needs_enrichment:
                 self._cache.put(path, mtime, outline, keyword_model=keyword_model)
                 self._all_outlines[path] = outline
 
-        # Phase 3: Build reference index
+    def _finalize_index(self, progress_callback=None):
+        """Phase 3: Build reference index from accumulated outlines."""
         if progress_callback:
             progress_callback("doc_index", "Building cross-references...", 96)
 
@@ -279,12 +314,33 @@ class DocIndex:
         if progress_callback:
             progress_callback("doc_index", "Document indexing complete", 100)
 
-        logger.info(
-            f"Document index: {len(self._all_outlines)} files, "
-            f"{len(needs_enrichment)} newly indexed"
-        )
+    def enrich_single_file(self, path, mtime, outline, text, keyword_model=None,
+                           progress_callback=None):
+        """Enrich and cache a single file's outline.
 
-        return self._all_outlines
+        Called from LLMService._build_doc_index to process one file at a
+        time with asyncio.sleep(0) between files, giving the event loop
+        a chance to process WebSocket traffic between GIL-heavy enrichment.
+
+        Args:
+            path: relative file path
+            mtime: file modification time
+            outline: DocOutline from extraction phase
+            text: file text content
+            keyword_model: keyword model name or None
+            progress_callback: optional fn(stage, message, percent) —
+                               passed only for the first file to trigger
+                               model init with progress reporting.
+
+        Returns:
+            enriched DocOutline
+        """
+        if self._enricher:
+            outline = self._enricher.enrich(outline, text,
+                                            progress_callback=progress_callback)
+        self._cache.put(path, mtime, outline, keyword_model=keyword_model)
+        self._all_outlines[path] = outline
+        return outline
 
     def _get_all_repo_files(self):
         """Get set of all files in the repo (for image reference validation)."""
