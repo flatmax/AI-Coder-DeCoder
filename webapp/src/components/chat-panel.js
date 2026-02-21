@@ -1722,6 +1722,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       const urlChips = this.shadowRoot?.querySelector('ac-url-chips');
       if (urlChips) urlChips.clear();
       this._showToast('New session started', 'success');
+      // Notify dialog to refresh history bar (session was cleared)
+      window.dispatchEvent(new CustomEvent('session-loaded', {
+        detail: { sessionId: null, messages: [] },
+      }));
     } catch (e) {
       console.error('Failed to start new session:', e);
       this._showToast('Failed to start new session', 'error');

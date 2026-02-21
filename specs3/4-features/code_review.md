@@ -526,19 +526,21 @@ File tabs show review status badges: **NEW** for added files, **MOD** for modifi
 
 When review mode is active, the snippet drawer shows **review-specific snippets** instead of the standard coding snippets. This is a full replacement, not a merge — the review workflow needs different quick actions than the coding workflow.
 
-Review snippets are loaded from a dedicated config file (`review-snippets.json`) using the same format as the standard `snippets.json`. The two-location fallback applies: repo-local `.ac-dc/review-snippets.json` first, then the app config directory.
+Review snippets live in the unified `snippets.json` file under the `"review"` key, alongside `"code"` and `"doc"` snippets:
 
 ```json
 {
-  "snippets": [
+  "code": [...],
+  "review": [
     {"icon": "🔍", "tooltip": "Full review", "message": "Review all changes..."},
     {"icon": "🔒", "tooltip": "Security review", "message": "Review for security issues..."},
     {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit..."}
-  ]
+  ],
+  "doc": [...]
 }
 ```
 
-The `get_snippets()` RPC method checks `get_review_state().active` and returns review snippets when in review mode, standard snippets otherwise. The frontend does not need to distinguish — it always calls `get_snippets()` and renders whatever is returned.
+The `get_snippets()` RPC method checks `get_review_state().active` and returns review snippets when in review mode, standard snippets otherwise. The frontend does not need to distinguish — it always calls `get_snippets()` and renders whatever is returned. The two-location fallback applies to the unified file: repo-local `.ac-dc/snippets.json` first, then the app config directory.
 
 ## Backend
 

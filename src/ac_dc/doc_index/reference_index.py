@@ -94,10 +94,15 @@ class DocReferenceIndex:
                     target_file_part = raw_target
                     target_anchor = ""
 
-                target_file = self._resolve_link(
-                    target_file_part if target_file_part else raw_target,
-                    source_path, repo_root
-                )
+                # Image links have targets already resolved to repo-relative
+                # paths by the markdown extractor — skip double-resolution.
+                if getattr(link, 'is_image', False) and target_file_part:
+                    target_file = target_file_part
+                else:
+                    target_file = self._resolve_link(
+                        target_file_part if target_file_part else raw_target,
+                        source_path, repo_root
+                    )
                 if not target_file or target_file == source_path:
                     continue
 

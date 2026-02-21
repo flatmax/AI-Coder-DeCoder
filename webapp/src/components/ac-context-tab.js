@@ -378,18 +378,21 @@ export class AcContextTab extends RpcMixin(LitElement) {
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('files-changed', this._onFilesChanged);
+    window.addEventListener('mode-changed', this._onModeChanged);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('files-changed', this._onFilesChanged);
+    window.removeEventListener('mode-changed', this._onModeChanged);
   }
 
   onRpcReady() {
@@ -405,6 +408,14 @@ export class AcContextTab extends RpcMixin(LitElement) {
   }
 
   _onFilesChanged() {
+    if (this._isTabActive()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
+  _onModeChanged() {
     if (this._isTabActive()) {
       this._refresh();
     } else {
@@ -499,9 +510,15 @@ export class AcContextTab extends RpcMixin(LitElement) {
       {
         key: 'symbol_map',
         icon: this._data?.mode === 'doc' ? '📝' : '📦',
-        name: this._data?.mode === 'doc'
-          ? `Doc Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`
-          : `Symbol Map${b.symbol_map_files ? ` (${b.symbol_map_files} files)` : ''}`,
+        name: (() => {
+          const isDoc = this._data?.mode === 'doc';
+          const crossRef = this._data?.cross_ref_enabled;
+          const fileCount = b.symbol_map_files ? ` (${b.symbol_map_files} files)` : '';
+          if (isDoc && crossRef) return `Doc Map + Symbols${fileCount}`;
+          if (isDoc) return `Doc Map${fileCount}`;
+          if (crossRef) return `Symbol Map + Docs${fileCount}`;
+          return `Symbol Map${fileCount}`;
+        })(),
         tokens: b.symbol_map || 0,
         details: b.symbol_map_chunks || null,
       },
@@ -572,7 +589,9 @@ export class AcContextTab extends RpcMixin(LitElement) {
         pct: (c.tokens / total) * 100,
         color: CAT_COLORS[c.key]?.bar || '#666',
         label: c.key === 'symbol_map'
-          ? (this._data?.mode === 'doc' ? 'Doc Map' : 'Symbols')
+          ? (this._data?.cross_ref_enabled
+              ? (this._data?.mode === 'doc' ? 'Docs+Sym' : 'Sym+Docs')
+              : (this._data?.mode === 'doc' ? 'Doc Map' : 'Symbols'))
           : (CAT_COLORS[c.key]?.label || c.key),
         tokens: c.tokens,
       }));
@@ -712,7 +731,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
         ${this._renderBudget()}
         ${this._data ? html`
           <div class="model-info">
-            <span>Model: ${this._data.model || '—'}${this._data.mode === 'doc' ? ' · 📝 Doc Mode' : ''}</span>
+            <span>Model: ${this._data.model || '—'}${this._data.mode === 'doc' ? ' · 📝 Doc Mode' : ''}${this._data.cross_ref_enabled ? ' · +cross-ref' : ''}</span>
             ${(() => {
               const rate = this._data.provider_cache_rate ?? this._data.cache_hit_rate;
               return rate != null ? html`

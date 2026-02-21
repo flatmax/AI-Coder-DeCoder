@@ -284,7 +284,36 @@ Consistent with the not-in-context edit philosophy: the user maintains control o
 
 ### Edit Summary Banner
 
-When ambiguous anchor failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
+When ambiguous anchor or old-text-mismatch failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
+
+## Old Text Mismatch Retry Prompt
+
+When one or more edits fail due to **old text mismatch** (the anchor was found but the subsequent old lines don't match the actual file content) and the target file is **already in the active context** (present in `selectedFiles`), the system auto-populates the chat input with a retry prompt — but does **not** auto-send it.
+
+This addresses the most common LLM editing mistake: the model "remembers" file content incorrectly instead of copying from the actual file in context. The retry prompt explicitly reminds the LLM to re-read the file content character by character.
+
+### Behavior
+
+1. **Detection**: On `streamComplete`, the frontend inspects `edit_results` for entries with status `failed` and message containing `"Old text mismatch"` where the file path is in `selectedFiles`
+2. **Prompt construction**: A retry prompt is composed listing each mismatch failure with file path and error detail, reminding the LLM that the file is already in context
+3. **Auto-populate input**: The prompt text is placed into the chat textarea and auto-resized, but not sent
+4. **User control**: The user can review, edit, or discard the prompt before sending
+
+### Retry Prompt Template
+
+```
+The following edit(s) failed because the old text didn't match the actual file content. The file(s) are already in your context — please re-read them carefully and retry with the correct text:
+
+- {file_path}: {error_message}
+- {file_path}: {error_message}
+```
+
+### Scope
+
+- Only **in-context** mismatch failures trigger this prompt. Mismatch failures on files that were auto-added (not-in-context) are covered by the not-in-context retry prompt instead
+- **Anchor-not-found** failures do not trigger this prompt — they indicate the anchor text doesn't exist in the file at all, which is a different class of problem
+- **Ambiguous anchor** failures have their own retry prompt (see above)
+- When both ambiguous anchor and old-text-mismatch failures occur in the same response, both prompts are combined into a single auto-populated message
 
 ## Testing
 
@@ -331,4 +360,14 @@ When ambiguous anchor failures are present, the edit summary banner includes a n
 - Prompt instructs LLM to include more distinctive context lines (function names, unique comments)
 - Prompt is not auto-sent — user reviews and sends manually
 - Edit summary banner notes the prepared retry prompt
-- Only ambiguous failures trigger this; anchor-not-found and old-text-mismatch do not
+- Only ambiguous failures trigger this; anchor-not-found does not
+
+### Old Text Mismatch Retry
+- Old-text-mismatch failures on in-context files auto-populate retry prompt in chat input
+- Prompt lists each affected file path and error detail
+- Prompt instructs LLM to re-read file content from context before retrying
+- Prompt is not auto-sent — user reviews and sends manually
+- Edit summary banner notes the prepared retry prompt
+- Only in-context mismatch failures trigger this; not-in-context files are covered by the auto-add prompt
+- Anchor-not-found failures do not trigger this prompt
+- When both ambiguous and mismatch failures occur, prompts are combined into a single message

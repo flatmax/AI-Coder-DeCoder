@@ -395,7 +395,7 @@ The backend wraps `compact_history_if_needed()` with these notifications, sent v
 3. Post-response compaction runs if threshold exceeded
 
 ### Session Reset
-Clear history, purge stability tracker history entries, start new persistent session
+Clear history, purge stability tracker history entries, start new persistent session. The frontend dispatches a `session-loaded` event (with empty messages) so the dialog refreshes its history bar to reflect the cleared token count.
 
 ### Loading a Previous Session
 1. Clear current history

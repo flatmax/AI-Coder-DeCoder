@@ -1,39 +1,34 @@
 {
-  "snippets": [
-    {
-      "icon": "✂️",
-      "tooltip": "Your last edit was truncated",
-      "message": "Your last edit was truncated, please continue."
-    },
-    {
-      "icon": "🔍",
-      "tooltip": "Check in your context for that content",
-      "message": "You are asking for some content which I believe is already in your context, please check there."
-    },
-    {
-      "icon": "✏️",
-      "tooltip": "Tell AI to honor edit blocks.",
-      "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."
-    },
-    {
-      "icon": "⏸️",
-      "tooltip": "Before you start implementing the plan...",
-      "message": "Before you start implementing the plan, is there anything you would like to change ?"
-    },
-    {
-      "icon": "✅",
-      "tooltip": "Confirm tests are testing what was intended",
-      "message": "All tests passed, can you confirm the tests are testing what you intended to test?"
-    },
-    {
-      "icon": "📦",
-      "tooltip": "Check if ready to commit and update plan",
-      "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? What will be next?"
-    },
-    {
-      "icon": "🏁",
-      "tooltip": "Check if ready to commit, update plan and git mv",
-      "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? Please give me the git mv command to mark the plan as done."
-    }
+  "code": [
+    {"icon": "✂️", "tooltip": "Your last edit was truncated", "message": "Your last edit was truncated, please continue."},
+    {"icon": "🔍", "tooltip": "Check in your context for that content", "message": "You are asking for some content which I believe is already in your context, please check there."},
+    {"icon": "✏️", "tooltip": "Tell AI to honor edit blocks.", "message": "Those edits didn't apply because your edit blocks were incorrect. please look at the system instructions and use the correct edit block format."},
+    {"icon": "🔄", "tooltip": "Old text mismatch — retry from context", "message": "Your edit blocks failed with 'old text mismatch'. The files are in your context. Please re-read the actual file content carefully (character by character around the edit site) and retry with the correct old text. Copy-paste from the file — never type from memory."},
+    {"icon": "⏸️", "tooltip": "Before you start implementing the plan...", "message": "Before you start implementing the plan, is there anything you would like to change ?"},
+    {"icon": "✅", "tooltip": "Confirm tests are testing what was intended", "message": "All tests passed, can you confirm the tests are testing what you intended to test?"},
+    {"icon": "📦", "tooltip": "Check if ready to commit and update plan", "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? What will be next?"},
+    {"icon": "🏁", "tooltip": "Check if ready to commit, update plan and git mv", "message": "Great! Does the code look good for committing (I can generate the commit messages)? Can you update the plan first? Please give me the git mv command to mark the plan as done."}
+  ],
+  "review": [
+    {"icon": "🔍", "tooltip": "Full review of all changes", "message": "Give me a full review of this PR."},
+    {"icon": "🔒", "tooltip": "Security review", "message": "Review the changes for security issues: input validation, authentication, authorization, injection attacks, error handling, secrets exposure, rate limiting."},
+    {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the author's intent for each change and flagging any issues."},
+    {"icon": "🏗️", "tooltip": "Architecture review", "message": "Assess the structural changes: modularity, coupling, separation of concerns, design patterns, and how the changes fit the existing architecture."},
+    {"icon": "✅", "tooltip": "Test coverage", "message": "Evaluate test coverage of the changes. What functionality is tested? What edge cases are missing? Are the test assertions meaningful?"},
+    {"icon": "📝", "tooltip": "PR description", "message": "Write a pull request description summarizing these changes, including: what changed, why, how to test, and any migration notes."},
+    {"icon": "🧹", "tooltip": "Code quality", "message": "Review for code quality: naming, duplication, complexity, error handling, documentation, and adherence to the codebase's existing patterns."},
+    {"icon": "🎯", "tooltip": "Scoped review", "message": "Review only the files I have selected."},
+    {"icon": "🔗", "tooltip": "Check broken references", "message": "Are there any broken call chains, missing imports, or orphaned references after these changes?"},
+    {"icon": "📋", "tooltip": "Summarize changes", "message": "Summarize what this PR changes in 3-4 sentences."}
+  ],
+  "doc": [
+    {"icon": "🔍", "tooltip": "Check in your context for that content", "message": "You are asking for some content which I believe is already in your context, please check there."},
+    {"icon": "📄", "tooltip": "Summarise", "message": "Summarise this document in 3-5 bullet points"},
+    {"icon": "🔗", "tooltip": "Cross-refs", "message": "Check all cross-references in this document and flag any broken links"},
+    {"icon": "🏗️", "tooltip": "Restructure", "message": "Suggest a better structure for this document"},
+    {"icon": "📋", "tooltip": "Executive summary", "message": "Write an executive summary of this document"},
+    {"icon": "📑", "tooltip": "TOC", "message": "Generate a table of contents for this document"},
+    {"icon": "🔍", "tooltip": "Consistency", "message": "Check this document for terminology inconsistencies"},
+    {"icon": "✏️", "tooltip": "Simplify", "message": "Rewrite this section in simpler language"}
   ]
 }

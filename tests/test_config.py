@@ -53,7 +53,7 @@ def test_default_app_config_has_expected_keys():
     config = ConfigManager()
     assert "enabled" in config.compaction_config
     assert "compaction_trigger_tokens" in config.compaction_config
-    assert "path" in config.url_cache_config
+    assert "ttl_hours" in config.url_cache_config
 
 
 def test_cache_target_tokens():

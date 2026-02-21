@@ -39,6 +39,9 @@ export class AcDialog extends RpcMixin(LitElement) {
     _modeSwitchPercent: { type: Number, state: true },
     _docIndexReady: { type: Boolean, state: true },
     _docIndexBuilding: { type: Boolean, state: true },
+    _crossRefReady: { type: Boolean, state: true },
+    _crossRefEnabled: { type: Boolean, state: true },
+    _enrichingDocs: { type: Boolean, state: true },
     _repoName: { type: String, state: true },
   };
 
@@ -324,6 +327,9 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._modeSwitchPercent = 0;
     this._docIndexReady = false;
     this._docIndexBuilding = false;
+    this._crossRefReady = false;
+    this._crossRefEnabled = false;
+    this._enrichingDocs = false;
     this._repoName = null;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
@@ -353,6 +359,11 @@ export class AcDialog extends RpcMixin(LitElement) {
       this._repoName = state.repo_name;
       // Migrate legacy bare key to repo-scoped key
       this._migrateModeKey();
+    }
+    // Sync cross-ref state from initial state load
+    if (state) {
+      if (typeof state.cross_ref_ready === 'boolean') this._crossRefReady = state.cross_ref_ready;
+      if (typeof state.cross_ref_enabled === 'boolean') this._crossRefEnabled = state.cross_ref_enabled;
     }
   }
 
@@ -409,8 +420,14 @@ export class AcDialog extends RpcMixin(LitElement) {
           this._modeSwitching = false;
           this._modeSwitchMessage = '';
           this._modeSwitchPercent = 0;
+          // In code mode, doc index ready means cross-ref is now available
+          if (this._mode === 'code') {
+            this._crossRefReady = true;
+          }
           this.requestUpdate();
-          dispatchToast(data.message || '📝 Document index ready — doc mode available', 'info');
+          // Also refresh from backend to ensure state is fully synced
+          this._refreshMode();
+          dispatchToast(data.message || '📝 Document index ready', 'info');
         } else if (data.stage === 'doc_index_failed') {
           this._docIndexBuilding = false;
           this._modeSwitching = false;
@@ -419,12 +436,34 @@ export class AcDialog extends RpcMixin(LitElement) {
           this.requestUpdate();
           dispatchToast(data.message || 'Document index build failed', 'error');
         } else if (data.stage === 'doc_index_progress') {
-          if (this._docIndexReady) return;
-          // Background doc index build progress — update overlay bar
+          if (this._docIndexReady) {
+            // Enrichment phase — structural pass already done.
+            // Show progress in the header bar (non-blocking indicator).
+            // Set _enrichingDocs so the bar renders (needed after browser refresh
+            // when doc_enrichment_queued was missed but progress events continue).
+            this._enrichingDocs = true;
+            if (data.message) this._modeSwitchMessage = data.message;
+            if (typeof data.percent === 'number') this._modeSwitchPercent = data.percent;
+            this._docIndexBuilding = false;  // not blocking — just enriching
+            return;
+          }
+          // Structural extraction phase — show blocking overlay
           this._docIndexBuilding = true;
           this._modeSwitching = true;
           if (data.message) this._modeSwitchMessage = data.message;
           if (typeof data.percent === 'number') this._modeSwitchPercent = data.percent;
+        } else if (data.stage === 'doc_enrichment_queued') {
+          // Keyword enrichment starting in background
+          this._enrichingDocs = true;
+          this.requestUpdate();
+        } else if (data.stage === 'doc_enrichment_file_done') {
+          // One file enriched — update indicator
+          this.requestUpdate();
+        } else if (data.stage === 'doc_enrichment_complete') {
+          this._enrichingDocs = false;
+          this._modeSwitchMessage = '';
+          this._modeSwitchPercent = 0;
+          this.requestUpdate();
         }
       });
     }
@@ -465,12 +504,20 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   async _refreshMode() {
+    // Don't refresh or auto-switch while a mode switch RPC is in flight —
+    // the saved preference hasn't been updated yet, and _refreshMode would
+    // read the stale pref and immediately switch back.
+    if (this._modeSwitchInFlight) return;
+
     try {
       const result = await this.rpcExtract('LLMService.get_mode');
+      if (this._modeSwitchInFlight) return;  // guard again after await
       if (result) {
         if (result.mode) this._mode = result.mode;
         this._docIndexReady = !!result.doc_index_ready;
         this._docIndexBuilding = !!result.doc_index_building;
+        this._crossRefReady = !!result.cross_ref_ready;
+        this._crossRefEnabled = !!result.cross_ref_enabled;
         // If backend says ready, clear any lingering switch overlay
         if (this._docIndexReady) {
           this._modeSwitching = false;
@@ -483,6 +530,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       // Ignore — RPC may not be ready
     }
     // Also restore persisted mode preference and sync if needed
+    if (this._modeSwitchInFlight) return;
     const saved = this._loadPref(this._modeKey(), null);
     if (saved && saved !== this._mode && this._docIndexReady) {
       await this._switchMode(saved);
@@ -491,9 +539,13 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   async _switchMode(mode) {
     if (mode === this._mode) return;
+    if (this._modeSwitchInFlight) return;
 
+    console.log('[ac-dialog] switching mode to', mode, 'from', this._mode);
+    this._modeSwitchInFlight = true;
     try {
       const result = await this.rpcExtract('LLMService.switch_mode', mode);
+      console.log('[ac-dialog] switch_mode result:', result);
       if (!result) return;
 
       if (result.building) {
@@ -507,8 +559,10 @@ export class AcDialog extends RpcMixin(LitElement) {
         return;
       }
 
-      // Successful switch
+      // Sync mode from backend (handles "already in this mode" case where
+      // frontend and backend were out of sync)
       this._mode = result.mode || mode;
+      this._crossRefEnabled = false;
       this._savePref(this._modeKey(), this._mode);
       window.dispatchEvent(new CustomEvent('mode-changed', {
         detail: { mode: this._mode },
@@ -524,12 +578,48 @@ export class AcDialog extends RpcMixin(LitElement) {
       }
     } catch (e) {
       dispatchToast(`Mode switch failed: ${e.message || e}`, 'error');
+    } finally {
+      this._modeSwitchInFlight = false;
     }
   }
 
   _onModeToggle() {
     const newMode = this._mode === 'code' ? 'doc' : 'code';
     this._switchMode(newMode);
+  }
+
+  async _onCrossRefToggle() {
+    const newEnabled = !this._crossRefEnabled;
+    try {
+      const result = await this.rpcExtract('LLMService.set_cross_reference', newEnabled);
+      if (!result) return;
+      if (result.status === 'not_ready') {
+        dispatchToast(result.message || 'Cross-reference index is not ready yet.', 'warning');
+        return;
+      }
+      if (result.error) {
+        dispatchToast(result.error, 'error');
+        return;
+      }
+      this._crossRefEnabled = !!result.cross_ref_enabled;
+      if (this._crossRefEnabled) {
+        dispatchToast(
+          result.message || 'Cross-reference enabled — additional tokens will be used.',
+          'info',
+        );
+      } else {
+        dispatchToast(
+          result.message || 'Cross-reference disabled.',
+          'info',
+        );
+      }
+      // Notify tabs to refresh
+      window.dispatchEvent(new CustomEvent('mode-changed', {
+        detail: { mode: this._mode, crossRefEnabled: this._crossRefEnabled },
+      }));
+    } catch (e) {
+      dispatchToast(`Cross-reference toggle failed: ${e.message || e}`, 'error');
+    }
   }
 
   async _refreshHistoryBar() {
@@ -886,17 +976,33 @@ export class AcDialog extends RpcMixin(LitElement) {
               <div class="header-progress-fill" style="width: ${this._modeSwitchPercent}%"></div>
             </div>
           </div>
+        ` : this._enrichingDocs && this._modeSwitchMessage ? html`
+          <div class="header-progress">
+            <span class="header-progress-label">${this._modeSwitchMessage}</span>
+            <div class="header-progress-bar">
+              <div class="header-progress-fill" style="width: ${this._modeSwitchPercent}%"></div>
+            </div>
+          </div>
         ` : ''}
 
         <div class="header-actions">
+          <label class="header-action" style="display: flex; align-items: center; gap: 3px; font-size: 0.72rem; cursor: pointer;"
+            title="${this._crossRefEnabled ? 'Disable cross-reference index' : 'Enable cross-reference index'}"
+            @mousedown=${(e) => e.stopPropagation()}>
+            <input type="checkbox"
+              .checked=${this._crossRefEnabled}
+              @change=${() => this._onCrossRefToggle()}
+              style="margin: 0; cursor: pointer;">
+            <span style="color: var(--text-muted); white-space: nowrap;">
+              ${this._mode === 'code' ? '+doc index' : '+code symbols'}
+            </span>
+          </label>
           <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''} ${this._docIndexBuilding ? 'building' : ''}"
             title="${this._docIndexBuilding
               ? 'Document index building…'
               : this._mode === 'doc'
                 ? 'Switch to Code mode'
-                : this._docIndexReady
-                  ? 'Switch to Document mode'
-                  : 'Document index not ready'}"
+                : 'Switch to Document mode'}"
             aria-label="${this._mode === 'code' ? 'Switch to document mode' : 'Switch to code mode'}"
             ?disabled=${this._docIndexBuilding}
             @mousedown=${(e) => e.stopPropagation()}

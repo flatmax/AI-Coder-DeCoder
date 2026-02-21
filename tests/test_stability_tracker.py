@@ -243,6 +243,21 @@ class TestStaleRemoval:
         tracker.remove_stale(set())
         assert Tier.L3 in tracker._broken_tiers
 
+    def test_stale_doc_items_removed(self, tracker):
+        """Stale doc: items are removed like symbol: and file: items."""
+        tracker._items["doc:deleted.md"] = TrackedItem(
+            key="doc:deleted.md", tier=Tier.L2, n=6,
+            content_hash="d", tokens=80,
+        )
+        tracker._items["doc:exists.md"] = TrackedItem(
+            key="doc:exists.md", tier=Tier.L1, n=9,
+            content_hash="e", tokens=120,
+        )
+        tracker.remove_stale({"exists.md"})
+        assert tracker.get_item("doc:deleted.md") is None
+        assert tracker.get_item("doc:exists.md") is not None
+        assert Tier.L2 in tracker._broken_tiers
+
 
 # === History Purge ===
 

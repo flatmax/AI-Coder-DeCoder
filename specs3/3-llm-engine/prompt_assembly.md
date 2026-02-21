@@ -111,7 +111,7 @@ The following named constants are used when building the message array:
 L0 is the **system role message** (not a user/assistant pair). It concatenates:
 
 1. **System prompt** — from files
-2. **Symbol map legend** — preceded by:
+2. **Index legend(s)** — preceded by:
    ```
    # Repository Structure
 
@@ -119,8 +119,8 @@ L0 is the **system role message** (not a user/assistant pair). It concatenates:
    Use this to understand the codebase structure and find relevant code.
 
    ```
-   Then the legend text (abbreviation key + path aliases). The context legend does not include `:N=line(s)` since line numbers are not present in the context symbol map.
-3. **L0 symbol entries** — symbol blocks for L0-stability files
+   Then the legend text (abbreviation key + path aliases). The context legend does not include `:N=line(s)` since line numbers are not present in the context symbol map. When cross-reference mode is active, both the symbol-map legend and the doc-index legend are included in L0.
+3. **L0 index entries** — symbol/doc blocks for L0-stability files
 4. **L0 file contents** — preceded by:
    ```
    # Reference Files (Stable)
@@ -135,7 +135,7 @@ Each non-empty tier produces a **user/assistant pair** (if it has symbols or fil
 - User message: symbol entries + file contents concatenated
 - Assistant message: `"Ok."`
 
-Symbol entries use header: `# Repository Structure (continued)\n\n`
+Index entries use header: `# Repository Structure (continued)\n\n`
 
 File content headers by tier:
 - L1: `# Reference Files\n\nThese files are included for reference:\n\n`
@@ -272,7 +272,7 @@ This section specifies how the streaming handler builds the `tiered_content` dic
 ```pseudo
 for tier in [L0, L1, L2, L3]:
     tier_items = stability_tracker.get_tier_items(tier)
-    # tier_items = {key: TrackedItem} where key is "file:{path}", "symbol:{path}", or "history:{N}"
+    # tier_items = {key: TrackedItem} where key is "file:{path}", "sym:{path}", "doc:{path}", or "history:{N}"
 ```
 
 ### Step 2: Build Content for Each Tier
@@ -288,9 +288,15 @@ for tier in [L0, L1, L2, L3]:
     history_messages = []
 
     for key, item in tier_items:
-        if key starts with "symbol:":
-            path = key.removeprefix("symbol:")
+        if key starts with "sym:":
+            path = key.removeprefix("sym:")
             block = symbol_index.get_file_symbol_block(path)
+            if block:
+                symbols_text += block + "\n"
+
+        elif key starts with "doc:":
+            path = key.removeprefix("doc:")
+            block = doc_index.get_file_doc_block(path)
             if block:
                 symbols_text += block + "\n"
 
@@ -325,10 +331,10 @@ for tier in [L0, L1, L2, L3]:
         if key starts with "file:":
             path = key.removeprefix("file:")
             graduated_files.add(path)
-            symbol_map_exclude.add(path)  # full content present, no need for symbol block
-        elif key starts with "symbol:":
-            path = key.removeprefix("symbol:")
-            symbol_map_exclude.add(path)  # symbol block in tier, exclude from main map
+            symbol_map_exclude.add(path)  # full content present, no need for index block
+        elif key starts with "sym:" or key starts with "doc:":
+            path = key.split(":", 1)[1]
+            symbol_map_exclude.add(path)  # index block in tier, exclude from main map
 
 # Also exclude selected files whose symbol blocks are in active
 for path in selected_files:
@@ -339,13 +345,15 @@ for path in selected_files:
 
 ```pseudo
 symbol_map = symbol_index.get_symbol_map(exclude_files=symbol_map_exclude)
-legend = symbol_index.get_legend()
+symbol_legend = symbol_index.get_legend()
+doc_legend = doc_index.get_legend() if cross_ref_enabled else None
 
 messages = context_manager.assemble_tiered_messages(
     user_prompt=user_message,
     images=images,
     symbol_map=symbol_map,
-    symbol_legend=legend,
+    symbol_legend=symbol_legend,
+    doc_legend=doc_legend,
     file_tree=file_tree,
     tiered_content=tiered_content
 )
@@ -355,16 +363,18 @@ messages = context_manager.assemble_tiered_messages(
 
 | Item Type | Content Source | Exclusion Effect |
 |-----------|--------------|------------------|
-| `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; symbol block excluded from main map |
-| `symbol:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
+| `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; index block excluded from main map |
+| `sym:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
+| `doc:{path}` in tier | `DocIndex.get_file_doc_block(path)` | Excluded from main doc index output |
 | `history:{N}` in tier | `ContextManager.get_history()[N]` | Excluded from active history messages |
-| `file:{path}` in active | `FileContext.get_content(path)` | Symbol block excluded from main map (full content present) |
-| `symbol:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
+| `file:{path}` in active | `FileContext.get_content(path)` | Index block excluded from main map (full content present) |
+| `sym:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
+| `doc:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
 
 ### A File Never Appears Twice
 
 A file's content is present in exactly one location:
-- **Full content** in a cached tier block (graduated) — symbol block excluded from all maps
-- **Full content** in the active Working Files section — symbol block excluded from main map
-- **Symbol block only** in a cached tier — when full content is not selected
-- **Symbol block only** in the main symbol map — default for unselected, non-graduated files
+- **Full content** in a cached tier block (graduated) — index block excluded from all maps
+- **Full content** in the active Working Files section — index block excluded from main map
+- **Index block only** in a cached tier — when full content is not selected
+- **Index block only** in the main map — default for unselected, non-graduated files

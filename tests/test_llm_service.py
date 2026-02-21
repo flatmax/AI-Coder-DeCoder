@@ -52,13 +52,17 @@ def service(config, repo):
 
 class TestStateManagement:
     def test_get_current_state(self, service):
-        """get_current_state returns messages, selected_files, streaming_active, session_id."""
+        """get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_ready, cross_ref_enabled."""
         state = service.get_current_state()
         assert "messages" in state
         assert "selected_files" in state
         assert "streaming_active" in state
         assert "session_id" in state
+        assert "repo_name" in state
+        assert "cross_ref_ready" in state
+        assert "cross_ref_enabled" in state
         assert state["streaming_active"] is False
+        assert state["cross_ref_enabled"] is False
 
     def test_set_selected_files(self, service):
         """set_selected_files updates and returns copy."""
@@ -427,6 +431,142 @@ class TestModeSwitch:
 
 
 # === Review State ===
+
+
+class TestCrossReferenceToggle:
+    def test_cross_ref_disabled_by_default(self, service):
+        """Cross-reference is disabled by default."""
+        state = service.get_current_state()
+        assert state["cross_ref_enabled"] is False
+
+    def test_cross_ref_not_ready_when_no_doc_index(self, service):
+        """In code mode, cross-ref not ready until doc index is built."""
+        assert service._is_cross_ref_ready() is False
+
+    def test_set_cross_ref_rejected_when_not_ready(self, service):
+        """set_cross_reference(True) rejected when cross-ref index not ready."""
+        result = service.set_cross_reference(True)
+        assert result["status"] == "not_ready"
+        assert result["cross_ref_enabled"] is False
+
+    def test_set_cross_ref_no_change_when_already_disabled(self, service):
+        """set_cross_reference(False) when already disabled is no-op."""
+        result = service.set_cross_reference(False)
+        assert result["status"] == "no_change"
+
+    def test_enable_cross_ref_adds_items(self, service):
+        """Enabling cross-ref adds items from the other index to the tracker."""
+        from ac_dc.doc_index.index import DocIndex
+        from unittest.mock import MagicMock
+
+        # Simulate a ready doc index
+        mock_doc_index = MagicMock(spec=DocIndex)
+        mock_doc_index._all_outlines = {"docs/README.md": {}, "docs/guide.md": {}}
+        mock_doc_index.reference_index = MagicMock()
+        mock_doc_index.reference_index.connected_components.return_value = []
+        mock_doc_index.get_file_doc_block.return_value = "## Heading\n"
+        mock_doc_index.get_signature_hash.return_value = "abc123"
+        mock_doc_index.get_legend.return_value = "# legend\n"
+
+        service._doc_index = mock_doc_index
+        service._doc_index_building = False
+
+        result = service.set_cross_reference(True)
+        assert result["status"] == "enabled"
+        assert result["cross_ref_enabled"] is True
+        assert result["items_added"] == 2
+        assert "tokens_added" in result
+
+        # doc: items should exist in the code tracker
+        assert service._stability_tracker.get_item("doc:docs/README.md") is not None
+        assert service._stability_tracker.get_item("doc:docs/guide.md") is not None
+
+    def test_disable_cross_ref_removes_items(self, service):
+        """Disabling cross-ref removes cross-ref items and marks tiers broken."""
+        from ac_dc.stability_tracker import TrackedItem
+
+        # Manually add doc: items to simulate enabled cross-ref
+        service._stability_tracker._items["doc:a.md"] = TrackedItem(
+            key="doc:a.md", tier=Tier.L2, n=6,
+            content_hash="x", tokens=100,
+        )
+        service._cross_ref_enabled = True
+
+        result = service.set_cross_reference(False)
+        assert result["status"] == "disabled"
+        assert result["cross_ref_enabled"] is False
+        assert service._stability_tracker.get_item("doc:a.md") is None
+        assert Tier.L2 in service._stability_tracker._broken_tiers
+
+    def test_cross_ref_items_use_correct_prefix(self, service):
+        """Cross-ref items use doc: prefix in code mode."""
+        from ac_dc.stability_tracker import TrackedItem
+        from unittest.mock import MagicMock
+
+        mock_doc_index = MagicMock()
+        mock_doc_index._all_outlines = {"README.md": {}}
+        mock_doc_index.reference_index = MagicMock()
+        mock_doc_index.reference_index.connected_components.return_value = []
+        mock_doc_index.get_file_doc_block.return_value = "# Doc\n"
+        mock_doc_index.get_signature_hash.return_value = "h1"
+        mock_doc_index.get_legend.return_value = ""
+
+        service._doc_index = mock_doc_index
+        service._doc_index_building = False
+
+        service.set_cross_reference(True)
+
+        # Should be doc: not symbol:
+        assert service._stability_tracker.get_item("doc:README.md") is not None
+        assert service._stability_tracker.get_item("symbol:README.md") is None
+
+    def test_mode_switch_resets_cross_ref(self, service):
+        """_disable_cross_reference removes cross-ref items and resets flag.
+
+        switch_mode calls _disable_cross_reference before switching modes.
+        We test the mechanism directly since triggering a full mode switch
+        requires a built doc index.
+        """
+        from ac_dc.stability_tracker import TrackedItem
+
+        # Simulate cross-ref enabled with doc: items in the code tracker
+        service._stability_tracker._items["doc:a.md"] = TrackedItem(
+            key="doc:a.md", tier=Tier.L2, n=6,
+            content_hash="x", tokens=100,
+        )
+        service._cross_ref_enabled = True
+
+        # _disable_cross_reference is what switch_mode calls before switching
+        service._disable_cross_reference()
+
+        assert service._cross_ref_enabled is False
+        assert service._stability_tracker.get_item("doc:a.md") is None
+        assert Tier.L2 in service._stability_tracker._broken_tiers
+
+    def test_get_mode_includes_cross_ref_fields(self, service):
+        """get_mode returns cross_ref_ready and cross_ref_enabled."""
+        result = service.get_mode()
+        assert "cross_ref_ready" in result
+        assert "cross_ref_enabled" in result
+        assert result["cross_ref_enabled"] is False
+
+    def test_enable_cross_ref_returns_token_cost(self, service):
+        """Enabling cross-ref returns token count for toast."""
+        from unittest.mock import MagicMock
+
+        mock_doc_index = MagicMock()
+        mock_doc_index._all_outlines = {"a.md": {}}
+        mock_doc_index.reference_index = MagicMock()
+        mock_doc_index.reference_index.connected_components.return_value = []
+        mock_doc_index.get_file_doc_block.return_value = "content " * 50
+        mock_doc_index.get_signature_hash.return_value = "sig"
+        mock_doc_index.get_legend.return_value = ""
+
+        service._doc_index = mock_doc_index
+        service._doc_index_building = False
+
+        result = service.set_cross_reference(True)
+        assert result["tokens_added"] >= 0
 
 
 class TestReviewState:

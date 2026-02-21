@@ -29,6 +29,7 @@ Background task: _stream_chat
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Initialize stability tracker from reference graph (if not already done at startup)
+    ├─ Re-extract doc file structures if doc mode (mtime-based, instant; changed files queued for background enrichment)
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
     │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
@@ -172,6 +173,7 @@ EditResult:
 7. Refresh file tree if `files_modified` is non-empty — dispatch `files-modified` event and reload repo file list
 8. Refresh repo file list (`get_flat_file_list`) for file mention detection of newly created files
 9. Check for ambiguous anchor failures — auto-populate retry prompt in chat input (see [Edit Protocol — Ambiguous Anchor Retry Prompt](edit_protocol.md#ambiguous-anchor-retry-prompt))
+10. Check for old-text-mismatch failures on in-context files — auto-populate retry prompt asking the LLM to re-read the file content and retry
 
 ## URL Fetch Notifications During Streaming
 
@@ -202,11 +204,14 @@ for path in selected_files:
             "tokens": counter.count(content)
         }
 
-# 2. Symbol blocks for selected files
+# 2. Index entries for selected files (sym: in code mode, doc: in document mode)
+#    In doc mode, get_file_block returns the current cached outline — enriched if
+#    available, unenriched (structure-only) if enrichment is still pending.
 for path in selected_files:
-    block = symbol_index.get_file_symbol_block(path)
+    prefix = "sym:" if mode == "code" else "doc:"
+    block = index.get_file_block(path)  # symbol_index or doc_index per mode
     if block:
-        active_items["symbol:" + path] = {
+        active_items[prefix + path] = {
             "hash": sha256(block),
             "tokens": counter.count(block)
         }
@@ -309,7 +314,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name
+- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_enabled
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 
 ### Streaming Guards
@@ -323,6 +328,16 @@ Session total: 182,756
 - Returns breakdown with system/symbol_map/files/history categories
 - Returns total_tokens, max_input_tokens, model, session_totals
 - Session totals initially zero
+
+### Mode Switch Effects
+- Mode switch clears selected files and broadcasts filesChanged to frontend
+- Cache tab and context tab listen for mode-changed and files-changed events, triggering refresh
+- Stability tracker switches to mode-specific instance; _update_stability runs immediately
+- Context breakdown reflects new mode's index (symbol map or doc map) after switch
+- Cross-reference toggle resets to OFF on mode switch (cross-ref items from previous mode are removed)
+- Mode switch is instant — structural re-extraction produces unenriched outlines immediately; changed files queued for background enrichment with non-blocking header progress bar
+- Unenriched outlines are cached immediately so the doc map and cross-reference work without waiting for enrichment; enriched outlines replace cache entries as each file completes (no toast — progress shown in header bar only)
+- Mode switch RPC is guarded by `_modeSwitchInFlight` flag — `_refreshMode` skips both backend polling and saved-preference auto-switching while a switch is in flight, preventing a race where `doc_index_ready` triggers `_refreshMode` before the switch RPC returns and the preference is saved
 
 ### Shell Command Detection
 - Extracts from ```bash blocks, $ prefix, > prefix
@@ -348,6 +363,15 @@ Session total: 182,756
 - Auto-added files broadcast via filesChanged callback
 - files_auto_added in streamComplete lists paths that were auto-added
 - Review mode skips all edit application (existing behavior unchanged)
+
+### Cross-Reference Toggle
+- `set_cross_reference(true)` runs initialization pass for the other index's items
+- `set_cross_reference(false)` removes cross-ref items from tracker, marks affected tiers as broken
+- `get_current_state` includes `cross_ref_enabled` field
+- Cross-ref items use `sym:` or `doc:` prefix matching the cross-referenced index
+- Both legends appear in L0 when cross-ref is enabled
+- Mode switch resets cross-ref to disabled
+- Token usage toast shown on activation indicating additional token cost
 
 ### Ambiguous Anchor Retry
 - Failed edits with "Ambiguous anchor" in message trigger auto-populated retry prompt in chat input
