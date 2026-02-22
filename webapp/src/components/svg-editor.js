@@ -936,11 +936,30 @@ export class SvgEditor {
     const fontFamily = computed.fontFamily || 'sans-serif';
     const fill = computed.fill || textEl.getAttribute('fill') || '#000';
 
+    // Force light text so it's always readable against the dark editor background,
+    // regardless of the original SVG fill colour.
+    const editColor = (() => {
+      if (fill === 'none' || !fill) return '#e0e0e0';
+      // Parse the fill to check luminance — if it's too dark, use light text
+      const tmp = document.createElement('span');
+      tmp.style.color = fill;
+      document.body.appendChild(tmp);
+      const computed2 = window.getComputedStyle(tmp).color;
+      tmp.remove();
+      const m = computed2.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (m) {
+        const lum = (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]);
+        if (lum < 128) return '#e0e0e0';
+      }
+      return fill;
+    })();
+
     Object.assign(div.style, {
       fontSize,
       fontFamily,
-      color: fill === 'none' ? '#000' : fill,
-      background: 'rgba(30, 30, 30, 0.85)',
+      color: editColor,
+      caretColor: '#4fc3f7',
+      background: 'rgba(30, 30, 30, 0.92)',
       border: '1px solid #4fc3f7',
       borderRadius: '2px',
       padding: `${pad}px`,
@@ -953,7 +972,17 @@ export class SvgEditor {
       width: '100%',
       height: '100%',
       overflow: 'hidden',
+      // Ensure selection highlight doesn't make text invisible
+      WebkitTextFillColor: editColor,
     });
+
+    // Style the selection highlight for readability
+    const styleEl = document.createElement('style');
+    styleEl.textContent = `
+      [contenteditable]::selection { background: rgba(79, 195, 247, 0.35); color: ${editColor}; }
+      [contenteditable]::-moz-selection { background: rgba(79, 195, 247, 0.35); color: ${editColor}; }
+    `;
+    div.appendChild(styleEl);
 
     // Populate with current text content
     div.textContent = textEl.textContent;
