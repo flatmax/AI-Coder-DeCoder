@@ -1345,13 +1345,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._loadRepoFiles();
     }
 
-    // Check for ambiguous anchor failures — auto-populate retry prompt
+    // Check for edit failures — auto-populate retry prompt
     if (result?.edit_results) {
-      const ambiguousFailures = result.edit_results.filter(
-        er => er.status === 'failed' && er.message && er.message.includes('Ambiguous anchor')
+      const failures = result.edit_results.filter(
+        er => er.status === 'failed'
       );
-      if (ambiguousFailures.length > 0) {
-        this._populateAmbiguousRetryPrompt(ambiguousFailures);
+      if (failures.length > 0) {
+        this._populateEditRetryPrompt(failures);
       }
     }
 
@@ -2266,7 +2266,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const parts = [];
     if (msg.passed) parts.push(html`<span class="stat pass">✅ ${msg.passed} applied</span>`);
     if (msg.already_applied) parts.push(html`<span class="stat pass">✅ ${msg.already_applied} already applied</span>`);
-    if (msg.failed) parts.push(html`<span class="stat fail">❌ ${msg.failed} failed</span>`);
+    if (msg.failed) {
+      // Collect failed file names from editResults
+      const failedFiles = msg.editResults
+        ? Object.entries(msg.editResults)
+            .filter(([, er]) => er.status === 'failed')
+            .map(([file]) => file.split('/').pop())
+        : [];
+      const failedLabel = failedFiles.length > 0
+        ? `${failedFiles.join(', ')}`
+        : `${msg.failed} file${msg.failed > 1 ? 's' : ''}`;
+      parts.push(html`<span class="stat fail">❌ ${msg.failed} failed: ${failedLabel}</span>`);
+    }
     if (msg.skipped) parts.push(html`<span class="stat skip">⚠️ ${msg.skipped} skipped</span>`);
     if (msg.not_in_context) parts.push(html`<span class="stat skip">⚠️ ${msg.not_in_context} not in context</span>`);
     const autoAddNote = msg.files_auto_added?.length > 0
@@ -2276,7 +2287,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       : nothing;
     // Check for edit failures — show retry hint
     const hasFailures = msg.editResults && Object.values(msg.editResults).some(
-      er => er.status === 'failed' && er.message !== 'already_applied'
+      er => er.status === 'failed'
     );
     const failureNote = hasFailures
       ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
