@@ -179,8 +179,14 @@ Recommended implementation sequence, with dependencies noted:
 - [x] **Cache tier integration** — Document outline blocks tracked by stability tracker alongside code symbol blocks, intermingled in tiered content
 - [x] **Document mode toggle** — Flag controlling verbosity: code mode shows full symbols + heading outlines, document mode shows file names + expanded doc outlines
 
+### Phase 12: Document Convert
+- [ ] **Doc Convert tab** — Dialog tab in `ac-dialog` with file list, status badges, selective conversion, progress view
+- [ ] **Conversion backend** — markitdown integration, provenance header writing, image extraction
+- [ ] **Clean tree gate** — Require clean git working tree before conversion (same pattern as code review)
+- [ ] **Provenance headers** — HTML comment headers in converted `.md` and extracted `.svg` for staleness detection
+- [ ] **Staleness detection** — Compare source file SHA-256 against provenance header hash on tab open
+- [ ] **RPC methods** — `DocConvert.scan_convertible_files()`, `DocConvert.convert_files()`, `DocConvert.is_available()`
+- [ ] **Graceful degradation** — Tab hidden when markitdown not installed
+
 ### Future: Additional Document Extractors
-- [ ] **DOCX extractor** — Optional `python-docx` dependency, heading extraction by style, hyperlinks (`doc_index/extractors/docx_extractor.py`)
-- [ ] **XLSX extractor** — Optional `openpyxl` dependency, sheet names, dimensions, header rows (`doc_index/extractors/xlsx_extractor.py`)
-- [ ] **PDF extractor** — Optional `pymupdf`/`pdfplumber` dependency, TOC extraction, page count (`doc_index/extractors/pdf_extractor.py`)
-- [ ] **CSV extractor** — Stdlib `csv` module, column headers, row count (`doc_index/extractors/csv_extractor.py`)
+Dedicated per-format document *extractors* are not planned — [Document Convert](../4-features/doc_convert.md) handles binary format conversion to markdown, and the resulting `.md` files flow through the existing markdown extractor and keyword enricher. The extractor registry remains available for future **text-based** document formats (`.rst`, `.adoc`, `.tex`).

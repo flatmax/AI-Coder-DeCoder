@@ -129,7 +129,7 @@ Without keywords, every `### Overview` / `### Parameters` / `### Error Codes` lo
 
 ### Converted DOCX Example
 
-A `.docx` file auto-converted to markdown (via [Document Auto-Convert](doc_auto_convert.md)) and indexed:
+A `.docx` file converted to markdown (via [Document Convert](../4-features/doc_convert.md)) and indexed:
 
 ```
 docs/architecture.md [spec]:
@@ -159,7 +159,7 @@ data/budget.md [reference]:
   ## Lookups (region codes, category mapping) [table] ~12ln
 ```
 
-**Note on CSV files:** CSV is already text and diffable. Auto-convert to a markdown table is most useful for small-to-medium files that benefit from being rendered as formatted tables in the doc index. Very large CSVs (thousands of rows) produce unwieldy markdown — users may prefer to exclude `.csv` from the `extensions` list in [auto-convert config](doc_auto_convert.md#configuration) and instead maintain a hand-written summary document.
+**Note on CSV files:** CSV is already text and diffable. Converting to a markdown table is most useful for small-to-medium files that benefit from being rendered as formatted tables in the doc index. Very large CSVs (thousands of rows) produce unwieldy markdown — users may prefer to exclude `.csv` from the `extensions` list in [doc convert config](../4-features/doc_convert.md#configuration) and instead maintain a hand-written summary document.
 
 ### Format Annotations Reference
 
@@ -280,15 +280,15 @@ Modified files get fresh unenriched outlines instantly. Keyword enrichment is qu
 
 **Manual edits in the SVG editor** — When a user edits and saves an SVG via the SVG viewer/editor (`SvgViewer._save()`), the file's mtime changes on disk. No explicit invalidation fires — the mtime change is detected lazily by the next structure re-extraction (triggered by the next chat message). This is the same lazy-detection pattern used for markdown files edited in Monaco, as described in the Caching section above. The SVG outline may be stale only until the next chat message.
 
-### Document Auto-Convert
+### Document Convert
 
-Non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`) are automatically converted to markdown files via the **Document Auto-Convert** pipeline. Converted files are placed as siblings to the originals, indexed by the document index like any other markdown, and their source files are gitignored. See the full specification:
+Non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`) can be converted to markdown files via the **Document Convert** tool — a dialog-driven workflow requiring a clean git working tree. Converted files are placed as siblings to the originals and indexed by the document index like any other markdown. See the full specification:
 
-→ **[Document Auto-Convert](doc_auto_convert.md)**
+→ **[Document Convert](../4-features/doc_convert.md)**
 
 ### Future: Additional Format Extractors
 
-With [Document Auto-Convert](doc_auto_convert.md) handling the conversion of binary document formats to markdown, dedicated per-format *extractors* (which would produce lossy outlines from binary files) are no longer planned. The auto-convert approach is strictly superior: it produces full editable markdown content rather than structural-only outlines, and the resulting `.md` files flow through the existing markdown extractor and keyword enricher.
+With [Document Convert](../4-features/doc_convert.md) handling the conversion of binary document formats to markdown, dedicated per-format *extractors* (which would produce lossy outlines from binary files) are no longer planned. The convert approach is strictly superior: it produces full editable markdown content rather than structural-only outlines, and the resulting `.md` files flow through the existing markdown extractor and keyword enricher.
 
 The extractor registry pattern (base class + per-format subclasses) remains available for future **text-based** document formats that don't require conversion — e.g., reStructuredText (`.rst`), AsciiDoc (`.adoc`), or LaTeX (`.tex`). These formats are already human-readable and greppable, so a dedicated extractor (producing structural outlines directly) would be more appropriate than converting to markdown.
 
@@ -746,8 +746,6 @@ Server startup
     │
     ├── Code index built, stability initialized, "ready" sent → startup overlay dismissed
     └── _start_background_doc_index() called AFTER "ready"
-          ├── Phase 0: Auto-convert scan — see [Document Auto-Convert](doc_auto_convert.md)
-          │     └── Converts new/changed source docs → sibling .md + images before indexing
           ├── Phase 1: Structure extraction in executor (fast, I/O-bound)
           │     ├── All files get unenriched outlines cached immediately
           │     ├── Build DocReferenceIndex from extracted outlines (fast)
