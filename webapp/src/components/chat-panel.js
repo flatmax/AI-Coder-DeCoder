@@ -1347,11 +1347,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     // Check for edit failures — auto-populate retry prompt
     if (result?.edit_results) {
-      const failures = result.edit_results.filter(
-        er => er.status === 'failed'
+      const ambiguous = result.edit_results.filter(
+        er => er.status === 'failed' && er.message && er.message.toLowerCase().includes('ambiguous')
       );
-      if (failures.length > 0) {
-        this._populateEditRetryPrompt(failures);
+      const otherFailures = result.edit_results.filter(
+        er => er.status === 'failed' && !(er.message && er.message.toLowerCase().includes('ambiguous'))
+      );
+      if (ambiguous.length > 0) {
+        this._populateAmbiguousRetryPrompt(ambiguous);
+      } else if (otherFailures.length > 0) {
+        this._populateOldTextMismatchRetryPrompt(otherFailures);
       }
     }
 

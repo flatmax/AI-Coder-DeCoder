@@ -914,13 +914,23 @@ export class SvgEditor {
     const ns = 'http://www.w3.org/2000/svg';
     const xhtmlNs = 'http://www.w3.org/1999/xhtml';
 
-    // Create foreignObject sized to cover the text with some padding
-    const pad = 4;
+    // Transform bbox from element-local coords into SVG root coords
+    // so the foreignObject aligns with the visually-rendered text position
+    // (accounts for ancestor <g> transforms and viewBox offsets).
+    const tl = this._localToSvgRoot(textEl, bbox.x, bbox.y);
+    const br = this._localToSvgRoot(textEl, bbox.x + bbox.width, bbox.y + bbox.height);
+    const rootX = Math.min(tl.x, br.x);
+    const rootY = Math.min(tl.y, br.y);
+    const rootW = Math.abs(br.x - tl.x);
+    const rootH = Math.abs(br.y - tl.y);
+
+    // Create foreignObject sized to cover the text with generous padding
+    const pad = 8;
     const fo = document.createElementNS(ns, 'foreignObject');
-    fo.setAttribute('x', bbox.x - pad);
-    fo.setAttribute('y', bbox.y - pad);
-    fo.setAttribute('width', Math.max(bbox.width + pad * 4, 60));
-    fo.setAttribute('height', bbox.height + pad * 2);
+    fo.setAttribute('x', rootX - pad);
+    fo.setAttribute('y', rootY - pad);
+    fo.setAttribute('width', Math.max(rootW + pad * 6, 120));
+    fo.setAttribute('height', Math.max(rootH + pad * 4, 40));
     fo.classList.add(HANDLE_CLASS); // so hit-testing skips it
     fo.dataset.handleType = 'text-edit';
     fo.dataset.handleIndex = '0';
@@ -936,51 +946,32 @@ export class SvgEditor {
     const fontFamily = computed.fontFamily || 'sans-serif';
     const fill = computed.fill || textEl.getAttribute('fill') || '#000';
 
-    // Force light text so it's always readable against the dark editor background,
-    // regardless of the original SVG fill colour.
-    const editColor = (() => {
-      if (fill === 'none' || !fill) return '#e0e0e0';
-      // Parse the fill to check luminance — if it's too dark, use light text
-      const tmp = document.createElement('span');
-      tmp.style.color = fill;
-      document.body.appendChild(tmp);
-      const computed2 = window.getComputedStyle(tmp).color;
-      tmp.remove();
-      const m = computed2.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (m) {
-        const lum = (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]);
-        if (lum < 128) return '#e0e0e0';
-      }
-      return fill;
-    })();
-
     Object.assign(div.style, {
       fontSize,
       fontFamily,
-      color: editColor,
+      color: '#f0f0f0',
       caretColor: '#4fc3f7',
-      background: 'rgba(30, 30, 30, 0.92)',
-      border: '1px solid #4fc3f7',
-      borderRadius: '2px',
+      background: '#1a1a2e',
+      border: '2px solid #4fc3f7',
+      borderRadius: '4px',
       padding: `${pad}px`,
       margin: '0',
       outline: 'none',
       whiteSpace: 'pre',
-      minWidth: '40px',
+      minWidth: '60px',
       lineHeight: 'normal',
       boxSizing: 'border-box',
       width: '100%',
       height: '100%',
-      overflow: 'hidden',
-      // Ensure selection highlight doesn't make text invisible
-      WebkitTextFillColor: editColor,
+      overflow: 'visible',
+      WebkitTextFillColor: '#f0f0f0',
     });
 
     // Style the selection highlight for readability
     const styleEl = document.createElement('style');
     styleEl.textContent = `
-      [contenteditable]::selection { background: rgba(79, 195, 247, 0.35); color: ${editColor}; }
-      [contenteditable]::-moz-selection { background: rgba(79, 195, 247, 0.35); color: ${editColor}; }
+      [contenteditable]::selection { background: rgba(79, 195, 247, 0.45); color: #ffffff; }
+      [contenteditable]::-moz-selection { background: rgba(79, 195, 247, 0.45); color: #ffffff; }
     `;
     div.appendChild(styleEl);
 
