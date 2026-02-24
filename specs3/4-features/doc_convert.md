@@ -2,7 +2,7 @@
 
 ## Overview
 
-Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.tex`) to markdown files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
+Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`, `.tex`) to markdown files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
 
 Converted markdown is strictly superior in a git repo — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol. Document convert brings this benefit without requiring the user to run external tools manually.
 
@@ -19,6 +19,7 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
 | `.odt` | OpenDocument text | Full content similar to `.docx` |
+| `.odp` | OpenDocument presentation | Slide headings and text content; one section per slide. Similar to `.pptx` |
 | `.tex` | LaTeX document | Structural elements (sections, lists, tables) converted; math blocks passed through as `$$...$$`. Requires `pypandoc` with Pandoc installed — see Conversion Backend |
 
 ## Conversion Backend
@@ -240,7 +241,7 @@ Document convert is controlled via `app.json`:
 {
   "doc_convert": {
     "enabled": true,
-    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".tex"],
+    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp", ".tex"],
     "max_source_size_mb": 50
   }
 }
@@ -284,6 +285,7 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Convert `.pdf` (50 pages) | ~1-5s | Depends on text extraction complexity |
 | Convert `.xlsx` (5 sheets) | ~100-300ms | Table formatting is fast |
 | Convert `.pptx` (30 slides) | ~300-800ms | Slide text extraction |
+| Convert `.odp` (30 slides) | ~300-800ms | Similar to `.pptx` via markitdown |
 | Convert `.tex` (50 pages) | ~500ms-2s | pypandoc/Pandoc; depends on macro complexity |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
