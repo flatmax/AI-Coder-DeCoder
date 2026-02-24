@@ -1662,6 +1662,7 @@ class LLMService:
                             "file": r.file_path,
                             "status": r.status.value,
                             "message": r.message,
+                            "error_type": r.error_type,
                         }
                         for r in edit_results
                     ]

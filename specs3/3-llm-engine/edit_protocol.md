@@ -208,6 +208,31 @@ During streaming, partially received blocks are tracked. The parser maintains st
 | Failed | Anchor not found, ambiguous, or old text mismatch |
 | Skipped | Binary file or pre-condition failed |
 | Not In Context | File was not in the active context; edit deferred (see below) |
+| Already Applied | New content already present in file (idempotent) |
+
+Each result includes:
+
+| Field | Description |
+|-------|-------------|
+| `file_path` | Target file for the edit |
+| `status` | One of the statuses above |
+| `message` | Human-readable error detail (e.g., "Old text not found in file") |
+| `error_type` | Machine-readable failure category (empty string on success) |
+
+#### Error Type Classification
+
+Non-success results carry an `error_type` string classifying the failure:
+
+| Error Type | Trigger |
+|------------|---------|
+| `anchor_not_found` | Zero matches for anchor text in file |
+| `ambiguous_anchor` | Multiple matches for anchor text |
+| `old_text_mismatch` | Anchor found but old lines don't match file content |
+| `file_not_found` | File does not exist on disk (or cannot be read) |
+| `write_error` | File validated but write to disk failed (OS error) |
+| `validation_error` | Pre-condition failure: path traversal blocked, binary file |
+
+The `error_type` is serialized alongside `status` and `message` in the `edit_results` array of the `streamComplete` result object.
 
 ### Not-In-Context Edit Handling
 
@@ -284,6 +309,26 @@ Consistent with the not-in-context edit philosophy: the user maintains control o
 
 ### Edit Summary Banner
 
+The edit summary banner (rendered by `_renderEditSummary` in `chat-panel.js`) shows aggregate counts with color-coded badges:
+
+- ✅ **N applied** (green) — successfully written to disk
+- ✅ **N already applied** (green) — new content already present
+- ❌ **N failed** (red) — validation or application failure
+- ⚠️ **N skipped** (amber) — pre-condition failure
+- ⚠️ **N not in context** (amber) — file not in active selection
+
+#### Individual Failure Listing
+
+When one or more edit blocks have non-success status (`failed`, `skipped`, or `not_in_context`), the banner expands to list each failure individually:
+
+| Field | Description |
+|-------|-------------|
+| **File path** | Clickable — navigates to the file in the diff viewer via `navigate-file` event |
+| **Error type** | The `error_type` badge (e.g., `anchor_not_found`, `ambiguous_anchor`) |
+| **Error message** | The human-readable `message` from the backend |
+
+When all edits succeed, no failure section is rendered — only aggregate counts appear.
+
 When ambiguous anchor or old-text-mismatch failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
 
 ## Old Text Mismatch Retry Prompt
@@ -327,11 +372,11 @@ The following edit(s) failed because the old text didn't match the actual file c
 - Comment-prefixed lines not treated as file paths
 
 ### Validation
-- Valid edit passes (anchor found, old text matches)
-- Anchor not found returns error
-- Ambiguous match (multiple locations) returns error
-- Create blocks always valid
-- Whitespace mismatch diagnosed
+- Valid edit passes (anchor found, old text matches) — `error_type` is empty
+- Anchor not found returns error with `error_type: anchor_not_found`
+- Ambiguous match (multiple locations) returns error with `error_type: ambiguous_anchor`
+- Create blocks always valid — `error_type` is empty
+- Whitespace mismatch diagnosed with `error_type: anchor_not_found`
 
 ### Application
 - Basic replacement preserves surrounding content
@@ -341,9 +386,9 @@ The following edit(s) failed because the old text didn't match the actual file c
 - Repo application writes to disk, status = APPLIED
 - Create makes parent directories
 - Dry run validates without writing (status = VALIDATED)
-- Path escape (../) blocked (status = SKIPPED)
-- Binary file skipped
-- Missing file fails
+- Path escape (../) blocked (status = SKIPPED, error_type = validation_error)
+- Binary file skipped (status = SKIPPED, error_type = validation_error)
+- Missing file fails (status = FAILED, error_type = file_not_found)
 - Multiple sequential edits to same file
 
 ### Not-In-Context Handling

@@ -35,6 +35,15 @@ class EditStatus(Enum):
     ALREADY_APPLIED = "already_applied"
 
 
+class ErrorType(Enum):
+    ANCHOR_NOT_FOUND = "anchor_not_found"
+    AMBIGUOUS_ANCHOR = "ambiguous_anchor"
+    OLD_TEXT_MISMATCH = "old_text_mismatch"
+    FILE_NOT_FOUND = "file_not_found"
+    WRITE_ERROR = "write_error"
+    VALIDATION_ERROR = "validation_error"
+
+
 class ParseState(Enum):
     SCANNING = "scanning"
     EXPECT_EDIT = "expect_edit"
@@ -60,6 +69,7 @@ class EditResult:
     file_path: str
     status: EditStatus
     message: str = ""
+    error_type: str = ""
     old_text: str = ""
     new_text: str = ""
     preview: str = ""
@@ -255,13 +265,13 @@ def _check_already_applied(block, file_content):
 def validate_edit(block, file_content):
     """Validate an edit block against file content.
 
-    Returns (is_valid, error_message).
+    Returns (is_valid, error_message, error_type).
     """
     if block.is_create:
-        return True, ""
+        return True, "", ""
 
     if file_content is None:
-        return False, "File not found"
+        return False, "File not found", ErrorType.FILE_NOT_FOUND.value
 
     # Find anchor
     anchor_idx, match_count = _find_anchor(file_content, block.anchor_lines, block.old_only)
@@ -269,12 +279,12 @@ def validate_edit(block, file_content):
     if match_count == 0:
         # Check if the edit was already applied (new content already present)
         if _check_already_applied(block, file_content):
-            return False, "already_applied"
+            return False, "already_applied", ""
         diag = _diagnose_failure(file_content, block.anchor_lines, block.old_only)
-        return False, f"Anchor not found: {diag}"
+        return False, f"Anchor not found: {diag}", ErrorType.ANCHOR_NOT_FOUND.value
 
     if match_count > 1:
-        return False, f"Ambiguous anchor: {match_count} matches found"
+        return False, f"Ambiguous anchor: {match_count} matches found", ErrorType.AMBIGUOUS_ANCHOR.value
 
     # Verify old text at anchored position
     if block.old_only:
@@ -283,15 +293,15 @@ def validate_edit(block, file_content):
         old_end = old_start + len(block.old_only)
 
         if old_end > len(file_lines):
-            return False, "Old text extends past end of file"
+            return False, "Old text extends past end of file", ErrorType.OLD_TEXT_MISMATCH.value
 
         file_old = "\n".join(file_lines[old_start:old_end])
         expected_old = "\n".join(block.old_only)
 
         if file_old != expected_old:
-            return False, f"Old text mismatch at line {old_start + 1}"
+            return False, f"Old text mismatch at line {old_start + 1}", ErrorType.OLD_TEXT_MISMATCH.value
 
-    return True, ""
+    return True, "", ""
 
 
 def apply_edit(block, file_content):
@@ -315,7 +325,7 @@ def apply_edit(block, file_content):
             message="File not found",
         )
 
-    valid, error = validate_edit(block, file_content)
+    valid, error, error_type = validate_edit(block, file_content)
     if not valid:
         if error == "already_applied":
             return file_content, EditResult(
@@ -327,6 +337,7 @@ def apply_edit(block, file_content):
             file_path=block.file_path,
             status=EditStatus.FAILED,
             message=error,
+            error_type=error_type,
         )
 
     file_lines = file_content.split("\n")
@@ -373,6 +384,7 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                 file_path=block.file_path,
                 status=EditStatus.SKIPPED,
                 message="Path traversal not allowed",
+                error_type=ErrorType.VALIDATION_ERROR.value,
             ))
             continue
 
@@ -388,6 +400,7 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                             file_path=block.file_path,
                             status=EditStatus.SKIPPED,
                             message="Binary file",
+                            error_type=ErrorType.VALIDATION_ERROR.value,
                         ))
                         continue
             except OSError:
@@ -406,6 +419,7 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                     file_path=block.file_path,
                     status=EditStatus.FAILED,
                     message=f"Cannot read file: {e}",
+                    error_type=ErrorType.FILE_NOT_FOUND.value,
                 ))
                 continue
         else:
@@ -413,11 +427,12 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                 file_path=block.file_path,
                 status=EditStatus.FAILED,
                 message="File not found",
+                error_type=ErrorType.FILE_NOT_FOUND.value,
             ))
             continue
 
         if dry_run:
-            valid, error = validate_edit(block, content)
+            valid, error, error_type = validate_edit(block, content)
             if not valid and error == "already_applied":
                 results.append(EditResult(
                     file_path=block.file_path,
@@ -429,6 +444,7 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                     file_path=block.file_path,
                     status=EditStatus.VALIDATED if valid else EditStatus.FAILED,
                     message=error if error else "Validation passed",
+                    error_type=error_type if not valid else "",
                 ))
             if valid and content is not None:
                 new_content, _ = apply_edit(block, content)
@@ -447,6 +463,7 @@ def apply_edits_to_repo(blocks, repo_root, dry_run=False):
                     file_path=block.file_path,
                     status=EditStatus.FAILED,
                     message=f"Write failed: {e}",
+                    error_type=ErrorType.WRITE_ERROR.value,
                 )
         results.append(result)
 
