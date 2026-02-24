@@ -19,5 +19,10 @@
     "keywords_diversity": 0.5,
     "keywords_tfidf_fallback_chars": 150,
     "keywords_max_doc_freq": 0.6
+  },
+  "doc_convert": {
+    "enabled": true,
+    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
+    "max_source_size_mb": 50
   }
 }

@@ -444,6 +444,7 @@ class LLMService:
 
     def get_current_state(self):
         """Return current session state."""
+        from .doc_convert import _is_markitdown_available
         return {
             "messages": self._context.get_history(),
             "selected_files": list(self._selected_files),
@@ -454,6 +455,7 @@ class LLMService:
             "mode": self._context.mode.value,
             "cross_ref_ready": self._is_cross_ref_ready(),
             "cross_ref_enabled": self._cross_ref_enabled,
+            "doc_convert_available": _is_markitdown_available(),
         }
 
     def set_selected_files(self, files):

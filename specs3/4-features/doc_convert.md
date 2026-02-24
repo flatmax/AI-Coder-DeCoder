@@ -2,7 +2,7 @@
 
 ## Overview
 
-Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`, `.tex`) to markdown files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
+Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) to markdown files, with per-slide SVG export for presentations. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally. All conversion dependencies are pure Python — no system-level binary installations are required.
 
 Converted markdown is strictly superior in a git repo — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol. Document convert brings this benefit without requiring the user to run external tools manually.
 
@@ -14,33 +14,52 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 |-----------|-----------|-----------------|
 | `.docx` | Word document | Full content including tables, headings, lists |
 | `.pdf` | PDF document | Text extraction; layout-heavy PDFs may lose formatting |
-| `.pptx` | PowerPoint | Slide headings and text content; one section per slide |
+| `.pptx` | PowerPoint | Per-slide SVG export — each slide rendered as an SVG file in a subdirectory, linked from an index `.md` |
 | `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables |
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
 | `.odt` | OpenDocument text | Full content similar to `.docx` |
-| `.odp` | OpenDocument presentation | Slide headings and text content; one section per slide. Similar to `.pptx` |
-| `.tex` | LaTeX document | Structural elements (sections, lists, tables) converted; math blocks passed through as `$$...$$`. Requires `pypandoc` with Pandoc installed — see Conversion Backend |
+| `.odp` | OpenDocument presentation | Markdown via markitdown |
 
 ## Conversion Backend
 
-The primary conversion backend is **markitdown** (Microsoft's Python library):
+All conversion uses **pure Python libraries** — no external binary dependencies (no Pandoc, no LibreOffice). This ensures the tool works in any Python environment without system-level package installation.
 
-- Pure Python — no external binary dependency (unlike `pandoc`)
-- Handles all supported formats in a single library
-- Fits the existing packaging model (PyInstaller can bundle it)
+### markitdown
+
+The primary conversion backend is **markitdown** (Microsoft's Python library) installed with the `[all]` extra to enable all format-specific converters:
+
+- `markitdown[all]` pulls in `python-docx`, `odfpy`, `pdfminer`, `openpyxl`, and other format-specific dependencies
+- Handles `.docx`, `.pdf`, `.xlsx`, `.csv`, `.rtf`, `.odt` in a single library
+- Pure Python — fits the existing packaging model (PyInstaller can bundle it)
 - Actively maintained, broad format coverage
 
-### LaTeX Backend
+### python-pptx (Presentation SVG Export)
 
-LaTeX (`.tex`) files use **`pypandoc`** (a Python wrapper around Pandoc) instead of markitdown, since markitdown does not support LaTeX:
+PowerPoint (`.pptx`) files are converted using **python-pptx** directly, bypassing markitdown. Each slide is rendered as an SVG file containing:
 
-- Pandoc is the gold standard for LaTeX-to-markdown conversion — it understands sections, lists, tables, bibliographies, and math
-- Math blocks are converted to `$$...$$` fenced notation, which most markdown renderers support
-- **Requires Pandoc installed as an external binary** — this is the one format where a system dependency is needed
-- If `pypandoc` or Pandoc is not available, `.tex` files are shown in the file list with a "requires Pandoc" badge and skipped during conversion. All other formats still work via markitdown
+- **Text shapes** — rendered as `<text>` elements with font size, weight, color, and alignment extracted from the slide
+- **Images** — embedded as base64 data URIs in `<image>` elements
+- **Tables** — rendered as `<rect>` borders with `<text>` cell content
+- **Slide dimensions** — converted from EMU (English Metric Units) to pixels at 96 DPI
 
-The conversion dispatches per-format: markitdown for all supported formats, pypandoc for `.tex`. This is transparent to the user — the progress view shows the same per-file status regardless of which backend handled the file.
+Slide SVGs are stored in a subdirectory named after the source file, with zero-padded slide numbers:
+
+```
+docs/
+    presentation.pptx               ← source
+    presentation.md                  ← index markdown linking all slides
+    presentation/
+        01_slide.svg                 ← slide 1
+        02_slide.svg                 ← slide 2
+        ...
+```
+
+The index `.md` file links each slide SVG with heading and image syntax, making slides individually viewable in the SVG viewer and navigable from the document index.
+
+### odfpy
+
+**odfpy** is included as an explicit dependency alongside `markitdown[all]` (which also pulls it in transitively). It provides native ODF format parsing for `.odt` files. The explicit dependency ensures `.odt` support is available even if markitdown's dependency groups change in future versions.
 
 ### Installation
 
@@ -52,7 +71,7 @@ pip install ac-dc[docs]
 uv sync --extra docs
 ```
 
-The `[docs]` extra already includes `keybert`; `markitdown` and `pypandoc` are added to the same extra so a single install enables all document features. Note that `pypandoc` additionally requires [Pandoc](https://pandoc.org/installing.html) on the system PATH — without it, only `.tex` conversion is unavailable.
+The `[docs]` extra includes `keybert`, `markitdown[all]`, `odfpy`, and `python-pptx` — a single install enables all document features. No system-level binary dependencies are required.
 
 ## Clean Working Tree Gate
 
@@ -115,27 +134,57 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original:
+Converted files are placed as **siblings** to the original. Presentation slides are placed in a subdirectory:
 
 ```
 docs/
     architecture.docx              ← source
     architecture.md                ← converted output
-    architecture_img_001.png       ← extracted raster image
-    architecture_img_002.svg       ← extracted vector image
+    architecture_img1.png          ← extracted raster image
+    architecture_img2.svg          ← extracted vector image
     budget.xlsx                    ← source
     budget.md                      ← converted output
+    presentation.pptx              ← source
+    presentation.md                ← index markdown
+    presentation/                  ← slide subdirectory
+        01_slide.svg               ← slide 1
+        02_slide.svg               ← slide 2
 ```
 
 ## Image Handling
 
-Images embedded in source documents (e.g., figures in `.docx`, charts in `.pptx`) are extracted alongside the converted markdown:
+Images embedded in source documents (e.g., figures in `.docx`) are extracted alongside the converted markdown. markitdown embeds images as base64 data URIs in its output; the image extraction pipeline decodes these and saves them as files.
 
-- **Raster images** (PNG, JPEG, GIF, BMP, TIFF) are saved as-is in their original format next to the markdown file, and linked from the markdown via standard image syntax (`![alt](image.png)`)
-- **Vector images** (EMF, WMF, SVG embedded in Office documents) are saved as `.svg` where the source format permits lossless conversion; otherwise saved as raster
-- **No raster-to-SVG conversion** is attempted — wrapping a bitmap in an SVG container adds no value
+### Extraction Pipeline
 
-Image filenames are derived from the source document name with a numeric suffix (e.g., `architecture_img_001.png`). Extracted SVG images carry a provenance header (see above) and are indexed by the doc index via `SvgExtractor`.
+1. **Scan** markdown output for `![...](data:image/...;base64,...)` patterns using string scanning (not regex — base64 data commonly contains `)` characters that break regex quantifiers)
+2. **Decode** the base64 payload and detect the MIME subtype
+3. **Save** raster images (PNG, JPEG, GIF, BMP, TIFF, WebP) in their native format — no format conversion is performed
+4. **Save** vector images (SVG) directly with a provenance header injected
+5. **Replace** data URIs in the markdown with relative file paths to the saved images
+6. **Verify** file-referenced images (non-data-URI) that markitdown may have written to disk
+
+### Design Decisions
+
+- **No raster-to-SVG conversion** — wrapping a bitmap in an SVG container adds no value
+- **Native format preservation** — images are saved exactly as embedded, avoiding any lossy re-encoding
+- **String scanning over regex** — base64 payloads are extremely long and may contain characters that confuse regex engines; the parser uses `str.find()` to locate `![`, `](`, `data:image/`, and the closing `)` sequentially
+
+### Filename Convention
+
+Image filenames are derived from the source document stem with a numeric suffix:
+
+```
+architecture_img1.png      ← first image, raster
+architecture_img2.svg      ← second image, vector
+architecture_img3.jpg      ← third image, raster
+```
+
+Extracted SVG images carry a provenance header (see above) and are indexed by the doc index via `SvgExtractor`.
+
+### Presentation Images
+
+For `.pptx` files, images are not extracted separately — they are embedded directly as base64 data URIs inside the per-slide SVG `<image>` elements. This preserves the spatial layout (position and size) of images within each slide.
 
 ## Doc Convert Tab
 
@@ -196,10 +245,11 @@ Status is determined by:
    - 🔄 Converting...
    - ✅ Done
    - ❌ Failed: {reason}
-7. Conversions run sequentially in a background executor
-8. On completion, progress view shows summary: "Converted 5 files. 1 failed."
-9. File picker refreshes — new `.md` and image files appear as untracked
-10. User reviews diffs in the diff viewer, edits if needed, commits normally
+7. Conversions run sequentially — presentation files produce SVG subdirectories, other formats produce sibling `.md` files
+8. Data URI images in markitdown output are decoded and saved as separate files
+9. On completion, progress view shows summary: "Converted 5 files. 1 failed."
+10. File picker refreshes — new `.md`, `.svg`, and image files appear as untracked
+11. User reviews diffs in the diff viewer, edits if needed, commits normally
 
 ### Conflict Handling
 
@@ -241,7 +291,7 @@ Document convert is controlled via `app.json`:
 {
   "doc_convert": {
     "enabled": true,
-    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp", ".tex"],
+    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
     "max_source_size_mb": 50
   }
 }
@@ -250,7 +300,7 @@ Document convert is controlled via `app.json`:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `true` | Enable/disable doc convert entirely. When `false`, the tab is hidden |
-| `extensions` | list[str] | All supported | Which file extensions to show for conversion. Remove entries to skip formats. `.tex` requires Pandoc — if Pandoc is unavailable, `.tex` files are shown but skipped |
+| `extensions` | list[str] | All supported | Which file extensions to show for conversion. Remove entries to skip formats |
 | `max_source_size_mb` | int | `50` | Source files larger than this are shown with a warning badge and skipped during conversion. Prevents enormous CSVs or PDFs from producing unwieldy markdown |
 
 ## Integration with Document Index
@@ -272,7 +322,9 @@ When `markitdown` is not installed:
 2. **Frontend:** Doc Convert tab is hidden entirely — no empty tab, no error state
 3. **Terminal:** A `logger.info` is emitted during startup (not a warning — the feature is optional)
 
-The feature is entirely optional — the document index, mode toggle, keyword enrichment, and all other doc-mode features work without it.
+When `python-pptx` is not installed, `.pptx` conversion raises a clear error message directing the user to `pip install ac-dc[docs]`.
+
+The feature is entirely optional — the document index, mode toggle, keyword enrichment, and all other doc-mode features work without it. All conversion dependencies are pure Python — no system-level binary installations are required.
 
 ## Performance
 
@@ -284,9 +336,9 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Convert `.docx` (10 pages) | ~200-500ms | markitdown, depends on content complexity |
 | Convert `.pdf` (50 pages) | ~1-5s | Depends on text extraction complexity |
 | Convert `.xlsx` (5 sheets) | ~100-300ms | Table formatting is fast |
-| Convert `.pptx` (30 slides) | ~300-800ms | Slide text extraction |
-| Convert `.odp` (30 slides) | ~300-800ms | Similar to `.pptx` via markitdown |
-| Convert `.tex` (50 pages) | ~500ms-2s | pypandoc/Pandoc; depends on macro complexity |
+| Convert `.pptx` (30 slides) | ~300-800ms | python-pptx SVG export |
+| Convert `.odp` (30 slides) | ~300-800ms | markitdown |
+| Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
 Conversion runs in a background executor and does not block UI interaction. The progress view provides per-file feedback.
@@ -311,11 +363,16 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - New file conversion creates sibling `.md` with correct content and provenance header
 - Stale file re-conversion overwrites `.md` with updated content and hash
 - Conflict file conversion overwrites existing `.md` and adds provenance header
-- Extracted images linked from markdown with correct relative paths
+- Data URI images decoded from markitdown output and saved as separate files
+- Data URIs in markdown replaced with relative paths to saved image files
+- Raster images saved in native format (PNG, JPEG, etc.) — no format conversion
+- SVG images saved with provenance header injected
 - Orphan images cleaned up on re-conversion (images in old header but not in new output)
+- PPTX files produce per-slide SVG files in a subdirectory with zero-padded filenames
+- PPTX slide SVGs contain text, images, and tables from each slide
+- PPTX index markdown links all slide SVGs with heading and image syntax
 - Graceful degradation when markitdown is not installed (tab hidden, no errors)
-- Graceful degradation when pypandoc/Pandoc is not installed (`.tex` files shown with badge, skipped during conversion, other formats unaffected)
-- LaTeX conversion preserves math blocks as `$$...$$` in output markdown
+- Graceful degradation when python-pptx is not installed (clear error message)
 - Configuration `enabled: false` hides the tab
 - Custom extension list in config is respected
 - Files exceeding `max_source_size_mb` are shown with warning and skipped during conversion
