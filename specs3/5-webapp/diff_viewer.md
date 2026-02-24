@@ -77,7 +77,7 @@ Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to
 
 ## Markdown Preview
 
-For `.md` and `.markdown` files, a **Preview** button appears in the top-right corner (next to the status LED). Toggling it switches from the standard side-by-side diff layout to a split editor+preview layout.
+For `.md` and `.markdown` files, a **Preview** button appears in the top-right corner (next to the status LED). Toggling it switches from the standard side-by-side diff layout to a split editor+preview layout. In preview mode, the Preview button moves to the top-right of the **preview pane** (right panel) so the user can exit preview from the same panel they're reading. The button uses `position: sticky` to remain visible while scrolling.
 
 ### Split Layout
 
@@ -122,6 +122,19 @@ Editor and preview scroll positions are synchronized:
 **Preview → Editor:** When the preview pane scrolls, the reverse mapping finds which source line corresponds to the current scroll offset. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning.
 
 **Scroll lock:** A mutex mechanism prevents infinite feedback loops. When one side initiates a scroll, it sets `_scrollLock` to `'editor'` or `'preview'`. The other side's scroll handler checks the lock and skips if the other side owns it. The lock auto-releases after 120ms.
+
+### Image Rendering
+
+Markdown images with relative `src` paths are resolved against the current file's directory and fetched from the repository via RPC. After each preview render, `_resolvePreviewImages()` post-processes `<img>` tags:
+
+- **Skip** `data:`, `blob:`, `http://`, `https://` URLs — these pass through unchanged
+- **Resolve** relative paths (including `../` and `./`) against the markdown file's directory using `_normalizePath()`
+- **Fetch** content via `Repo.get_file_content`
+- **SVG files** are injected as `data:image/svg+xml` URIs with URL-encoded text content
+- **Binary images** (PNG, JPG, GIF, WebP, BMP, ICO) expect base64-encoded content from the server and are injected as `data:{mime};base64,{content}` URIs
+- **Failed loads** degrade gracefully — the `alt` text is updated to show the error and the image is dimmed (`opacity: 0.4`)
+
+Images are styled with `max-width: 100%` to fit within the preview pane.
 
 ### Toggle Behavior
 
