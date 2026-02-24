@@ -20,12 +20,13 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
 - **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
 - **Image paste support** — drop screenshots into chat with persistent storage across sessions.
+- **Document convert** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown from a dedicated dialog tab. Presentations export per-slide SVGs. Requires a clean git working tree so all results appear as reviewable diffs. Install `pip install ac-dc[docs]` for conversion support.
 - **Voice dictation** via Web Speech API.
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
-- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. A cross-reference toggle lets the LLM see document outlines alongside the symbol map in code mode (and vice versa), so it can trace connections between code and documentation without a full mode switch. Install `pip install ac-dc[docs]` for keyword extraction support (optional — document mode works without it).
+- **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. A cross-reference toggle lets the LLM see document outlines alongside the symbol map in code mode (and vice versa), so it can trace connections between code and documentation without a full mode switch. Install `pip install ac-dc[docs]` for keyword extraction and document conversion support (optional — document mode works without it).
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
 - **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
 - **Token HUD** with per-request and session-total usage reporting.
@@ -165,7 +166,8 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `Alt+2` | Global | Search tab |
 | `Alt+3` | Global | Context Budget tab |
 | `Alt+4` | Global | Cache Tiers tab |
-| `Alt+5` | Global | Settings tab |
+| `Alt+5` | Global | Doc Convert tab |
+| `Alt+6` | Global | Settings tab |
 | `Alt+M` | Global | Toggle minimize dialog |
 | `↑/↓` | Search results | Navigate matches |
 | `Enter` | Search results | Open match in diff viewer |
@@ -209,6 +211,7 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `system_doc.md` | Document mode system prompt | Markdown |
 | `snippets.json` | Quick-insert prompt buttons | JSON |
 | `doc-snippets.json` | Document mode snippet buttons | JSON |
+| `doc_convert` | Doc convert settings (extensions, size limits) | JSON (in `app.json`) |
 | `compaction.md` | History compaction skill prompt | Markdown |
 | `review.md` | Code review system prompt | Markdown |
 | `review-snippets.json` | Review mode snippet buttons | JSON |
@@ -236,6 +239,9 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `history_compaction.verbatim_window_tokens` | `4000` | Recent tokens kept verbatim |
 | `history_compaction.summary_budget_tokens` | `500` | Max tokens for compaction summary |
 | `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges always kept |
+| `doc_convert.enabled` | `true` | Enable/disable document conversion |
+| `doc_convert.extensions` | All supported | File extensions to show for conversion |
+| `doc_convert.max_source_size_mb` | `50` | Skip source files larger than this |
 
 All configs are editable from the Settings tab in the browser UI with hot-reload support.
 
@@ -278,7 +284,7 @@ cd AI-Coder-DeCoder
 # Install Python dependencies (with dev extras)
 pip install -e ".[dev]"
 
-# Optional: install document mode keyword extraction (KeyBERT + sentence-transformers)
+# Optional: install document mode extras (KeyBERT keywords + document conversion)
 pip install -e ".[docs]"
 
 # Install webapp dependencies
@@ -317,6 +323,8 @@ npm run build
 | [Tree-sitter](https://tree-sitter.github.io/) | AST parsing for symbol extraction (Python, JS/TS, C/C++) |
 | [trafilatura](https://trafilatura.readthedocs.io/) | Web page content extraction |
 | [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/) | AWS Bedrock support |
+| [markitdown](https://github.com/microsoft/markitdown) | Document-to-markdown conversion (`.docx`, `.pdf`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) |
+| [python-pptx](https://python-pptx.readthedocs.io/) | PowerPoint per-slide SVG export |
 
 **Frontend (JavaScript):**
 
@@ -356,6 +364,7 @@ src/ac_dc/
     base_cache.py                # Shared mtime-based in-memory cache base class
     config.py                    # Configuration loading and management
     context.py                   # Context manager, file context, prompt assembly
+    doc_convert.py               # Document-to-markdown conversion (docx, pdf, pptx, etc.)
     edit_parser.py               # Edit block parsing, validation, application
     history_compactor.py         # History truncation and summarization
     history_store.py             # JSONL persistent history
@@ -411,6 +420,7 @@ tests/
     sample.svg                   # Test SVG for doc index extraction tests
     test_config.py
     test_context.py
+    test_doc_convert.py          # Document conversion, provenance headers, status detection
     test_doc_index.py            # Document index, extractors, cache, formatter
     test_edit_parser.py
     test_history.py
@@ -438,6 +448,7 @@ webapp/
             ac-cache-tab.js      # Cache tier viewer
             ac-context-tab.js    # Context budget viewer
             ac-dialog.js         # Main dialog container with tabs
+            ac-doc-convert-tab.js # Document conversion UI
             ac-files-tab.js      # Files & chat split panel
             ac-history-browser.js # Session browser modal
             ac-search-tab.js     # Full-text search
