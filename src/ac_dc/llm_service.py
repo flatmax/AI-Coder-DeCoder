@@ -1189,6 +1189,56 @@ class LLMService:
 
         logger.info(f"Keyword enrichment complete: {enrich_total} files")
 
+    async def _enrich_modified_docs_background(self, enrichment_queue, keyword_model, request_id):
+        """Background keyword enrichment for docs modified by edit blocks.
+
+        Runs after streamComplete has already been sent, so it doesn't
+        delay the UI transition from stop → send button.
+        """
+        if not self._doc_index or not enrichment_queue:
+            return
+
+        loop = asyncio.get_event_loop()
+        for path, mtime, outline, text in enrichment_queue:
+            try:
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda p=path, m=mtime, o=outline, t=text: (
+                        self._doc_index.enrich_single_file(
+                            p, m, o, t, keyword_model=keyword_model)
+                    ),
+                )
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", request_id,
+                            {"stage": "doc_enrichment_file_done", "file": path},
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Background enrichment failed for {path}: {e}")
+                if self._event_callback:
+                    try:
+                        await self._event_callback(
+                            "compactionEvent", request_id,
+                            {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
+                        )
+                    except Exception:
+                        pass
+            await asyncio.sleep(0)
+
+        if self._event_callback:
+            try:
+                await self._event_callback(
+                    "compactionEvent", request_id,
+                    {"stage": "doc_enrichment_complete"},
+                )
+            except Exception:
+                pass
+
+        logger.info(f"Background enrichment complete for {len(enrichment_queue)} modified docs")
+
     # === Streaming Chat (RPC) ===
 
     async def chat_streaming(self, request_id, message, files=None, images=None):
@@ -1581,6 +1631,7 @@ class LLMService:
                             self._doc_index.invalidate_file(path)
                             self._doc_index.index_file_structure_only(path)
                         # Queue modified doc files for background enrichment
+                        # (non-blocking — don't delay streamComplete)
                         enrichment_queue = self._doc_index.queue_enrichment(modified)
                         if enrichment_queue:
                             pending_paths = [p for p, m, o, t in enrichment_queue]
@@ -1592,44 +1643,13 @@ class LLMService:
                                     )
                                 except Exception:
                                     pass
-                            keyword_model = self._doc_index._enricher.model_name if self._doc_index._enricher else None
-                            loop = asyncio.get_event_loop()
-                            for path, mtime, outline, text in enrichment_queue:
-                                try:
-                                    await loop.run_in_executor(
-                                        self._executor,
-                                        lambda p=path, m=mtime, o=outline, t=text: (
-                                            self._doc_index.enrich_single_file(
-                                                p, m, o, t, keyword_model=keyword_model)
-                                        ),
-                                    )
-                                    if self._event_callback:
-                                        try:
-                                            await self._event_callback(
-                                                "compactionEvent", request_id,
-                                                {"stage": "doc_enrichment_file_done", "file": path},
-                                            )
-                                        except Exception:
-                                            pass
-                                except Exception as e:
-                                    logger.warning(f"Background enrichment failed for {path}: {e}")
-                                    if self._event_callback:
-                                        try:
-                                            await self._event_callback(
-                                                "compactionEvent", request_id,
-                                                {"stage": "doc_enrichment_failed", "file": path, "error": str(e)},
-                                            )
-                                        except Exception:
-                                            pass
-                                await asyncio.sleep(0)
-                            if self._event_callback:
-                                try:
-                                    await self._event_callback(
-                                        "compactionEvent", request_id,
-                                        {"stage": "doc_enrichment_complete"},
-                                    )
-                                except Exception:
-                                    pass
+                            # Stash enrichment queue for deferred launch —
+                            # KeyBERT is GIL-heavy and must not start until
+                            # after streamComplete has been transmitted.
+                            result["_deferred_enrichment"] = {
+                                "queue": enrichment_queue,
+                                "keyword_model": self._doc_index._enricher.model_name if self._doc_index._enricher else None,
+                            }
 
                     # Auto-add not-in-context files to selected files
                     files_auto_added = []
@@ -1716,12 +1736,27 @@ class LLMService:
             self._current_request_id = None
             self._cancelled_requests.discard(request_id)
 
+            # Strip non-serializable deferred enrichment data BEFORE
+            # sending streamComplete — DocOutline objects in the queue
+            # aren't JSON-serializable and would silently kill the send.
+            deferred = result.pop("_deferred_enrichment", None)
+
             # Send streamComplete
             if self._event_callback:
                 try:
                     await self._event_callback("streamComplete", request_id, result)
                 except Exception as e:
                     logger.error(f"streamComplete callback failed: {e}")
+
+            # Yield so the WebSocket frame for streamComplete is flushed
+            # before any GIL-heavy background work (KeyBERT) can start.
+            await asyncio.sleep(0)
+            if deferred:
+                asyncio.ensure_future(
+                    self._enrich_modified_docs_background(
+                        deferred["queue"], deferred["keyword_model"], request_id,
+                    )
+                )
 
             # Post-response compaction
             try:
