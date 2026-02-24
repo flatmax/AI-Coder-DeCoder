@@ -229,6 +229,14 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       font-size: 0.9rem;
       line-height: 1.6;
       color: var(--text-primary, #e0e0e0);
+      position: relative;
+    }
+    .preview-pane > .preview-btn {
+      position: sticky;
+      top: 0;
+      float: right;
+      margin: -18px -20px 0 0;
+      z-index: 10;
     }
 
     /* Markdown preview content styling */
@@ -1283,10 +1291,18 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       return html`
         <div class="split-container">
           <div class="editor-pane">
-            ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
+            ${this._renderOverlayButtons(file, isDirty, false)}
           </div>
           <div class="preview-pane"
                @scroll=${() => this._scrollEditorToPreviewLine()}>
+            <button
+              class="preview-btn active"
+              title="Toggle Markdown preview"
+              @click=${() => this._togglePreview()}
+            >
+              <span class="preview-icon"></span>
+              Preview
+            </button>
             ${unsafeHTML(this._previewContent)}
           </div>
         </div>
