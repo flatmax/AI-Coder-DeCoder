@@ -773,7 +773,7 @@ User clicks mode toggle
     └── Insert system message: "Switched to document mode"
 ```
 
-Mode switches are **instant** — the structural re-extraction (<5ms per changed file) produces unenriched outlines that are immediately usable for tier assembly. If any files need keyword re-enrichment (edited while in code mode), they are queued for background enrichment and a persistent toast informs the user. The mode switch does not wait for enrichment to complete.
+Mode switches are **instant** — the structural re-extraction (<5ms per changed file) produces unenriched outlines that are immediately usable for tier assembly. If any files need keyword re-enrichment (edited while in code mode), they are queued for background enrichment and a persistent toast informs the user. The mode switch does not wait for enrichment to complete. The KeyBERT sentence-transformer model is eagerly pre-initialized during Phase 2 of the background doc index build (before `doc_index_ready` is sent), so the first mode switch never triggers a ~10-second GIL-blocking model load.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 

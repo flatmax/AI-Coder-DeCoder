@@ -378,6 +378,28 @@ class LLMService:
             # Mark doc index as ready — mode switching and cross-ref now available
             self._doc_index_building = False
 
+            # Pre-initialize the KeyBERT model BEFORE sending doc_index_ready.
+            # Model loading is GIL-heavy (~10s for PyTorch weights) — if it
+            # happens lazily during the first enrich_single_file call or during
+            # a mode-switch enrichment queue, it blocks the event loop from
+            # delivering the RPC response.  By loading here, the model is warm
+            # before the user can click the doc mode button.
+            #
+            # This runs unconditionally (not gated on needs_enrichment) because
+            # even when all files are cached from disk, a future mode switch
+            # may discover mtime-changed files and queue them for enrichment.
+            # The model must be warm before that can happen.
+            if self._doc_index and self._doc_index._enricher:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        self._executor,
+                        lambda: self._doc_index._enricher._init_model(),
+                    )
+                    logger.info("KeyBERT model pre-initialized before doc_index_ready")
+                except Exception as e:
+                    logger.warning(f"Eager KeyBERT model pre-init failed: {e}")
+
             # Notify frontend that doc index is ready (mode not switched yet)
             if self._event_callback:
                 try:
