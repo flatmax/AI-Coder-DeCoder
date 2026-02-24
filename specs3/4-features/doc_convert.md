@@ -2,7 +2,7 @@
 
 ## Overview
 
-Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`) to markdown files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
+Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.tex`) to markdown files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
 
 Converted markdown is strictly superior in a git repo — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol. Document convert brings this benefit without requiring the user to run external tools manually.
 
@@ -19,6 +19,7 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
 | `.odt` | OpenDocument text | Full content similar to `.docx` |
+| `.tex` | LaTeX document | Structural elements (sections, lists, tables) converted; math blocks passed through as `$$...$$`. Requires `pypandoc` with Pandoc installed — see Conversion Backend |
 
 ## Conversion Backend
 
@@ -29,6 +30,19 @@ The primary conversion backend is **markitdown** (Microsoft's Python library):
 - Fits the existing packaging model (PyInstaller can bundle it)
 - Actively maintained, broad format coverage
 
+### LaTeX Backend
+
+LaTeX (`.tex`) files use **`pypandoc`** (a Python wrapper around Pandoc) instead of markitdown, since markitdown does not support LaTeX:
+
+- Pandoc is the gold standard for LaTeX-to-markdown conversion — it understands sections, lists, tables, bibliographies, and math
+- Math blocks are converted to `$$...$$` fenced notation, which most markdown renderers support
+- **Requires Pandoc installed as an external binary** — this is the one format where a system dependency is needed
+- If `pypandoc` or Pandoc is not available, `.tex` files are shown in the file list with a "requires Pandoc" badge and skipped during conversion. All other formats still work via markitdown
+
+The conversion dispatches per-format: markitdown for all supported formats, pypandoc for `.tex`. This is transparent to the user — the progress view shows the same per-file status regardless of which backend handled the file.
+
+### Installation
+
 If `markitdown` is not installed, the Doc Convert tab is hidden and conversion is unavailable (same graceful degradation pattern as KeyBERT — see [Document Mode — Graceful Degradation in Packaged Releases](../2-code-analysis/document_mode.md#graceful-degradation-in-packaged-releases)). Users running from source can install it with:
 
 ```bash
@@ -37,7 +51,7 @@ pip install ac-dc[docs]
 uv sync --extra docs
 ```
 
-The `[docs]` extra already includes `keybert`; `markitdown` is added to the same extra so a single install enables both document features.
+The `[docs]` extra already includes `keybert`; `markitdown` and `pypandoc` are added to the same extra so a single install enables all document features. Note that `pypandoc` additionally requires [Pandoc](https://pandoc.org/installing.html) on the system PATH — without it, only `.tex` conversion is unavailable.
 
 ## Clean Working Tree Gate
 
@@ -226,7 +240,7 @@ Document convert is controlled via `app.json`:
 {
   "doc_convert": {
     "enabled": true,
-    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt"],
+    "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".tex"],
     "max_source_size_mb": 50
   }
 }
@@ -235,7 +249,7 @@ Document convert is controlled via `app.json`:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `true` | Enable/disable doc convert entirely. When `false`, the tab is hidden |
-| `extensions` | list[str] | All supported | Which file extensions to show for conversion. Remove entries to skip formats |
+| `extensions` | list[str] | All supported | Which file extensions to show for conversion. Remove entries to skip formats. `.tex` requires Pandoc — if Pandoc is unavailable, `.tex` files are shown but skipped |
 | `max_source_size_mb` | int | `50` | Source files larger than this are shown with a warning badge and skipped during conversion. Prevents enormous CSVs or PDFs from producing unwieldy markdown |
 
 ## Integration with Document Index
@@ -270,6 +284,7 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Convert `.pdf` (50 pages) | ~1-5s | Depends on text extraction complexity |
 | Convert `.xlsx` (5 sheets) | ~100-300ms | Table formatting is fast |
 | Convert `.pptx` (30 slides) | ~300-800ms | Slide text extraction |
+| Convert `.tex` (50 pages) | ~500ms-2s | pypandoc/Pandoc; depends on macro complexity |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
 Conversion runs in a background executor and does not block UI interaction. The progress view provides per-file feedback.
@@ -297,6 +312,8 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - Extracted images linked from markdown with correct relative paths
 - Orphan images cleaned up on re-conversion (images in old header but not in new output)
 - Graceful degradation when markitdown is not installed (tab hidden, no errors)
+- Graceful degradation when pypandoc/Pandoc is not installed (`.tex` files shown with badge, skipped during conversion, other formats unaffected)
+- LaTeX conversion preserves math blocks as `$$...$$` in output markdown
 - Configuration `enabled: false` hides the tab
 - Custom extension list in config is respected
 - Files exceeding `max_source_size_mb` are shown with warning and skipped during conversion
