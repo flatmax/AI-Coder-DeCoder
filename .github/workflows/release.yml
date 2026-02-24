@@ -116,6 +116,22 @@ jobs:
             --hidden-import=ac_dc.url_handler \
             --hidden-import=ac_dc.url_cache \
             --hidden-import=ac_dc.symbol_index \
+            --hidden-import=ac_dc.symbol_index.parser \
+            --hidden-import=ac_dc.symbol_index.cache \
+            --hidden-import=ac_dc.symbol_index.compact_format \
+            --hidden-import=ac_dc.symbol_index.import_resolver \
+            --hidden-import=ac_dc.symbol_index.index \
+            --hidden-import=ac_dc.symbol_index.reference_index \
+            --hidden-import=ac_dc.symbol_index.extractors \
+            --hidden-import=ac_dc.doc_index \
+            --hidden-import=ac_dc.doc_index.cache \
+            --hidden-import=ac_dc.doc_index.index \
+            --hidden-import=ac_dc.doc_index.formatter \
+            --hidden-import=ac_dc.doc_index.keyword_enricher \
+            --hidden-import=ac_dc.doc_index.reference_index \
+            --hidden-import=ac_dc.doc_index.extractors \
+            --hidden-import=ac_dc.doc_convert \
+            --hidden-import=ac_dc.base_cache \
             --hidden-import=jrpc_oo \
             src/ac_dc/__main__.py
 
