@@ -303,40 +303,193 @@ def _merge_svg_text_elements(svg_text):
     return "\n".join(result)
 
 
-def _pdf_pages_to_svgs(pdf_path):
-    """Convert each page of a PDF to an SVG string using PyMuPDF.
+def _pdf_page_has_images(page):
+    """Check if a PDF page contains raster images or non-trivial vector graphics.
 
-    Text elements are post-processed to merge per-character glyphs back
-    into readable text runs.
+    Returns True only when there is visual content beyond styled text —
+    i.e. embedded raster images, curves, filled shapes, or complex paths.
+    Simple lines/rectangles used for borders and underlines are ignored.
+    """
+    # Check for raster images
+    if page.get_images(full=True):
+        return True
+
+    # Check for non-trivial vector drawings.
+    # get_drawings() returns path dicts for every line, rect, curve, etc.
+    # Many PDF generators emit rectangles and lines for borders, table
+    # rules, and underlines — we filter those out.
+    drawings = page.get_drawings()
+    significant = 0
+    for d in drawings:
+        items = d.get("items", [])
+        has_curve = False
+        has_fill = d.get("fill") is not None  # filled shape (not just stroked)
+        n_points = 0
+        for item in items:
+            op = item[0]
+            if op in ("c", "qu"):
+                has_curve = True
+                break
+            n_points += 1
+
+        if has_curve:
+            significant += 1
+        elif has_fill and n_points > 2:
+            # Filled polygon with > 2 segments — likely a real shape
+            significant += 1
+        elif n_points > 4:
+            # Complex path with many segments
+            significant += 1
+
+        # Threshold: a handful of decorative rects/lines is not "images"
+        if significant >= 3:
+            return True
+
+    return False
+
+
+def _pdf_extract_page_text(page):
+    """Extract structured text from a PDF page as markdown.
+
+    Uses PyMuPDF's text extraction with block/line structure to produce
+    readable markdown with paragraph breaks.
+    """
+    blocks = page.get_text("dict", flags=0)["blocks"]
+    md_parts = []
+
+    for block in blocks:
+        if block["type"] != 0:  # 0 = text block
+            continue
+
+        block_lines = []
+        for line in block.get("lines", []):
+            spans_text = []
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                if text:
+                    spans_text.append(text)
+            if spans_text:
+                block_lines.append(" ".join(spans_text))
+
+        if block_lines:
+            paragraph = " ".join(block_lines)
+            md_parts.append(paragraph)
+
+    return "\n\n".join(md_parts)
+
+
+def _pdf_page_to_svg(page):
+    """Convert a single PDF page to an SVG string using PyMuPDF.
+
+    The full-page SVG is post-processed to remove text glyph <use>
+    elements (which reference font defs), keeping only the graphical
+    content — images, paths, shapes.  The text is already extracted
+    separately into the markdown file.
+    """
+    svg_text = page.get_svg_image()
+    svg_text = _strip_svg_text_elements(svg_text)
+    return svg_text
+
+
+def _strip_svg_text_elements(svg_text):
+    """Remove per-character <use data-text> glyph elements from an SVG.
+
+    Also removes unused font <symbol> definitions from <defs> that were
+    only referenced by the stripped <use> elements.
+
+    This leaves behind only the graphical content (images, paths, rects,
+    circles, etc.) while the text lives in the companion markdown file.
+    """
+    lines = svg_text.split("\n")
+    result = []
+    # Collect font symbol ids referenced by text glyphs so we can
+    # strip their <symbol> defs as well.
+    font_ids_to_strip = set()
+    stripped_use_lines = []
+
+    # First pass: identify text <use> lines and collect their href targets
+    keep_flags = []
+    _href_re = re.compile(r'xlink:href="#([^"]*)"')
+    for line in lines:
+        stripped = line.strip()
+        parsed = _parse_use_element(stripped)
+        if parsed is not None:
+            keep_flags.append(False)
+            m = _href_re.search(stripped)
+            if m:
+                font_ids_to_strip.add(m.group(1))
+        else:
+            keep_flags.append(True)
+
+    # Second pass: emit non-text lines, also stripping font <symbol> defs
+    in_stripped_symbol = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Skip text glyph <use> elements
+        if not keep_flags[i]:
+            continue
+
+        # Skip <symbol> blocks for font glyphs
+        if not in_stripped_symbol:
+            # Check for <symbol id="font_..."> opening
+            m = re.match(r'<symbol\s+id="([^"]*)"', stripped)
+            if m and m.group(1) in font_ids_to_strip:
+                in_stripped_symbol = True
+                continue
+        else:
+            if stripped == '</symbol>' or stripped.startswith('</symbol>'):
+                in_stripped_symbol = False
+                continue
+            # Skip lines inside stripped symbol
+            continue
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
+def _pdf_extract_pages(pdf_path):
+    """Extract content from each page of a PDF.
+
+    For each page, extracts text as markdown.  Pages that also contain
+    images or vector graphics get an SVG export of the full page.
 
     Args:
         pdf_path: path to the PDF file
 
     Returns:
-        list of SVG strings, one per page, or None if PyMuPDF unavailable.
+        list of dicts per page:
+            {"text": str, "svg": str|None, "has_images": bool}
+        or None if PyMuPDF is unavailable.
     """
     try:
         import fitz  # PyMuPDF
     except ImportError:
         logger.warning(
-            "PyMuPDF (fitz) is required for PDF→SVG conversion. "
+            "PyMuPDF (fitz) is required for PDF conversion. "
             "Install with: pip install pymupdf"
         )
         return None
 
-    svgs = []
+    pages = []
     try:
         doc = fitz.open(str(pdf_path))
         for page in doc:
-            svg_text = page.get_svg_image()
-            svg_text = _merge_svg_text_elements(svg_text)
-            svgs.append(svg_text)
+            text = _pdf_extract_page_text(page)
+            has_images = _pdf_page_has_images(page)
+            svg = _pdf_page_to_svg(page) if has_images else None
+            pages.append({
+                "text": text,
+                "svg": svg,
+                "has_images": has_images,
+            })
         doc.close()
     except Exception as e:
-        logger.error("PyMuPDF SVG extraction failed: %s", e)
+        logger.error("PyMuPDF extraction failed: %s", e)
         return None
 
-    return svgs
+    return pages
 
 
 def _should_skip_dir(dirname):
@@ -701,6 +854,25 @@ class DocConvert:
 
         Returns a list of SVG strings, or None if the pipeline is unavailable.
         """
+        pages = self._extract_pdf_pages(abs_path)
+        if pages is None:
+            return None
+        # Legacy interface: return just the SVG strings for each page.
+        # Pages without images get a full SVG export as fallback.
+        svgs = []
+        for page in pages:
+            if page["svg"]:
+                svgs.append(page["svg"])
+            else:
+                # Text-only page — still need an SVG for the slide-based flow
+                svgs.append(page.get("svg") or "")
+        return svgs if any(svgs) else None
+
+    def _extract_pdf_pages(self, abs_path):
+        """Extract structured content from a PDF via LibreOffice + PyMuPDF.
+
+        Returns a list of page dicts from _pdf_extract_pages, or None.
+        """
         tmpdir = None
         try:
             tmpdir = tempfile.mkdtemp(prefix="docuvert_")
@@ -713,8 +885,7 @@ class DocConvert:
                 if pdf_path is None:
                     return None
 
-            svgs = _pdf_pages_to_svgs(pdf_path)
-            return svgs
+            return _pdf_extract_pages(pdf_path)
         finally:
             if tmpdir:
                 try:
@@ -724,26 +895,37 @@ class DocConvert:
 
     def _convert_presentation_to_svgs(self, rel_path, abs_path, output_rel,
                                        output_abs, source_name, source_hash, ext):
-        """Convert a presentation/PDF to per-page SVG files + index markdown.
+        """Convert a presentation/PDF to markdown with optional SVG images.
 
-        Pipeline: source → LibreOffice → PDF → PyMuPDF → SVG per page.
+        Pipeline: source → LibreOffice → PDF → PyMuPDF → text + SVGs.
+
+        Text-only pages become markdown paragraphs in the output .md file.
+        Pages with images/vector graphics also get an SVG export that is
+        linked from the markdown.
+
         Falls back to python-pptx for .pptx if LibreOffice/PyMuPDF unavailable.
 
         Returns dict with {path, status, output_path, images?}
         """
-        # Try the high-fidelity PDF→SVG pipeline first
-        slides = self._convert_to_svgs_via_pdf(abs_path)
+        # Try the hybrid text+SVG pipeline first
+        pages = self._extract_pdf_pages(abs_path)
 
         # Fallback for .pptx if the PDF pipeline is not available
-        if not slides and ext == ".pptx":
+        if not pages and ext == ".pptx":
             logger.info(
                 "PDF pipeline unavailable, falling back to python-pptx "
                 "for %s", rel_path,
             )
             slides = self._extract_pptx_slides(abs_path)
+            if slides:
+                # Wrap in page dicts for unified handling below
+                pages = [
+                    {"text": "", "svg": svg, "has_images": True}
+                    for svg in slides
+                ]
 
         # Fallback for .odp — try markitdown
-        if not slides and ext == ".odp":
+        if not pages and ext == ".odp":
             md_content = self._convert_with_markitdown(abs_path)
             if md_content is None:
                 return {
@@ -760,14 +942,14 @@ class DocConvert:
                 "output_path": output_rel,
             }
 
-        # For .pdf with no SVG pipeline, return error
-        if not slides:
+        # For .pdf with no pipeline, return error
+        if not pages:
             return {
                 "path": rel_path,
                 "status": "failed",
                 "error": (
-                    "SVG conversion requires LibreOffice and PyMuPDF. "
-                    "Install PyMuPDF with: pip install pymupdf"
+                    "PDF conversion requires PyMuPDF. "
+                    "Install with: pip install pymupdf"
                 ),
             }
 
@@ -775,53 +957,71 @@ class DocConvert:
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(rel_path).stem
 
-        # Create subdirectory for page SVGs
+        # Create subdirectory for page SVGs (only if needed)
         slides_dir = output_dir / stem
-        slides_dir.mkdir(parents=True, exist_ok=True)
+        has_any_svg = any(p["svg"] for p in pages)
+        if has_any_svg:
+            slides_dir.mkdir(parents=True, exist_ok=True)
 
         # Zero-pad page numbers based on total count
-        n_digits = len(str(len(slides)))
+        n_pages = len(pages)
+        n_digits = len(str(n_pages))
         page_label = "slide" if ext in (".pptx", ".odp") else "page"
+        heading_label = "Slide" if ext in (".pptx", ".odp") else "Page"
 
         svg_filenames = []
-        for i, page_svg in enumerate(slides, start=1):
-            padded = str(i).zfill(n_digits)
-            filename = f"{padded}_{page_label}.svg"
-            rel_filename = f"{stem}/{filename}"
-            svg_path = slides_dir / filename
-            prov = _build_svg_provenance_header(
-                f"{stem}.md", source_name, source_hash, i,
-            )
-            svg_path.write_text(prov + "\n" + page_svg)
-            svg_filenames.append(rel_filename)
-            logger.info(f"Saved {page_label} {i}: {rel_filename}")
+        md_lines = []
 
-        # Build index markdown
-        header = _build_provenance_header(
-            source_name, source_hash, svg_filenames,
-        )
-        heading_label = "Slide" if ext in (".pptx", ".odp") else "Page"
-        md_lines = [header, "", f"# {stem}", ""]
-        n_digits_md = len(str(len(svg_filenames)))
-        for i, filename in enumerate(svg_filenames, start=1):
-            padded = str(i).zfill(n_digits_md)
+        for i, page_data in enumerate(pages, start=1):
+            padded = str(i).zfill(n_digits)
+            text = page_data.get("text", "").strip()
+            svg = page_data.get("svg")
+
             md_lines.append(f"## {heading_label} {padded}")
             md_lines.append("")
-            md_lines.append(f"![{heading_label} {padded}]({filename})")
-            md_lines.append("")
 
-        output_abs.write_text("\n".join(md_lines))
+            # Add extracted text as markdown
+            if text:
+                md_lines.append(text)
+                md_lines.append("")
+
+            # Add SVG image link for pages with graphics
+            if svg:
+                filename = f"{padded}_{page_label}.svg"
+                rel_filename = f"{stem}/{filename}"
+                svg_path = slides_dir / filename
+                prov = _build_svg_provenance_header(
+                    f"{stem}.md", source_name, source_hash, i,
+                )
+                svg_path.write_text(prov + "\n" + svg)
+                svg_filenames.append(rel_filename)
+                md_lines.append(f"![{heading_label} {padded}]({rel_filename})")
+                md_lines.append("")
+                logger.info(f"Saved {page_label} {i}: {rel_filename}")
+
+        # Build final markdown with provenance header
+        header = _build_provenance_header(
+            source_name, source_hash, svg_filenames or None,
+        )
+        full_md = header + "\n\n" + f"# {stem}\n\n" + "\n".join(md_lines)
+        output_abs.write_text(full_md)
+
+        svg_count = len(svg_filenames)
+        text_only = n_pages - svg_count
         logger.info(
             f"Converted {rel_path} → {output_rel} "
-            f"({len(svg_filenames)} {page_label}s)"
+            f"({n_pages} {page_label}s: {text_only} text-only, "
+            f"{svg_count} with images)"
         )
 
-        return {
+        result = {
             "path": rel_path,
             "status": "converted",
             "output_path": output_rel,
-            "images": svg_filenames,
         }
+        if svg_filenames:
+            result["images"] = svg_filenames
+        return result
 
     def _extract_pptx_slides(self, abs_path):
         """Extract slides from a .pptx file as SVG strings.
