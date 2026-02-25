@@ -1,15 +1,19 @@
 """Document Convert — convert non-markdown documents to markdown.
 
 Converts .docx, .pdf, .pptx, .xlsx, .csv, .rtf, .odt, .odp files
-to markdown using markitdown (pure Python). PPTX files produce per-slide
-SVG exports via python-pptx. Images embedded as data URIs are extracted
-and saved as separate files. Requires a clean git working tree.
+to markdown using markitdown (pure Python). Presentation and PDF files
+produce per-page SVG exports via headless LibreOffice + PyMuPDF for
+full visual fidelity. Images embedded as data URIs are extracted and
+saved as separate files. Requires a clean git working tree.
 """
 
 import hashlib
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -116,7 +120,223 @@ def _output_path_for(source_path):
 
 
 # Extensions that produce per-page/per-slide SVG output instead of markdown
-_SVG_EXPORT_EXTENSIONS = {".pptx", ".odp"}
+_SVG_EXPORT_EXTENSIONS = {".pptx", ".odp", ".pdf"}
+
+
+def _is_libreoffice_available():
+    """Check if LibreOffice is available on the PATH."""
+    for name in ("libreoffice", "soffice"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _libreoffice_to_pdf(source_path, output_dir):
+    """Convert a document to PDF using headless LibreOffice.
+
+    Args:
+        source_path: absolute path to the source file
+        output_dir: directory to write the PDF into
+
+    Returns:
+        Path to the generated PDF, or None on failure.
+    """
+    lo = _is_libreoffice_available()
+    if not lo:
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                lo,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", str(output_dir),
+                str(source_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "LibreOffice PDF conversion failed: %s",
+                result.stderr.decode(errors="replace").strip(),
+            )
+            return None
+    except FileNotFoundError:
+        logger.warning("LibreOffice not found on PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("LibreOffice conversion timed out")
+        return None
+
+    stem = Path(source_path).stem
+    pdf_path = Path(output_dir) / f"{stem}.pdf"
+    if pdf_path.exists():
+        return pdf_path
+    # LibreOffice sometimes normalises the name — look for any PDF
+    for f in Path(output_dir).glob("*.pdf"):
+        return f
+    return None
+
+
+# Regex to match a <use> element with data-text and transform matrix.
+# PyMuPDF emits glyphs as:
+#   <use data-text="X" xlink:href="..." transform="matrix(a,b,c,d,tx,ty)" fill="..."/>
+# Attributes may appear in any order and with varying whitespace.
+_SVG_USE_TEXT_RE = re.compile(
+    r'<use\b([^>]*?)\bdata-text="([^"]*)"([^>]*?)/>'
+)
+_SVG_USE_TRANSFORM_RE = re.compile(
+    r'\btransform="matrix\(([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^)]+)\)"'
+)
+_SVG_USE_FILL_RE = re.compile(r'\bfill="([^"]*)"')
+
+
+def _parse_use_element(stripped):
+    """Parse a <use data-text="..."> element.
+
+    Returns (char, tx, ty, sx, sy, fill) or None if not a text glyph element.
+    """
+    m = _SVG_USE_TEXT_RE.match(stripped)
+    if not m:
+        return None
+
+    before_attr = m.group(1)
+    char = m.group(2)
+    after_attr = m.group(3)
+    all_attrs = before_attr + after_attr
+
+    tm = _SVG_USE_TRANSFORM_RE.search(all_attrs)
+    if not tm:
+        return None
+
+    sx = float(tm.group(1))
+    sy = float(tm.group(4))
+    tx = float(tm.group(5))
+    ty = float(tm.group(6))
+
+    fm = _SVG_USE_FILL_RE.search(all_attrs)
+    fill = fm.group(1) if fm else "#000000"
+
+    return (char, tx, ty, sx, sy, fill)
+
+
+def _merge_svg_text_elements(svg_text):
+    """Merge per-character <use data-text> elements into <text> runs.
+
+    PyMuPDF's get_svg_image() emits each glyph as an individual <use>
+    element referencing a font glyph definition, with a transform matrix
+    for positioning.  This post-processor groups consecutive <use> elements
+    that share the same y-coordinate (within tolerance), same font scale,
+    and same fill colour, then emits a single <text> element for each run.
+
+    The transform matrix is: matrix(sx, 0, 0, -sy, tx, ty)
+    where sx/sy are the font scale and tx/ty are the position.
+    """
+    lines = svg_text.split("\n")
+    result = []
+    # Each pending item: (char, tx, ty, sx, sy, fill, original_line)
+    pending = []
+
+    def _flush():
+        """Write the pending run as a single <text> element."""
+        if not pending:
+            return
+        if len(pending) == 1:
+            # Single char — keep original <use> element unchanged
+            result.append(pending[0][6])
+            pending.clear()
+            return
+
+        # Compute font size from the scale factor
+        sy = abs(pending[0][4])
+        font_size = round(sy, 2)
+        tx0 = pending[0][1]
+        ty0 = pending[0][2]
+        fill = pending[0][5]
+        merged_text = "".join(item[0] for item in pending)
+
+        # Escape XML special characters
+        escaped = (
+            merged_text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+        result.append(
+            f'<text x="{round(tx0, 3)}" y="{round(ty0, 3)}"'
+            f' font-size="{font_size}" fill="{fill}"'
+            f'>{escaped}</text>'
+        )
+        pending.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        parsed = _parse_use_element(stripped)
+        if not parsed:
+            _flush()
+            result.append(line)
+            continue
+
+        char, tx, ty, sx, sy, fill = parsed
+
+        # Build a grouping key: font scale + fill
+        font_key = (round(abs(sy), 2), fill)
+
+        if pending:
+            prev_ty = pending[-1][2]
+            prev_key = (round(abs(pending[-1][4]), 2), pending[-1][5])
+            # Same line: y within tolerance and same style
+            y_tol = 0.5
+            if abs(ty - prev_ty) < y_tol and font_key == prev_key:
+                pending.append((char, tx, ty, sx, sy, fill, line))
+                continue
+            else:
+                _flush()
+
+        pending.append((char, tx, ty, sx, sy, fill, line))
+
+    _flush()
+    return "\n".join(result)
+
+
+def _pdf_pages_to_svgs(pdf_path):
+    """Convert each page of a PDF to an SVG string using PyMuPDF.
+
+    Text elements are post-processed to merge per-character glyphs back
+    into readable text runs.
+
+    Args:
+        pdf_path: path to the PDF file
+
+    Returns:
+        list of SVG strings, one per page, or None if PyMuPDF unavailable.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        logger.warning(
+            "PyMuPDF (fitz) is required for PDF→SVG conversion. "
+            "Install with: pip install pymupdf"
+        )
+        return None
+
+    svgs = []
+    try:
+        doc = fitz.open(str(pdf_path))
+        for page in doc:
+            svg_text = page.get_svg_image()
+            svg_text = _merge_svg_text_elements(svg_text)
+            svgs.append(svg_text)
+        doc.close()
+    except Exception as e:
+        logger.error("PyMuPDF SVG extraction failed: %s", e)
+        return None
+
+    return svgs
 
 
 def _should_skip_dir(dirname):
@@ -155,8 +375,18 @@ class DocConvert:
 
     def is_available(self):
         """RPC: Check if doc convert is available."""
+        lo = _is_libreoffice_available()
+        has_pymupdf = False
+        try:
+            import fitz  # noqa: F401
+            has_pymupdf = True
+        except ImportError:
+            pass
         return {
             "available": self.available,
+            "libreoffice": lo is not None,
+            "pymupdf": has_pymupdf,
+            "pdf_pipeline": lo is not None and has_pymupdf,
         }
 
     def scan_convertible_files(self):
@@ -245,11 +475,20 @@ class DocConvert:
         # Sort by path
         files.sort(key=lambda f: f["path"])
 
+        lo = _is_libreoffice_available()
+        has_pymupdf = False
+        try:
+            import fitz  # noqa: F401
+            has_pymupdf = True
+        except ImportError:
+            pass
+
         return {
             "clean": is_clean,
             "clean_message": clean_msg,
             "files": files,
             "available": self.available,
+            "pdf_pipeline": lo is not None and has_pymupdf,
         }
 
     def _detect_status(self, source_abs, output_abs, output_rel):
@@ -399,7 +638,7 @@ class DocConvert:
         # Clean up old orphan images if re-converting
         old_images = self._get_old_images(output_abs)
 
-        # Presentation formats → per-slide SVG export
+        # Presentation and PDF formats → per-page SVG export
         if ext in _SVG_EXPORT_EXTENSIONS:
             return self._convert_presentation_to_svgs(
                 rel_path, abs_path, output_rel, output_abs,
@@ -457,18 +696,54 @@ class DocConvert:
             result["images"] = image_names
         return result
 
+    def _convert_to_svgs_via_pdf(self, abs_path):
+        """Convert a document to SVG pages via LibreOffice PDF + PyMuPDF.
+
+        Returns a list of SVG strings, or None if the pipeline is unavailable.
+        """
+        tmpdir = None
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="docuvert_")
+
+            ext = abs_path.suffix.lower()
+            if ext == ".pdf":
+                pdf_path = abs_path
+            else:
+                pdf_path = _libreoffice_to_pdf(abs_path, tmpdir)
+                if pdf_path is None:
+                    return None
+
+            svgs = _pdf_pages_to_svgs(pdf_path)
+            return svgs
+        finally:
+            if tmpdir:
+                try:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception:
+                    pass
+
     def _convert_presentation_to_svgs(self, rel_path, abs_path, output_rel,
                                        output_abs, source_name, source_hash, ext):
-        """Convert a presentation file to per-slide SVG files + index markdown.
+        """Convert a presentation/PDF to per-page SVG files + index markdown.
 
-        Each slide becomes an SVG file. A markdown index file links them all.
+        Pipeline: source → LibreOffice → PDF → PyMuPDF → SVG per page.
+        Falls back to python-pptx for .pptx if LibreOffice/PyMuPDF unavailable.
 
         Returns dict with {path, status, output_path, images?}
         """
-        if ext == ".pptx":
+        # Try the high-fidelity PDF→SVG pipeline first
+        slides = self._convert_to_svgs_via_pdf(abs_path)
+
+        # Fallback for .pptx if the PDF pipeline is not available
+        if not slides and ext == ".pptx":
+            logger.info(
+                "PDF pipeline unavailable, falling back to python-pptx "
+                "for %s", rel_path,
+            )
             slides = self._extract_pptx_slides(abs_path)
-        else:
-            # .odp — try markitdown fallback, no SVG export yet
+
+        # Fallback for .odp — try markitdown
+        if not slides and ext == ".odp":
             md_content = self._convert_with_markitdown(abs_path)
             if md_content is None:
                 return {
@@ -485,54 +760,60 @@ class DocConvert:
                 "output_path": output_rel,
             }
 
+        # For .pdf with no SVG pipeline, return error
         if not slides:
             return {
                 "path": rel_path,
                 "status": "failed",
-                "error": "No slides extracted",
+                "error": (
+                    "SVG conversion requires LibreOffice and PyMuPDF. "
+                    "Install PyMuPDF with: pip install pymupdf"
+                ),
             }
 
         output_dir = output_abs.parent
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(rel_path).stem
 
-        # Create subdirectory for slide SVGs
+        # Create subdirectory for page SVGs
         slides_dir = output_dir / stem
         slides_dir.mkdir(parents=True, exist_ok=True)
 
-        # Zero-pad slide numbers based on total count
+        # Zero-pad page numbers based on total count
         n_digits = len(str(len(slides)))
+        page_label = "slide" if ext in (".pptx", ".odp") else "page"
 
         svg_filenames = []
-        for i, slide_svg in enumerate(slides, start=1):
+        for i, page_svg in enumerate(slides, start=1):
             padded = str(i).zfill(n_digits)
-            filename = f"{padded}_slide.svg"
+            filename = f"{padded}_{page_label}.svg"
             rel_filename = f"{stem}/{filename}"
             svg_path = slides_dir / filename
             prov = _build_svg_provenance_header(
                 f"{stem}.md", source_name, source_hash, i,
             )
-            svg_path.write_text(prov + "\n" + slide_svg)
+            svg_path.write_text(prov + "\n" + page_svg)
             svg_filenames.append(rel_filename)
-            logger.info(f"Saved slide {i}: {rel_filename}")
+            logger.info(f"Saved {page_label} {i}: {rel_filename}")
 
         # Build index markdown
         header = _build_provenance_header(
             source_name, source_hash, svg_filenames,
         )
+        heading_label = "Slide" if ext in (".pptx", ".odp") else "Page"
         md_lines = [header, "", f"# {stem}", ""]
         n_digits_md = len(str(len(svg_filenames)))
         for i, filename in enumerate(svg_filenames, start=1):
             padded = str(i).zfill(n_digits_md)
-            md_lines.append(f"## Slide {padded}")
+            md_lines.append(f"## {heading_label} {padded}")
             md_lines.append("")
-            md_lines.append(f"![Slide {padded}]({filename})")
+            md_lines.append(f"![{heading_label} {padded}]({filename})")
             md_lines.append("")
 
         output_abs.write_text("\n".join(md_lines))
         logger.info(
             f"Converted {rel_path} → {output_rel} "
-            f"({len(svg_filenames)} slides)"
+            f"({len(svg_filenames)} {page_label}s)"
         )
 
         return {
