@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
 - **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
 - **Image paste support** — drop screenshots into chat with persistent storage across sessions.
-- **Document convert** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown from a dedicated dialog tab. Presentations export per-slide SVGs. Requires a clean git working tree so all results appear as reviewable diffs. Install `pip install ac-dc[docs]` for conversion support.
+- **Document convert** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown from a dedicated dialog tab. PDFs and presentations extract text into markdown and export pages with images/vector graphics as SVGs. Requires a clean git working tree so all results appear as reviewable diffs. Install `pip install ac-dc[docs]` for conversion support. The full PDF/presentation pipeline also requires [LibreOffice](https://www.libreoffice.org/) (`soffice` on PATH) for format conversion and [PyMuPDF](https://pymupdf.readthedocs.io/) (`pip install pymupdf`) for page extraction — without them, `.pptx` falls back to python-pptx (basic SVG export) and `.pdf` conversion is unavailable.
 - **Voice dictation** via Web Speech API.
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
@@ -324,7 +324,8 @@ npm run build
 | [trafilatura](https://trafilatura.readthedocs.io/) | Web page content extraction |
 | [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/) | AWS Bedrock support |
 | [markitdown](https://github.com/microsoft/markitdown) | Document-to-markdown conversion (`.docx`, `.pdf`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) |
-| [python-pptx](https://python-pptx.readthedocs.io/) | PowerPoint per-slide SVG export |
+| [PyMuPDF](https://pymupdf.readthedocs.io/) | PDF text extraction and per-page SVG export |
+| [python-pptx](https://python-pptx.readthedocs.io/) | PowerPoint per-slide SVG export (fallback when LibreOffice unavailable) |
 
 **Frontend (JavaScript):**
 
@@ -336,6 +337,12 @@ npm run build
 | [Marked](https://marked.js.org/) | Markdown rendering |
 | [highlight.js](https://highlightjs.org/) | Syntax highlighting |
 | [diff](https://github.com/kpdecker/jsdiff) | Myers diff algorithm for edit block display |
+
+**System dependencies (optional):**
+
+| Tool | Purpose |
+|------|---------|
+| [LibreOffice](https://www.libreoffice.org/) | Headless conversion of `.pptx`, `.odp` → PDF for the full PDF pipeline (`soffice` must be on PATH). Not needed for `.docx`, `.xlsx`, `.csv`, `.rtf`, `.odt` (handled by markitdown) or `.pdf` (handled directly by PyMuPDF). Without LibreOffice, `.pptx` falls back to python-pptx for basic SVG export. |
 
 **Build & Deploy:**
 

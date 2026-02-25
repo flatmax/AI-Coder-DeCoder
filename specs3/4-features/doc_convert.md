@@ -2,7 +2,7 @@
 
 ## Overview
 
-Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) to markdown files, with per-slide SVG export for presentations. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally. All conversion dependencies are pure Python — no system-level binary installations are required.
+Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) to markdown files. PDFs and presentations use a hybrid pipeline: text is extracted into markdown paragraphs, and only pages containing images or vector graphics produce companion SVG files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
 
 Converted markdown is strictly superior in a git repo — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol. Document convert brings this benefit without requiring the user to run external tools manually.
 
@@ -13,8 +13,8 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 | Extension | Source Type | Conversion Notes |
 |-----------|-----------|-----------------|
 | `.docx` | Word document | Full content including tables, headings, lists |
-| `.pdf` | PDF document | Text extraction; layout-heavy PDFs may lose formatting |
-| `.pptx` | PowerPoint | Per-slide SVG export — each slide rendered as an SVG file in a subdirectory, linked from an index `.md` |
+| `.pdf` | PDF document | Text extracted into markdown paragraphs; pages with images/vector graphics also get per-page SVG exports |
+| `.pptx` | PowerPoint | Text extracted into markdown via PyMuPDF; slides with images/diagrams also get SVG exports. Falls back to python-pptx (full SVG per slide) when LibreOffice/PyMuPDF unavailable |
 | `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables |
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
@@ -23,7 +23,7 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 
 ## Conversion Backend
 
-All conversion uses **pure Python libraries** — no external binary dependencies (no Pandoc, no LibreOffice). This ensures the tool works in any Python environment without system-level package installation.
+Simple document formats (`.docx`, `.xlsx`, `.csv`, `.rtf`, `.odt`) use **pure Python libraries** with no external binary dependencies. PDF and presentation formats (`.pdf`, `.pptx`, `.odp`) additionally benefit from **LibreOffice** (headless, for format conversion to PDF) and **PyMuPDF** (for per-page text extraction and SVG export). The system degrades gracefully when these are unavailable.
 
 ### markitdown
 
@@ -34,16 +34,67 @@ The primary conversion backend is **markitdown** (Microsoft's Python library) in
 - Pure Python — fits the existing packaging model (PyInstaller can bundle it)
 - Actively maintained, broad format coverage
 
-### python-pptx (Presentation SVG Export)
+### LibreOffice (Headless PDF Conversion)
 
-PowerPoint (`.pptx`) files are converted using **python-pptx** directly, bypassing markitdown. Each slide is rendered as an SVG file containing:
+For `.pptx` and `.odp` files, the primary pipeline converts the source to PDF via **headless LibreOffice** (`soffice --headless --convert-to pdf`), then hands the PDF to PyMuPDF for extraction. LibreOffice is a **system dependency** — it must be installed separately and `soffice` must be on `PATH`.
+
+| Scenario | Behaviour |
+|----------|-----------|
+| LibreOffice available | `.pptx` / `.odp` → PDF → PyMuPDF text + SVG pipeline |
+| LibreOffice unavailable, `.pptx` | Falls back to python-pptx (full SVG per slide, no text extraction) |
+| LibreOffice unavailable, `.odp` | Falls back to markitdown |
+| `.pdf` files | LibreOffice not needed — PyMuPDF reads PDF directly |
+
+### PyMuPDF (PDF Text Extraction and SVG Export)
+
+**PyMuPDF** (`fitz`) provides the core PDF processing:
+
+- **Text extraction** — `page.get_text("dict")` extracts text blocks with line/span structure, converted to markdown paragraphs
+- **Image detection** — `page.get_images()` and `page.get_drawings()` determine which pages have visual content beyond styled text
+- **SVG export** — `page.get_svg_image()` renders the full page as SVG, then post-processing strips text glyph elements (since text is already in the markdown)
+
+#### Hybrid Text + SVG Pipeline
+
+For each PDF page:
+
+| Page content | Markdown output | SVG file? |
+|---|---|---|
+| Text only | Extracted text paragraphs | No |
+| Text + images/diagrams | Extracted text + `![Page N](link)` | Yes (graphics only) |
+| Images/diagrams only | `![Page N](link)` | Yes (graphics only) |
+
+#### Image Detection Heuristics
+
+Not all vector drawing commands indicate real images — PDF generators emit rectangles and lines for borders, table rules, and underlines. The detector uses a significance threshold:
+
+- **Raster images** (`page.get_images()`) → always significant
+- **Curves** (Bézier `c`, quadratic `qu` operations) → significant
+- **Filled polygons** with >2 segments → significant
+- **Complex paths** with >4 segments → significant
+- **Threshold**: ≥3 significant drawings required to trigger SVG export
+- Simple borders, underlines, and table rules → ignored
+
+#### SVG Text Stripping
+
+When SVG export is triggered, text glyph elements are stripped from the SVG since the text is already captured in the companion markdown. The stripping process:
+
+1. Identifies `<use data-text="...">` elements (PyMuPDF emits each character as a `<use>` referencing a font glyph `<symbol>` in `<defs>`)
+2. Collects the `xlink:href` targets of stripped `<use>` elements
+3. Removes the corresponding `<symbol id="font_...">` definitions from `<defs>`
+4. Keeps all graphical content: `<image>`, `<path>`, `<rect>`, `<circle>`, etc.
+
+This produces clean SVGs containing only the visual elements (diagrams, images, charts) while the text lives in the markdown file.
+
+### python-pptx (Presentation SVG Export — Fallback)
+
+When LibreOffice and PyMuPDF are unavailable, PowerPoint (`.pptx`) files fall back to **python-pptx** for direct SVG rendering. Each slide is rendered as an SVG file containing:
 
 - **Text shapes** — rendered as `<text>` elements with font size, weight, color, and alignment extracted from the slide
 - **Images** — embedded as base64 data URIs in `<image>` elements
 - **Tables** — rendered as `<rect>` borders with `<text>` cell content
 - **Slide dimensions** — converted from EMU (English Metric Units) to pixels at 96 DPI
 
-Slide SVGs are stored in a subdirectory named after the source file, with zero-padded slide numbers:
+In the fallback pipeline, slide SVGs are stored in a subdirectory named after the source file, with zero-padded slide numbers:
 
 ```
 docs/
@@ -56,6 +107,8 @@ docs/
 ```
 
 The index `.md` file links each slide SVG with heading and image syntax, making slides individually viewable in the SVG viewer and navigable from the document index.
+
+When the primary PyMuPDF pipeline is used, text-only slides appear as markdown paragraphs without a companion SVG. Only slides containing images or diagrams produce SVG files, so the subdirectory may contain fewer files than the total slide count.
 
 ### odfpy
 
@@ -71,7 +124,9 @@ pip install ac-dc[docs]
 uv sync --extra docs
 ```
 
-The `[docs]` extra includes `keybert`, `markitdown[all]`, `odfpy`, and `python-pptx` — a single install enables all document features. No system-level binary dependencies are required.
+The `[docs]` extra includes `keybert`, `markitdown[all]`, `odfpy`, `python-pptx`, and `pymupdf` — a single install enables all document features.
+
+For the full PDF/presentation pipeline, **LibreOffice** must also be installed as a system dependency (`soffice` on PATH). Without it, `.pptx` falls back to python-pptx and `.pdf` is handled directly by PyMuPDF (no LibreOffice needed for `.pdf`).
 
 ## Clean Working Tree Gate
 
@@ -134,7 +189,7 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original. Presentation slides are placed in a subdirectory:
+Converted files are placed as **siblings** to the original. Presentation and PDF slides/pages are placed in a subdirectory (only for pages with graphics):
 
 ```
 docs/
@@ -145,11 +200,18 @@ docs/
     budget.xlsx                    ← source
     budget.md                      ← converted output
     presentation.pptx              ← source
-    presentation.md                ← index markdown
-    presentation/                  ← slide subdirectory
-        01_slide.svg               ← slide 1
-        02_slide.svg               ← slide 2
+    presentation.md                ← markdown with text + image links
+    presentation/                  ← slide subdirectory (graphics only)
+        03_slide.svg               ← slide 3 (had diagrams)
+        07_slide.svg               ← slide 7 (had images)
+    report.pdf                     ← source
+    report.md                      ← markdown with text + image links
+    report/                        ← page subdirectory (graphics only)
+        02_page.svg                ← page 2 (had figures)
+        05_page.svg                ← page 5 (had charts)
 ```
+
+Text-only pages/slides appear as markdown paragraphs in the `.md` file without companion SVGs. The subdirectory is only created when at least one page has graphical content.
 
 ## Image Handling
 
@@ -324,7 +386,27 @@ When `markitdown` is not installed:
 
 When `python-pptx` is not installed, `.pptx` conversion raises a clear error message directing the user to `pip install ac-dc[docs]`.
 
-The feature is entirely optional — the document index, mode toggle, keyword enrichment, and all other doc-mode features work without it. All conversion dependencies are pure Python — no system-level binary installations are required.
+When **PyMuPDF** is not installed:
+- `.pdf` conversion is unavailable (clear error message)
+- `.pptx` and `.odp` fall back to non-PDF pipelines (python-pptx or markitdown)
+
+When **LibreOffice** is not installed:
+- `.pptx` falls back to python-pptx (full SVG per slide, no text extraction)
+- `.odp` falls back to markitdown
+- `.pdf` files are unaffected (PyMuPDF reads them directly)
+
+The `is_available()` RPC method reports the status of each dependency:
+
+```python
+{
+    "available": True,        # markitdown installed
+    "libreoffice": True,      # soffice on PATH
+    "pymupdf": True,          # fitz importable
+    "pdf_pipeline": True,     # both LibreOffice and PyMuPDF available
+}
+```
+
+The feature is entirely optional — the document index, mode toggle, keyword enrichment, and all other doc-mode features work without it.
 
 ## Performance
 
@@ -334,7 +416,8 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | SHA-256 hash of source document | <10ms | Even for large (50MB) files |
 | Provenance header parsing | <1ms | Single regex on first line |
 | Convert `.docx` (10 pages) | ~200-500ms | markitdown, depends on content complexity |
-| Convert `.pdf` (50 pages) | ~1-5s | Depends on text extraction complexity |
+| Convert `.pdf` (50 pages, text-only) | ~1-3s | PyMuPDF text extraction, no SVG export |
+| Convert `.pdf` (50 pages, mixed) | ~3-8s | Text extraction + SVG export + text stripping for image pages |
 | Convert `.xlsx` (5 sheets) | ~100-300ms | Table formatting is fast |
 | Convert `.pptx` (30 slides) | ~300-800ms | python-pptx SVG export |
 | Convert `.odp` (30 slides) | ~300-800ms | markitdown |
@@ -349,7 +432,7 @@ Conversion runs in a background executor and does not block UI interaction. The 
 |--------|-------------|
 | `DocConvert.scan_convertible_files()` | Returns list of convertible files with status badges. Includes clean-tree check |
 | `DocConvert.convert_files(paths: list[str])` | Converts selected files. Returns per-file results. Requires clean tree |
-| `DocConvert.is_available()` | Returns whether markitdown is installed |
+| `DocConvert.is_available()` | Returns dict with availability of markitdown, LibreOffice, PyMuPDF, and combined pdf_pipeline status |
 
 ## Testing
 
@@ -373,6 +456,16 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - PPTX index markdown links all slide SVGs with heading and image syntax
 - Graceful degradation when markitdown is not installed (tab hidden, no errors)
 - Graceful degradation when python-pptx is not installed (clear error message)
+- Graceful degradation when PyMuPDF is not installed (`.pdf` unavailable, fallbacks used)
+- Graceful degradation when LibreOffice is not installed (`.pptx` falls back to python-pptx, `.odp` falls back to markitdown)
+- `is_available()` reports status of all dependencies (markitdown, LibreOffice, PyMuPDF, pdf_pipeline)
+- PDF text-only pages produce markdown paragraphs without SVG files
+- PDF pages with raster images produce companion SVG with text stripped
+- PDF pages with non-trivial vector graphics (curves, filled shapes) produce SVG
+- PDF pages with only simple borders/underlines are treated as text-only
+- SVG text stripping removes `<use data-text>` elements and their font `<symbol>` defs
+- SVG text stripping preserves graphical content (`<image>`, `<path>`, `<rect>`, etc.)
+- Image detection threshold requires ≥3 significant drawings (not just decorative rules)
 - Configuration `enabled: false` hides the tab
 - Custom extension list in config is respected
 - Files exceeding `max_source_size_mb` are shown with warning and skipped during conversion
