@@ -47,8 +47,8 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 ## Workflow
 
 1. **Start** — Run `ac-dc` in your git repo. Browser opens automatically.
-2. **Select files** — Check files in the picker to add their full content to context.
-3. **Chat** — Ask the LLM to understand, modify, or create code.
+2. **Chat** — Ask the LLM to understand, modify, or create code. The symbol map gives it enough structure to identify which files are relevant.
+3. **Add files** — When the LLM references files, click the file mentions in the chat to add them to context. You can also manually check files in the picker.
 4. **Review edits** — Applied edits appear in the diff viewer with two-level highlighting. SVG files open in a dedicated viewer with pan/zoom and inline editing.
 5. **Commit** — Click 💾 to stage all, generate an LLM commit message, and commit.
 6. **Iterate** — File context and cache tiers evolve as you work.
