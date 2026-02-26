@@ -209,12 +209,10 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `system.md` | Main LLM system prompt | Markdown |
 | `system_extra.md` | Additional project-specific instructions | Markdown |
 | `system_doc.md` | Document mode system prompt | Markdown |
-| `snippets.json` | Quick-insert prompt buttons | JSON |
-| `doc-snippets.json` | Document mode snippet buttons | JSON |
+| `snippets.json` | Quick-insert prompt buttons (code, review, and doc modes) | JSON |
 | `doc_convert` | Doc convert settings (extensions, size limits) | JSON (in `app.json`) |
 | `compaction.md` | History compaction skill prompt | Markdown |
 | `review.md` | Code review system prompt | Markdown |
-| `review-snippets.json` | Review mode snippet buttons | JSON |
 | `commit.md` | Commit message generation prompt | Markdown |
 | `system_reminder.md` | Edit block reminder injected before each user message | Markdown |
 
@@ -239,6 +237,15 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `history_compaction.verbatim_window_tokens` | `4000` | Recent tokens kept verbatim |
 | `history_compaction.summary_budget_tokens` | `500` | Max tokens for compaction summary |
 | `history_compaction.min_verbatim_exchanges` | `2` | Minimum recent exchanges always kept |
+| `doc_index.keyword_model` | `BAAI/bge-small-en-v1.5` | KeyBERT model for keyword extraction |
+| `doc_index.keywords_enabled` | `true` | Enable keyword enrichment |
+| `doc_index.keywords_top_n` | `3` | Keywords per section |
+| `doc_index.keywords_ngram_range` | `[1, 2]` | N-gram range for keyword extraction |
+| `doc_index.keywords_min_section_chars` | `50` | Minimum section length for keyword extraction |
+| `doc_index.keywords_min_score` | `0.3` | Minimum keyword relevance score |
+| `doc_index.keywords_diversity` | `0.5` | Keyword diversity (MMR) |
+| `doc_index.keywords_tfidf_fallback_chars` | `150` | Fallback to TF-IDF below this section length |
+| `doc_index.keywords_max_doc_freq` | `0.6` | Maximum document frequency threshold |
 | `doc_convert.enabled` | `true` | Enable/disable document conversion |
 | `doc_convert.extensions` | All supported | File extensions to show for conversion |
 | `doc_convert.max_source_size_mb` | `50` | Skip source files larger than this |
@@ -265,6 +272,12 @@ ac-dc
 ```
 
 The webapp is served from [GitHub Pages](https://flatmax.github.io/AI-Coder-DeCoder/) — no local build step needed.
+
+To develop or build the webapp locally, also install Node.js dependencies:
+
+```bash
+npm install
+```
 
 ---
 
@@ -388,11 +401,9 @@ src/ac_dc/
         app.json
         commit.md               # Commit message generation prompt
         compaction.md
-        doc-snippets.json       # Document mode snippet buttons
         llm.json
-        review-snippets.json
         review.md
-        snippets.json
+        snippets.json            # Prompt buttons for code, review, and doc modes
         system.md
         system_doc.md            # Document mode system prompt
         system_extra.md

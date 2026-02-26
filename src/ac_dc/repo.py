@@ -243,6 +243,7 @@ class Repo:
             # Get status arrays
             modified = []
             staged = []
+            deleted = []
             status_output = self._run_git("status", "--porcelain").strip()
             for line in status_output.splitlines():
                 if not line or len(line) < 3:
@@ -269,6 +270,8 @@ class Repo:
                     staged.append(filepath)
                 if work_status == "M":
                     modified.append(filepath)
+                elif work_status == "D":
+                    deleted.append(filepath)
 
             # Get diff stats
             diff_stats = {}
@@ -305,6 +308,7 @@ class Repo:
                 "modified": modified,
                 "staged": staged,
                 "untracked": untracked,
+                "deleted": deleted,
                 "diff_stats": diff_stats,
             }
         except subprocess.CalledProcessError as e:

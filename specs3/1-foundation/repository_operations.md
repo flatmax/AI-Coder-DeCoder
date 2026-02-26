@@ -49,6 +49,7 @@ TreeResult:
     modified: string[]
     staged: string[]
     untracked: string[]
+    deleted: string[]
     diff_stats: map         // path → {additions, deletions}
 ```
 
@@ -119,7 +120,7 @@ Paths containing `..` traversal are rejected. The resolved absolute path is veri
 - Stage, unstage, staged diff verification
 - Commit, reset hard restores content
 - Rename tracked file
-- Tree includes modified, untracked, staged arrays
+- Tree includes modified, untracked, staged, deleted arrays
 - Flat file list contains expected paths
 - Search finds content, case-insensitive, no-results returns empty
 
