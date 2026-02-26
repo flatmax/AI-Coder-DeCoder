@@ -74,16 +74,14 @@ Not all vector drawing commands indicate real images — PDF generators emit rec
 - **Threshold**: ≥3 significant drawings required to trigger SVG export
 - Simple borders, underlines, and table rules → ignored
 
-#### SVG Text Stripping
+#### SVG Text Preservation
 
-When SVG export is triggered, text glyph elements are stripped from the SVG since the text is already captured in the companion markdown. The stripping process:
+When SVG export is triggered, text glyph elements are **kept** in the SVG. PyMuPDF renders each character as a `<use>` element referencing a font glyph `<symbol>` in `<defs>` — these are the primary visual representation for slides and formatted documents. Stripping them produces empty-looking SVGs because many PDF generators emit all visible content (including headings and labels) through the same glyph mechanism.
 
-1. Identifies `<use data-text="...">` elements (PyMuPDF emits each character as a `<use>` referencing a font glyph `<symbol>` in `<defs>`)
-2. Collects the `xlink:href` targets of stripped `<use>` elements
-3. Removes the corresponding `<symbol id="font_...">` definitions from `<defs>`
-4. Keeps all graphical content: `<image>`, `<path>`, `<rect>`, `<circle>`, etc.
+The extracted text is **also** written to the companion markdown file for searchability and LLM context. This means text appears in both places:
 
-This produces clean SVGs containing only the visual elements (diagrams, images, charts) while the text lives in the markdown file.
+- **SVG** — for visual fidelity when viewing in the SVG viewer
+- **Markdown** — for grep, doc index, and LLM edit access
 
 ### python-pptx (Presentation SVG Export — Fallback)
 
@@ -463,8 +461,8 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - PDF pages with raster images produce companion SVG with text stripped
 - PDF pages with non-trivial vector graphics (curves, filled shapes) produce SVG
 - PDF pages with only simple borders/underlines are treated as text-only
-- SVG text stripping removes `<use data-text>` elements and their font `<symbol>` defs
-- SVG text stripping preserves graphical content (`<image>`, `<path>`, `<rect>`, etc.)
+- SVG export preserves text glyph elements (`<use data-text>`) for visual fidelity
+- Extracted text also appears in companion markdown for searchability
 - Image detection threshold requires ≥3 significant drawings (not just decorative rules)
 - Configuration `enabled: false` hides the tab
 - Custom extension list in config is respected
