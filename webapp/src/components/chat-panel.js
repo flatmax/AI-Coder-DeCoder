@@ -1539,6 +1539,22 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
+    // Handle undo/redo — native undo is broken in shadow DOM textareas
+    // when Lit re-renders set .value programmatically, so use execCommand fallback
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        document.execCommand('undo');
+        return;
+      }
+      if (key === 'z' && e.shiftKey || key === 'y') {
+        e.preventDefault();
+        document.execCommand('redo');
+        return;
+      }
+    }
+
     // If history overlay is open, delegate to it
     const historyEl = this.shadowRoot?.querySelector('ac-input-history');
     if (historyEl?.open) {
