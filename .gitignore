@@ -16,3 +16,4 @@ venv/
 **/uv.lock
 uv.lock
 .aicoder/
+safeZone/
