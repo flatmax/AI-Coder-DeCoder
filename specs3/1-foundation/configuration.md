@@ -46,6 +46,11 @@ Configuration is split across multiple files, each serving a distinct purpose. A
         verbatim_window_tokens: 4000,
         summary_budget_tokens: 500,
         min_verbatim_exchanges: 2
+    },
+    doc_convert: {
+        enabled: true,
+        extensions: [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt"],
+        max_source_size_mb: 50
     }
 }
 ```
@@ -198,3 +203,4 @@ A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first ru
 | `symbol_map.txt` | Current symbol map | Rebuilt on startup and before each LLM request |
 | `snippets.json` | Per-repo prompt snippets override (optional, all modes) | User-managed |
 | `images/` | Persisted chat images | Write on paste, read on session load |
+| `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed |

@@ -57,6 +57,7 @@ Depends on: Repository (for file access)
 |------|-------------|
 | [Symbol Index](2-code-analysis/symbol_index.md) | Tree-sitter parsing, extractors, compact format, reference graph, LSP |
 | [Document Mode](2-code-analysis/document_mode.md) | Document index for markdown/SVG, cache tier integration, document mode toggle |
+| [Document Auto-Convert](2-code-analysis/doc_auto_convert.md) | Automatic conversion of Office/PDF/CSV to markdown via markitdown |
 
 ### Layer 3: LLM Engine (**read in order**)
 

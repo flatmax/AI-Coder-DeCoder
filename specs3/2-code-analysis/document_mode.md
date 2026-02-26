@@ -129,7 +129,7 @@ Without keywords, every `### Overview` / `### Parameters` / `### Error Codes` lo
 
 ### Converted DOCX Example
 
-A `.docx` file converted via `pandoc -f docx -t markdown` and indexed as markdown:
+A `.docx` file converted to markdown (via [Document Convert](../4-features/doc_convert.md)) and indexed:
 
 ```
 docs/architecture.md [spec]:
@@ -146,14 +146,20 @@ docs/architecture.md [spec]:
 
 ### Converted Data File Example
 
-A CSV converted to a markdown table (or summarised in a README):
+A CSV auto-converted to a markdown table, and an Excel file converted with sheet structure preserved:
 
 ```
-data/README.md [reference]:
-  # Data Files
-  ## users.csv (id, name, email, role, created_at — 12,400 rows)
-  ## budget.xlsx (3 sheets: Q1 Revenue, Q2 Forecast, Lookups)
+data/users.md [reference]:
+  # users (id, name, email, role, created_at — 12,400 rows) [table]
+
+data/budget.md [reference]:
+  # budget
+  ## Q1 Revenue (monthly totals, growth rate) [table] ~45ln
+  ## Q2 Forecast (projected, confidence interval) [table] ~38ln
+  ## Lookups (region codes, category mapping) [table] ~12ln
 ```
+
+**Note on CSV files:** CSV is already text and diffable. Converting to a markdown table is most useful for small-to-medium files that benefit from being rendered as formatted tables in the doc index. Very large CSVs (thousands of rows) produce unwieldy markdown — users may prefer to exclude `.csv` from the `extensions` list in [doc convert config](../4-features/doc_convert.md#configuration) and instead maintain a hand-written summary document.
 
 ### Format Annotations Reference
 
@@ -274,51 +280,17 @@ Modified files get fresh unenriched outlines instantly. Keyword enrichment is qu
 
 **Manual edits in the SVG editor** — When a user edits and saves an SVG via the SVG viewer/editor (`SvgViewer._save()`), the file's mtime changes on disk. No explicit invalidation fires — the mtime change is detected lazily by the next structure re-extraction (triggered by the next chat message). This is the same lazy-detection pattern used for markdown files edited in Monaco, as described in the Caching section above. The SVG outline may be stale only until the next chat message.
 
-### Non-Markdown Documents — Convert First
+### Document Convert
 
-For `.docx`, `.pdf`, `.xlsx`, `.csv`, and other formats, the recommended workflow is to **convert to markdown before adding to the repository**. This is a deliberate design choice:
+Non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`) can be converted to markdown files via the **Document Convert** tool — a dialog-driven workflow requiring a clean git working tree. Converted files are placed as siblings to the originals and indexed by the document index like any other markdown. See the full specification:
 
-1. **Converted markdown is strictly superior in a git repo** — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol
-2. **Conversion tools are mature and widely available** — `pandoc` handles `.docx`/`.pdf`/`.epub`/`.rst`, `markitdown` and `marker` handle PDF with layout preservation, and simple scripts handle CSV→markdown tables
-3. **Dedicated extractors would produce inferior results** — a `.docx` extractor can only extract headings and links (a lossy outline), while `pandoc` converts the full content to editable markdown. Why index a shadow when you can have the real thing?
-4. **PDF heading extraction is inherently unreliable** — PDFs lack semantic structure; heading detection is heuristic-based and error-prone. Converting to markdown with a purpose-built tool (where the user can verify quality) produces far better results than attempting automated extraction at index time
-5. **XLSX/CSV are data, not documents** — their "outline" (sheet names, column headers) is so minimal that a brief description in a README is more useful than a dedicated extractor
-6. **Zero additional dependencies** — no `python-docx`, `openpyxl`, `pymupdf`, or `pdfplumber` to install, version-manage, or lazily import
-
-Example conversion workflows:
-
-```bash
-# Word documents
-pandoc -f docx -t markdown -o docs/architecture.md docs/architecture.docx
-
-# PDF (simple text)
-pandoc -f pdf -t markdown -o docs/spec.md docs/spec.pdf
-
-# PDF (complex layout — use a dedicated tool)
-marker docs/report.pdf docs/report.md
-
-# CSV to markdown table
-# (simple script or pandoc)
-pandoc -f csv -t markdown -o data/users.md data/users.csv
-```
-
-Once converted, the `.md` files are indexed automatically by the document index like any other markdown file. The original binary files can remain in the repo (or in `.gitignore`) — only the `.md` versions are indexed.
+→ **[Document Convert](../4-features/doc_convert.md)**
 
 ### Future: Additional Format Extractors
 
-Dedicated extractors for other text formats and binary formats may be added in a future version if demand warrants it. The extractor registry pattern (base class + per-format subclasses) is designed to accommodate this:
+With [Document Convert](../4-features/doc_convert.md) handling the conversion of binary document formats to markdown, dedicated per-format *extractors* (which would produce lossy outlines from binary files) are no longer planned. The convert approach is strictly superior: it produces full editable markdown content rather than structural-only outlines, and the resulting `.md` files flow through the existing markdown extractor and keyword enricher.
 
-```
-extractors/
-    markdown_extractor.py   # v1 — regex-based, no dependencies
-    svg_extractor.py        # v1 — stdlib xml.etree.ElementTree
-    docx_extractor.py       # future — python-docx
-    xlsx_extractor.py       # future — openpyxl
-    pdf_extractor.py        # future — pymupdf or pdfplumber
-    csv_extractor.py        # future — stdlib csv
-```
-
-Each future extractor would be optional — imported lazily and skipped if its library is unavailable (same pattern as tree-sitter language loading in `parser.py`).
+The extractor registry pattern (base class + per-format subclasses) remains available for future **text-based** document formats that don't require conversion — e.g., reStructuredText (`.rst`), AsciiDoc (`.adoc`), or LaTeX (`.tex`). These formats are already human-readable and greppable, so a dedicated extractor (producing structural outlines directly) would be more appropriate than converting to markdown.
 
 ## Keyword Enrichment with KeyBERT
 
@@ -801,7 +773,7 @@ User clicks mode toggle
     └── Insert system message: "Switched to document mode"
 ```
 
-Mode switches are **instant** — the structural re-extraction (<5ms per changed file) produces unenriched outlines that are immediately usable for tier assembly. If any files need keyword re-enrichment (edited while in code mode), they are queued for background enrichment and a persistent toast informs the user. The mode switch does not wait for enrichment to complete.
+Mode switches are **instant** — the structural re-extraction (<5ms per changed file) produces unenriched outlines that are immediately usable for tier assembly. If any files need keyword re-enrichment (edited while in code mode), they are queued for background enrichment and a persistent toast informs the user. The mode switch does not wait for enrichment to complete. The KeyBERT sentence-transformer model is eagerly pre-initialized during Phase 2 of the background doc index build (before `doc_index_ready` is sent), so the first mode switch never triggers a ~10-second GIL-blocking model load.
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 

@@ -24,6 +24,9 @@ The badge truncates long branch names with ellipsis (max 140px) and shows a tool
 - Git status badge (M/S/U)
 - Diff stats (+N -N)
 
+**Tooltip**: Every row (file or directory) displays a native browser tooltip on hover showing the full path and the node name, formatted as `full/path — name`. For the root node, falls back to the repository name for both parts.
+
+
 ### Filtering
 
 Text filter narrows visible nodes by path substring. Directories auto-expand when filtered.

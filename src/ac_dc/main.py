@@ -386,10 +386,12 @@ def main(args=None):
     from ac_dc.config import ConfigManager
     from ac_dc.repo import Repo
     from ac_dc.settings import Settings
+    from ac_dc.doc_convert import DocConvert
 
     config = ConfigManager(repo_root=repo_path)
     repo = Repo(repo_path)
     settings = Settings(config)
+    doc_convert = DocConvert(repo, config)
 
     # Step 4: Start Vite dev/preview server
     vite_proc = None
@@ -412,6 +414,7 @@ def main(args=None):
         server = JRPCServer(server_port, remote_timeout=60)
         server.add_class(repo)
         server.add_class(settings)
+        server.add_class(doc_convert)
 
         # Step 5.5: Create LLM service and restore last session BEFORE the
         # server starts accepting connections.  This way get_current_state()

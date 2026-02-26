@@ -889,6 +889,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
         aria-expanded="${isDir ? String(isExpanded) : nothing}"
         aria-level="${depth + 1}"
         aria-label="${node.name}${gitStatus ? `, ${gitStatus}` : ''}"
+        title="${node.path || node.name} — ${node.name}"
         style="padding-left: ${depth * 16 + 4}px"
         @click=${() => this._onRowClick(node)}
         @auxclick=${(e) => this._onRowMiddleClick(node, e)}

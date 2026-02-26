@@ -904,6 +904,55 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .edit-summary .stat.fail { color: var(--accent-red); }
     .edit-summary .stat.skip { color: #f0a030; }
 
+    /* Individual failure listing */
+    .edit-failures {
+      margin-top: 8px;
+      padding: 6px 0 0;
+      border-top: 1px solid var(--border-primary);
+    }
+    .edit-failures-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+    .edit-failure-item {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 3px 0;
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }
+    .edit-failure-path {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--accent-primary);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 50%;
+      flex-shrink: 0;
+    }
+    .edit-failure-path:hover {
+      text-decoration: underline;
+    }
+    .edit-failure-type {
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--accent-red);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .edit-failure-msg {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     /* File mentions */
     .file-mention {
       color: var(--accent-primary);
@@ -1305,7 +1354,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       if (result.edit_results) {
         editMeta.editResults = {};
         for (const er of result.edit_results) {
-          editMeta.editResults[er.file] = { status: er.status, message: er.message };
+          editMeta.editResults[er.file] = { status: er.status, message: er.message, error_type: er.error_type || '' };
         }
       }
       if (result.passed || result.failed || result.skipped || result.not_in_context || result.already_applied) {
@@ -1345,13 +1394,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._loadRepoFiles();
     }
 
-    // Check for ambiguous anchor failures — auto-populate retry prompt
+    // Check for edit failures — auto-populate retry prompt
     if (result?.edit_results) {
-      const ambiguousFailures = result.edit_results.filter(
-        er => er.status === 'failed' && er.message && er.message.includes('Ambiguous anchor')
+      const ambiguous = result.edit_results.filter(
+        er => er.status === 'failed' && er.message && er.message.toLowerCase().includes('ambiguous')
       );
-      if (ambiguousFailures.length > 0) {
-        this._populateAmbiguousRetryPrompt(ambiguousFailures);
+      const otherFailures = result.edit_results.filter(
+        er => er.status === 'failed' && !(er.message && er.message.toLowerCase().includes('ambiguous'))
+      );
+      if (ambiguous.length > 0) {
+        this._populateAmbiguousRetryPrompt(ambiguous);
+      } else if (otherFailures.length > 0) {
+        this._populateOldTextMismatchRetryPrompt(otherFailures);
       }
     }
 
@@ -2269,21 +2323,52 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (msg.failed) parts.push(html`<span class="stat fail">❌ ${msg.failed} failed</span>`);
     if (msg.skipped) parts.push(html`<span class="stat skip">⚠️ ${msg.skipped} skipped</span>`);
     if (msg.not_in_context) parts.push(html`<span class="stat skip">⚠️ ${msg.not_in_context} not in context</span>`);
+
+    // Collect individual non-success entries for detailed listing
+    const failureEntries = [];
+    if (msg.editResults) {
+      for (const [file, er] of Object.entries(msg.editResults)) {
+        if (er.status === 'failed' || er.status === 'skipped' || er.status === 'not_in_context') {
+          failureEntries.push({ file, status: er.status, message: er.message || '', error_type: er.error_type || '' });
+        }
+      }
+    }
+
+    const failureList = failureEntries.length > 0
+      ? html`
+        <div class="edit-failures">
+          <div class="edit-failures-label">Failed edits:</div>
+          ${failureEntries.map(entry => html`
+            <div class="edit-failure-item">
+              <span class="edit-failure-path"
+                    title="${entry.file}"
+                    @click=${() => window.dispatchEvent(new CustomEvent('navigate-file', { detail: { path: entry.file } }))}>
+                ${entry.file}
+              </span>
+              ${entry.error_type ? html`
+                <span class="edit-failure-type">${entry.error_type}</span>
+              ` : nothing}
+              ${entry.message ? html`
+                <span class="edit-failure-msg" title="${entry.message}">— ${entry.message}</span>
+              ` : nothing}
+            </div>
+          `)}
+        </div>`
+      : nothing;
+
     const autoAddNote = msg.files_auto_added?.length > 0
       ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
           ${msg.files_auto_added.length} file${msg.files_auto_added.length > 1 ? 's were' : ' was'} added to context. Send a follow-up to retry those edits.
         </div>`
       : nothing;
     // Check for edit failures — show retry hint
-    const hasFailures = msg.editResults && Object.values(msg.editResults).some(
-      er => er.status === 'failed' && er.message !== 'already_applied'
-    );
+    const hasFailures = failureEntries.some(e => e.status === 'failed');
     const failureNote = hasFailures
       ? html`<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary)">
           A retry prompt has been prepared in the input below.
         </div>`
       : nothing;
-    return html`<div class="edit-summary">${parts}${autoAddNote}${failureNote}</div>`;
+    return html`<div class="edit-summary">${parts}${failureList}${autoAddNote}${failureNote}</div>`;
   }
 
   _renderMsgActions(msg) {

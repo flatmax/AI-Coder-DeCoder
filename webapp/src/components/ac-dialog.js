@@ -17,6 +17,7 @@ const lazyImports = {
   context: () => import('./ac-context-tab.js'),
   cache: () => import('./ac-cache-tab.js'),
   settings: () => import('./ac-settings-tab.js'),
+  convert: () => import('./ac-doc-convert-tab.js'),
 };
 
 const TABS = [
@@ -24,7 +25,8 @@ const TABS = [
   { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+3' },
   { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+4' },
-  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+5' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5' },
+  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+6' },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {
@@ -43,6 +45,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     _crossRefEnabled: { type: Boolean, state: true },
     _enrichingDocs: { type: Boolean, state: true },
     _repoName: { type: String, state: true },
+    _docConvertAvailable: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -331,6 +334,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._crossRefEnabled = false;
     this._enrichingDocs = false;
     this._repoName = null;
+    this._docConvertAvailable = false;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
@@ -364,6 +368,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     if (state) {
       if (typeof state.cross_ref_ready === 'boolean') this._crossRefReady = state.cross_ref_ready;
       if (typeof state.cross_ref_enabled === 'boolean') this._crossRefEnabled = state.cross_ref_enabled;
+      if (typeof state.doc_convert_available === 'boolean') this._docConvertAvailable = state.doc_convert_available;
     }
   }
 
@@ -634,12 +639,13 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
-    // Alt+1..5 tab switching
-    if (e.altKey && e.key >= '1' && e.key <= '5') {
+    // Alt+1..6 tab switching
+    if (e.altKey && e.key >= '1' && e.key <= '6') {
       e.preventDefault();
       const idx = parseInt(e.key) - 1;
-      if (TABS[idx]) {
-        this._switchTab(TABS[idx].id);
+      const tab = TABS[idx];
+      if (tab && (!tab.conditional || this._docConvertAvailable)) {
+        this._switchTab(tab.id);
       }
       return;
     }
@@ -955,7 +961,7 @@ export class AcDialog extends RpcMixin(LitElement) {
         <span class="header-label">${currentTab?.label || 'Files'}</span>
 
         <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
-          ${TABS.map(tab => html`
+          ${TABS.filter(tab => !tab.conditional || this._docConvertAvailable).map(tab => html`
             <button
               class="tab-btn ${tab.id === this.activeTab ? 'active' : ''}"
               role="tab"
@@ -1059,6 +1065,13 @@ export class AcDialog extends RpcMixin(LitElement) {
           <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}"
                role="tabpanel" id="panel-settings" aria-labelledby="tab-settings">
             <ac-settings-tab></ac-settings-tab>
+          </div>
+        ` : ''}
+
+        ${this._visitedTabs.has('convert') || this.activeTab === 'convert' ? html`
+          <div class="tab-panel ${this.activeTab === 'convert' ? 'active' : ''}"
+               role="tabpanel" id="panel-convert" aria-labelledby="tab-convert">
+            <ac-doc-convert-tab></ac-doc-convert-tab>
           </div>
         ` : ''}
       </div>

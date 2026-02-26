@@ -160,9 +160,10 @@ class TestValidation:
             new_only=["    return 2"],
         )
         content = "import os\n\ndef foo():\n    return 1\n\ndef bar():\n    pass"
-        valid, error = validate_edit(block, content)
+        valid, error, error_type = validate_edit(block, content)
         assert valid is True
         assert error == ""
+        assert error_type == ""
 
     def test_anchor_not_found(self):
         """Anchor not found returns error."""
@@ -175,9 +176,10 @@ class TestValidation:
             new_only=[],
         )
         content = "def foo():\n    pass"
-        valid, error = validate_edit(block, content)
+        valid, error, error_type = validate_edit(block, content)
         assert valid is False
         assert "not found" in error.lower()
+        assert error_type == "anchor_not_found"
 
     def test_ambiguous_match(self):
         """Ambiguous match (multiple locations) returns error."""
@@ -190,9 +192,10 @@ class TestValidation:
             new_only=[],
         )
         content = "def a():\n    pass\n\ndef b():\n    pass"
-        valid, error = validate_edit(block, content)
+        valid, error, error_type = validate_edit(block, content)
         assert valid is False
         assert "ambiguous" in error.lower()
+        assert error_type == "ambiguous_anchor"
 
     def test_create_always_valid(self):
         """Create blocks always valid."""
@@ -205,8 +208,9 @@ class TestValidation:
             new_only=["print('hello')"],
             is_create=True,
         )
-        valid, error = validate_edit(block, None)
+        valid, error, error_type = validate_edit(block, None)
         assert valid is True
+        assert error_type == ""
 
     def test_whitespace_mismatch(self):
         """Whitespace mismatch diagnosed."""
@@ -219,8 +223,9 @@ class TestValidation:
             new_only=["    return 2"],
         )
         content = "def foo():\n    return 1"
-        valid, error = validate_edit(block, content)
+        valid, error, error_type = validate_edit(block, content)
         assert valid is False
+        assert error_type == "anchor_not_found"
 
 
 class TestApplication:
@@ -339,7 +344,7 @@ class TestApplication:
         assert "return 1" in test_file.read_text()
 
     def test_path_traversal_blocked(self, tmp_path):
-        """Path escape (../) blocked."""
+        """Path escape (../) blocked with error_type."""
         block = EditBlock(
             file_path="../../../etc/passwd",
             old_lines=["root"],
@@ -350,9 +355,10 @@ class TestApplication:
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.SKIPPED
+        assert results[0].error_type == "validation_error"
 
     def test_binary_file_skipped(self, tmp_path):
-        """Binary file skipped."""
+        """Binary file skipped with error_type."""
         bin_file = tmp_path / "data.bin"
         bin_file.write_bytes(b"text\x00binary")
 
@@ -366,9 +372,10 @@ class TestApplication:
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.SKIPPED
+        assert results[0].error_type == "validation_error"
 
     def test_missing_file_fails(self, tmp_path):
-        """Missing file fails."""
+        """Missing file fails with error_type."""
         block = EditBlock(
             file_path="nonexistent.py",
             old_lines=["code"],
@@ -379,6 +386,7 @@ class TestApplication:
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.FAILED
+        assert results[0].error_type == "file_not_found"
 
     def test_multiple_sequential_edits_same_file(self, tmp_path):
         """Multiple sequential edits to same file."""

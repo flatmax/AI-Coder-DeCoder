@@ -229,6 +229,14 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       font-size: 0.9rem;
       line-height: 1.6;
       color: var(--text-primary, #e0e0e0);
+      position: relative;
+    }
+    .preview-pane > .preview-btn {
+      position: sticky;
+      top: 0;
+      float: right;
+      margin: -18px -20px 0 0;
+      z-index: 10;
     }
 
     /* Markdown preview content styling */
@@ -1189,6 +1197,86 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       this._previewContent = renderMarkdownWithSourceMap(content);
     }
     this.requestUpdate();
+    // After DOM update, resolve relative image paths
+    this.updateComplete.then(() => this._resolvePreviewImages());
+  }
+
+  /**
+   * Find <img> tags in the preview pane with relative src paths and
+   * replace them with blob URLs fetched from the repo via RPC.
+   */
+  async _resolvePreviewImages() {
+    const previewPane = this.shadowRoot?.querySelector('.preview-pane');
+    if (!previewPane || !this.rpcConnected) return;
+
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return;
+
+    // Compute the directory of the current file for resolving relative paths
+    const filePath = file.path;
+    const lastSlash = filePath.lastIndexOf('/');
+    const fileDir = lastSlash >= 0 ? filePath.slice(0, lastSlash) : '';
+
+    const imgs = previewPane.querySelectorAll('img');
+    for (const img of imgs) {
+      const src = img.getAttribute('src');
+      if (!src) continue;
+      // Skip data URIs, blob URLs, and absolute URLs
+      if (src.startsWith('data:') || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://')) continue;
+
+      // Resolve relative path against the file's directory
+      const resolvedPath = fileDir ? fileDir + '/' + src : src;
+      // Normalize path segments (handle ../ and ./)
+      const normalized = this._normalizePath(resolvedPath);
+
+      try {
+        const result = await this.rpcExtract('Repo.get_file_content', normalized);
+        if (result?.error) {
+          img.alt = `[Image not found: ${src}]`;
+          img.style.opacity = '0.4';
+          continue;
+        }
+        const content = result?.content ?? result ?? '';
+        // Determine MIME type from extension
+        const ext = src.slice(src.lastIndexOf('.')).toLowerCase();
+        const mimeMap = {
+          '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+          '.bmp': 'image/bmp', '.ico': 'image/x-icon',
+        };
+        const mime = mimeMap[ext] || 'image/png';
+
+        if (ext === '.svg') {
+          // SVG is text-based — use data URI
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(content);
+        } else {
+          // Binary images — content should be base64-encoded from the server
+          // If it looks like base64, use it directly; otherwise encode it
+          img.src = `data:${mime};base64,${content}`;
+        }
+      } catch (e) {
+        console.warn('Failed to load preview image:', normalized, e);
+        img.alt = `[Failed to load: ${src}]`;
+        img.style.opacity = '0.4';
+      }
+    }
+  }
+
+  /**
+   * Normalize a file path — resolve . and .. segments.
+   */
+  _normalizePath(path) {
+    const parts = path.split('/');
+    const resolved = [];
+    for (const part of parts) {
+      if (part === '.' || part === '') continue;
+      if (part === '..') {
+        resolved.pop();
+      } else {
+        resolved.push(part);
+      }
+    }
+    return resolved.join('/');
   }
 
   // === Preview ↔ Editor Scroll Sync ===
@@ -1283,10 +1371,18 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       return html`
         <div class="split-container">
           <div class="editor-pane">
-            ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
+            ${this._renderOverlayButtons(file, isDirty, false)}
           </div>
           <div class="preview-pane"
                @scroll=${() => this._scrollEditorToPreviewLine()}>
+            <button
+              class="preview-btn active"
+              title="Toggle Markdown preview"
+              @click=${() => this._togglePreview()}
+            >
+              <span class="preview-icon"></span>
+              Preview
+            </button>
             ${unsafeHTML(this._previewContent)}
           </div>
         </div>

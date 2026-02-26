@@ -297,6 +297,17 @@ class ConfigManager:
         })
 
     @property
+    def doc_convert_config(self):
+        return self._app_config.get("doc_convert", {
+            "enabled": True,
+            "extensions": [
+                ".docx", ".pdf", ".pptx", ".xlsx", ".csv",
+                ".rtf", ".odt", ".odp",
+            ],
+            "max_source_size_mb": 50,
+        })
+
+    @property
     def url_cache_config(self):
         return self._app_config.get("url_cache", {
             "path": "/tmp/ac-dc-url-cache",

@@ -52,12 +52,16 @@ Background task: _stream_chat
     │       ├─ Separate: in-context vs not-in-context files
     │       ├─ Apply in-context edits normally
     │       ├─ Mark not-in-context edits as NOT_IN_CONTEXT
-    │       └─ Auto-add not-in-context files to selected files, broadcast
+    │       ├─ Auto-add not-in-context files to selected files, broadcast
+    │       └─ Stash modified doc files for deferred enrichment (doc mode only)
     ├─ Persist assistant message
     ├─ Update cache stability (→ cache_tiering.md)
     │
     ▼
 Send streamComplete → browser
+    │
+    ├─ await sleep(0) — flush WebSocket frame before GIL-heavy work
+    ├─ Launch deferred doc enrichment (KeyBERT, background, non-blocking)
     │
     ▼
 Post-response compaction (→ context_and_history.md)
@@ -252,6 +256,16 @@ Runs asynchronously after `streamComplete` with a 500ms delay:
 5. Send `compaction_complete` (or `compaction_error` on failure) notification
 
 See [Context and History](context_and_history.md) for the compaction algorithm and frontend notification protocol.
+
+### Deferred Doc Enrichment
+
+When edit blocks modify document files in doc mode, their structures are re-extracted immediately (instant unenriched outlines) but keyword enrichment is **deferred** until after `streamComplete` is transmitted. This prevents KeyBERT — which is CPU-bound and holds the GIL for seconds per file — from blocking the WebSocket write that transitions the UI from stop to send mode.
+
+#### Eager Model Pre-Initialization
+
+The KeyBERT sentence-transformer model (~80–420 MB) is loaded lazily on first use. Loading holds the GIL for ~10 seconds (PyTorch weight materialization). To prevent this from blocking the mode-switch RPC response, the model is **eagerly pre-initialized** at the end of `_build_doc_index_background_silent` Phase 1, **before** the `doc_index_ready` event is sent to the frontend. This runs unconditionally (not gated on `needs_enrichment`) because even when all files are cached from disk, a future mode switch may discover mtime-changed files and queue them for enrichment. By the time `doc_index_ready` is sent and the user can click the doc mode button, the model is already loaded.
+
+The enrichment queue is stashed in the result dict under `_deferred_enrichment`. This key is stripped via `result.pop` **before** `streamComplete` is sent — the queue contains `DocOutline` objects that aren't JSON-serializable and would silently kill the WebSocket write. After `streamComplete` and an `await asyncio.sleep(0)` to flush the WebSocket frame, the enrichment is launched via `asyncio.ensure_future`. Each file is enriched in the thread pool executor, with per-file progress events sent to the browser. The reference index is rebuilt after all files complete.
 
 ## Token Usage Extraction
 
