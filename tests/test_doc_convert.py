@@ -240,16 +240,6 @@ class TestScanFeatures:
 
 
 class TestConvertFiles:
-    def test_rejects_dirty_tree(self, converter, git_repo):
-        (git_repo / "dirty.txt").write_text("uncommitted")
-        subprocess.run(
-            ["git", "-C", str(git_repo), "add", "dirty.txt"],
-            capture_output=True,
-        )
-        result = converter.convert_files(["something.docx"])
-        assert "error" in result
-        assert "uncommitted" in result["error"].lower()
-
     @patch("ac_dc.doc_convert._is_markitdown_available", return_value=True)
     def test_nonexistent_file_fails(self, mock_avail, converter, git_repo):
         result = converter.convert_files(["missing.docx"])
@@ -310,23 +300,6 @@ class TestConvertFiles:
         assert result["summary"]["converted"] == 1
         # Orphan image should be deleted
         assert not old_img.exists()
-
-
-class TestCleanTreeGate:
-    def test_clean_tree_reported(self, converter, git_repo):
-        result = converter.scan_convertible_files()
-        assert result["clean"] is True
-        assert result["clean_message"] is None
-
-    def test_dirty_tree_reported(self, converter, git_repo):
-        (git_repo / "dirty.txt").write_text("uncommitted")
-        subprocess.run(
-            ["git", "-C", str(git_repo), "add", "dirty.txt"],
-            capture_output=True,
-        )
-        result = converter.scan_convertible_files()
-        assert result["clean"] is False
-        assert result["clean_message"] is not None
 
 
 class TestGracefulDegradation:

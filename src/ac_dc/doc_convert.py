@@ -4,7 +4,7 @@ Converts .docx, .pdf, .pptx, .xlsx, .csv, .rtf, .odt, .odp files
 to markdown using markitdown (pure Python). Presentation and PDF files
 produce per-page SVG exports via headless LibreOffice + PyMuPDF for
 full visual fidelity. Images embedded as data URIs are extracted and
-saved as separate files. Requires a clean git working tree.
+saved as separate files.
 """
 
 import hashlib
@@ -180,127 +180,6 @@ def _libreoffice_to_pdf(source_path, output_dir):
     return None
 
 
-# Regex to match a <use> element with data-text and transform matrix.
-# PyMuPDF emits glyphs as:
-#   <use data-text="X" xlink:href="..." transform="matrix(a,b,c,d,tx,ty)" fill="..."/>
-# Attributes may appear in any order and with varying whitespace.
-_SVG_USE_TEXT_RE = re.compile(
-    r'<use\b([^>]*?)\bdata-text="([^"]*)"([^>]*?)/>'
-)
-_SVG_USE_TRANSFORM_RE = re.compile(
-    r'\btransform="matrix\(([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^)]+)\)"'
-)
-_SVG_USE_FILL_RE = re.compile(r'\bfill="([^"]*)"')
-
-
-def _parse_use_element(stripped):
-    """Parse a <use data-text="..."> element.
-
-    Returns (char, tx, ty, sx, sy, fill) or None if not a text glyph element.
-    """
-    m = _SVG_USE_TEXT_RE.match(stripped)
-    if not m:
-        return None
-
-    before_attr = m.group(1)
-    char = m.group(2)
-    after_attr = m.group(3)
-    all_attrs = before_attr + after_attr
-
-    tm = _SVG_USE_TRANSFORM_RE.search(all_attrs)
-    if not tm:
-        return None
-
-    sx = float(tm.group(1))
-    sy = float(tm.group(4))
-    tx = float(tm.group(5))
-    ty = float(tm.group(6))
-
-    fm = _SVG_USE_FILL_RE.search(all_attrs)
-    fill = fm.group(1) if fm else "#000000"
-
-    return (char, tx, ty, sx, sy, fill)
-
-
-def _merge_svg_text_elements(svg_text):
-    """Merge per-character <use data-text> elements into <text> runs.
-
-    PyMuPDF's get_svg_image() emits each glyph as an individual <use>
-    element referencing a font glyph definition, with a transform matrix
-    for positioning.  This post-processor groups consecutive <use> elements
-    that share the same y-coordinate (within tolerance), same font scale,
-    and same fill colour, then emits a single <text> element for each run.
-
-    The transform matrix is: matrix(sx, 0, 0, -sy, tx, ty)
-    where sx/sy are the font scale and tx/ty are the position.
-    """
-    lines = svg_text.split("\n")
-    result = []
-    # Each pending item: (char, tx, ty, sx, sy, fill, original_line)
-    pending = []
-
-    def _flush():
-        """Write the pending run as a single <text> element."""
-        if not pending:
-            return
-        if len(pending) == 1:
-            # Single char — keep original <use> element unchanged
-            result.append(pending[0][6])
-            pending.clear()
-            return
-
-        # Compute font size from the scale factor
-        sy = abs(pending[0][4])
-        font_size = round(sy, 2)
-        tx0 = pending[0][1]
-        ty0 = pending[0][2]
-        fill = pending[0][5]
-        merged_text = "".join(item[0] for item in pending)
-
-        # Escape XML special characters
-        escaped = (
-            merged_text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-        )
-
-        result.append(
-            f'<text x="{round(tx0, 3)}" y="{round(ty0, 3)}"'
-            f' font-size="{font_size}" fill="{fill}"'
-            f'>{escaped}</text>'
-        )
-        pending.clear()
-
-    for line in lines:
-        stripped = line.strip()
-        parsed = _parse_use_element(stripped)
-        if not parsed:
-            _flush()
-            result.append(line)
-            continue
-
-        char, tx, ty, sx, sy, fill = parsed
-
-        # Build a grouping key: font scale + fill
-        font_key = (round(abs(sy), 2), fill)
-
-        if pending:
-            prev_ty = pending[-1][2]
-            prev_key = (round(abs(pending[-1][4]), 2), pending[-1][5])
-            # Same line: y within tolerance and same style
-            y_tol = 0.5
-            if abs(ty - prev_ty) < y_tol and font_key == prev_key:
-                pending.append((char, tx, ty, sx, sy, fill, line))
-                continue
-            else:
-                _flush()
-
-        pending.append((char, tx, ty, sx, sy, fill, line))
-
-    _flush()
-    return "\n".join(result)
 
 
 def _pdf_page_has_images(page):
@@ -354,7 +233,7 @@ def _pdf_extract_page_text(page):
     Uses PyMuPDF's text extraction with block/line structure to produce
     readable markdown with paragraph breaks.
     """
-    blocks = page.get_text("dict", flags=0)["blocks"]
+    blocks = page.get_text("dict")["blocks"]
     md_parts = []
 
     for block in blocks:
@@ -381,72 +260,15 @@ def _pdf_extract_page_text(page):
 def _pdf_page_to_svg(page):
     """Convert a single PDF page to an SVG string using PyMuPDF.
 
-    The full-page SVG is post-processed to remove text glyph <use>
-    elements (which reference font defs), keeping only the graphical
-    content — images, paths, shapes.  The text is already extracted
-    separately into the markdown file.
+    Returns the full SVG including text glyph elements, which are the
+    primary visual representation for slides and formatted documents.
+    The extracted text is written separately to the companion markdown
+    for searchability.
+
+    Args:
+        page: a PyMuPDF page object
     """
-    svg_text = page.get_svg_image()
-    svg_text = _strip_svg_text_elements(svg_text)
-    return svg_text
-
-
-def _strip_svg_text_elements(svg_text):
-    """Remove per-character <use data-text> glyph elements from an SVG.
-
-    Also removes unused font <symbol> definitions from <defs> that were
-    only referenced by the stripped <use> elements.
-
-    This leaves behind only the graphical content (images, paths, rects,
-    circles, etc.) while the text lives in the companion markdown file.
-    """
-    lines = svg_text.split("\n")
-    result = []
-    # Collect font symbol ids referenced by text glyphs so we can
-    # strip their <symbol> defs as well.
-    font_ids_to_strip = set()
-    stripped_use_lines = []
-
-    # First pass: identify text <use> lines and collect their href targets
-    keep_flags = []
-    _href_re = re.compile(r'xlink:href="#([^"]*)"')
-    for line in lines:
-        stripped = line.strip()
-        parsed = _parse_use_element(stripped)
-        if parsed is not None:
-            keep_flags.append(False)
-            m = _href_re.search(stripped)
-            if m:
-                font_ids_to_strip.add(m.group(1))
-        else:
-            keep_flags.append(True)
-
-    # Second pass: emit non-text lines, also stripping font <symbol> defs
-    in_stripped_symbol = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-
-        # Skip text glyph <use> elements
-        if not keep_flags[i]:
-            continue
-
-        # Skip <symbol> blocks for font glyphs
-        if not in_stripped_symbol:
-            # Check for <symbol id="font_..."> opening
-            m = re.match(r'<symbol\s+id="([^"]*)"', stripped)
-            if m and m.group(1) in font_ids_to_strip:
-                in_stripped_symbol = True
-                continue
-        else:
-            if stripped == '</symbol>' or stripped.startswith('</symbol>'):
-                in_stripped_symbol = False
-                continue
-            # Skip lines inside stripped symbol
-            continue
-
-        result.append(line)
-
-    return "\n".join(result)
+    return page.get_svg_image()
 
 
 def _pdf_extract_pages(pdf_path):
@@ -475,10 +297,23 @@ def _pdf_extract_pages(pdf_path):
     pages = []
     try:
         doc = fitz.open(str(pdf_path))
-        for page in doc:
+        for page_num, page in enumerate(doc, 1):
             text = _pdf_extract_page_text(page)
             has_images = _pdf_page_has_images(page)
+            text_ok = bool(text and text.strip())
+            # Never strip text glyphs from the SVG.  PyMuPDF renders
+            # slide/page text as <use data-text> font-glyph elements
+            # which are the primary visual representation.  Stripping
+            # them produces an empty-looking SVG.  The extracted text
+            # is still written to the companion markdown for search.
             svg = _pdf_page_to_svg(page) if has_images else None
+            # If no text was extracted and no SVG was generated yet,
+            # export the full page as SVG so the visual content is
+            # preserved.
+            if not text_ok and svg is None:
+                svg = _pdf_page_to_svg(page)
+                if svg and svg.strip():
+                    has_images = True
             pages.append({
                 "text": text,
                 "svg": svg,
@@ -547,29 +382,16 @@ class DocConvert:
 
         Returns:
             {
-                clean: bool,
-                clean_message: str | None,
                 files: [{path, size, status, output_path}],
                 available: bool,
-                pypandoc_available: bool,
             }
         """
         if not self._repo:
             return {"error": "No repository available"}
 
-        # Check clean working tree
-        is_clean = self._repo.is_clean()
-        clean_msg = None
-        if not is_clean:
-            clean_msg = (
-                "Commit or stash your changes before converting documents."
-            )
-
         config = self._doc_convert_config
         if not config.get("enabled", True):
             return {
-                "clean": is_clean,
-                "clean_message": clean_msg,
                 "files": [],
                 "available": self.available,
             }
@@ -637,8 +459,6 @@ class DocConvert:
             pass
 
         return {
-            "clean": is_clean,
-            "clean_message": clean_msg,
             "files": files,
             "available": self.available,
             "pdf_pipeline": lo is not None and has_pymupdf,
@@ -688,13 +508,6 @@ class DocConvert:
         """
         if not self._repo:
             return {"error": "No repository available"}
-
-        # Verify clean tree first — this gate applies regardless of tooling
-        if not self._repo.is_clean():
-            return {
-                "error": "Working tree has uncommitted changes. "
-                         "Commit or stash changes before converting."
-            }
 
         if not self.available:
             return {"error": "markitdown is not installed. Install with: pip install ac-dc[docs]"}
