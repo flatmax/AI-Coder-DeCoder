@@ -1588,12 +1588,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       } else if (this._snippetDrawerOpen) {
         this._snippetDrawerOpen = false;
       } else if (this._inputValue) {
-        this._inputValue = '';
         const textarea = this.shadowRoot?.querySelector('.input-textarea');
         if (textarea) {
-          textarea.value = '';
+          textarea.focus();
+          textarea.select();
+          document.execCommand('delete');
           textarea.style.height = 'auto';
         }
+        this._inputValue = '';
       }
     }
   }
