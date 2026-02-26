@@ -47,6 +47,7 @@ Arrow keys move focus. Space/Enter toggles selection. Auto-scroll to focused ite
 | Modified | Amber | M |
 | Staged | Green | S |
 | Untracked | Green | U |
+| Deleted | Red | D |
 
 ## Context Menu
 
@@ -70,7 +71,7 @@ Rename, new file, and new directory operations render an **inline text input** i
 
 ## Auto-Selection
 
-On first load, auto-select modified/staged/untracked files. Auto-expand directories containing changed files.
+On first load, auto-select modified/staged/untracked/deleted files. Auto-expand directories containing changed files.
 
 A `_initialAutoSelect` guard ensures this runs exactly once per component lifetime — subsequent tree reloads (after commits, resets, review entry) do not re-trigger auto-selection. The auto-expansion walks each changed file's path segments and adds all ancestor directories to the expanded set.
 

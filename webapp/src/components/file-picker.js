@@ -17,6 +17,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     _modified: { type: Array, state: true },
     _staged: { type: Array, state: true },
     _untracked: { type: Array, state: true },
+    _deleted: { type: Array, state: true },
     _diffStats: { type: Object, state: true },
     _expanded: { type: Object, state: true },   // Set<string>
     _filter: { type: String, state: true },
@@ -173,6 +174,11 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     .node-name.untracked {
       color: var(--accent-green);
     }
+    .node-name.deleted {
+      color: var(--accent-red);
+      text-decoration: line-through;
+      opacity: 0.75;
+    }
 
     /* Branch badge next to repo name */
     .branch-badge {
@@ -240,6 +246,10 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     .git-badge.untracked {
       color: var(--accent-green);
       background: rgba(126, 231, 135, 0.15);
+    }
+    .git-badge.deleted {
+      color: var(--accent-red);
+      background: rgba(255, 80, 80, 0.15);
     }
 
     .diff-stat {
@@ -349,6 +359,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     this._modified = [];
     this._staged = [];
     this._untracked = [];
+    this._deleted = [];
     this._diffStats = {};
     this._expanded = new Set();
     this._filter = '';
@@ -436,6 +447,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       this._modified = result.modified || [];
       this._staged = result.staged || [];
       this._untracked = result.untracked || [];
+      this._deleted = result.deleted || [];
       this._diffStats = result.diff_stats || {};
 
       // Fetch current branch
@@ -465,7 +477,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       // Auto-select changed files on first load
       if (!this._initialAutoSelect) {
         this._initialAutoSelect = true;
-        const changed = new Set([...this._modified, ...this._staged, ...this._untracked]);
+        const changed = new Set([...this._modified, ...this._staged, ...this._untracked, ...this._deleted]);
         if (changed.size > 0) {
           this.selectedFiles = new Set(changed);
           this._autoExpandChanged(changed);
@@ -858,6 +870,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _getGitStatus(path) {
     if (this._staged.includes(path)) return 'staged';
+    if (this._deleted.includes(path)) return 'deleted';
     if (this._modified.includes(path)) return 'modified';
     if (this._untracked.includes(path)) return 'untracked';
     return null;
@@ -925,7 +938,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
           ${gitStatus ? html`
             <span class="git-badge ${gitStatus}">
-              ${gitStatus === 'modified' ? 'M' : gitStatus === 'staged' ? 'S' : 'U'}
+              ${gitStatus === 'modified' ? 'M' : gitStatus === 'staged' ? 'S' : gitStatus === 'deleted' ? 'D' : 'U'}
             </span>
           ` : nothing}
 

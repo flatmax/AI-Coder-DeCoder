@@ -53,10 +53,8 @@ Clicking a file mention dispatches `file-mention-click`. The Files tab **toggles
 ### File Summary Chips vs Inline Mentions
 
 **Inline text mentions** (in message body) navigate to the diff viewer on click.
-
-
-### Input Accumulation (on add)
 **File summary chips** (in the "Files Referenced" section below messages) only toggle selection — they do not open the diff viewer. The "Add All" button also only toggles selection without navigation.
+
 
 ### File Mention Orchestration
 
@@ -72,9 +70,6 @@ The `ac-files-tab` component acts as the orchestration hub for file mention clic
 8. If `navigate: false` (file summary chips, "Add All"): no navigation
 
 This direct-update pattern (rather than relying on reactive property propagation through the parent) avoids full re-renders that would reset scroll position and streaming state.
-
-### Input Accumulation (on add)
-═══════ REPL is wrong, let me redo
 
 ### Input Accumulation (on add)
 
