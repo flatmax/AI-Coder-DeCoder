@@ -449,9 +449,8 @@ tests/
     test_symbol_index.py
     test_url_handler.py
     test_history_browser.js      # Node.js tests for history browser utilities
+vite.config.js                   # Vite bundler configuration
 webapp/
-    index.html
-    vite.config.js               # Vite bundler configuration
     index.html
     src/
         app-shell.js             # Root component, WebSocket, event routing

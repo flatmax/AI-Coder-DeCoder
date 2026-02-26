@@ -1482,6 +1482,33 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Auto-populate chat input with a retry prompt for old text mismatch failures.
+   * Only triggers for files already in context (selectedFiles).
+   * Does NOT auto-send — the user reviews and sends manually.
+   */
+  _populateOldTextMismatchRetryPrompt(failures) {
+    // Only include failures for files already in context
+    const selectedSet = new Set(this.selectedFiles || []);
+    const inContextFailures = failures.filter(er => selectedSet.has(er.file));
+    if (inContextFailures.length === 0) return;
+
+    const lines = inContextFailures.map(er => `- ${er.file}: ${er.message}`);
+    const prompt =
+      'The following edit(s) failed because the old text didn\'t match the actual file content. ' +
+      'The file(s) are already in your context — please re-read them carefully and retry with ' +
+      'the correct text:\n\n' +
+      lines.join('\n');
+
+    this._inputValue = prompt;
+    const textarea = this.shadowRoot?.querySelector('.input-textarea');
+    if (textarea) {
+      textarea.value = prompt;
+      this._autoResize(textarea);
+      textarea.focus();
+    }
+  }
+
   // === Scrolling ===
 
   _scrollToBottom() {

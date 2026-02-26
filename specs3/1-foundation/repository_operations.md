@@ -42,6 +42,7 @@ FileNode:
     path: string           // Full relative path
     type: "file" | "dir"
     lines: integer          // Line count (0 for binary/dirs)
+    mtime: float            // Last modification timestamp (files only)
     children: FileNode[]
 
 TreeResult:
