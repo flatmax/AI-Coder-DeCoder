@@ -3131,13 +3131,24 @@ class LLMService:
             block = self._doc_index.get_file_doc_block(path)
             if block:
                 return {"path": path, "content": block, "mode": "doc"}
+            # Fall through to symbol index in case it's a code file viewed in doc mode
+            if self._symbol_index:
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    return {"path": path, "content": block, "mode": "code"}
             return {"error": f"No document outline for {path}"}
 
         if self._symbol_index:
             block = self._symbol_index.get_file_symbol_block(path)
             if block:
                 return {"path": path, "content": block, "mode": "code"}
-            return {"error": f"No symbol data for {path}"}
+
+        # Fall through to doc index — cross-reference mode adds doc items
+        # to the code tracker, so doc files need to be viewable in code mode
+        if self._doc_index:
+            block = self._doc_index.get_file_doc_block(path)
+            if block:
+                return {"path": path, "content": block, "mode": "doc"}
 
         return {"error": "No index available"}
 
