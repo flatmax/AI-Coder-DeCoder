@@ -184,6 +184,10 @@ Model: provider/model    Total: 38.7K
 
 Per-item: numeric `N/threshold` label displayed inline, plus a proportional fill bar with tier color. Tooltip shows `N={n}/{threshold}`. Only shown for items that have an N value (symbols, files). The numeric value gives precise progress toward promotion; the bar gives a visual summary.
 
+### Item Click → View Map Block
+
+Clicking an item name opens a modal showing the full index block for that file. The backend (`get_file_map_block`) dispatches to the appropriate index based on the item's key prefix, not the current mode — so `doc:` items in code mode's cross-reference view correctly show the document outline, and `symbol:` items in doc mode show the symbol block. If the primary index for the current mode has no data for the path, the other index is tried before returning an error.
+
 ### Fuzzy Search
 
 Character-by-character matching against item names. Hides non-matching items and tiers with no matching items.
