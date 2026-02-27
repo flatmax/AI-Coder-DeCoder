@@ -1224,39 +1224,42 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Skip data URIs, blob URLs, and absolute URLs
       if (src.startsWith('data:') || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://')) continue;
 
+      // Decode percent-encoded characters (e.g. %20 for spaces) back to
+      // real filesystem characters before building the repo path.
+      const decodedSrc = decodeURIComponent(src);
+
       // Resolve relative path against the file's directory
-      const resolvedPath = fileDir ? fileDir + '/' + src : src;
+      const resolvedPath = fileDir ? fileDir + '/' + decodedSrc : decodedSrc;
       // Normalize path segments (handle ../ and ./)
       const normalized = this._normalizePath(resolvedPath);
 
       try {
-        const result = await this.rpcExtract('Repo.get_file_content', normalized);
-        if (result?.error) {
-          img.alt = `[Image not found: ${src}]`;
-          img.style.opacity = '0.4';
-          continue;
-        }
-        const content = result?.content ?? result ?? '';
-        // Determine MIME type from extension
-        const ext = src.slice(src.lastIndexOf('.')).toLowerCase();
-        const mimeMap = {
-          '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
-          '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
-          '.bmp': 'image/bmp', '.ico': 'image/x-icon',
-        };
-        const mime = mimeMap[ext] || 'image/png';
-
+        const ext = decodedSrc.slice(decodedSrc.lastIndexOf('.')).toLowerCase();
         if (ext === '.svg') {
-          // SVG is text-based — use data URI
+          // SVG is text — fetch as text content and build a data URI
+          const result = await this.rpcExtract('Repo.get_file_content', normalized);
+          if (result?.error) {
+            img.alt = `[Image not found: ${decodedSrc}]`;
+            img.style.opacity = '0.4';
+            continue;
+          }
+          const content = result?.content ?? result ?? '';
           img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(content);
         } else {
-          // Binary images — content should be base64-encoded from the server
-          // If it looks like base64, use it directly; otherwise encode it
-          img.src = `data:${mime};base64,${content}`;
+          // Binary images — fetch as base64 data URI
+          const result = await this.rpcExtract('Repo.get_file_base64', normalized);
+          if (result?.error) {
+            img.alt = `[Image not found: ${decodedSrc}]`;
+            img.style.opacity = '0.4';
+            continue;
+          }
+          if (result?.data_uri) {
+            img.src = result.data_uri;
+          }
         }
       } catch (e) {
         console.warn('Failed to load preview image:', normalized, e);
-        img.alt = `[Failed to load: ${src}]`;
+        img.alt = `[Failed to load: ${decodedSrc}]`;
         img.style.opacity = '0.4';
       }
     }

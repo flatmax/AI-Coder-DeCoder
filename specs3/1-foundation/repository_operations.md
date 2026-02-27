@@ -13,6 +13,7 @@ The repository layer wraps version control operations and file I/O. It is expose
 | `Repo.create_file(path, content)` | Create new file. Errors if file exists |
 | `Repo.file_exists(path)` | Check if file exists |
 | `Repo.is_binary_file(path)` | Binary detection: check first 8KB for null bytes |
+| `Repo.get_file_base64(path)` | Read file and return as base64 data URI (`{data_uri}` or `{error}`). Used by SVG viewer to resolve relative image references |
 
 ### Git Staging
 

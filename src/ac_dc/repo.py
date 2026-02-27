@@ -116,6 +116,49 @@ class Repo:
         except (ValueError, OSError):
             return False
 
+    def get_file_base64(self, path):
+        """Read a file and return its content as a base64 data URI.
+
+        Used by the SVG viewer to resolve relative image references
+        (e.g. <image xlink:href="slide_img1.jpg"/>) that cannot be
+        loaded directly by the browser since the webapp origin differs
+        from the repo filesystem.
+
+        Returns dict with 'data_uri' or 'error'.
+        """
+        import base64
+        import mimetypes
+        try:
+            resolved = self._resolve_path(path)
+            if not resolved.exists():
+                return {"error": "File not found"}
+            # Read binary content
+            data = resolved.read_bytes()
+            # Determine MIME type
+            mime, _ = mimetypes.guess_type(str(resolved))
+            if not mime:
+                # Fallback based on common image extensions
+                ext = resolved.suffix.lower()
+                mime_map = {
+                    '.png': 'image/png',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp',
+                    '.svg': 'image/svg+xml',
+                    '.bmp': 'image/bmp',
+                    '.ico': 'image/x-icon',
+                    '.tiff': 'image/tiff',
+                    '.tif': 'image/tiff',
+                }
+                mime = mime_map.get(ext, 'application/octet-stream')
+            b64 = base64.b64encode(data).decode('ascii')
+            return {"data_uri": f"data:{mime};base64,{b64}"}
+        except ValueError as e:
+            return {"error": str(e)}
+        except OSError as e:
+            return {"error": str(e)}
+
     def delete_file(self, path):
         """Remove file from filesystem."""
         try:

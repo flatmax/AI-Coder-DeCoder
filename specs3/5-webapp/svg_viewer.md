@@ -115,6 +115,8 @@ When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual
 
 Click an SVG element to select it. A bounding box with handles appears around the selected element. Click empty space or press Escape to deselect. The selected element's tag name is tracked internally (`_selectedTag`) but is not currently displayed in the UI.
 
+When a `<tspan>` element is clicked, the hit resolves to its parent `<text>` element — `tspan` is never selected independently. This ensures that PyMuPDF-generated SVGs (which wrap text runs in `<tspan>` children of `<text>`) are fully interactive.
+
 ### Multi-Selection
 
 Hold **Shift** and click or drag to multi-select:
@@ -171,7 +173,8 @@ The editor determines interaction behavior from the element type:
 | `line` | Translate both endpoints | Move individual endpoints |
 | `polyline`, `polygon` | Translate all points | Move individual vertices |
 | `path` | Translate via transform | Move individual path points |
-| `text` | Translate (x, y or transform) | — (double-click to edit) |
+| `text` | Translate (x, y or transform — auto-detected) | — (double-click to edit) |
+| `tspan` | Resolves to parent `text` | — |
 | `g` (group) | Translate via transform | — |
 
 ### Marquee Visual Feedback
@@ -201,9 +204,11 @@ There is no persistent toolbar. The viewer uses floating overlay buttons and key
 
 A floating `⊡` button in the bottom-right corner of the diff container. Fits both panels so SVG content is fully visible within the available space. Styled as a 32×32px rounded button with border, background blur, and box-shadow for visibility over SVG content. Hover state lightens the background and text color.
 
-Fitting uses the SVG element's `getBBox()` (the actual rendered content bounding box) rather than the `viewBox` attribute, which may be a crop window that doesn't cover all elements. A 3% margin is added around the content. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
+Fitting respects the SVG's authored `viewBox` when one exists. Many SVGs — especially those with `<defs>` containing font glyphs, clip paths, or symbol definitions with fractional coordinates — produce misleading `getBBox()` results that don't reflect the intended visible area. The authored viewBox is the correct viewport in these cases.
 
-For the left panel, the viewBox attribute is updated to the content bounding box before `svg-pan-zoom` is initialized, so its `fit()` and `center()` methods operate on the full content area. For the right panel (SvgEditor), `fitContent()` computes and sets the viewBox directly.
+When no authored viewBox is present, fitting falls back to `getBBox()` (the actual rendered content bounding box) with a 3% margin. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
+
+For the left panel, the viewBox attribute is only updated from `getBBox()` if no authored viewBox exists, before `svg-pan-zoom` is initialized with `fit: true` and `center: true`. For the right panel (SvgEditor), if an authored viewBox exists it is fitted into the container dimensions directly (preserving aspect ratio); otherwise `fitContent()` computes a viewBox via `getBBox()`.
 
 ### Status LED
 
@@ -239,9 +244,23 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
    - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
 
-**Content bounds vs viewBox**: An SVG's `viewBox` attribute may define a crop window that doesn't cover all rendered content (elements can extend outside the declared viewBox). During initialization, the left panel's viewBox is updated to the actual content bounding box (`getBBox()` with a 3% margin) before `svg-pan-zoom` is created. The right panel's `SvgEditor.fitContent()` similarly uses `getBBox()` to compute a viewBox that shows all content. This ensures "fit" works correctly regardless of the original viewBox.
+**Authored viewBox preservation**: Both panels prefer the SVG's authored `viewBox` attribute over a `getBBox()`-derived one. SVGs with `<defs>` containing font glyphs, clip paths, or symbol definitions often have elements with very small coordinate systems (e.g., 0–1 font units) that pollute `getBBox()` results, causing content to appear shrunken. The authored viewBox is trusted as the correct viewport. `getBBox()` is only used as a fallback when no viewBox attribute exists — in that case a 3% margin is added around the computed bounding box. For the right panel, `preserveAspectRatio="none"` is set so that `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform.
 
 **Retry on next frame**: If the `.svg-left` / `.svg-right` containers are not yet in the shadow DOM when `_injectSvgContent()` runs (due to Lit render timing — the method may be called from `updated()` before the template has committed), it schedules a retry via `requestAnimationFrame`. This ensures injection succeeds even when called during the Lit update lifecycle before the DOM reflects the latest template.
+
+## Relative Image Resolution
+
+SVG files produced by doc-convert (e.g. from `.pptx` presentations) reference sibling image files with relative paths like `<image xlink:href="01_slide_img1_2.jpg"/>`. When the SVG is injected into the webapp DOM, the browser resolves those paths against the webapp's origin URL — which does not serve repository files. The images silently fail to load.
+
+After `_injectSvgContent()` sets `innerHTML` on both panels, it calls `_resolveImageHrefs()` on each container. This method:
+
+1. Finds all `<image>` elements in the injected SVG
+2. Skips elements whose `href` / `xlink:href` is already a `data:` URI or an absolute URL (`http://`, `https://`)
+3. Resolves each relative path against the SVG file's directory (e.g. `docs/slides/01_slide.svg` + `01_slide_img1_2.jpg` → `docs/slides/01_slide_img1_2.jpg`)
+4. Fetches the binary content via `Repo.get_file_base64` RPC, which returns a `data:` URI with the correct MIME type
+5. Rewrites the `href` and/or `xlink:href` attribute in-place so the browser renders the image
+
+Image resolution runs in parallel for all images in both panels via `Promise.all`. It is non-blocking — the SVG panels initialize and become interactive immediately, and images appear as the base64 fetches complete. Failed fetches log a warning but do not prevent the SVG from displaying.
 
 ## File Content Fetching
 
@@ -251,6 +270,7 @@ Content is fetched via the same RPC methods as the diff viewer:
 |---------|----------|----------|
 | HEAD (original) | `Repo.get_file_content(path, 'HEAD')` | Empty string (file is new) |
 | Working copy (modified) | `Repo.get_file_content(path)` | Empty string (file deleted) |
+| Embedded images | `Repo.get_file_base64(imagePath)` | Warning logged, image not shown |
 
 Each call is wrapped in its own try/catch — a failure in one (e.g., file doesn't exist in HEAD) doesn't prevent the other from loading. The response is normalized to a string regardless of whether the RPC returns a string or `{content: string}` object.
 

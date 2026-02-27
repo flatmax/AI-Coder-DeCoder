@@ -4,7 +4,7 @@ Converts .docx, .pdf, .pptx, .xlsx, .csv, .rtf, .odt, .odp files
 to markdown using markitdown (pure Python). Presentation and PDF files
 produce per-page SVG exports via headless LibreOffice + PyMuPDF for
 full visual fidelity. Images embedded as data URIs are extracted and
-saved as separate files. Requires a clean git working tree.
+saved as separate files.
 """
 
 import hashlib
@@ -32,6 +32,21 @@ _SKIP_DIRS = {
     ".git", ".ac-dc", "node_modules", "__pycache__",
     ".venv", "venv", "dist", "build", ".egg-info",
 }
+
+# Regex to match data-URI href/xlink:href in <image> elements.
+# Handles both href="data:..." and xlink:href="data:..." with optional
+# whitespace around the base64 payload and newlines within it.
+_SVG_DATA_URI_RE = re.compile(
+    r'((?:xlink:)?href=")\s*data:image/([a-zA-Z0-9.+-]+);base64,\s*([^"]+?)\s*(")',
+    re.DOTALL,
+)
+
+# Regex matching truncated data-URI image references emitted by markitdown.
+# These look like ![alt](data:image/png;base64...) — note the literal "..."
+# with no actual base64 payload.
+_TRUNCATED_URI_RE = re.compile(
+    r'(!\[[^\]]*\]\()data:image/[a-zA-Z0-9.+-]+;base64\.{2,}\)?'
+)
 
 
 def _is_markitdown_available():
@@ -180,127 +195,6 @@ def _libreoffice_to_pdf(source_path, output_dir):
     return None
 
 
-# Regex to match a <use> element with data-text and transform matrix.
-# PyMuPDF emits glyphs as:
-#   <use data-text="X" xlink:href="..." transform="matrix(a,b,c,d,tx,ty)" fill="..."/>
-# Attributes may appear in any order and with varying whitespace.
-_SVG_USE_TEXT_RE = re.compile(
-    r'<use\b([^>]*?)\bdata-text="([^"]*)"([^>]*?)/>'
-)
-_SVG_USE_TRANSFORM_RE = re.compile(
-    r'\btransform="matrix\(([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^)]+)\)"'
-)
-_SVG_USE_FILL_RE = re.compile(r'\bfill="([^"]*)"')
-
-
-def _parse_use_element(stripped):
-    """Parse a <use data-text="..."> element.
-
-    Returns (char, tx, ty, sx, sy, fill) or None if not a text glyph element.
-    """
-    m = _SVG_USE_TEXT_RE.match(stripped)
-    if not m:
-        return None
-
-    before_attr = m.group(1)
-    char = m.group(2)
-    after_attr = m.group(3)
-    all_attrs = before_attr + after_attr
-
-    tm = _SVG_USE_TRANSFORM_RE.search(all_attrs)
-    if not tm:
-        return None
-
-    sx = float(tm.group(1))
-    sy = float(tm.group(4))
-    tx = float(tm.group(5))
-    ty = float(tm.group(6))
-
-    fm = _SVG_USE_FILL_RE.search(all_attrs)
-    fill = fm.group(1) if fm else "#000000"
-
-    return (char, tx, ty, sx, sy, fill)
-
-
-def _merge_svg_text_elements(svg_text):
-    """Merge per-character <use data-text> elements into <text> runs.
-
-    PyMuPDF's get_svg_image() emits each glyph as an individual <use>
-    element referencing a font glyph definition, with a transform matrix
-    for positioning.  This post-processor groups consecutive <use> elements
-    that share the same y-coordinate (within tolerance), same font scale,
-    and same fill colour, then emits a single <text> element for each run.
-
-    The transform matrix is: matrix(sx, 0, 0, -sy, tx, ty)
-    where sx/sy are the font scale and tx/ty are the position.
-    """
-    lines = svg_text.split("\n")
-    result = []
-    # Each pending item: (char, tx, ty, sx, sy, fill, original_line)
-    pending = []
-
-    def _flush():
-        """Write the pending run as a single <text> element."""
-        if not pending:
-            return
-        if len(pending) == 1:
-            # Single char — keep original <use> element unchanged
-            result.append(pending[0][6])
-            pending.clear()
-            return
-
-        # Compute font size from the scale factor
-        sy = abs(pending[0][4])
-        font_size = round(sy, 2)
-        tx0 = pending[0][1]
-        ty0 = pending[0][2]
-        fill = pending[0][5]
-        merged_text = "".join(item[0] for item in pending)
-
-        # Escape XML special characters
-        escaped = (
-            merged_text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-        )
-
-        result.append(
-            f'<text x="{round(tx0, 3)}" y="{round(ty0, 3)}"'
-            f' font-size="{font_size}" fill="{fill}"'
-            f'>{escaped}</text>'
-        )
-        pending.clear()
-
-    for line in lines:
-        stripped = line.strip()
-        parsed = _parse_use_element(stripped)
-        if not parsed:
-            _flush()
-            result.append(line)
-            continue
-
-        char, tx, ty, sx, sy, fill = parsed
-
-        # Build a grouping key: font scale + fill
-        font_key = (round(abs(sy), 2), fill)
-
-        if pending:
-            prev_ty = pending[-1][2]
-            prev_key = (round(abs(pending[-1][4]), 2), pending[-1][5])
-            # Same line: y within tolerance and same style
-            y_tol = 0.5
-            if abs(ty - prev_ty) < y_tol and font_key == prev_key:
-                pending.append((char, tx, ty, sx, sy, fill, line))
-                continue
-            else:
-                _flush()
-
-        pending.append((char, tx, ty, sx, sy, fill, line))
-
-    _flush()
-    return "\n".join(result)
 
 
 def _pdf_page_has_images(page):
@@ -354,7 +248,7 @@ def _pdf_extract_page_text(page):
     Uses PyMuPDF's text extraction with block/line structure to produce
     readable markdown with paragraph breaks.
     """
-    blocks = page.get_text("dict", flags=0)["blocks"]
+    blocks = page.get_text("dict")["blocks"]
     md_parts = []
 
     for block in blocks:
@@ -381,72 +275,18 @@ def _pdf_extract_page_text(page):
 def _pdf_page_to_svg(page):
     """Convert a single PDF page to an SVG string using PyMuPDF.
 
-    The full-page SVG is post-processed to remove text glyph <use>
-    elements (which reference font defs), keeping only the graphical
-    content — images, paths, shapes.  The text is already extracted
-    separately into the markdown file.
+    Uses ``text_as_path=0`` so that text is emitted as ``<text>``
+    elements rather than decomposed into individual per-character
+    font-glyph ``<use>``/``<path>`` elements.  This keeps sentences
+    intact and produces much smaller, more readable SVGs.
+
+    The extracted text is also written separately to the companion
+    markdown for searchability.
+
+    Args:
+        page: a PyMuPDF page object
     """
-    svg_text = page.get_svg_image()
-    svg_text = _strip_svg_text_elements(svg_text)
-    return svg_text
-
-
-def _strip_svg_text_elements(svg_text):
-    """Remove per-character <use data-text> glyph elements from an SVG.
-
-    Also removes unused font <symbol> definitions from <defs> that were
-    only referenced by the stripped <use> elements.
-
-    This leaves behind only the graphical content (images, paths, rects,
-    circles, etc.) while the text lives in the companion markdown file.
-    """
-    lines = svg_text.split("\n")
-    result = []
-    # Collect font symbol ids referenced by text glyphs so we can
-    # strip their <symbol> defs as well.
-    font_ids_to_strip = set()
-    stripped_use_lines = []
-
-    # First pass: identify text <use> lines and collect their href targets
-    keep_flags = []
-    _href_re = re.compile(r'xlink:href="#([^"]*)"')
-    for line in lines:
-        stripped = line.strip()
-        parsed = _parse_use_element(stripped)
-        if parsed is not None:
-            keep_flags.append(False)
-            m = _href_re.search(stripped)
-            if m:
-                font_ids_to_strip.add(m.group(1))
-        else:
-            keep_flags.append(True)
-
-    # Second pass: emit non-text lines, also stripping font <symbol> defs
-    in_stripped_symbol = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-
-        # Skip text glyph <use> elements
-        if not keep_flags[i]:
-            continue
-
-        # Skip <symbol> blocks for font glyphs
-        if not in_stripped_symbol:
-            # Check for <symbol id="font_..."> opening
-            m = re.match(r'<symbol\s+id="([^"]*)"', stripped)
-            if m and m.group(1) in font_ids_to_strip:
-                in_stripped_symbol = True
-                continue
-        else:
-            if stripped == '</symbol>' or stripped.startswith('</symbol>'):
-                in_stripped_symbol = False
-                continue
-            # Skip lines inside stripped symbol
-            continue
-
-        result.append(line)
-
-    return "\n".join(result)
+    return page.get_svg_image(text_as_path=0)
 
 
 def _pdf_extract_pages(pdf_path):
@@ -475,10 +315,21 @@ def _pdf_extract_pages(pdf_path):
     pages = []
     try:
         doc = fitz.open(str(pdf_path))
-        for page in doc:
+        for page_num, page in enumerate(doc, 1):
             text = _pdf_extract_page_text(page)
             has_images = _pdf_page_has_images(page)
+            text_ok = bool(text and text.strip())
+            # Text is emitted as <text> elements (text_as_path=0) so
+            # sentences stay intact.  The extracted text is also
+            # written to the companion markdown for search.
             svg = _pdf_page_to_svg(page) if has_images else None
+            # If no text was extracted and no SVG was generated yet,
+            # export the full page as SVG so the visual content is
+            # preserved.
+            if not text_ok and svg is None:
+                svg = _pdf_page_to_svg(page)
+                if svg and svg.strip():
+                    has_images = True
             pages.append({
                 "text": text,
                 "svg": svg,
@@ -499,6 +350,152 @@ def _should_skip_dir(dirname):
     if dirname.startswith(".") and dirname != ".github":
         return True
     return False
+
+
+def _externalize_svg_images(svg_text, output_dir, stem, page_index):
+    """Extract embedded base64 images from SVG and save as separate files.
+
+    Finds all ``<image>`` elements whose ``href`` or ``xlink:href``
+    contains a ``data:image/…;base64,…`` URI, decodes the payload,
+    writes each image to *output_dir*, and replaces the data URI in the
+    SVG with a relative filename reference.
+
+    Args:
+        svg_text: the full SVG string (may contain embedded data URIs)
+        output_dir: Path to the directory where image files are saved
+        stem: base filename stem used for naming (e.g. ``"04_slide"``)
+        page_index: 1-based page/slide index, used in filenames
+
+    Returns:
+        (modified_svg_text, saved_filenames) — the SVG with data URIs
+        replaced by relative paths, and a list of saved image filenames.
+    """
+    import base64 as _b64
+
+    ext_map = {
+        "png": ".png",
+        "jpeg": ".jpg",
+        "jpg": ".jpg",
+        "gif": ".gif",
+        "svg+xml": ".svg",
+        "webp": ".webp",
+        "bmp": ".bmp",
+        "tiff": ".tiff",
+    }
+
+    saved = []
+    counter = 0
+
+    def _replace_match(m):
+        nonlocal counter
+        counter += 1
+        prefix = m.group(1)       # 'href="' or 'xlink:href="'
+        mime_sub = m.group(2)      # e.g. 'png', 'jpeg'
+        encoded = m.group(3)       # raw base64 (may contain newlines)
+        suffix = m.group(4)        # closing '"'
+
+        # Strip all whitespace from the base64 payload
+        clean_data = re.sub(r'\s+', '', encoded)
+        try:
+            img_bytes = _b64.b64decode(clean_data)
+        except Exception as e:
+            logger.warning(
+                "Failed to decode base64 image %d in %s: %s",
+                counter, stem, e,
+            )
+            return m.group(0)  # leave unchanged
+
+        ext = ext_map.get(mime_sub.lower(), f".{mime_sub.lower()}")
+        filename = f"{stem}_img{page_index}_{counter}{ext}"
+        out_path = Path(output_dir) / filename
+
+        try:
+            out_path.write_bytes(img_bytes)
+        except Exception as e:
+            logger.warning(
+                "Failed to save externalized image %s: %s", filename, e,
+            )
+            return m.group(0)  # leave unchanged
+
+        logger.info("Externalized embedded image: %s", filename)
+        saved.append(filename)
+        return f'{prefix}{filename}{suffix}'
+
+    modified = _SVG_DATA_URI_RE.sub(_replace_match, svg_text)
+    return modified, saved
+
+
+def _extract_docx_images(abs_path, output_dir, stem):
+    """Extract embedded images from a .docx archive.
+
+    Opens the docx as a zip, finds all files under ``word/media/``,
+    and writes them to *output_dir* with sequential names like
+    ``stem_img1.png``.
+
+    Args:
+        abs_path: Path to the .docx file
+        output_dir: directory to write extracted images into
+        stem: base filename stem for naming output files
+
+    Returns:
+        list of saved filenames in archive order, e.g.
+        ``["report_img1.png", "report_img2.jpeg"]``
+    """
+    import zipfile
+
+    saved = []
+    try:
+        with zipfile.ZipFile(str(abs_path), "r") as zf:
+            media = sorted(
+                n for n in zf.namelist()
+                if n.startswith("word/media/") and not n.endswith("/")
+            )
+            for idx, member in enumerate(media, start=1):
+                ext = os.path.splitext(member)[1].lower() or ".bin"
+                # Normalise common variants
+                if ext == ".jpeg":
+                    ext = ".jpg"
+                filename = f"{stem}_img{idx}{ext}"
+                out_path = Path(output_dir) / filename
+                try:
+                    data = zf.read(member)
+                    out_path.write_bytes(data)
+                    saved.append(filename)
+                    logger.info("Extracted docx image: %s → %s", member, filename)
+                except Exception as e:
+                    logger.warning("Failed to extract %s: %s", member, e)
+    except zipfile.BadZipFile:
+        logger.warning("Cannot open %s as a zip — skipping image extraction", abs_path)
+    except Exception as e:
+        logger.warning("docx image extraction failed for %s: %s", abs_path, e)
+
+    return saved
+
+
+def _replace_truncated_uris(md_content, image_filenames):
+    """Replace truncated data-URI image references with real filenames.
+
+    markitdown emits ``![alt](data:image/png;base64...)`` with a literal
+    ``...`` instead of actual base64 data.  This function substitutes each
+    such reference with the next filename from *image_filenames*.
+
+    Args:
+        md_content: markdown text containing truncated URIs
+        image_filenames: ordered list of extracted image filenames
+
+    Returns:
+        modified markdown text
+    """
+    it = iter(image_filenames)
+
+    def _repl(m):
+        prefix = m.group(1)  # '![alt]('
+        fn = next(it, None)
+        if fn is None:
+            return m.group(0)  # no more images — leave as-is
+        return f"{prefix}{fn})"
+
+    return _TRUNCATED_URI_RE.sub(_repl, md_content)
 
 
 class DocConvert:
@@ -547,29 +544,16 @@ class DocConvert:
 
         Returns:
             {
-                clean: bool,
-                clean_message: str | None,
                 files: [{path, size, status, output_path}],
                 available: bool,
-                pypandoc_available: bool,
             }
         """
         if not self._repo:
             return {"error": "No repository available"}
 
-        # Check clean working tree
-        is_clean = self._repo.is_clean()
-        clean_msg = None
-        if not is_clean:
-            clean_msg = (
-                "Commit or stash your changes before converting documents."
-            )
-
         config = self._doc_convert_config
         if not config.get("enabled", True):
             return {
-                "clean": is_clean,
-                "clean_message": clean_msg,
                 "files": [],
                 "available": self.available,
             }
@@ -637,8 +621,6 @@ class DocConvert:
             pass
 
         return {
-            "clean": is_clean,
-            "clean_message": clean_msg,
             "files": files,
             "available": self.available,
             "pdf_pipeline": lo is not None and has_pymupdf,
@@ -688,13 +670,6 @@ class DocConvert:
         """
         if not self._repo:
             return {"error": "No repository available"}
-
-        # Verify clean tree first — this gate applies regardless of tooling
-        if not self._repo.is_clean():
-            return {
-                "error": "Working tree has uncommitted changes. "
-                         "Commit or stash changes before converting."
-            }
 
         if not self.available:
             return {"error": "markitdown is not installed. Install with: pip install ac-dc[docs]"}
@@ -808,13 +783,26 @@ class DocConvert:
                 "error": "Conversion produced no output",
             }
 
-        # Extract and save images from the conversion result
+        # For .docx files, extract real images from the zip archive and
+        # replace markitdown's truncated data-URI placeholders.
+        docx_image_names = []
+        if ext == ".docx":
+            output_dir = output_abs.parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+            docx_image_names = _extract_docx_images(
+                abs_path, output_dir, Path(rel_path).stem,
+            )
+            if docx_image_names:
+                md_content = _replace_truncated_uris(md_content, docx_image_names)
+
+        # Extract and save images from the conversion result (real
+        # base64 data URIs only — truncated ones were already handled).
         images = self._extract_and_save_images(
             md_content, rel_path, abs_path, source_name, source_hash
         )
-        image_names = [img["filename"] for img in images]
+        image_names = docx_image_names + [img["filename"] for img in images]
 
-        # Replace data URIs in the markdown with saved file paths
+        # Replace remaining real data URIs with saved file paths
         md_content = self._replace_data_uris(md_content, images)
 
         # Build provenance header
@@ -970,6 +958,7 @@ class DocConvert:
         heading_label = "Slide" if ext in (".pptx", ".odp") else "Page"
 
         svg_filenames = []
+        ext_image_filenames = []
         md_lines = []
 
         for i, page_data in enumerate(pages, start=1):
@@ -990,6 +979,15 @@ class DocConvert:
                 filename = f"{padded}_{page_label}.svg"
                 rel_filename = f"{stem}/{filename}"
                 svg_path = slides_dir / filename
+
+                # Externalize embedded base64 images before writing
+                svg_stem = Path(filename).stem
+                svg, ext_images = _externalize_svg_images(
+                    svg, slides_dir, svg_stem, i,
+                )
+                for img_fn in ext_images:
+                    ext_image_filenames.append(f"{stem}/{img_fn}")
+
                 prov = _build_svg_provenance_header(
                     f"{stem}.md", source_name, source_hash, i,
                 )
@@ -1000,18 +998,20 @@ class DocConvert:
                 logger.info(f"Saved {page_label} {i}: {rel_filename}")
 
         # Build final markdown with provenance header
+        all_image_filenames = svg_filenames + ext_image_filenames
         header = _build_provenance_header(
-            source_name, source_hash, svg_filenames or None,
+            source_name, source_hash, all_image_filenames or None,
         )
         full_md = header + "\n\n" + f"# {stem}\n\n" + "\n".join(md_lines)
         output_abs.write_text(full_md)
 
         svg_count = len(svg_filenames)
         text_only = n_pages - svg_count
+        ext_count = len(ext_image_filenames)
         logger.info(
             f"Converted {rel_path} → {output_rel} "
             f"({n_pages} {page_label}s: {text_only} text-only, "
-            f"{svg_count} with images)"
+            f"{svg_count} with images, {ext_count} externalized)"
         )
 
         result = {
@@ -1019,8 +1019,8 @@ class DocConvert:
             "status": "converted",
             "output_path": output_rel,
         }
-        if svg_filenames:
-            result["images"] = svg_filenames
+        if all_image_filenames:
+            result["images"] = all_image_filenames
         return result
 
     def _extract_pptx_slides(self, abs_path):
@@ -1227,7 +1227,11 @@ class DocConvert:
         1. Data URIs (base64-encoded) — decoded and saved as files
         2. File references — verified to exist on disk
 
-        Returns a list of {filename, path} dicts.
+        Truncated data URIs (ending with literal ``...``) are skipped —
+        those are handled by ``_replace_truncated_uris`` instead.
+
+        Returns a list of {filename, path, source} dicts where *source*
+        is ``"data_uri"`` or ``"file"``.
         """
         import base64
 
@@ -1260,6 +1264,12 @@ class DocConvert:
                 search_start = uri_start
                 continue
             data_uri = md_content[uri_start:paren_close]
+
+            # Skip truncated URIs emitted by markitdown (literal "...")
+            if data_uri.endswith("...") and ";base64," not in data_uri:
+                search_start = paren_close + 1
+                continue
+
             data_uri_index += 1
             logger.debug(
                 f"Found data URI image {data_uri_index}: "
@@ -1270,6 +1280,7 @@ class DocConvert:
                 source_name, source_hash,
             )
             if saved:
+                saved["source"] = "data_uri"
                 images.append(saved)
             search_start = paren_close + 1
 
@@ -1292,6 +1303,7 @@ class DocConvert:
                 images.append({
                     "filename": os.path.basename(img_path),
                     "path": img_path,
+                    "source": "file",
                 })
 
         return images
@@ -1326,8 +1338,10 @@ class DocConvert:
         mime_subtype = match.group(1).lower()
         encoded_data = match.group(2)
 
+        # Strip whitespace — markitdown may wrap long base64 with newlines
+        clean_data = re.sub(r'\s+', '', encoded_data)
         try:
-            img_bytes = base64.b64decode(encoded_data)
+            img_bytes = base64.b64decode(clean_data)
         except Exception as e:
             logger.warning(f"Failed to decode base64 image {index}: {e}")
             return None
@@ -1381,11 +1395,11 @@ class DocConvert:
         Uses string scanning (not regex) to match data URIs reliably,
         same approach as _extract_and_save_images.
         """
-        # Filter to only images that were saved from data URIs
+        # Filter to only images that were actually saved from data URIs
         # (file-referenced images don't need replacement)
         data_uri_images = [
             img for img in images
-            if not img["path"].startswith(("http://", "https://"))
+            if img.get("source") == "data_uri"
         ]
         if not data_uri_images:
             return md_content

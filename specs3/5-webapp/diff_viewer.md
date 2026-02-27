@@ -99,6 +99,8 @@ The markdown utility module maintains two completely independent `Marked` instan
 
 The two instances share no renderer state. This separation prevents preview-specific logic (source-line injection, walkTokens hooks) from affecting chat rendering, and keeps the chat renderer simple by using marked's defaults for all non-code block elements.
 
+Both instances share a common pre-processing step: `_encodeImagePaths()` encodes spaces in image paths as `%20` before passing text to `marked`, since `marked` cannot parse `![alt](path with spaces)`.
+
 ### Source-Line Attribute Injection
 
 `renderMarkdownWithSourceMap()` injects `data-source-line` attributes into the HTML output for scroll synchronization. The approach uses a two-phase strategy:
@@ -128,13 +130,17 @@ Editor and preview scroll positions are synchronized:
 Markdown images with relative `src` paths are resolved against the current file's directory and fetched from the repository via RPC. After each preview render, `_resolvePreviewImages()` post-processes `<img>` tags:
 
 - **Skip** `data:`, `blob:`, `http://`, `https://` URLs — these pass through unchanged
+- **Decode** percent-encoded characters in `src` attributes (e.g. `%20` → space) back to real filesystem characters before building the repo path. This is necessary because `_encodeImagePaths()` in the markdown utility encodes spaces for `marked` compatibility
 - **Resolve** relative paths (including `../` and `./`) against the markdown file's directory using `_normalizePath()`
-- **Fetch** content via `Repo.get_file_content`
-- **SVG files** are injected as `data:image/svg+xml` URIs with URL-encoded text content
-- **Binary images** (PNG, JPG, GIF, WebP, BMP, ICO) expect base64-encoded content from the server and are injected as `data:{mime};base64,{content}` URIs
+- **SVG files** are fetched as text via `Repo.get_file_content` and injected as `data:image/svg+xml;charset=utf-8,` URIs with URL-encoded content
+- **Binary images** (PNG, JPG, GIF, WebP, BMP, ICO) are fetched via `Repo.get_file_base64` which returns a ready-to-use `data:{mime};base64,{content}` URI
 - **Failed loads** degrade gracefully — the `alt` text is updated to show the error and the image is dimmed (`opacity: 0.4`)
 
 Images are styled with `max-width: 100%` to fit within the preview pane.
+
+#### Space Encoding in Image Paths
+
+The `marked` markdown library does not parse `![alt](path with spaces)` — unencoded spaces break the link parser. The markdown utility pre-processes text through `_encodeImagePaths()` which replaces spaces with `%20` in image URL portions before `marked` processes the markdown. This function is applied in both `renderMarkdown()` (chat) and `renderMarkdownWithSourceMap()` (diff viewer preview). Already-encoded URLs and absolute `http(s)://` URLs are left unchanged.
 
 ### Toggle Behavior
 

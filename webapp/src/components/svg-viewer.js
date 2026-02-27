@@ -346,6 +346,72 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     return [...this._dirtySet];
   }
 
+  // === SVG Image Resolution ===
+
+  /**
+   * Resolve relative image references in an SVG container.
+   *
+   * SVG files produced by doc-convert (e.g. from .pptx) reference sibling
+   * image files with relative paths like "01_slide_img1_2.jpg".  When the
+   * SVG is injected into the webapp DOM, the browser resolves those paths
+   * against the webapp origin — which doesn't serve repo files.
+   *
+   * This method finds all <image> elements with relative href/xlink:href,
+   * resolves each path relative to the SVG file's directory, fetches the
+   * binary content as a base64 data URI via RPC, and rewrites the href
+   * in-place so the browser can render the image.
+   */
+  async _resolveImageHrefs(container, svgFilePath) {
+    if (!this.rpcConnected || !svgFilePath) return;
+
+    const svgDir = svgFilePath.includes('/')
+      ? svgFilePath.substring(0, svgFilePath.lastIndexOf('/'))
+      : '';
+
+    const images = container.querySelectorAll('image');
+    if (!images.length) return;
+
+    const promises = [];
+
+    for (const img of images) {
+      // Check both href and xlink:href
+      const href = img.getAttribute('href')
+        || img.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      if (!href) continue;
+
+      // Skip already-resolved data URIs and absolute URLs
+      if (href.startsWith('data:') || href.startsWith('http://') || href.startsWith('https://')) continue;
+
+      // Build repo-relative path
+      const imagePath = svgDir ? `${svgDir}/${href}` : href;
+
+      const promise = this.rpcExtract('Repo.get_file_base64', imagePath)
+        .then(result => {
+          if (result && result.data_uri) {
+            // Rewrite both attributes to the data URI
+            if (img.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')) {
+              img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', result.data_uri);
+            }
+            if (img.hasAttribute('href')) {
+              img.setAttribute('href', result.data_uri);
+            }
+            // If neither was set explicitly but we read via getAttributeNS,
+            // set xlink:href as fallback
+            if (!img.hasAttribute('href') && !img.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')) {
+              img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', result.data_uri);
+            }
+          }
+        })
+        .catch(err => {
+          console.warn(`Failed to resolve image ${imagePath}:`, err);
+        });
+
+      promises.push(promise);
+    }
+
+    await Promise.all(promises);
+  }
+
   // === SVG Content Fetching ===
 
   async _fetchSvgContent(path) {
@@ -461,21 +527,25 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
     if (!leftSvg) return;
 
-    // Update the viewBox to cover all rendered content so that
-    // svg-pan-zoom's fit() shows everything (the original viewBox
-    // may be a crop window that doesn't include all elements).
-    try {
-      const bbox = leftSvg.getBBox();
-      if (bbox.width > 0 && bbox.height > 0) {
-        const margin = 0.03;
-        const mx = bbox.x - bbox.width * margin;
-        const my = bbox.y - bbox.height * margin;
-        const mw = bbox.width * (1 + margin * 2);
-        const mh = bbox.height * (1 + margin * 2);
-        leftSvg.setAttribute('viewBox', `${mx} ${my} ${mw} ${mh}`);
+    // Only compute a viewBox from getBBox if the SVG doesn't already have
+    // an authored viewBox.  Many SVGs (especially those with <defs> containing
+    // font glyphs or clip paths in fractional coordinates) produce misleading
+    // getBBox results that don't reflect the intended visible area.
+    const existingVb = leftSvg.getAttribute('viewBox');
+    if (!existingVb) {
+      try {
+        const bbox = leftSvg.getBBox();
+        if (bbox.width > 0 && bbox.height > 0) {
+          const margin = 0.03;
+          const mx = bbox.x - bbox.width * margin;
+          const my = bbox.y - bbox.height * margin;
+          const mw = bbox.width * (1 + margin * 2);
+          const mh = bbox.height * (1 + margin * 2);
+          leftSvg.setAttribute('viewBox', `${mx} ${my} ${mw} ${mh}`);
+        }
+      } catch {
+        // getBBox can fail for hidden/empty SVGs — keep default
       }
-    } catch {
-      // getBBox can fail for hidden/empty SVGs — keep original viewBox
     }
 
     try {
@@ -701,10 +771,33 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.center();
     }
 
-    // In select mode, use the editor's own fit method which accounts
-    // for the container aspect ratio and resets zoom.
+    // In select mode, fit the editor to its content.  If the SVG has an
+    // authored viewBox we set it directly — fitContent() uses getBBox()
+    // which can produce misleading results for SVGs with <defs> containing
+    // font glyphs or clip paths in fractional coordinates.
     if (this._mode === 'select' && this._svgEditor) {
-      this._svgEditor.fitContent();
+      const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
+      const origVb = rightSvg && this._getOriginalViewBox(rightSvg);
+      if (origVb && origVb.w > 0 && origVb.h > 0) {
+        // Fit the authored viewBox into the container while preserving
+        // aspect ratio (same logic as fitContent but without getBBox).
+        const container = this.shadowRoot.querySelector('.svg-right');
+        if (container) {
+          const cr = container.getBoundingClientRect();
+          if (cr.width > 0 && cr.height > 0) {
+            const scaleX = cr.width / origVb.w;
+            const scaleY = cr.height / origVb.h;
+            const scale = Math.min(scaleX, scaleY);
+            const fitW = cr.width / scale;
+            const fitH = cr.height / scale;
+            const fitX = origVb.x - (fitW - origVb.w) / 2;
+            const fitY = origVb.y - (fitH - origVb.h) / 2;
+            this._svgEditor.setViewBox(fitX, fitY, fitW, fitH);
+          }
+        }
+      } else {
+        this._svgEditor.fitContent();
+      }
       this._zoomLevel = Math.round(this._svgEditor.zoomLevel * 100);
     }
   }
@@ -1057,7 +1150,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     rightContainer.innerHTML = modifiedSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
 
     this._prepareSvgElement(leftContainer);
-    this._prepareSvgElement(rightContainer);
+    this._prepareSvgElement(rightContainer, { editable: true });
+
+    // Resolve relative image references (e.g. sibling .jpg/.png files from
+    // doc-convert slides) by fetching them as base64 data URIs from the repo.
+    const filePath = file.path;
+    Promise.all([
+      this._resolveImageHrefs(leftContainer, filePath),
+      this._resolveImageHrefs(rightContainer, filePath),
+    ]).catch(err => console.warn('Image resolution failed:', err));
 
     // Attach context menu to right panel
     rightContainer.removeEventListener('contextmenu', this._onContextMenu);
