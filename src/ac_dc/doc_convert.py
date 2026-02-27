@@ -41,6 +41,13 @@ _SVG_DATA_URI_RE = re.compile(
     re.DOTALL,
 )
 
+# Regex matching truncated data-URI image references emitted by markitdown.
+# These look like ![alt](data:image/png;base64...) — note the literal "..."
+# with no actual base64 payload.
+_TRUNCATED_URI_RE = re.compile(
+    r'(!\[[^\]]*\]\()data:image/[a-zA-Z0-9.+-]+;base64\.{2,}\)?'
+)
+
 
 def _is_markitdown_available():
     """Check if markitdown is installed."""
@@ -418,6 +425,79 @@ def _externalize_svg_images(svg_text, output_dir, stem, page_index):
     return modified, saved
 
 
+def _extract_docx_images(abs_path, output_dir, stem):
+    """Extract embedded images from a .docx archive.
+
+    Opens the docx as a zip, finds all files under ``word/media/``,
+    and writes them to *output_dir* with sequential names like
+    ``stem_img1.png``.
+
+    Args:
+        abs_path: Path to the .docx file
+        output_dir: directory to write extracted images into
+        stem: base filename stem for naming output files
+
+    Returns:
+        list of saved filenames in archive order, e.g.
+        ``["report_img1.png", "report_img2.jpeg"]``
+    """
+    import zipfile
+
+    saved = []
+    try:
+        with zipfile.ZipFile(str(abs_path), "r") as zf:
+            media = sorted(
+                n for n in zf.namelist()
+                if n.startswith("word/media/") and not n.endswith("/")
+            )
+            for idx, member in enumerate(media, start=1):
+                ext = os.path.splitext(member)[1].lower() or ".bin"
+                # Normalise common variants
+                if ext == ".jpeg":
+                    ext = ".jpg"
+                filename = f"{stem}_img{idx}{ext}"
+                out_path = Path(output_dir) / filename
+                try:
+                    data = zf.read(member)
+                    out_path.write_bytes(data)
+                    saved.append(filename)
+                    logger.info("Extracted docx image: %s → %s", member, filename)
+                except Exception as e:
+                    logger.warning("Failed to extract %s: %s", member, e)
+    except zipfile.BadZipFile:
+        logger.warning("Cannot open %s as a zip — skipping image extraction", abs_path)
+    except Exception as e:
+        logger.warning("docx image extraction failed for %s: %s", abs_path, e)
+
+    return saved
+
+
+def _replace_truncated_uris(md_content, image_filenames):
+    """Replace truncated data-URI image references with real filenames.
+
+    markitdown emits ``![alt](data:image/png;base64...)`` with a literal
+    ``...`` instead of actual base64 data.  This function substitutes each
+    such reference with the next filename from *image_filenames*.
+
+    Args:
+        md_content: markdown text containing truncated URIs
+        image_filenames: ordered list of extracted image filenames
+
+    Returns:
+        modified markdown text
+    """
+    it = iter(image_filenames)
+
+    def _repl(m):
+        prefix = m.group(1)  # '![alt]('
+        fn = next(it, None)
+        if fn is None:
+            return m.group(0)  # no more images — leave as-is
+        return f"{prefix}{fn})"
+
+    return _TRUNCATED_URI_RE.sub(_repl, md_content)
+
+
 class DocConvert:
     """RPC service for document conversion.
 
@@ -703,13 +783,26 @@ class DocConvert:
                 "error": "Conversion produced no output",
             }
 
-        # Extract and save images from the conversion result
+        # For .docx files, extract real images from the zip archive and
+        # replace markitdown's truncated data-URI placeholders.
+        docx_image_names = []
+        if ext == ".docx":
+            output_dir = output_abs.parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+            docx_image_names = _extract_docx_images(
+                abs_path, output_dir, Path(rel_path).stem,
+            )
+            if docx_image_names:
+                md_content = _replace_truncated_uris(md_content, docx_image_names)
+
+        # Extract and save images from the conversion result (real
+        # base64 data URIs only — truncated ones were already handled).
         images = self._extract_and_save_images(
             md_content, rel_path, abs_path, source_name, source_hash
         )
-        image_names = [img["filename"] for img in images]
+        image_names = docx_image_names + [img["filename"] for img in images]
 
-        # Replace data URIs in the markdown with saved file paths
+        # Replace remaining real data URIs with saved file paths
         md_content = self._replace_data_uris(md_content, images)
 
         # Build provenance header
@@ -1134,7 +1227,11 @@ class DocConvert:
         1. Data URIs (base64-encoded) — decoded and saved as files
         2. File references — verified to exist on disk
 
-        Returns a list of {filename, path} dicts.
+        Truncated data URIs (ending with literal ``...``) are skipped —
+        those are handled by ``_replace_truncated_uris`` instead.
+
+        Returns a list of {filename, path, source} dicts where *source*
+        is ``"data_uri"`` or ``"file"``.
         """
         import base64
 
@@ -1167,6 +1264,12 @@ class DocConvert:
                 search_start = uri_start
                 continue
             data_uri = md_content[uri_start:paren_close]
+
+            # Skip truncated URIs emitted by markitdown (literal "...")
+            if data_uri.endswith("...") and ";base64," not in data_uri:
+                search_start = paren_close + 1
+                continue
+
             data_uri_index += 1
             logger.debug(
                 f"Found data URI image {data_uri_index}: "
@@ -1177,6 +1280,7 @@ class DocConvert:
                 source_name, source_hash,
             )
             if saved:
+                saved["source"] = "data_uri"
                 images.append(saved)
             search_start = paren_close + 1
 
@@ -1199,6 +1303,7 @@ class DocConvert:
                 images.append({
                     "filename": os.path.basename(img_path),
                     "path": img_path,
+                    "source": "file",
                 })
 
         return images
@@ -1233,8 +1338,10 @@ class DocConvert:
         mime_subtype = match.group(1).lower()
         encoded_data = match.group(2)
 
+        # Strip whitespace — markitdown may wrap long base64 with newlines
+        clean_data = re.sub(r'\s+', '', encoded_data)
         try:
-            img_bytes = base64.b64decode(encoded_data)
+            img_bytes = base64.b64decode(clean_data)
         except Exception as e:
             logger.warning(f"Failed to decode base64 image {index}: {e}")
             return None
@@ -1288,11 +1395,11 @@ class DocConvert:
         Uses string scanning (not regex) to match data URIs reliably,
         same approach as _extract_and_save_images.
         """
-        # Filter to only images that were saved from data URIs
+        # Filter to only images that were actually saved from data URIs
         # (file-referenced images don't need replacement)
         data_uri_images = [
             img for img in images
-            if not img["path"].startswith(("http://", "https://"))
+            if img.get("source") == "data_uri"
         ]
         if not data_uri_images:
             return md_content

@@ -13,10 +13,12 @@ from ac_dc.doc_convert import (
     DocConvert,
     _build_provenance_header,
     _build_svg_provenance_header,
+    _extract_docx_images,
     _externalize_svg_images,
     _is_markitdown_available,
     _output_path_for,
     _parse_provenance,
+    _replace_truncated_uris,
     _sha256_file,
     _should_skip_dir,
 )
@@ -466,3 +468,226 @@ class TestExternalizeSvgImages:
         # Invalid base64 should be left in place
         assert saved == []
         assert "data:image" in result_svg
+
+
+# === Docx Image Extraction Tests ===
+
+
+class TestExtractDocxImages:
+    """Tests for _extract_docx_images."""
+
+    def _make_docx_zip(self, tmp_path, media_files):
+        """Create a minimal .docx zip with given media files.
+
+        Args:
+            tmp_path: directory to write the zip into
+            media_files: dict of {archive_member: bytes_content}
+
+        Returns:
+            Path to the created .docx file
+        """
+        import zipfile
+        docx_path = tmp_path / "test.docx"
+        with zipfile.ZipFile(str(docx_path), "w") as zf:
+            # Minimal content types
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+            for member, data in media_files.items():
+                zf.writestr(member, data)
+        return docx_path
+
+    def test_single_image_extracted(self, tmp_path):
+        docx = self._make_docx_zip(tmp_path, {
+            "word/media/image1.png": b"\x89PNG\r\n\x1a\nfakedata",
+        })
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(docx, out_dir, "report")
+        assert len(saved) == 1
+        assert saved[0] == "report_img1.png"
+        assert (out_dir / saved[0]).exists()
+        assert (out_dir / saved[0]).read_bytes() == b"\x89PNG\r\n\x1a\nfakedata"
+
+    def test_multiple_images_in_order(self, tmp_path):
+        docx = self._make_docx_zip(tmp_path, {
+            "word/media/image1.png": b"img1",
+            "word/media/image2.jpeg": b"img2",
+            "word/media/image3.gif": b"img3",
+        })
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(docx, out_dir, "doc")
+        assert len(saved) == 3
+        assert saved[0] == "doc_img1.gif"   # sorted alphabetically
+        assert saved[1] == "doc_img2.jpg"   # .jpeg normalised to .jpg
+        assert saved[2] == "doc_img3.png"
+
+    def test_jpeg_normalised_to_jpg(self, tmp_path):
+        docx = self._make_docx_zip(tmp_path, {
+            "word/media/photo.jpeg": b"\xff\xd8\xff",
+        })
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(docx, out_dir, "memo")
+        assert len(saved) == 1
+        assert saved[0].endswith(".jpg")
+
+    def test_no_media_returns_empty(self, tmp_path):
+        docx = self._make_docx_zip(tmp_path, {})
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(docx, out_dir, "empty")
+        assert saved == []
+
+    def test_non_zip_returns_empty(self, tmp_path):
+        fake = tmp_path / "notazip.docx"
+        fake.write_text("this is not a zip")
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(fake, out_dir, "bad")
+        assert saved == []
+
+    def test_non_media_files_skipped(self, tmp_path):
+        docx = self._make_docx_zip(tmp_path, {
+            "word/media/image1.png": b"img",
+            "word/document.xml": b"<doc/>",
+            "word/styles.xml": b"<styles/>",
+        })
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        saved = _extract_docx_images(docx, out_dir, "test")
+        assert len(saved) == 1
+        assert saved[0] == "test_img1.png"
+
+
+class TestReplaceTruncatedUris:
+    """Tests for _replace_truncated_uris."""
+
+    def test_single_truncated_uri_replaced(self):
+        md = "# Title\n\n![diagram](data:image/png;base64...)\n\nText"
+        result = _replace_truncated_uris(md, ["report_img1.png"])
+        assert "report_img1.png" in result
+        assert "data:image" not in result
+
+    def test_multiple_truncated_uris_replaced_in_order(self):
+        md = (
+            "![first](data:image/png;base64...)\n"
+            "![second](data:image/jpeg;base64...)\n"
+        )
+        result = _replace_truncated_uris(md, ["img1.png", "img2.jpg"])
+        assert "img1.png" in result
+        assert "img2.jpg" in result
+        assert result.index("img1.png") < result.index("img2.jpg")
+
+    def test_real_data_uri_not_replaced(self):
+        import base64
+        b64 = base64.b64encode(b"realdata").decode()
+        md = f"![pic](data:image/png;base64,{b64})"
+        result = _replace_truncated_uris(md, ["should_not_appear.png"])
+        assert "should_not_appear.png" not in result
+        assert b64 in result
+
+    def test_no_truncated_uris_unchanged(self):
+        md = "# Title\n\n![photo](images/photo.png)\n"
+        result = _replace_truncated_uris(md, ["unused.png"])
+        assert result == md
+
+    def test_more_uris_than_images_leaves_extras(self):
+        md = (
+            "![a](data:image/png;base64...)\n"
+            "![b](data:image/png;base64...)\n"
+        )
+        result = _replace_truncated_uris(md, ["only_one.png"])
+        assert "only_one.png" in result
+        # Second truncated URI has no replacement — left as-is
+        assert "data:image" in result
+
+    def test_empty_image_list(self):
+        md = "![x](data:image/png;base64...)"
+        result = _replace_truncated_uris(md, [])
+        assert result == md
+
+    def test_alt_text_preserved(self):
+        md = "![Architecture Diagram](data:image/png;base64...)"
+        result = _replace_truncated_uris(md, ["arch.png"])
+        assert "![Architecture Diagram](arch.png)" in result
+
+
+class TestDocxConversionIntegration:
+    """Integration tests for docx image extraction in _convert_single."""
+
+    @patch("ac_dc.doc_convert._is_markitdown_available", return_value=True)
+    def test_docx_images_extracted_and_linked(self, mock_avail, converter, git_repo):
+        """Verify that docx images are extracted from the zip and linked in output."""
+        import zipfile
+
+        # Create a real .docx zip with an embedded image
+        source = git_repo / "report.docx"
+        img_data = b"\x89PNG\r\n\x1a\nfake_png_data"
+        with zipfile.ZipFile(str(source), "w") as zf:
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+            zf.writestr("word/media/image1.png", img_data)
+
+        # markitdown returns markdown with a truncated data URI
+        fake_md = "# Report\n\n![diagram](data:image/png;base64...)\n\nDone."
+
+        with patch(
+            "ac_dc.doc_convert.DocConvert._convert_with_markitdown",
+            return_value=fake_md,
+        ):
+            result = converter.convert_files(["report.docx"])
+
+        assert result["summary"]["converted"] == 1
+
+        # Check that the image was extracted
+        img_file = git_repo / "report_img1.png"
+        assert img_file.exists()
+        assert img_file.read_bytes() == img_data
+
+        # Check that the output markdown references the extracted image
+        output = git_repo / "report.md"
+        assert output.exists()
+        text = output.read_text()
+        assert "report_img1.png" in text
+        assert "data:image" not in text
+
+        # Check provenance lists the image
+        assert "images=" in text
+        assert "report_img1.png" in text
+
+    @patch("ac_dc.doc_convert._is_markitdown_available", return_value=True)
+    def test_non_docx_skips_docx_extraction(self, mock_avail, converter, git_repo):
+        """Non-.docx files should not attempt docx zip extraction."""
+        source = git_repo / "data.csv"
+        source.write_text("a,b,c\n1,2,3")
+
+        with patch(
+            "ac_dc.doc_convert.DocConvert._convert_with_markitdown",
+            return_value="| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |",
+        ):
+            result = converter.convert_files(["data.csv"])
+
+        assert result["summary"]["converted"] == 1
+        output = git_repo / "data.md"
+        assert output.exists()
+
+    @patch("ac_dc.doc_convert._is_markitdown_available", return_value=True)
+    def test_docx_no_images_still_converts(self, mock_avail, converter, git_repo):
+        """A .docx with no embedded images should convert normally."""
+        import zipfile
+
+        source = git_repo / "plain.docx"
+        with zipfile.ZipFile(str(source), "w") as zf:
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+            # No word/media/ entries
+
+        with patch(
+            "ac_dc.doc_convert.DocConvert._convert_with_markitdown",
+            return_value="# Plain Document\n\nJust text.",
+        ):
+            result = converter.convert_files(["plain.docx"])
+
+        assert result["summary"]["converted"] == 1
+        output = git_repo / "plain.md"
+        text = output.read_text()
+        assert "# Plain Document" in text
+        assert "data:image" not in text
