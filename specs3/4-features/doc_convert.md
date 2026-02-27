@@ -263,13 +263,13 @@ When hidden, no tab slot is consumed — the layout is identical to a repo witho
 The tab contains:
 
 1. **Status banner** — shows working tree state. Green checkmark when clean, amber warning when dirty with "Commit or stash changes first" message. Controls below are disabled when dirty
-2. **File list** — scrollable list of all convertible files in the repo, each row showing:
+2. **Toolbar** — "Select All" / "Deselect All" buttons, file count summary ("3 of 7 selected"), "Convert Selected (N)" button disabled when nothing is selected or tree is dirty
+3. **Filter bar** — text input with fuzzy matching against file paths. Shows match count ("3 / 12") when a filter is active. Uses the same character-by-character fuzzy algorithm as the cache tab — each character in the filter must appear in order in the file path, but not necessarily consecutively
+4. **File list** — scrollable list of convertible files (filtered when a filter is active), each row showing:
    - Checkbox for selective conversion
    - File path (relative to repo root)
    - File size
    - Status badge (see below)
-3. **Toolbar** — "Select All" / "Deselect All" buttons, file count summary ("3 of 7 selected")
-4. **Convert button** — "Convert Selected (N)" at the bottom, disabled when nothing is selected or tree is dirty
 5. **Progress area** — replaces the file list during conversion, showing per-file progress
 
 ### Status Badges

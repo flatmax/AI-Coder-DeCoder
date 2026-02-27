@@ -87,13 +87,26 @@ const marked = new Marked({
 });
 
 /**
+ * Pre-process markdown text to percent-encode spaces in image paths.
+ * marked doesn't parse `![alt](path with spaces)` — the spaces break
+ * the link parser.  We encode only the URL portion of image references.
+ */
+function _encodeImagePaths(text) {
+  return text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, url) => {
+    if (url.includes('%20') || /^https?:\/\//.test(url)) return _match;
+    const encoded = url.replace(/ /g, '%20');
+    return `![${alt}](${encoded})`;
+  });
+}
+
+/**
  * Render markdown to HTML string.
  * Safe for LLM output — uses highlight.js for code blocks.
  */
 export function renderMarkdown(text) {
   if (!text) return '';
   try {
-    return marked.parse(text);
+    return marked.parse(_encodeImagePaths(text));
   } catch (e) {
     console.warn('Markdown parse error:', e);
     return `<pre>${escapeHtml(text)}</pre>`;
@@ -243,8 +256,9 @@ let _currentLineMap = null;
 export function renderMarkdownWithSourceMap(text) {
   if (!text) return '';
   try {
-    _currentLineMap = _buildLineMap(text);
-    const html = markedSourceMap.parse(text);
+    const processed = _encodeImagePaths(text);
+    _currentLineMap = _buildLineMap(processed);
+    const html = markedSourceMap.parse(processed);
     _currentLineMap = null;
     return html;
   } catch (e) {

@@ -32,6 +32,7 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     _converting: { type: Boolean, state: true },
     _conversionResults: { type: Array, state: true },
     _loading: { type: Boolean, state: true },
+    _filter: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -236,6 +237,40 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
       gap: 8px;
     }
 
+    /* Filter input */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-bottom: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+    }
+
+    .filter-input {
+      flex: 1;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 5px 10px;
+      outline: none;
+    }
+    .filter-input:focus {
+      border-color: var(--accent-primary);
+    }
+    .filter-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .filter-count {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
     /* Empty / loading states */
     .empty-state {
       display: flex;
@@ -259,6 +294,7 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     this._converting = false;
     this._conversionResults = null;
     this._loading = false;
+    this._filter = '';
   }
 
   onRpcReady() {
@@ -369,6 +405,28 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     this._scan();
   }
 
+  // === Filter ===
+
+  _onFilterInput(e) {
+    this._filter = e.target.value;
+  }
+
+  _fuzzyMatch(text, filter) {
+    if (!filter) return true;
+    const lower = text.toLowerCase();
+    const f = filter.toLowerCase();
+    let fi = 0;
+    for (let i = 0; i < lower.length && fi < f.length; i++) {
+      if (lower[i] === f[fi]) fi++;
+    }
+    return fi === f.length;
+  }
+
+  _getFilteredFiles() {
+    if (!this._filter) return this._files;
+    return this._files.filter(f => this._fuzzyMatch(f.path, this._filter));
+  }
+
   // === Render helpers ===
 
   _renderBanner() {
@@ -384,6 +442,24 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
       <div class="status-banner dirty">
         <span class="icon">⚠️</span>
         <span class="msg">${this._cleanMessage || 'Commit or stash your changes before converting documents.'}</span>
+      </div>
+    `;
+  }
+
+  _renderFilterBar() {
+    const filtered = this._getFilteredFiles();
+    const total = this._files.length;
+    return html`
+      <div class="filter-bar">
+        <input
+          class="filter-input"
+          type="text"
+          placeholder="Filter files..."
+          aria-label="Filter convertible files"
+          .value=${this._filter}
+          @input=${this._onFilterInput}
+        >
+        ${this._filter ? html`<span class="filter-count">${filtered.length} / ${total}</span>` : nothing}
       </div>
     `;
   }
@@ -512,11 +588,14 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
       `;
     }
 
+    const filtered = this._getFilteredFiles();
+
     return html`
       ${this._renderBanner()}
       ${this._renderToolbar()}
+      ${this._renderFilterBar()}
       <div class="file-list">
-        ${this._files.map(f => this._renderFileRow(f))}
+        ${filtered.map(f => this._renderFileRow(f))}
       </div>
     `;
   }
