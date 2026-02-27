@@ -40,6 +40,7 @@ function _getInteractionModel(el) {
     case 'path':
       return { drag: true, endpoints: true, resize: false };
     case 'text':
+    case 'tspan':
       return { drag: true, endpoints: false, resize: false };
     case 'g':
     case 'image':
@@ -539,7 +540,13 @@ export class SvgEditor {
       if (!this._svg.contains(el)) continue;
       // Check if it's an editable element
       const model = _getInteractionModel(el);
-      if (model.drag) return el;
+      if (model.drag) {
+        // If we hit a <tspan>, return its parent <text> element instead
+        if (tag === 'tspan' && el.parentElement && el.parentElement.tagName.toLowerCase() === 'text') {
+          return el.parentElement;
+        }
+        return el;
+      }
     }
     return null;
   }
@@ -1614,7 +1621,7 @@ export class SvgEditor {
   _startElementDrag(el, svgPt) {
     const tag = el.tagName.toLowerCase();
 
-    if (['rect', 'text'].includes(tag)) {
+    if (tag === 'rect') {
       // Drag by x, y attributes
       this._dragState = {
         mode: 'translate',
@@ -1624,6 +1631,31 @@ export class SvgEditor {
         origX: _num(el, 'x'),
         origY: _num(el, 'y'),
       };
+    } else if (tag === 'text') {
+      // Text elements may use x/y or a transform matrix for positioning.
+      // If the element has a transform attribute, drag via transform;
+      // otherwise fall back to x/y attributes.
+      const hasTransform = el.getAttribute('transform');
+      if (hasTransform) {
+        const { tx, ty } = _parseTranslate(el);
+        this._dragState = {
+          mode: 'translate',
+          element: el,
+          startSvg: { ...svgPt },
+          attrMode: 'transform',
+          origX: tx,
+          origY: ty,
+        };
+      } else {
+        this._dragState = {
+          mode: 'translate',
+          element: el,
+          startSvg: { ...svgPt },
+          attrMode: 'xy',
+          origX: _num(el, 'x'),
+          origY: _num(el, 'y'),
+        };
+      }
     } else if (['circle', 'ellipse'].includes(tag)) {
       // Drag by cx, cy
       this._dragState = {

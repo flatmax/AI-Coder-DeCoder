@@ -115,6 +115,8 @@ When in Select mode, the right panel uses `SvgEditor` — a pointer-based visual
 
 Click an SVG element to select it. A bounding box with handles appears around the selected element. Click empty space or press Escape to deselect. The selected element's tag name is tracked internally (`_selectedTag`) but is not currently displayed in the UI.
 
+When a `<tspan>` element is clicked, the hit resolves to its parent `<text>` element — `tspan` is never selected independently. This ensures that PyMuPDF-generated SVGs (which wrap text runs in `<tspan>` children of `<text>`) are fully interactive.
+
 ### Multi-Selection
 
 Hold **Shift** and click or drag to multi-select:
@@ -171,7 +173,8 @@ The editor determines interaction behavior from the element type:
 | `line` | Translate both endpoints | Move individual endpoints |
 | `polyline`, `polygon` | Translate all points | Move individual vertices |
 | `path` | Translate via transform | Move individual path points |
-| `text` | Translate (x, y or transform) | — (double-click to edit) |
+| `text` | Translate (x, y or transform — auto-detected) | — (double-click to edit) |
+| `tspan` | Resolves to parent `text` | — |
 | `g` (group) | Translate via transform | — |
 
 ### Marquee Visual Feedback

@@ -76,11 +76,11 @@ Not all vector drawing commands indicate real images — PDF generators emit rec
 
 #### SVG Text Preservation
 
-When SVG export is triggered, text glyph elements are **kept** in the SVG. PyMuPDF renders each character as a `<use>` element referencing a font glyph `<symbol>` in `<defs>` — these are the primary visual representation for slides and formatted documents. Stripping them produces empty-looking SVGs because many PDF generators emit all visible content (including headings and labels) through the same glyph mechanism.
+SVG export uses `text_as_path=0` so that PyMuPDF emits text as `<text>` elements rather than decomposing each character into individual font-glyph `<use>`/`<path>` elements. This keeps sentences intact, produces much smaller SVGs, and makes the text selectable and searchable within the SVG viewer.
 
 The extracted text is **also** written to the companion markdown file for searchability and LLM context. This means text appears in both places:
 
-- **SVG** — for visual fidelity when viewing in the SVG viewer
+- **SVG** — as `<text>` elements for visual fidelity and selectability
 - **Markdown** — for grep, doc index, and LLM edit access
 
 ### python-pptx (Presentation SVG Export — Fallback)
@@ -461,7 +461,7 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - PDF pages with raster images produce companion SVG with text stripped
 - PDF pages with non-trivial vector graphics (curves, filled shapes) produce SVG
 - PDF pages with only simple borders/underlines are treated as text-only
-- SVG export preserves text glyph elements (`<use data-text>`) for visual fidelity
+- SVG export emits text as `<text>` elements (`text_as_path=0`) for visual fidelity and selectability
 - Extracted text also appears in companion markdown for searchability
 - Image detection threshold requires ≥3 significant drawings (not just decorative rules)
 - Configuration `enabled: false` hides the tab

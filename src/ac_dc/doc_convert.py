@@ -268,15 +268,18 @@ def _pdf_extract_page_text(page):
 def _pdf_page_to_svg(page):
     """Convert a single PDF page to an SVG string using PyMuPDF.
 
-    Returns the full SVG including text glyph elements, which are the
-    primary visual representation for slides and formatted documents.
-    The extracted text is written separately to the companion markdown
-    for searchability.
+    Uses ``text_as_path=0`` so that text is emitted as ``<text>``
+    elements rather than decomposed into individual per-character
+    font-glyph ``<use>``/``<path>`` elements.  This keeps sentences
+    intact and produces much smaller, more readable SVGs.
+
+    The extracted text is also written separately to the companion
+    markdown for searchability.
 
     Args:
         page: a PyMuPDF page object
     """
-    return page.get_svg_image()
+    return page.get_svg_image(text_as_path=0)
 
 
 def _pdf_extract_pages(pdf_path):
@@ -309,11 +312,9 @@ def _pdf_extract_pages(pdf_path):
             text = _pdf_extract_page_text(page)
             has_images = _pdf_page_has_images(page)
             text_ok = bool(text and text.strip())
-            # Never strip text glyphs from the SVG.  PyMuPDF renders
-            # slide/page text as <use data-text> font-glyph elements
-            # which are the primary visual representation.  Stripping
-            # them produces an empty-looking SVG.  The extracted text
-            # is still written to the companion markdown for search.
+            # Text is emitted as <text> elements (text_as_path=0) so
+            # sentences stay intact.  The extracted text is also
+            # written to the companion markdown for search.
             svg = _pdf_page_to_svg(page) if has_images else None
             # If no text was extracted and no SVG was generated yet,
             # export the full page as SVG so the visual content is
