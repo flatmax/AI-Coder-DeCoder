@@ -346,6 +346,72 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     return [...this._dirtySet];
   }
 
+  // === SVG Image Resolution ===
+
+  /**
+   * Resolve relative image references in an SVG container.
+   *
+   * SVG files produced by doc-convert (e.g. from .pptx) reference sibling
+   * image files with relative paths like "01_slide_img1_2.jpg".  When the
+   * SVG is injected into the webapp DOM, the browser resolves those paths
+   * against the webapp origin — which doesn't serve repo files.
+   *
+   * This method finds all <image> elements with relative href/xlink:href,
+   * resolves each path relative to the SVG file's directory, fetches the
+   * binary content as a base64 data URI via RPC, and rewrites the href
+   * in-place so the browser can render the image.
+   */
+  async _resolveImageHrefs(container, svgFilePath) {
+    if (!this.rpcConnected || !svgFilePath) return;
+
+    const svgDir = svgFilePath.includes('/')
+      ? svgFilePath.substring(0, svgFilePath.lastIndexOf('/'))
+      : '';
+
+    const images = container.querySelectorAll('image');
+    if (!images.length) return;
+
+    const promises = [];
+
+    for (const img of images) {
+      // Check both href and xlink:href
+      const href = img.getAttribute('href')
+        || img.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      if (!href) continue;
+
+      // Skip already-resolved data URIs and absolute URLs
+      if (href.startsWith('data:') || href.startsWith('http://') || href.startsWith('https://')) continue;
+
+      // Build repo-relative path
+      const imagePath = svgDir ? `${svgDir}/${href}` : href;
+
+      const promise = this.rpcExtract('Repo.get_file_base64', imagePath)
+        .then(result => {
+          if (result && result.data_uri) {
+            // Rewrite both attributes to the data URI
+            if (img.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')) {
+              img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', result.data_uri);
+            }
+            if (img.hasAttribute('href')) {
+              img.setAttribute('href', result.data_uri);
+            }
+            // If neither was set explicitly but we read via getAttributeNS,
+            // set xlink:href as fallback
+            if (!img.hasAttribute('href') && !img.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')) {
+              img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', result.data_uri);
+            }
+          }
+        })
+        .catch(err => {
+          console.warn(`Failed to resolve image ${imagePath}:`, err);
+        });
+
+      promises.push(promise);
+    }
+
+    await Promise.all(promises);
+  }
+
   // === SVG Content Fetching ===
 
   async _fetchSvgContent(path) {
@@ -1085,6 +1151,14 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     this._prepareSvgElement(leftContainer);
     this._prepareSvgElement(rightContainer, { editable: true });
+
+    // Resolve relative image references (e.g. sibling .jpg/.png files from
+    // doc-convert slides) by fetching them as base64 data URIs from the repo.
+    const filePath = file.path;
+    Promise.all([
+      this._resolveImageHrefs(leftContainer, filePath),
+      this._resolveImageHrefs(rightContainer, filePath),
+    ]).catch(err => console.warn('Image resolution failed:', err));
 
     // Attach context menu to right panel
     rightContainer.removeEventListener('contextmenu', this._onContextMenu);

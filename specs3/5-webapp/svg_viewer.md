@@ -248,6 +248,20 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
 
 **Retry on next frame**: If the `.svg-left` / `.svg-right` containers are not yet in the shadow DOM when `_injectSvgContent()` runs (due to Lit render timing — the method may be called from `updated()` before the template has committed), it schedules a retry via `requestAnimationFrame`. This ensures injection succeeds even when called during the Lit update lifecycle before the DOM reflects the latest template.
 
+## Relative Image Resolution
+
+SVG files produced by doc-convert (e.g. from `.pptx` presentations) reference sibling image files with relative paths like `<image xlink:href="01_slide_img1_2.jpg"/>`. When the SVG is injected into the webapp DOM, the browser resolves those paths against the webapp's origin URL — which does not serve repository files. The images silently fail to load.
+
+After `_injectSvgContent()` sets `innerHTML` on both panels, it calls `_resolveImageHrefs()` on each container. This method:
+
+1. Finds all `<image>` elements in the injected SVG
+2. Skips elements whose `href` / `xlink:href` is already a `data:` URI or an absolute URL (`http://`, `https://`)
+3. Resolves each relative path against the SVG file's directory (e.g. `docs/slides/01_slide.svg` + `01_slide_img1_2.jpg` → `docs/slides/01_slide_img1_2.jpg`)
+4. Fetches the binary content via `Repo.get_file_base64` RPC, which returns a `data:` URI with the correct MIME type
+5. Rewrites the `href` and/or `xlink:href` attribute in-place so the browser renders the image
+
+Image resolution runs in parallel for all images in both panels via `Promise.all`. It is non-blocking — the SVG panels initialize and become interactive immediately, and images appear as the base64 fetches complete. Failed fetches log a warning but do not prevent the SVG from displaying.
+
 ## File Content Fetching
 
 Content is fetched via the same RPC methods as the diff viewer:
@@ -256,6 +270,7 @@ Content is fetched via the same RPC methods as the diff viewer:
 |---------|----------|----------|
 | HEAD (original) | `Repo.get_file_content(path, 'HEAD')` | Empty string (file is new) |
 | Working copy (modified) | `Repo.get_file_content(path)` | Empty string (file deleted) |
+| Embedded images | `Repo.get_file_base64(imagePath)` | Warning logged, image not shown |
 
 Each call is wrapped in its own try/catch — a failure in one (e.g., file doesn't exist in HEAD) doesn't prevent the other from loading. The response is normalized to a string regardless of whether the RPC returns a string or `{content: string}` object.
 
