@@ -33,6 +33,14 @@ _SKIP_DIRS = {
     ".venv", "venv", "dist", "build", ".egg-info",
 }
 
+# Regex to match data-URI href/xlink:href in <image> elements.
+# Handles both href="data:..." and xlink:href="data:..." with optional
+# whitespace around the base64 payload and newlines within it.
+_SVG_DATA_URI_RE = re.compile(
+    r'((?:xlink:)?href=")\s*data:image/([a-zA-Z0-9.+-]+);base64,\s*([^"]+?)\s*(")',
+    re.DOTALL,
+)
+
 
 def _is_markitdown_available():
     """Check if markitdown is installed."""
@@ -334,6 +342,79 @@ def _should_skip_dir(dirname):
     if dirname.startswith(".") and dirname != ".github":
         return True
     return False
+
+
+def _externalize_svg_images(svg_text, output_dir, stem, page_index):
+    """Extract embedded base64 images from SVG and save as separate files.
+
+    Finds all ``<image>`` elements whose ``href`` or ``xlink:href``
+    contains a ``data:image/…;base64,…`` URI, decodes the payload,
+    writes each image to *output_dir*, and replaces the data URI in the
+    SVG with a relative filename reference.
+
+    Args:
+        svg_text: the full SVG string (may contain embedded data URIs)
+        output_dir: Path to the directory where image files are saved
+        stem: base filename stem used for naming (e.g. ``"04_slide"``)
+        page_index: 1-based page/slide index, used in filenames
+
+    Returns:
+        (modified_svg_text, saved_filenames) — the SVG with data URIs
+        replaced by relative paths, and a list of saved image filenames.
+    """
+    import base64 as _b64
+
+    ext_map = {
+        "png": ".png",
+        "jpeg": ".jpg",
+        "jpg": ".jpg",
+        "gif": ".gif",
+        "svg+xml": ".svg",
+        "webp": ".webp",
+        "bmp": ".bmp",
+        "tiff": ".tiff",
+    }
+
+    saved = []
+    counter = 0
+
+    def _replace_match(m):
+        nonlocal counter
+        counter += 1
+        prefix = m.group(1)       # 'href="' or 'xlink:href="'
+        mime_sub = m.group(2)      # e.g. 'png', 'jpeg'
+        encoded = m.group(3)       # raw base64 (may contain newlines)
+        suffix = m.group(4)        # closing '"'
+
+        # Strip all whitespace from the base64 payload
+        clean_data = re.sub(r'\s+', '', encoded)
+        try:
+            img_bytes = _b64.b64decode(clean_data)
+        except Exception as e:
+            logger.warning(
+                "Failed to decode base64 image %d in %s: %s",
+                counter, stem, e,
+            )
+            return m.group(0)  # leave unchanged
+
+        ext = ext_map.get(mime_sub.lower(), f".{mime_sub.lower()}")
+        filename = f"{stem}_img{page_index}_{counter}{ext}"
+        out_path = Path(output_dir) / filename
+
+        try:
+            out_path.write_bytes(img_bytes)
+        except Exception as e:
+            logger.warning(
+                "Failed to save externalized image %s: %s", filename, e,
+            )
+            return m.group(0)  # leave unchanged
+
+        logger.info("Externalized embedded image: %s", filename)
+        saved.append(filename)
+        return f'{prefix}{filename}{suffix}'
+
+    modified = _SVG_DATA_URI_RE.sub(_replace_match, svg_text)
+    return modified, saved
 
 
 class DocConvert:
@@ -783,6 +864,7 @@ class DocConvert:
         heading_label = "Slide" if ext in (".pptx", ".odp") else "Page"
 
         svg_filenames = []
+        ext_image_filenames = []
         md_lines = []
 
         for i, page_data in enumerate(pages, start=1):
@@ -803,6 +885,15 @@ class DocConvert:
                 filename = f"{padded}_{page_label}.svg"
                 rel_filename = f"{stem}/{filename}"
                 svg_path = slides_dir / filename
+
+                # Externalize embedded base64 images before writing
+                svg_stem = Path(filename).stem
+                svg, ext_images = _externalize_svg_images(
+                    svg, slides_dir, svg_stem, i,
+                )
+                for img_fn in ext_images:
+                    ext_image_filenames.append(f"{stem}/{img_fn}")
+
                 prov = _build_svg_provenance_header(
                     f"{stem}.md", source_name, source_hash, i,
                 )
@@ -813,18 +904,20 @@ class DocConvert:
                 logger.info(f"Saved {page_label} {i}: {rel_filename}")
 
         # Build final markdown with provenance header
+        all_image_filenames = svg_filenames + ext_image_filenames
         header = _build_provenance_header(
-            source_name, source_hash, svg_filenames or None,
+            source_name, source_hash, all_image_filenames or None,
         )
         full_md = header + "\n\n" + f"# {stem}\n\n" + "\n".join(md_lines)
         output_abs.write_text(full_md)
 
         svg_count = len(svg_filenames)
         text_only = n_pages - svg_count
+        ext_count = len(ext_image_filenames)
         logger.info(
             f"Converted {rel_path} → {output_rel} "
             f"({n_pages} {page_label}s: {text_only} text-only, "
-            f"{svg_count} with images)"
+            f"{svg_count} with images, {ext_count} externalized)"
         )
 
         result = {
@@ -832,8 +925,8 @@ class DocConvert:
             "status": "converted",
             "output_path": output_rel,
         }
-        if svg_filenames:
-            result["images"] = svg_filenames
+        if all_image_filenames:
+            result["images"] = all_image_filenames
         return result
 
     def _extract_pptx_slides(self, abs_path):

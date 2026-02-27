@@ -13,6 +13,7 @@ from ac_dc.doc_convert import (
     DocConvert,
     _build_provenance_header,
     _build_svg_provenance_header,
+    _externalize_svg_images,
     _is_markitdown_available,
     _output_path_for,
     _parse_provenance,
@@ -314,3 +315,154 @@ class TestGracefulDegradation:
         converter = DocConvert(MagicMock(), MagicMock())
         result = converter.is_available()
         assert result["available"] is True
+
+
+# === SVG Image Externalization Tests ===
+
+
+class TestExternalizeSvgImages:
+    """Tests for _externalize_svg_images."""
+
+    def _make_data_uri(self, mime_sub="png", data=b"\x89PNG\r\n\x1a\n"):
+        import base64
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:image/{mime_sub};base64,{b64}"
+
+    def _make_svg(self, href_attr="href", data_uri=None, extra_attrs=""):
+        if data_uri is None:
+            data_uri = self._make_data_uri()
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+            f'<image {extra_attrs}{href_attr}="{data_uri}" width="100" height="100"/>'
+            f'</svg>'
+        )
+
+    def test_single_image_extracted(self, tmp_path):
+        svg = self._make_svg()
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "01_slide", 1)
+        assert len(saved) == 1
+        assert saved[0].endswith(".png")
+        assert "01_slide_img1_1.png" == saved[0]
+        assert (tmp_path / saved[0]).exists()
+        assert "data:image" not in result_svg
+        assert saved[0] in result_svg
+
+    def test_xlink_href_handled(self, tmp_path):
+        svg = self._make_svg(href_attr="xlink:href")
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "02_slide", 2)
+        assert len(saved) == 1
+        assert "data:image" not in result_svg
+        assert saved[0] in result_svg
+
+    def test_jpeg_extension(self, tmp_path):
+        uri = self._make_data_uri(mime_sub="jpeg", data=b"\xff\xd8\xff\xe0")
+        svg = self._make_svg(data_uri=uri)
+        _, saved = _externalize_svg_images(svg, tmp_path, "03_slide", 3)
+        assert len(saved) == 1
+        assert saved[0].endswith(".jpg")
+
+    def test_multiple_images(self, tmp_path):
+        uri1 = self._make_data_uri(data=b"img1data")
+        uri2 = self._make_data_uri(mime_sub="jpeg", data=b"img2data")
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            f'<image href="{uri1}" width="50" height="50"/>'
+            f'<image xlink:href="{uri2}" width="50" height="50"/>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "04_slide", 4)
+        assert len(saved) == 2
+        assert saved[0].endswith(".png")
+        assert saved[1].endswith(".jpg")
+        assert "data:image" not in result_svg
+        for fn in saved:
+            assert (tmp_path / fn).exists()
+
+    def test_no_data_uris_unchanged(self, tmp_path):
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<image href="photo.png" width="100" height="100"/>'
+            '<text x="10" y="20">Hello</text>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "05_slide", 5)
+        assert saved == []
+        assert result_svg == svg
+
+    def test_text_elements_preserved(self, tmp_path):
+        uri = self._make_data_uri()
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<text x="10" y="20" font-size="14">Title</text>'
+            f'<image href="{uri}" width="50" height="50"/>'
+            '<path d="M0 0 L10 10"/>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "06_slide", 6)
+        assert len(saved) == 1
+        assert '<text x="10" y="20" font-size="14">Title</text>' in result_svg
+        assert '<path d="M0 0 L10 10"/>' in result_svg
+
+    def test_multiline_base64_handled(self, tmp_path):
+        """Base64 with newlines every 76 chars (as PyMuPDF produces)."""
+        import base64
+        raw = b"A" * 200  # enough bytes to produce multi-line base64
+        b64 = base64.b64encode(raw).decode("ascii")
+        # Insert newlines every 76 chars to mimic real output
+        wrapped = "\n".join(b64[i:i+76] for i in range(0, len(b64), 76))
+        data_uri = f"data:image/png;base64,\n{wrapped}\n"
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            f'<image href="{data_uri}" width="100" height="100"/>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "07_slide", 7)
+        assert len(saved) == 1
+        assert "data:image" not in result_svg
+        # Verify decoded content matches original
+        assert (tmp_path / saved[0]).read_bytes() == raw
+
+    def test_whitespace_around_uri(self, tmp_path):
+        """Whitespace after opening quote and before closing quote."""
+        import base64
+        raw = b"test image bytes"
+        b64 = base64.b64encode(raw).decode("ascii")
+        # Add whitespace around the data URI value
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            f'<image href=" data:image/png;base64, {b64} " width="100" height="100"/>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "08_slide", 8)
+        assert len(saved) == 1
+        assert (tmp_path / saved[0]).read_bytes() == raw
+
+    def test_file_naming_convention(self, tmp_path):
+        svg = self._make_svg()
+        _, saved = _externalize_svg_images(svg, tmp_path, "04_slide", 4)
+        assert saved[0] == "04_slide_img4_1.png"
+
+    def test_decoded_bytes_correct(self, tmp_path):
+        raw_bytes = b"\x89PNG\r\n\x1a\nSOME_IMAGE_DATA_HERE"
+        uri = self._make_data_uri(data=raw_bytes)
+        svg = self._make_svg(data_uri=uri)
+        _, saved = _externalize_svg_images(svg, tmp_path, "09_slide", 9)
+        assert (tmp_path / saved[0]).read_bytes() == raw_bytes
+
+    def test_empty_svg(self, tmp_path):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "10_slide", 10)
+        assert saved == []
+        assert result_svg == svg
+
+    def test_invalid_base64_left_unchanged(self, tmp_path):
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<image href="data:image/png;base64,!!!NOT_VALID_BASE64!!!" '
+            'width="100" height="100"/>'
+            '</svg>'
+        )
+        result_svg, saved = _externalize_svg_images(svg, tmp_path, "11_slide", 11)
+        # Invalid base64 should be left in place
+        assert saved == []
+        assert "data:image" in result_svg
