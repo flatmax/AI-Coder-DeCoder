@@ -85,6 +85,10 @@ Pending connections are tracked separately:
 
 Pending requests that are not acted on within **120 seconds** are auto-denied and the WebSocket is closed. This prevents abandoned connections from accumulating.
 
+If a new connection arrives from the same IP while a previous request is still pending (e.g., the user refreshed their browser), the old pending request is auto-denied and its toast is removed before the new request is created. The cancelled request's `admissionResult` includes `"replaced": true` so frontends can distinguish this from an explicit deny.
+
+The server also monitors the pending client's WebSocket for closure. If the pending client disconnects before a decision is made (e.g., closes the tab), the request is cleaned up and an `admissionResult` broadcast removes the toast from all admitted clients.
+
 ### Localhost Detection
 
 A connection is considered localhost if the peer IP matches:
@@ -385,7 +389,7 @@ When an `admissionRequest` event arrives via `AcApp.admissionRequest(data)`, a p
 
 The `_admissionRequests` array must be declared as a Lit reactive property (`{ type: Array, state: true }`) so that appending a new request triggers a re-render. The array is updated immutably (`this._admissionRequests = [...this._admissionRequests, data]`).
 
-The toast remains until acted upon. Multiple pending requests show multiple toasts, stacked.
+The toast remains until acted upon. Multiple pending requests show multiple toasts, stacked. If a new request arrives from the same IP as an existing pending toast (e.g., the remote user refreshed their browser), the old toast is replaced rather than duplicated.
 
 Clicking **Admit** calls `Collab.admit_client(client_id)`. Clicking **Deny** calls `Collab.deny_client(client_id)`.
 

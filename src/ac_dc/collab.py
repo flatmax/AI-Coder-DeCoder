@@ -208,6 +208,13 @@ class Collab:
         if future and not future.done():
             future.set_result(True)
 
+        # Broadcast immediately so all hosts remove the toast
+        self._broadcast_event("admissionResult", {
+            "client_id": client_id,
+            "ip": pending.get("ip", ""),
+            "admitted": True,
+        })
+
         return {"ok": True, "client_id": client_id}
 
     def deny_client(self, client_id):
@@ -224,6 +231,13 @@ class Collab:
         future = pending.get("future")
         if future and not future.done():
             future.set_result(False)
+
+        # Broadcast immediately so all hosts remove the toast
+        self._broadcast_event("admissionResult", {
+            "client_id": client_id,
+            "ip": pending.get("ip", ""),
+            "admitted": False,
+        })
 
         return {"ok": True, "client_id": client_id}
 
@@ -315,6 +329,22 @@ class CollabServer(JRPCServer):
         loop = asyncio.get_event_loop()
         future = loop.create_future()
 
+        # Cancel any existing pending request from the same IP
+        # (e.g. client refreshed their browser while waiting)
+        for old_id, old_info in list(self._collab._pending.items()):
+            if old_info["ip"] == peer_ip:
+                old_future = old_info.get("future")
+                if old_future and not old_future.done():
+                    old_future.set_result(False)
+                self._collab._pending.pop(old_id, None)
+                # Notify admitted clients to remove the stale toast
+                self._collab._broadcast_event("admissionResult", {
+                    "client_id": old_id,
+                    "ip": peer_ip,
+                    "admitted": False,
+                    "replaced": True,
+                })
+
         # Register pending
         self._collab._pending[client_id] = {
             "client_id": client_id,
@@ -341,12 +371,38 @@ class CollabServer(JRPCServer):
             "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
 
-        # Wait for admit/deny decision with timeout
+        # Wait for admit/deny decision with timeout.
+        # Also watch for WebSocket close (client refreshed or cancelled).
+        ws_closed = asyncio.ensure_future(websocket.wait_closed())
         try:
-            admitted = await asyncio.wait_for(future, timeout=120)
+            done, _pending_tasks = await asyncio.wait(
+                [asyncio.ensure_future(future), ws_closed],
+                timeout=120,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if future.done():
+                admitted = future.result()
+            else:
+                admitted = False
+                if ws_closed.done():
+                    logger.info(f"Pending client disconnected: {client_id} ({peer_ip})")
+                else:
+                    logger.info(f"Admission timeout for {client_id} ({peer_ip})")
+                # Broadcast immediately so hosts remove the toast
+                self._collab._broadcast_event("admissionResult", {
+                    "client_id": client_id,
+                    "ip": peer_ip,
+                    "admitted": False,
+                })
         except asyncio.TimeoutError:
             admitted = False
             logger.info(f"Admission timeout for {client_id} ({peer_ip})")
+        finally:
+            # Clean up the tasks we created
+            if not future.done():
+                future.cancel()
+            if not ws_closed.done():
+                ws_closed.cancel()
 
         # Clean up pending entry
         self._collab._pending.pop(client_id, None)
@@ -367,12 +423,15 @@ class CollabServer(JRPCServer):
         except Exception:
             pass
 
-        # Broadcast result to admitted clients
-        self._collab._broadcast_event("admissionResult", {
-            "client_id": client_id,
-            "ip": peer_ip,
-            "admitted": admitted,
-        })
+        # Broadcast result to admitted clients.
+        # (For admit/deny this duplicates the broadcast in admit_client/deny_client
+        # but is needed for timeout and disconnect paths.)
+        if not admitted:
+            self._collab._broadcast_event("admissionResult", {
+                "client_id": client_id,
+                "ip": peer_ip,
+                "admitted": False,
+            })
 
         return admitted
 

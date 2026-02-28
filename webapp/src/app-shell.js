@@ -614,9 +614,13 @@ class AcApp extends JRPCClient {
    */
   admissionRequest(data) {
     if (!data?.client_id) return true;
-    // Avoid duplicates
+    // Avoid duplicates by client_id
     if (this._admissionRequests.find(r => r.client_id === data.client_id)) return true;
-    this._admissionRequests = [...this._admissionRequests, data];
+    // Replace any existing request from the same IP (e.g. browser refresh)
+    this._admissionRequests = [
+      ...this._admissionRequests.filter(r => r.ip !== data.ip),
+      data,
+    ];
     return true;
   }
 
