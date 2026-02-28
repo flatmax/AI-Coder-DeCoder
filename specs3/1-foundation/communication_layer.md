@@ -137,6 +137,7 @@ streamChunk(requestId, content) {
 | Event | Description |
 |-------|-------------|
 | WebSocket opens | jrpc-oo handshake begins |
+| `serverChanged()` | WebSocket created — hook point for raw message interception (used by [Collaboration](../4-features/collaboration.md) admission flow) |
 | `remoteIsUp()` | Connection confirmed, remote is ready |
 | `setupDone()` | `call` proxy populated — can now make RPC calls |
 | `startupProgress` calls | Server sends initialization progress (first connect only) |

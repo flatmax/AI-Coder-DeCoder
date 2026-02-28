@@ -38,23 +38,34 @@ export const RpcMixin = (superClass) => class extends superClass {
   static properties = {
     ...super.properties,
     rpcConnected: { type: Boolean, state: true },
+    _canMutate: { type: Boolean, state: true },
   };
 
   constructor() {
     super();
     this.rpcConnected = false;
+    this._canMutate = true;
     this._rpcCallProxy = null;
     this._onRpcAvailable = this._onRpcAvailable.bind(this);
+    this._onCollabRoleChanged = this._onCollabRoleChanged.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     SharedRpc.addListener(this._onRpcAvailable);
+    window.addEventListener('collab-role-changed', this._onCollabRoleChanged);
+    // Sync initial state
+    this._canMutate = SharedRpc.canMutate();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     SharedRpc.removeListener(this._onRpcAvailable);
+    window.removeEventListener('collab-role-changed', this._onCollabRoleChanged);
+  }
+
+  _onCollabRoleChanged() {
+    this._canMutate = SharedRpc.canMutate();
   }
 
   _onRpcAvailable(call) {

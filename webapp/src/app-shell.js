@@ -45,6 +45,11 @@ class AcApp extends JRPCClient {
     _startupVisible: { type: Boolean, state: true },
     _startupMessage: { type: String, state: true },
     _startupPercent: { type: Number, state: true },
+    _admissionPending: { type: Boolean, state: true },
+    _admissionClientId: { type: String, state: true },
+    _admissionDenied: { type: Boolean, state: true },
+    _admissionRequests: { type: Array, state: true },
+    _connectedClients: { type: Number, state: true },
   };
 
   static styles = [theme, css`
@@ -170,6 +175,88 @@ class AcApp extends JRPCClient {
       to { opacity: 1; transform: translateY(0); }
     }
 
+    /* Admission pending overlay */
+    .admission-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20001;
+      background: var(--bg-primary, #0d1117);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+    }
+    .admission-brand {
+      font-size: 3rem;
+      opacity: 0.25;
+      margin-bottom: 1rem;
+      user-select: none;
+    }
+    .admission-message {
+      font-size: 1.1rem;
+      color: var(--text-secondary, #8b949e);
+    }
+    .admission-sub {
+      font-size: 0.85rem;
+      color: var(--text-muted, #6e7681);
+    }
+    .admission-denied-msg {
+      font-size: 1.1rem;
+      color: var(--accent-red, #f85149);
+    }
+    .admission-btn {
+      background: var(--bg-tertiary, #21262d);
+      border: 1px solid var(--border-primary, #30363d);
+      color: var(--text-secondary, #8b949e);
+      padding: 8px 24px;
+      border-radius: var(--radius-md, 8px);
+      cursor: pointer;
+      font-size: 0.9rem;
+      margin-top: 8px;
+    }
+    .admission-btn:hover {
+      background: var(--bg-secondary, #161b22);
+      color: var(--text-primary, #c9d1d9);
+    }
+
+    /* Admission request toast (persistent) */
+    .admission-toast {
+      pointer-events: auto;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--accent-orange);
+      border-radius: var(--radius-md, 8px);
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      box-shadow: var(--shadow-md);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 360px;
+    }
+    .admission-toast-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .admission-toast-actions button {
+      padding: 4px 16px;
+      border-radius: var(--radius-sm, 4px);
+      border: 1px solid var(--border-primary);
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .admission-toast-actions .admit-btn {
+      background: var(--accent-green, #3fb950);
+      color: #000;
+      border-color: var(--accent-green);
+    }
+    .admission-toast-actions .deny-btn {
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+    }
+
     /* Startup overlay */
     .startup-overlay {
       position: fixed;
@@ -229,12 +316,19 @@ class AcApp extends JRPCClient {
     this._startupMessage = 'Connecting...';
     this._startupPercent = 0;
     this._repoName = null;
+    this._admissionPending = false;
+    this._admissionClientId = null;
+    this._admissionDenied = false;
+    this._admissionRequests = [];
+    this._connectedClients = 1;
+    this._rawWsListener = null;
 
     // Set jrpc-oo connection properties
     this.serverURI = `ws://localhost:${this._port}`;
     this.remoteTimeout = 60;
 
     // Bind event handlers
+    this._onAdmissionCancel = this._cancelAdmission.bind(this);
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onFileSave = this._onFileSave.bind(this);
     this._onStreamCompleteForDiff = this._onStreamCompleteForDiff.bind(this);
@@ -250,8 +344,6 @@ class AcApp extends JRPCClient {
 
   connectedCallback() {
     super.connectedCallback();
-    console.log(`AC⚡DC connecting to ${this.serverURI}`);
-
     // Register methods the server can call on us
     this.addClass(this, 'AcApp');
 
@@ -296,7 +388,6 @@ class AcApp extends JRPCClient {
   // === jrpc-oo lifecycle callbacks ===
 
   remoteIsUp() {
-    console.log('WebSocket connected — remote is up, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     const wasReconnecting = this._reconnectAttempt > 0;
     this._reconnectAttempt = 0;
     this._reconnectVisible = false;
@@ -322,8 +413,49 @@ class AcApp extends JRPCClient {
     }
   }
 
+  /**
+   * Override serverChanged to intercept raw WebSocket messages
+   * for the admission flow before jrpc-oo processes them.
+   */
+  serverChanged() {
+    // Call parent to establish WebSocket connection
+    super.serverChanged();
+
+    // After super creates the WebSocket, add our raw message interceptor.
+    // jrpc-oo stores the WebSocket in different places depending on version;
+    // try common locations.
+    const ws = this._ws || this.ws;
+    if (ws && ws.addEventListener) {
+      const origOnMessage = ws.onmessage;
+      ws.onmessage = (event) => {
+        // Try to intercept admission messages
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.type === 'admission_pending') {
+            this._admissionPending = true;
+            this._admissionClientId = data.client_id;
+            this._admissionDenied = false;
+            return; // Don't pass to jrpc-oo
+          }
+          if (data && data.type === 'admission_granted') {
+            this._admissionPending = false;
+            this._admissionDenied = false;
+          }
+          if (data && data.type === 'admission_denied') {
+            this._admissionPending = false;
+            this._admissionDenied = true;
+            return; // Don't pass to jrpc-oo
+          }
+        } catch (_) {
+          // Not JSON or not an admission message — pass through
+        }
+        // Pass to original handler
+        if (origOnMessage) origOnMessage.call(ws, event);
+      };
+    }
+  }
+
   setupDone() {
-    console.log('jrpc-oo setup done — call proxy ready, _wasConnected:', this._wasConnected, '_startupVisible:', this._startupVisible);
     this._wasConnected = true;
 
     // Publish the call proxy so all child components get RPC access
@@ -334,7 +466,6 @@ class AcApp extends JRPCClient {
   }
 
   setupSkip() {
-    console.warn('jrpc-oo setup skipped — connection failed');
     // Trigger reconnection if we were previously connected
     if (this._wasConnected) {
       this._scheduleReconnect();
@@ -342,7 +473,6 @@ class AcApp extends JRPCClient {
   }
 
   remoteDisconnected() {
-    console.log('WebSocket disconnected');
     SharedRpc.clear();
 
     // Show red status bar
@@ -367,8 +497,6 @@ class AcApp extends JRPCClient {
 
     this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})... retry in ${delaySec}s`;
     this._reconnectVisible = true;
-
-    console.log(`Scheduling reconnect attempt ${this._reconnectAttempt} in ${delay}ms`);
 
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
@@ -457,12 +585,68 @@ class AcApp extends JRPCClient {
   }
 
   /**
+   * Receive admission request notification (another client wants to connect).
+   * Called via RPC: AcApp.admissionRequest(data)
+   *
+   * jrpc-oo server.call['AcApp.admissionRequest'](data) sends params=[data].
+   * The class-method dispatch calls this as admissionRequest(data).
+   */
+  admissionRequest(data) {
+    if (!data?.client_id) return true;
+    // Avoid duplicates
+    if (this._admissionRequests.find(r => r.client_id === data.client_id)) return true;
+    this._admissionRequests = [...this._admissionRequests, data];
+    return true;
+  }
+
+  /**
+   * Receive admission result (a pending client was admitted or denied).
+   * Called via RPC: AcApp.admissionResult(data)
+   */
+  admissionResult(data) {
+    if (!data?.client_id) return true;
+    // Remove from pending requests list
+    this._admissionRequests = this._admissionRequests.filter(
+      r => r.client_id !== data.client_id
+    );
+    return true;
+  }
+
+  /**
+   * Receive notification that a client joined.
+   * Called via RPC: AcApp.clientJoined(data)
+   */
+  clientJoined(data) {
+    this._fetchConnectedClients();
+    return true;
+  }
+
+  /**
+   * Receive notification that a client left.
+   * Called via RPC: AcApp.clientLeft(data)
+   */
+  clientLeft(data) {
+    this._fetchConnectedClients();
+    return true;
+  }
+
+  /**
+   * Receive notification that our role changed (e.g. promoted to host).
+   * Called via RPC: AcApp.roleChanged(data)
+   */
+  roleChanged(data) {
+    this._fetchCollabRole();
+    if (data?.role === 'host') {
+      this._showToast('You are now the host', 'success');
+    }
+    return true;
+  }
+
+  /**
    * Receive startup progress from server during deferred initialization.
    * Called via RPC: AcApp.startupProgress(stage, message, percent)
    */
   startupProgress(stage, message, percent) {
-    console.log(`startupProgress: stage=${stage}, message=${message}, percent=${percent}, _startupVisible=${this._startupVisible}`);
-
     // doc_index is a background task — don't let it stall the startup overlay.
     // Forward its progress to the dialog header bar only.
     if (stage === 'doc_index') {
@@ -481,15 +665,66 @@ class AcApp extends JRPCClient {
       this._startupPercent = Math.min(100, Math.max(0, percent));
     }
     if (stage === 'ready') {
-      console.log('startupProgress: ready — dismissing overlay in 400ms');
       // Dismiss overlay with a short delay for the animation
       setTimeout(() => {
-        console.log('startupProgress: dismissing overlay now');
         this._startupVisible = false;
       }, 400);
     }
 
     return true;
+  }
+
+  // === Admission Actions ===
+
+  async _admitClient(clientId) {
+    try {
+      await this.call['Collab.admit_client'](clientId);
+    } catch (e) {
+      console.warn('admit_client failed:', e);
+    }
+  }
+
+  async _denyClient(clientId) {
+    try {
+      await this.call['Collab.deny_client'](clientId);
+    } catch (e) {
+      console.warn('deny_client failed:', e);
+    }
+  }
+
+  async _fetchCollabRole() {
+    try {
+      const raw = await this.call['Collab.get_collab_role']();
+      const role = this._extract(raw);
+      if (role) {
+        SharedRpc.setCollabRole(role);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch collab role:', e);
+    }
+  }
+
+  async _fetchConnectedClients() {
+    try {
+      const raw = await this.call['Collab.get_connected_clients']();
+      const clients = this._extract(raw);
+      if (Array.isArray(clients)) {
+        this._connectedClients = clients.length;
+        window.dispatchEvent(new CustomEvent('collab-client-count', {
+          detail: { count: this._connectedClients },
+        }));
+      }
+    } catch (e) {
+      console.warn('Failed to fetch connected clients:', e);
+    }
+  }
+
+  _cancelAdmission() {
+    // User cancelled while waiting for admission — close the WebSocket
+    this._admissionPending = false;
+    try {
+      if (this._ws) this._ws.close();
+    } catch (_) {}
   }
 
   // === Initial state ===
@@ -499,8 +734,6 @@ class AcApp extends JRPCClient {
       const raw = await this.call['LLMService.get_current_state']();
       // Unwrap jrpc-oo envelope
       const state = this._extract(raw);
-      console.log('Initial state loaded:', state);
-      console.log('init_complete:', state?.init_complete, 'startupVisible:', this._startupVisible);
 
       // Set browser tab title to ⚡ {repo_name}
       if (state?.repo_name) {
@@ -512,10 +745,7 @@ class AcApp extends JRPCClient {
       // after suspend/resume or slow page load), dismiss the startup overlay.
       // The startupProgress("ready") RPC may have been sent while disconnected.
       if (state?.init_complete) {
-        console.log('Server already initialized — dismissing startup overlay');
         this._startupVisible = false;
-      } else {
-        console.log('Server not yet initialized — keeping startup overlay');
       }
 
       // Broadcast mode from server state
@@ -527,6 +757,10 @@ class AcApp extends JRPCClient {
 
       window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
       this._reopenLastFile();
+
+      // Fetch collaboration role and connected clients count
+      await this._fetchCollabRole();
+      await this._fetchConnectedClients();
     } catch (e) {
       console.error('Failed to load initial state:', e);
     }
@@ -796,6 +1030,21 @@ class AcApp extends JRPCClient {
 
       <ac-token-hud></ac-token-hud>
 
+      ${this._admissionPending ? html`
+        <div class="admission-overlay" role="status" aria-live="polite">
+          <div class="admission-brand">AC⚡DC</div>
+          <div class="admission-message">Waiting for admission...</div>
+          <div class="admission-sub">Requesting access to ac-dc</div>
+          <button class="admission-btn" @click=${this._onAdmissionCancel}>Cancel</button>
+        </div>
+      ` : this._admissionDenied ? html`
+        <div class="admission-overlay" role="alert">
+          <div class="admission-brand">AC⚡DC</div>
+          <div class="admission-denied-msg">Access denied</div>
+          <div class="admission-sub">Your connection was not admitted.</div>
+        </div>
+      ` : ''}
+
       ${this._startupVisible ? html`
         <div class="startup-overlay" role="status" aria-live="polite" aria-label="Loading">
           <div class="startup-brand">AC⚡DC</div>
@@ -812,6 +1061,15 @@ class AcApp extends JRPCClient {
            role="alert" aria-live="assertive">${this._reconnectMsg}</div>
 
       <div class="toast-container" role="status" aria-live="polite" aria-relevant="additions">
+        ${this._admissionRequests.map(req => html`
+          <div class="admission-toast" role="alert">
+            <div>🔔 ${req.ip} wants to connect</div>
+            <div class="admission-toast-actions">
+              <button class="admit-btn" @click=${() => this._admitClient(req.client_id)}>Admit</button>
+              <button class="deny-btn" @click=${() => this._denyClient(req.client_id)}>Deny</button>
+            </div>
+          </div>
+        `)}
         ${this._toasts.map(t => html`
           <div class="global-toast ${t.type} ${t.fading ? 'fading' : ''}" role="alert">${t.message}</div>
         `)}

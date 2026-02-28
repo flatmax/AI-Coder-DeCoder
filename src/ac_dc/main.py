@@ -411,10 +411,24 @@ def main(args=None):
     import asyncio
 
     async def _run_server():
-        server = JRPCServer(server_port, remote_timeout=60)
+        # Use CollabServer for admission-gated multi-browser support.
+        # In single-user mode the behavior is identical to JRPCServer —
+        # the first connection is auto-admitted and admission flow is
+        # never triggered.
+        from ac_dc.collab import CollabServer, Collab
+
+        collab = Collab()
+        server = CollabServer(server_port, collab=collab, remote_timeout=60)
+
+        # Attach collab to service instances for RPC restriction checks
+        repo._collab = collab
+        settings._collab = collab
+        doc_convert._collab = collab
+
         server.add_class(repo)
         server.add_class(settings)
         server.add_class(doc_convert)
+        server.add_class(collab)
 
         # Step 5.5: Create LLM service and restore last session BEFORE the
         # server starts accepting connections.  This way get_current_state()
@@ -426,6 +440,7 @@ def main(args=None):
         llm_service = LLMService(
             config, repo=repo, symbol_index=None, deferred_init=True,
         )
+        llm_service._collab = collab  # For RPC restriction checks
         llm_service._restore_last_session()
         server.add_class(llm_service)
 

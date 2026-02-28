@@ -119,14 +119,16 @@ The meaningful restriction is **localhost vs non-localhost**, not host vs partic
 
 The following operations are restricted to localhost connections:
 
-| Category | Methods |
-|----------|---------|
-| **LLM interaction** | `chat_streaming`, `generate_commit_message`, `cancel_streaming` |
-| **Session management** | `new_session`, `load_session` |
-| **LLM state** | `set_selected_files`, `set_mode` |
-| **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `save_file`, `write_file` |
-| **Review mode** | `start_review`, `exit_review` |
-| **Settings** | `update_llm_config`, `update_app_config`, `update_snippets` |
+| Category | Methods | Enforcement |
+|----------|---------|-------------|
+| **LLM interaction** | `chat_streaming`, `generate_commit_message`, `cancel_streaming` | `LLMService._check_localhost_only()` |
+| **Session management** | `new_session`, `load_session_into_context`, `history_new_session` | `LLMService._check_localhost_only()` |
+| **LLM state** | `set_selected_files`, `switch_mode`, `set_cross_reference` | `LLMService._check_localhost_only()` |
+| **Review mode** | `start_review`, `end_review` | `LLMService._check_localhost_only()` |
+| **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `write_file`, `discard_changes`, `reset_hard`, `stage_all` | **Not yet enforced** — `Repo._collab` is set but no check method exists on `Repo` |
+| **Settings** | `save_config_content`, `reload_llm_config`, `reload_app_config` | **Not yet enforced** — `Settings._collab` is set but no check method exists on `Settings` |
+
+> **Implementation gap:** RPC restrictions are currently enforced only on `LLMService` methods via `_check_localhost_only()`. The `Repo` and `Settings` classes have `_collab` set but do not check it before mutating operations. In practice, participant UI restrictions (hidden buttons, disabled inputs) prevent non-localhost users from triggering these RPCs through the UI, but direct RPC calls are not blocked server-side.
 
 ### Everyone RPCs
 
@@ -144,24 +146,49 @@ These are available to all admitted clients:
 RPC restriction is enforced by identifying which remote triggered a call. `CollabServer` overrides `handle_connection` to run its own message receive loop (rather than delegating entirely to `super()`). Before each `remote.receive(message)` dispatch, it sets a context variable identifying the caller:
 
 ```python
-async def handle_connection(self, websocket):
-    # ... admission logic, then:
-    remote = self.create_remote(websocket)
-    async for message in websocket:
-        self._current_caller_uuid = remote.uuid
-        data = message if isinstance(message, str) else message.decode()
-        remote.receive(data)
+class CollabServer(JRPCServer):
+    async def _run_admitted_connection(self, websocket, peer_ip, role):
+        remote = self.create_remote(websocket)
+        self._collab._register_client(remote.uuid, peer_ip, role=role,
+                                       websocket=websocket, remote=remote)
+        try:
+            async for message in websocket:
+                self._current_caller_uuid = remote.uuid
+                data = message if isinstance(message, str) else message.decode()
+                remote.receive(data)
+        finally:
+            self._current_caller_uuid = None
+            self._collab._unregister_client(remote.uuid)
 ```
 
-This mirrors the receive loop in `JRPCServer.handle_connection` but adds caller tracking. The restricted RPC methods check the caller:
+This mirrors the receive loop in `JRPCServer.handle_connection` but adds caller tracking. Service classes check the caller via the shared `Collab` instance:
 
 ```python
-def chat_streaming(self, request_id, message, ...):
-    caller = self._clients.get(self._current_caller_uuid)
-    if caller and not caller['is_localhost']:
-        return {"error": "restricted", "reason": "Participants cannot send prompts"}
-    # ... normal logic
+class LLMService:
+    def _check_localhost_only(self):
+        """Returns None if allowed, or error dict if restricted."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
+
+    def chat_streaming(self, request_id, message, ...):
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+        # ... normal logic
 ```
+
+The `_collab` reference is set on each service class in `main.py`:
+
+```python
+collab = Collab()
+server = CollabServer(server_port, collab=collab)
+llm_service._collab = collab
+repo._collab = collab
+settings._collab = collab
+```
+
+The `Collab._is_caller_localhost()` method reads `server._current_caller_uuid` (set per-message in the receive loop) and looks up the client's `is_localhost` flag in the registry. When no caller tracking is available (single-user fallback), it returns `True`.
 
 ## New RPC Methods
 
@@ -272,7 +299,41 @@ Sent just before the WebSocket is closed.
 
 ### Pending State (Pre-JRPC)
 
-The webapp detects the pending state by listening for raw WebSocket messages before JRPC setup completes. When `admission_pending` is received, the app shows a centered waiting screen:
+The webapp detects the pending state by intercepting raw WebSocket messages before jrpc-oo processes them. This requires overriding `serverChanged()` in the app shell (which jrpc-oo calls when the WebSocket is created) to patch `ws.onmessage`:
+
+```javascript
+serverChanged() {
+    super.serverChanged();  // creates WebSocket
+    const ws = this._ws || this.ws;
+    if (ws) {
+        const origOnMessage = ws.onmessage;
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data?.type === 'admission_pending') {
+                    this._admissionPending = true;
+                    this._admissionClientId = data.client_id;
+                    return;  // don't pass to jrpc-oo
+                }
+                if (data?.type === 'admission_granted') {
+                    this._admissionPending = false;
+                    // fall through — let jrpc-oo handle subsequent handshake
+                }
+                if (data?.type === 'admission_denied') {
+                    this._admissionPending = false;
+                    this._admissionDenied = true;
+                    return;  // don't pass to jrpc-oo
+                }
+            } catch (_) {}
+            if (origOnMessage) origOnMessage.call(ws, event);
+        };
+    }
+}
+```
+
+The `admission_pending` and `admission_denied` messages are consumed by the interceptor and never reach jrpc-oo. The `admission_granted` message passes through so jrpc-oo can proceed with its normal handshake.
+
+When `admission_pending` is received, the app shows a centered waiting screen:
 
 ```
 ┌──────────────────────────────────┐
@@ -307,7 +368,7 @@ Everything else works normally: browsing files, viewing diffs, searching, readin
 
 ### Admission Toast
 
-When an `admissionRequest` event arrives, a persistent (non-auto-dismissing) toast is shown:
+When an `admissionRequest` event arrives via `AcApp.admissionRequest(data)`, a persistent (non-auto-dismissing) toast is shown:
 
 ```
 ┌──────────────────────────────────────┐
@@ -317,11 +378,13 @@ When an `admissionRequest` event arrives, a persistent (non-auto-dismissing) toa
 └──────────────────────────────────────┘
 ```
 
+The `_admissionRequests` array must be declared as a Lit reactive property (`{ type: Array, state: true }`) so that appending a new request triggers a re-render. The array is updated immutably (`this._admissionRequests = [...this._admissionRequests, data]`).
+
 The toast remains until acted upon. Multiple pending requests show multiple toasts, stacked.
 
-Clicking **Admit** calls `rpc.admit_client(client_id)`. Clicking **Deny** calls `rpc.deny_client(client_id)`.
+Clicking **Admit** calls `Collab.admit_client(client_id)`. Clicking **Deny** calls `Collab.deny_client(client_id)`.
 
-When `admissionResult` is received, the toast is dismissed. If someone else already acted on it, the toast is also dismissed.
+When `admissionResult` is received, the matching request is removed from `_admissionRequests`, dismissing its toast. If someone else already acted on it, the toast is also dismissed.
 
 ### Connected Users Indicator
 

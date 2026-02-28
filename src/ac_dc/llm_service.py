@@ -213,6 +213,20 @@ class LLMService:
         self._review_stats = {}
         self._symbol_map_before = None
 
+        # Collaboration — set by main.py after construction
+        self._collab = None
+
+    def _check_localhost_only(self):
+        """Check if the current RPC caller is allowed to perform mutating operations.
+
+        Returns None if allowed, or an error dict if restricted.
+        Non-localhost participants cannot send prompts, mutate LLM state,
+        or perform git operations.
+        """
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
+
     @staticmethod
     def _new_session_id():
         return f"sess_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -460,6 +474,9 @@ class LLMService:
 
     def set_selected_files(self, files):
         """Update selected file list. Returns copy."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         self._selected_files = list(files)
         return list(self._selected_files)
 
@@ -469,6 +486,9 @@ class LLMService:
 
     def new_session(self):
         """Start a new session — clears history and generates new session ID."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         self._context.clear_history()
         self._session_id = self._new_session_id()
         # Don't reset stability_initialized — symbol tiers persist across sessions
@@ -512,6 +532,9 @@ class LLMService:
         Returns:
             {status, cross_ref_enabled, message?}
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         enabled = bool(enabled)
 
         if enabled == self._cross_ref_enabled:
@@ -729,6 +752,9 @@ class LLMService:
         Returns:
             {mode: str, message: str}
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         logger.info(f"switch_mode called: {mode} (current: {self._context.mode.value})")
         try:
             new_mode = Mode(mode)
@@ -1277,6 +1303,10 @@ class LLMService:
         Returns:
             {status: "started"} immediately; results via streamComplete callback
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+
         if not self._init_complete:
             return {"error": "Server is still initializing — please wait a moment"}
 
@@ -1895,6 +1925,9 @@ class LLMService:
 
     def cancel_streaming(self, request_id):
         """Cancel an active stream."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         if self._current_request_id == request_id:
             self._cancelled_requests.add(request_id)
             return {"success": True}
@@ -2175,6 +2208,9 @@ class LLMService:
         Returns:
             {message: str} or {error: str}
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         if not diff_text or not diff_text.strip():
             return {"error": "Empty diff"}
 
@@ -2837,6 +2873,9 @@ class LLMService:
         1. checkout_review_parent → build symbol_map_before
         2. setup_review_soft_reset → rebuild symbol index
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         if not self._repo:
             return {"error": "No repository available"}
 
@@ -2926,6 +2965,9 @@ class LLMService:
 
     async def end_review(self):
         """Exit review mode and restore repository."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         if not self._review_active:
             return {"error": "No active review"}
 
@@ -3217,6 +3259,9 @@ class LLMService:
 
     def history_new_session(self):
         """Start new session — alias for new_session."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         return self.new_session()
 
     def load_session_into_context(self, session_id):
@@ -3225,6 +3270,9 @@ class LLMService:
         Clears current history, reads messages from store,
         adds each to context manager, and sets session ID.
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         if not self._history_store:
             return {"error": "No history store available"}
 

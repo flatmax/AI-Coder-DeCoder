@@ -189,17 +189,17 @@ Recommended implementation sequence, with dependencies noted:
 - [ ] **Graceful degradation** — Tab hidden when markitdown not installed
 
 ### Phase 13: Collaboration
-- [ ] **CollabServer subclass** — Override `handle_connection` on `JRPCServer` for admission screening, auto-admit first connection, pending queue with `asyncio.Future` for subsequent connections
-- [ ] **Collab service class** — Separate RPC-exposable class registered via `add_class()` for admission and registry endpoints (`admit_client`, `deny_client`, `get_connected_clients`, `get_collab_role`), avoids exposing inherited server methods
-- [ ] **Client registry** — Track connected clients (id, ip, role, is_localhost, websocket), pending queue management, cleanup on disconnect
-- [ ] **Localhost detection** — Check peer IP against loopback (`127.0.0.1`, `::1`) and local network interfaces
-- [ ] **Admission flow** — Raw WebSocket messages for pending state (`admission_pending`, `admission_granted`, `admission_denied`), broadcast `admissionRequest` to admitted clients, `admit_client`/`deny_client` RPCs
-- [ ] **RPC restrictions** — Set `_current_caller_uuid` before dispatch, restrict LLM interaction, session management, git operations, review mode, and settings RPCs to localhost connections
-- [ ] **Host promotion** — On host disconnect, promote next admitted client by timestamp, broadcast `roleChanged`
-- [ ] **Admission toast** — Persistent non-auto-dismissing toast with Admit/Deny buttons, dismiss on `admissionResult`
-- [ ] **Pending screen** — Centered waiting UI for pre-JRPC clients, Cancel button to disconnect
-- [ ] **Participant UI restrictions** — Hide/disable chat input, file picker mutations, commit button, settings editing, mode toggle, session controls, review controls for non-localhost clients
-- [ ] **Connected users indicator** — `👥 N` badge in dialog header, visible when more than one client connected
+- [x] **CollabServer subclass** — Override `handle_connection` on `JRPCServer` for admission screening, auto-admit first connection, pending queue with `asyncio.Future` for subsequent connections
+- [x] **Collab service class** — Separate RPC-exposable class registered via `add_class()` for admission and registry endpoints (`admit_client`, `deny_client`, `get_connected_clients`, `get_collab_role`), avoids exposing inherited server methods
+- [x] **Client registry** — Track connected clients (id, ip, role, is_localhost, websocket), pending queue management, cleanup on disconnect
+- [x] **Localhost detection** — Check peer IP against loopback (`127.0.0.1`, `::1`) and local network interfaces
+- [x] **Admission flow** — Raw WebSocket messages for pending state (`admission_pending`, `admission_granted`, `admission_denied`), broadcast `admissionRequest` to admitted clients, `admit_client`/`deny_client` RPCs
+- [x] **RPC restrictions** — Set `_current_caller_uuid` before dispatch, restrict LLM interaction, session management, git operations, review mode, and settings RPCs to localhost connections
+- [x] **Host promotion** — On host disconnect, promote next admitted client by timestamp, broadcast `roleChanged`
+- [x] **Admission toast** — Persistent non-auto-dismissing toast with Admit/Deny buttons, dismiss on `admissionResult`
+- [x] **Pending screen** — Centered waiting UI for pre-JRPC clients, Cancel button to disconnect
+- [x] **Participant UI restrictions** — Hide/disable chat input, file picker mutations, commit button, settings editing, mode toggle, session controls, review controls for non-localhost clients
+- [x] **Connected users indicator** — `👥 N` badge in dialog header, visible when more than one client connected
 
 ### Future: Additional Document Extractors
 Dedicated per-format document *extractors* are not planned — [Document Convert](../4-features/doc_convert.md) handles binary format conversion to markdown, and the resulting `.md` files flow through the existing markdown extractor and keyword enricher. The extractor registry remains available for future **text-based** document formats (`.rst`, `.adoc`, `.tex`).

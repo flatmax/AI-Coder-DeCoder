@@ -46,6 +46,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     _enrichingDocs: { type: Boolean, state: true },
     _repoName: { type: String, state: true },
     _docConvertAvailable: { type: Boolean, state: true },
+    _connectedClients: { type: Number, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -335,9 +336,11 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._enrichingDocs = false;
     this._repoName = null;
     this._docConvertAvailable = false;
+    this._connectedClients = 1;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
+    this._onClientEvent = this._onClientEvent.bind(this);
   }
 
   connectedCallback() {
@@ -345,6 +348,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('keydown', this._onKeyDown);
     this._onStateLoaded = this._onStateLoaded.bind(this);
     window.addEventListener('state-loaded', this._onStateLoaded);
+    window.addEventListener('collab-client-count', this._onClientEvent);
     // Restore dialog width if previously resized
     this._restoreDialogWidth();
     // Restore dialog position if previously undocked
@@ -355,6 +359,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
     window.removeEventListener('state-loaded', this._onStateLoaded);
+    window.removeEventListener('collab-client-count', this._onClientEvent);
   }
 
   _onStateLoaded(e) {
@@ -369,6 +374,12 @@ export class AcDialog extends RpcMixin(LitElement) {
       if (typeof state.cross_ref_ready === 'boolean') this._crossRefReady = state.cross_ref_ready;
       if (typeof state.cross_ref_enabled === 'boolean') this._crossRefEnabled = state.cross_ref_enabled;
       if (typeof state.doc_convert_available === 'boolean') this._docConvertAvailable = state.doc_convert_available;
+    }
+  }
+
+  _onClientEvent(e) {
+    if (typeof e.detail?.count === 'number') {
+      this._connectedClients = e.detail.count;
     }
   }
 
@@ -992,13 +1003,21 @@ export class AcDialog extends RpcMixin(LitElement) {
         ` : ''}
 
         <div class="header-actions">
-          <label class="header-action" style="display: flex; align-items: center; gap: 3px; font-size: 0.72rem; cursor: pointer;"
+          ${this._connectedClients > 1 ? html`
+            <span class="header-action" style="cursor: default; font-size: 0.8rem;"
+              title="${this._connectedClients} connected clients"
+              @mousedown=${(e) => e.stopPropagation()}>
+              👥 ${this._connectedClients}
+            </span>
+          ` : ''}
+          <label class="header-action" style="display: flex; align-items: center; gap: 3px; font-size: 0.72rem; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'}; opacity: ${this._canMutate ? 1 : 0.5};"
             title="${this._crossRefEnabled ? 'Disable cross-reference index' : 'Enable cross-reference index'}"
             @mousedown=${(e) => e.stopPropagation()}>
             <input type="checkbox"
               .checked=${this._crossRefEnabled}
+              ?disabled=${!this._canMutate}
               @change=${() => this._onCrossRefToggle()}
-              style="margin: 0; cursor: pointer;">
+              style="margin: 0; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'};">
             <span style="color: var(--text-muted); white-space: nowrap;">
               ${this._mode === 'code' ? '+doc index' : '+code symbols'}
             </span>
@@ -1010,7 +1029,7 @@ export class AcDialog extends RpcMixin(LitElement) {
                 ? 'Switch to Code mode'
                 : 'Switch to Document mode'}"
             aria-label="${this._mode === 'code' ? 'Switch to document mode' : 'Switch to code mode'}"
-            ?disabled=${this._docIndexBuilding}
+            ?disabled=${this._docIndexBuilding || !this._canMutate}
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onModeToggle()}>
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
@@ -1018,6 +1037,7 @@ export class AcDialog extends RpcMixin(LitElement) {
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
             aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
+            ?disabled=${!this._canMutate}
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onReviewClick()}>
             👁️

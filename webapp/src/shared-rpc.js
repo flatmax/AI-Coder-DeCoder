@@ -5,6 +5,7 @@
 
 const _listeners = new Set();
 let _call = null;
+let _collabRole = null;   // { role, is_localhost, client_id }
 
 export const SharedRpc = {
   /**
@@ -51,5 +52,35 @@ export const SharedRpc = {
     for (const fn of _listeners) {
       try { fn(null); } catch (e) { console.error('SharedRpc listener error:', e); }
     }
+  },
+
+  /**
+   * Set the collaboration role for this client.
+   * Called after get_collab_role() RPC completes.
+   */
+  setCollabRole(role) {
+    _collabRole = role;
+    // Notify listeners about role change
+    window.dispatchEvent(new CustomEvent('collab-role-changed', {
+      detail: role,
+    }));
+  },
+
+  /**
+   * Get the current collaboration role.
+   * Returns { role, is_localhost, client_id } or null.
+   */
+  getCollabRole() {
+    return _collabRole;
+  },
+
+  /**
+   * Whether the current client can perform mutating operations.
+   * Returns true for localhost clients regardless of role.
+   * Returns true when collab role is not yet known (single-user default).
+   */
+  canMutate() {
+    if (!_collabRole) return true; // Not yet known — assume single-user
+    return _collabRole.is_localhost === true;
   },
 };
