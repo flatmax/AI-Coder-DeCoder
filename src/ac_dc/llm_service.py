@@ -152,6 +152,7 @@ class LLMService:
         self._cancelled_requests = set()
         self._session_id = self._new_session_id()
         self._executor = ThreadPoolExecutor(max_workers=2)
+        self._committing = False
 
         # Stability tracker
         self._stability_tracker = StabilityTracker(
@@ -1529,6 +1530,16 @@ class LLMService:
                 except Exception as e:
                     logger.warning(f"Failed to persist user message: {e}")
 
+            # Broadcast user message to all clients immediately so
+            # collaborators see it before the assistant starts streaming
+            if self._event_callback:
+                try:
+                    await self._event_callback(
+                        "userMessage", {"content": message}
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to broadcast user message: {e}")
+
             # Build and inject review context if review mode is active
             if self._review_active:
                 try:
@@ -2233,6 +2244,107 @@ class LLMService:
         except Exception as e:
             logger.error(f"Commit message generation failed: {e}")
             return {"error": str(e)}
+
+    async def commit_all(self):
+        """Stage all changes, generate commit message, and commit. (RPC)
+
+        Returns immediately with {status: "started"}.
+        Broadcasts commitResult event to all clients on completion.
+        """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        if self._committing:
+            return {"error": "A commit is already in progress"}
+
+        self._committing = True
+
+        # Launch background task
+        asyncio.ensure_future(self._commit_all_background())
+
+        return {"status": "started"}
+
+    async def _commit_all_background(self):
+        """Background task for commit_all — stages, generates message, commits."""
+        result = {}
+        try:
+            # Stage all changes
+            try:
+                self._repo.stage_all()
+            except Exception as e:
+                result = {"error": f"Stage failed: {e}"}
+                return
+
+            # Get staged diff
+            try:
+                diff_result = self._repo.get_staged_diff()
+                diff = diff_result.get("diff", "") if isinstance(diff_result, dict) else ""
+            except Exception as e:
+                result = {"error": f"Failed to get diff: {e}"}
+                return
+
+            if not diff.strip():
+                result = {"error": "Nothing to commit"}
+                return
+
+            # Generate commit message via LLM (in executor to avoid blocking)
+            loop = asyncio.get_event_loop()
+            try:
+                msg_result = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self.generate_commit_message(diff),
+                )
+            except Exception as e:
+                result = {"error": f"Message generation failed: {e}"}
+                return
+
+            if isinstance(msg_result, dict) and msg_result.get("error"):
+                result = {"error": f"Message generation failed: {msg_result['error']}"}
+                return
+
+            commit_message = msg_result.get("message", "") if isinstance(msg_result, dict) else ""
+            if not commit_message:
+                result = {"error": "Failed to generate commit message"}
+                return
+
+            # Commit
+            try:
+                commit_result = self._repo.commit(commit_message)
+            except Exception as e:
+                result = {"error": f"Commit failed: {e}"}
+                return
+
+            if isinstance(commit_result, dict) and commit_result.get("error"):
+                result = {"error": f"Commit failed: {commit_result['error']}"}
+                return
+
+            sha = ""
+            if isinstance(commit_result, dict):
+                sha = (commit_result.get("sha") or "")[:7]
+
+            result = {
+                "status": "committed",
+                "sha": sha,
+                "message": commit_message,
+            }
+
+        except Exception as e:
+            logger.error(f"commit_all background failed: {e}")
+            result = {"error": str(e)}
+
+        finally:
+            self._committing = False
+
+            # Broadcast result to all clients
+            if self._event_callback:
+                try:
+                    await self._event_callback("commitResult", result)
+                except Exception as e:
+                    logger.error(f"commitResult callback failed: {e}")
 
     # === Context Breakdown (RPC) ===
 

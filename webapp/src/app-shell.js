@@ -577,6 +577,20 @@ class AcApp extends JRPCClient {
     return true;
   }
 
+  commitResult(result) {
+    window.dispatchEvent(new CustomEvent('commit-result', {
+      detail: result,
+    }));
+    return true;
+  }
+
+  userMessage(data) {
+    window.dispatchEvent(new CustomEvent('user-message', {
+      detail: data,
+    }));
+    return true;
+  }
+
   filesChanged(selectedFiles) {
     window.dispatchEvent(new CustomEvent('files-changed', {
       detail: { selectedFiles },

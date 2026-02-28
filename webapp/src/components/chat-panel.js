@@ -1168,6 +1168,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._onViewUrlContent = this._onViewUrlContent.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
+    this._onCommitResult = this._onCommitResult.bind(this);
+    this._onUserMessage = this._onUserMessage.bind(this);
   }
 
   connectedCallback() {
@@ -1176,6 +1178,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('compaction-event', this._onCompactionEvent);
     window.addEventListener('mode-changed', this._onModeChanged);
+    window.addEventListener('commit-result', this._onCommitResult);
+    window.addEventListener('user-message', this._onUserMessage);
     this.addEventListener('view-url-content', this._onViewUrlContent);
   }
 
@@ -1185,6 +1189,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('compaction-event', this._onCompactionEvent);
     window.removeEventListener('mode-changed', this._onModeChanged);
+    window.removeEventListener('commit-result', this._onCommitResult);
+    window.removeEventListener('user-message', this._onUserMessage);
     this.removeEventListener('view-url-content', this._onViewUrlContent);
     if (this._rafId) cancelAnimationFrame(this._rafId);
     if (this._observer) this._observer.disconnect();
@@ -1431,6 +1437,64 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onModeChanged(e) {
     this._loadSnippets();
+  }
+
+  _onUserMessage(e) {
+    const { content } = e.detail || {};
+    if (!content) return;
+    // Skip if we initiated the current stream — we already added
+    // the user message optimistically in _send()
+    if (this._currentRequestId && !this._isPassiveStream) return;
+    this.messages = [...this.messages, { role: 'user', content }];
+    if (this._autoScroll) {
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => this._scrollToBottom());
+      });
+    }
+  }
+
+  _onCommitResult(e) {
+    const result = e.detail || {};
+
+    // Clear committing state (for the client that initiated it)
+    this._committing = false;
+
+    if (result.error) {
+      // Remove progress message if present
+      this.messages = this.messages.filter(m =>
+        !(m.role === 'assistant' && m.content?.includes('Staging changes and generating commit message'))
+      );
+      this._showToast(`Commit failed: ${result.error}`, 'error');
+      return;
+    }
+
+    if (result.status === 'committed') {
+      const sha = result.sha || '';
+      const commitMessage = result.message || '';
+
+      this._showToast(`Committed ${sha}: ${commitMessage.split('\n')[0]}`, 'success');
+
+      // Replace progress message (if present) with commit info, or just add it
+      const filtered = this.messages.filter(m =>
+        !(m.role === 'assistant' && m.content?.includes('Staging changes and generating commit message'))
+      );
+      this.messages = [...filtered, {
+        role: 'assistant',
+        content: `**Committed** \`${sha}\`\n\n\`\`\`\n${commitMessage}\n\`\`\``,
+      }];
+
+      if (this._autoScroll) {
+        this.updateComplete.then(() => {
+          requestAnimationFrame(() => this._scrollToBottom());
+        });
+      }
+
+      // Refresh file tree
+      this.dispatchEvent(new CustomEvent('files-modified', {
+        detail: { files: [] },
+        bubbles: true, composed: true,
+      }));
+    }
   }
 
   _onCompactionEvent(e) {
@@ -1947,83 +2011,33 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._committing = true;
 
     // Show progress message in chat
-    const progressMsg = { role: 'assistant', content: '⏳ **Staging changes and generating commit message...**' };
-    this.messages = [...this.messages, progressMsg];
+    this.messages = [...this.messages, {
+      role: 'assistant',
+      content: '⏳ **Staging changes and generating commit message...**',
+    }];
     if (this._autoScroll) {
       requestAnimationFrame(() => this._scrollToBottom());
     }
 
     try {
-      // Stage all changes
-      const stageResult = await this.rpcExtract('Repo.stage_all');
-      if (stageResult?.error) {
-        this._removeProgressMsg(progressMsg);
-        this._showToast(`Stage failed: ${stageResult.error}`, 'error');
-        return;
+      const result = await this.rpcExtract('LLMService.commit_all');
+      if (result?.error) {
+        // Synchronous error (e.g. already committing, no repo)
+        this._committing = false;
+        this.messages = this.messages.filter(m =>
+          !(m.role === 'assistant' && m.content?.includes('Staging changes and generating commit message'))
+        );
+        this._showToast(result.error, 'error');
       }
-
-      // Get staged diff for commit message generation
-      const diffResult = await this.rpcExtract('Repo.get_staged_diff');
-      const diff = diffResult?.diff || '';
-      if (!diff.trim()) {
-        this._removeProgressMsg(progressMsg);
-        this._showToast('Nothing to commit', 'error');
-        return;
-      }
-
-      // Generate commit message via LLM
-      const msgResult = await this.rpcExtract('LLMService.generate_commit_message', diff);
-      if (msgResult?.error) {
-        this._removeProgressMsg(progressMsg);
-        this._showToast(`Message generation failed: ${msgResult.error}`, 'error');
-        return;
-      }
-
-      const commitMessage = msgResult?.message;
-      if (!commitMessage) {
-        this._removeProgressMsg(progressMsg);
-        this._showToast('Failed to generate commit message', 'error');
-        return;
-      }
-
-      // Commit
-      const commitResult = await this.rpcExtract('Repo.commit', commitMessage);
-      if (commitResult?.error) {
-        this._removeProgressMsg(progressMsg);
-        this._showToast(`Commit failed: ${commitResult.error}`, 'error');
-        return;
-      }
-
-      const sha = commitResult?.sha?.slice(0, 7) || '';
-      this._showToast(`Committed ${sha}: ${commitMessage.split('\n')[0]}`, 'success');
-
-      // Replace progress message with commit info
-      const msgs = this.messages.filter(m => m !== progressMsg);
-      this.messages = [...msgs, {
-        role: 'assistant',
-        content: `**Committed** \`${sha}\`\n\n\`\`\`\n${commitMessage}\n\`\`\``,
-      }];
-
-      if (this._autoScroll) {
-        requestAnimationFrame(() => this._scrollToBottom());
-      }
-
-      // Refresh file tree
-      this.dispatchEvent(new CustomEvent('files-modified', {
-        detail: { files: [] },
-        bubbles: true, composed: true,
-      }));
+      // If {status: "started"}, the result will arrive via commit-result event
     } catch (e) {
       console.error('Commit failed:', e);
-      this._removeProgressMsg(progressMsg);
-      this._showToast(`Commit failed: ${e.message || 'Unknown error'}`, 'error');
-    } finally {
       this._committing = false;
+      this.messages = this.messages.filter(m =>
+        !(m.role === 'assistant' && m.content?.includes('Staging changes and generating commit message'))
+      );
+      this._showToast(`Commit failed: ${e.message || 'Unknown error'}`, 'error');
     }
-  }
-
-  _removeProgressMsg(progressMsg) {
-    this.messages = this.messages.filter(m => m !== progressMsg);
   }
 
   _confirmReset() {

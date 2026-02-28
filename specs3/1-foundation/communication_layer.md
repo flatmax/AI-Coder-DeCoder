@@ -181,6 +181,28 @@ The bidirectional nature enables server-push streaming:
 
 Each chunk/completion is a full JSON-RPC method call from server to client.
 
+### Commit Flow (Server-Driven)
+
+```
+1. Browser → Server:  LLMService.commit_all()
+2. Server returns:    {status: "started"} immediately
+3. Server (background): stage_all → get_staged_diff → generate_commit_message → commit
+4. Server → Browser:  AcApp.commitResult(result)    // broadcast to all clients
+```
+
+### User Message Broadcast
+
+When a user sends a chat message, the server broadcasts the message to all connected clients before streaming begins:
+
+```
+1. Browser → Server:  LLMService.chat_streaming(request_id, message, ...)
+2. Server → Browser:  AcApp.userMessage({content: message})  // broadcast to all
+3. Server → Browser:  AcApp.streamChunk(request_id, content)  // repeated
+4. Server → Browser:  AcApp.streamComplete(request_id, result) // once
+```
+
+The sending client ignores the `userMessage` broadcast (it already added the message optimistically). Collaborator clients add it to their message list immediately so the user message appears before streaming begins.
+
 ### Request ID Generation and Correlation
 
 The browser generates request IDs as `{epoch_ms}-{random_alphanumeric_6}` (e.g., `1736956800000-x7k2m9`). The chat panel stores the current request ID and ignores chunks/completions with non-matching IDs. This correlates callbacks to the correct request and prevents stale callbacks from a previous request from corrupting the current stream.
@@ -314,6 +336,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.cancel_streaming` | `(request_id) → {status}` | Cancel active stream |
 | `LLMService.new_session` | `() → {session_id}` | Start new session |
 | `LLMService.generate_commit_message` | `(diff_text) → string` | Generate commit message |
+| `LLMService.commit_all` | `() → {status: "started"}` | Stage, generate message, commit — result via `commitResult` broadcast |
 | `LLMService.get_context_breakdown` | `() → {model, total_tokens, blocks, breakdown, ...}` | Token/tier breakdown |
 | `LLMService.check_review_ready` | `() → {clean, message?}` | Check for clean tree |
 | `LLMService.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | Delegates to Repo |
@@ -371,6 +394,8 @@ Three top-level service classes, registered via `add_class()`:
 | `AcApp.compactionEvent` | `(requestId, event) → true` | Progress notification |
 | `AcApp.filesChanged` | `(selectedFiles) → true` | File selection broadcast |
 | `AcApp.startupProgress` | `(stage, message, percent) → true` | Startup initialization progress |
+| `AcApp.commitResult` | `(result) → true` | Commit completed (broadcast to all clients) |
+| `AcApp.userMessage` | `(data) → true` | User message sent (broadcast to all clients) |
 | `AcApp.admissionRequest` | `(data) → true` | New connection pending admission |
 | `AcApp.admissionResult` | `(data) → true` | Pending request resolved (admitted/denied) |
 | `AcApp.clientJoined` | `(data) → true` | Client completed admission |

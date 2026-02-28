@@ -428,6 +428,8 @@ Since `self.call` already broadcasts to all JRPC remotes, the following events r
 |-------|--------|
 | `streamChunk` | All clients see LLM response streaming |
 | `streamComplete` | All clients see completed response with edit results |
+| `userMessage` | All clients see user messages immediately (before streaming begins) |
+| `commitResult` | All clients see commit results (SHA, message) |
 | `filesChanged` | All clients see file selection changes |
 | `compactionEvent` | All clients see compaction notifications |
 | `admissionRequest` | All clients see admission toasts |

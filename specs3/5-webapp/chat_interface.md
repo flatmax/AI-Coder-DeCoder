@@ -379,7 +379,7 @@ Message cards have `border: 1px solid transparent` by default with a CSS transit
 The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)` clears all previous `.search-highlight` classes, then queries its own shadow DOM for `.message-card[data-msg-index="N"]` and applies the class. `scrollIntoView({ block: 'center' })` brings the match into view. All highlight state (matches array, current index) is managed within the chat panel component.
 
 | Right | 📋 | Copy diff to clipboard |
-| Right | 💾 | Stage all → generate message → commit |
+| Right | 💾 | Commit all (server-driven — see below) |
 | Right | ⚠️ | Reset to HEAD (with confirmation) |
 
 ### Review Status Bar
@@ -389,6 +389,23 @@ When review mode is active, a slim status bar appears above the chat input showi
 ### Review Snippets
 
 When review mode is active, `LLMService.get_snippets()` returns review-specific snippets (from the `"review"` key in the unified `snippets.json`). The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+
+### Commit Flow (Server-Driven)
+
+The commit button calls `LLMService.commit_all()`, which returns `{status: "started"}` immediately. The server performs the full commit pipeline in a background task (stage all → get diff → generate commit message via LLM → commit). On completion, the server broadcasts `AcApp.commitResult(result)` to **all** connected clients via `self.call`.
+
+All clients (including collaborators on other machines) receive the commit result and:
+- Show a toast with the short SHA and first line of the commit message
+- Add an assistant message card with the full commit info
+- Dispatch `files-modified` to refresh the file tree
+
+A `_committing` guard on both client and server prevents concurrent commits. The chat panel shows a progress message ("Staging changes and generating commit message...") which is replaced by the actual commit info when the result arrives.
+
+### User Message Broadcast
+
+When a user sends a chat message, the server broadcasts `AcApp.userMessage({content})` to all clients before streaming begins. This ensures collaborators see the user's message immediately rather than waiting for `streamComplete`.
+
+The sending client ignores this broadcast — it already added the message optimistically in `_send()`. Collaborator clients (detected by having no active `_currentRequestId` or being in passive stream mode) add it to their message list.
 
 ---
 
