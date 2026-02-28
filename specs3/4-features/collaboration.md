@@ -299,39 +299,44 @@ Sent just before the WebSocket is closed.
 
 ### Pending State (Pre-JRPC)
 
-The webapp detects the pending state by intercepting raw WebSocket messages before jrpc-oo processes them. This requires overriding `serverChanged()` in the app shell (which jrpc-oo calls when the WebSocket is created) to patch `ws.onmessage`:
+The webapp detects the pending state by intercepting raw WebSocket messages before jrpc-oo processes them. This requires overriding `serverChanged()` in the app shell (which jrpc-oo calls when the WebSocket is created) to add a capturing `addEventListener('message')` listener on the WebSocket:
 
 ```javascript
 serverChanged() {
     super.serverChanged();  // creates WebSocket
     const ws = this._ws || this.ws;
-    if (ws) {
-        const origOnMessage = ws.onmessage;
-        ws.onmessage = (event) => {
+    if (ws && ws.addEventListener) {
+        if (this._rawWsListener) {
+            ws.removeEventListener('message', this._rawWsListener);
+        }
+        this._rawWsListener = (event) => {
             try {
                 const data = JSON.parse(event.data);
                 if (data?.type === 'admission_pending') {
                     this._admissionPending = true;
                     this._admissionClientId = data.client_id;
-                    return;  // don't pass to jrpc-oo
+                    event.stopImmediatePropagation();
+                    return;
                 }
                 if (data?.type === 'admission_granted') {
                     this._admissionPending = false;
-                    // fall through — let jrpc-oo handle subsequent handshake
+                    event.stopImmediatePropagation();
+                    return;
                 }
                 if (data?.type === 'admission_denied') {
                     this._admissionPending = false;
                     this._admissionDenied = true;
-                    return;  // don't pass to jrpc-oo
+                    event.stopImmediatePropagation();
+                    return;
                 }
             } catch (_) {}
-            if (origOnMessage) origOnMessage.call(ws, event);
         };
+        ws.addEventListener('message', this._rawWsListener);
     }
 }
 ```
 
-The `admission_pending` and `admission_denied` messages are consumed by the interceptor and never reach jrpc-oo. The `admission_granted` message passes through so jrpc-oo can proceed with its normal handshake.
+All three admission message types are consumed via `stopImmediatePropagation()` and never reach jrpc-oo's message handler. This approach is necessary because jrpc-oo uses `addEventListener('message')` internally rather than `ws.onmessage`, so replacing `onmessage` would not intercept messages. The listener is re-attached each time `serverChanged` fires (e.g. on reconnect) and the previous listener is removed to avoid duplicates.
 
 When `admission_pending` is received, the app shows a centered waiting screen:
 
