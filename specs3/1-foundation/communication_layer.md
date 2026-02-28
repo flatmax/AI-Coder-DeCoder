@@ -15,15 +15,15 @@ Browser (WebSocket Client)
 Terminal App (WebSocket Server, localhost only)
 ```
 
-A single WebSocket connection carries all traffic, multiplexed by JSON-RPC request IDs. The server binds to all interfaces (`0.0.0.0`) but uses an admission flow to screen non-first connections (see [Collaboration](../4-features/collaboration.md)).
+A single WebSocket connection carries all traffic, multiplexed by JSON-RPC request IDs. By default the server binds to `127.0.0.1` (localhost only). When `--collab` is passed, it binds to `0.0.0.0` (all interfaces) and uses an admission flow to screen non-first connections (see [Collaboration](../4-features/collaboration.md)).
 
 ## Transport Configuration
 
 | Property | Value |
 |----------|-------|
 | Default server port | 18080 (configurable via CLI) |
-| WebSocket bind address | `0.0.0.0` (all interfaces — admission-gated, see [Collaboration](../4-features/collaboration.md)) |
-| Vite dev/preview bind address | `0.0.0.0` (all interfaces — so LAN collaborators can load the webapp) |
+| WebSocket bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (admission-gated, see [Collaboration](../4-features/collaboration.md)) |
+| Vite dev/preview bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
 | Remote timeout | 60 seconds |
@@ -282,7 +282,7 @@ Three top-level service classes, registered via `add_class()`:
 | **Repo** | `Repo.*` | Git operations, file I/O, tree, search |
 | **LLMService** | `LLMService.*` | Chat streaming, context assembly, URL handling, history, symbol index |
 | **Settings** | `Settings.*` | Config read/write/reload |
-| **Collab** | `Collab.*` | Admission, client registry, role queries |
+| **Collab** | `Collab.*` | Admission, client registry, role queries (only registered when `--collab` is passed) |
 
 **Note:** The LLM service class is named `LLMService` in code, so all RPC methods are prefixed `LLMService.*` (e.g., `LLMService.chat_streaming`, `LLMService.get_context_breakdown`). Other specs may refer to these methods with the full prefix or the shorthand `LLM.*` — both refer to the same endpoints.
 
@@ -431,13 +431,18 @@ llm_service = LLMService(
     deferred_init=True,       # skip session restore, stability init
 )
 
-# 3. Register with RPC server (CollabServer gates connections via admission)
-collab = Collab()
-server = CollabServer(port, collab=collab, remote_timeout=60)
+# 3. Register with RPC server
+#    With --collab: CollabServer gates connections via admission, binds 0.0.0.0
+#    Without --collab: plain JRPCServer, binds 127.0.0.1 (localhost only)
+if collab_enabled:
+    collab = Collab()
+    server = CollabServer(port, collab=collab, remote_timeout=60)
+    server.add_class(collab)
+else:
+    server = JRPCServer(port, remote_timeout=60)
 server.add_class(repo)
 server.add_class(llm_service)
 server.add_class(settings)
-server.add_class(collab)
 
 # 4. Wire up callbacks (chunk_callback, event_callback)
 # 5. Start server — WebSocket now accepting connections

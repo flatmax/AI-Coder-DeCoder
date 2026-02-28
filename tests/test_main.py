@@ -179,6 +179,16 @@ class TestCLI:
         assert args.dev is True
         assert args.verbose is True
 
+    def test_collab_flag(self):
+        """Collab flag defaults to False."""
+        args = parse_args([])
+        assert args.collab is False
+
+    def test_collab_flag_enabled(self):
+        """Collab flag can be enabled."""
+        args = parse_args(["--collab"])
+        assert args.collab is True
+
     def test_repo_path(self):
         """Custom repo path."""
         args = parse_args(["--repo-path", "/tmp/my-repo"])

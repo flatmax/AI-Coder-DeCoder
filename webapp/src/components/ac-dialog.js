@@ -51,6 +51,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     _collabClients: { type: Array, state: true },
     _shareUrl: { type: String, state: true },
     _shareCopied: { type: Boolean, state: true },
+    _collabDisabled: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -470,6 +471,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._collabClients = [];
     this._shareUrl = '';
     this._shareCopied = false;
+    this._collabDisabled = false;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
@@ -523,6 +525,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     }
     this._collabPopoverOpen = true;
     this._shareCopied = false;
+    this._collabDisabled = false;
     // Fetch clients and share info in parallel
     try {
       const [clients, shareInfo] = await Promise.all([
@@ -547,7 +550,11 @@ export class AcDialog extends RpcMixin(LitElement) {
         }
       }
     } catch (e) {
-      console.warn('Failed to fetch collab info:', e);
+      // If Collab class is not registered (single-user mode), RPC will fail
+      this._collabDisabled = true;
+      this._collabClients = [];
+      this._shareUrl = '';
+      console.debug('Collab not available (single-user mode):', e);
     }
   }
 
@@ -1210,42 +1217,55 @@ export class AcDialog extends RpcMixin(LitElement) {
             ${this._collabPopoverOpen ? html`
               <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
               <div class="collab-popover">
-                <div class="collab-popover-title">Connected Clients</div>
-                ${this._collabClients.length > 0 ? html`
-                  <ul class="collab-client-list">
-                    ${this._collabClients.map(c => html`
-                      <li class="collab-client-item">
-                        <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
-                        <span class="collab-client-ip">${c.ip}</span>
-                        ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
-                      </li>
-                    `)}
-                  </ul>
+                ${this._collabDisabled ? html`
+                  <div class="collab-popover-title">Collaboration Disabled</div>
+                  <div style="color: var(--text-secondary); padding: 4px 0; line-height: 1.5;">
+                    Collaboration mode is not enabled. The server is listening on localhost only.
+                  </div>
+                  <div style="color: var(--text-muted); padding: 6px 0 2px; font-size: 0.78rem; line-height: 1.5;">
+                    To allow others on your network to connect, restart with:
+                  </div>
+                  <div style="background: var(--bg-primary); padding: 6px 10px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-green); margin-top: 4px;">
+                    ac-dc --collab
+                  </div>
                 ` : html`
-                  <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
-                `}
-                <hr class="collab-divider">
-                <div class="collab-share-section">
-                  <div class="collab-share-label">Share Link</div>
-                  ${this._shareUrl ? html`
-                    <div class="collab-share-url">
-                      <input type="text" readonly .value=${this._shareUrl}
-                        @click=${(e) => e.target.select()}>
-                      <button class="${this._shareCopied ? 'copied' : ''}"
-                        @click=${() => this._copyShareUrl()}>
-                        ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
-                      </button>
-                    </div>
-                    <div class="collab-share-hint">
-                      Share this link with others on your network to collaborate.
-                    </div>
+                  <div class="collab-popover-title">Connected Clients</div>
+                  ${this._collabClients.length > 0 ? html`
+                    <ul class="collab-client-list">
+                      ${this._collabClients.map(c => html`
+                        <li class="collab-client-item">
+                          <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
+                          <span class="collab-client-ip">${c.ip}</span>
+                          ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
+                        </li>
+                      `)}
+                    </ul>
                   ` : html`
-                    <div class="collab-share-hint">
-                      No routable network address detected.<br>
-                      Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
-                    </div>
+                    <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
                   `}
-                </div>
+                  <hr class="collab-divider">
+                  <div class="collab-share-section">
+                    <div class="collab-share-label">Share Link</div>
+                    ${this._shareUrl ? html`
+                      <div class="collab-share-url">
+                        <input type="text" readonly .value=${this._shareUrl}
+                          @click=${(e) => e.target.select()}>
+                        <button class="${this._shareCopied ? 'copied' : ''}"
+                          @click=${() => this._copyShareUrl()}>
+                          ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
+                        </button>
+                      </div>
+                      <div class="collab-share-hint">
+                        Share this link with others on your network to collaborate.
+                      </div>
+                    ` : html`
+                      <div class="collab-share-hint">
+                        No routable network address detected.<br>
+                        Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
+                      </div>
+                    `}
+                  </div>
+                `}
               </div>
             ` : ''}
           </div>

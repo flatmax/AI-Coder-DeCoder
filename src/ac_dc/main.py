@@ -205,7 +205,7 @@ def _handle_not_a_repo(repo_path):
     sys.exit(1)
 
 
-def _start_vite_dev_server(webapp_port):
+def _start_vite_dev_server(webapp_port, host="127.0.0.1"):
     """Start Vite dev server as a child process.
 
     Returns the subprocess.Popen object, or None if port already in use.
@@ -228,10 +228,10 @@ def _start_vite_dev_server(webapp_port):
         print(f"node_modules/ not found in {project_root}. Run: cd {project_root} && npm install")
         sys.exit(1)
 
-    logger.info(f"Starting Vite dev server on port {webapp_port} (project: {project_root})")
+    logger.info(f"Starting Vite dev server on port {webapp_port} host={host} (project: {project_root})")
     try:
         proc = subprocess.Popen(
-            ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", str(webapp_port)],
+            ["npm", "run", "dev", "--", "--host", host, "--port", str(webapp_port)],
             cwd=str(project_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -244,7 +244,7 @@ def _start_vite_dev_server(webapp_port):
         return None
 
 
-def _start_vite_preview_server(webapp_port):
+def _start_vite_preview_server(webapp_port, host="127.0.0.1"):
     """Build and start Vite preview server as a child process.
 
     Returns the subprocess.Popen object, or None if port already in use.
@@ -281,10 +281,10 @@ def _start_vite_preview_server(webapp_port):
         sys.exit(1)
 
     # Start preview server
-    logger.info(f"Starting Vite preview server on port {webapp_port}")
+    logger.info(f"Starting Vite preview server on port {webapp_port} host={host}")
     try:
         proc = subprocess.Popen(
-            ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", str(webapp_port)],
+            ["npm", "run", "preview", "--", "--host", host, "--port", str(webapp_port)],
             cwd=str(project_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -345,6 +345,10 @@ def parse_args(args=None):
         "--verbose", action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--collab", action="store_true",
+        help="Enable collaboration mode (LAN-accessible, multi-browser)",
+    )
     return parser.parse_args(args)
 
 
@@ -395,10 +399,11 @@ def main(args=None):
 
     # Step 4: Start Vite dev/preview server
     vite_proc = None
+    vite_host = "0.0.0.0" if parsed.collab else "127.0.0.1"
     if parsed.dev:
-        vite_proc = _start_vite_dev_server(webapp_port)
+        vite_proc = _start_vite_dev_server(webapp_port, host=vite_host)
     elif parsed.preview:
-        vite_proc = _start_vite_preview_server(webapp_port)
+        vite_proc = _start_vite_preview_server(webapp_port, host=vite_host)
 
     # Step 5: Start RPC WebSocket server EARLY — before heavy init
     # This lets the browser connect immediately and show progress.
@@ -411,24 +416,31 @@ def main(args=None):
     import asyncio
 
     async def _run_server():
-        # Use CollabServer for admission-gated multi-browser support.
-        # In single-user mode the behavior is identical to JRPCServer —
-        # the first connection is auto-admitted and admission flow is
-        # never triggered.
-        from ac_dc.collab import CollabServer, Collab
+        if parsed.collab:
+            # CollabServer for admission-gated multi-browser support.
+            # Binds to 0.0.0.0 so LAN clients can connect.
+            from ac_dc.collab import CollabServer, Collab
 
-        collab = Collab()
-        server = CollabServer(server_port, collab=collab, remote_timeout=60)
+            collab = Collab()
+            server = CollabServer(server_port, collab=collab, remote_timeout=60)
 
-        # Attach collab to service instances for RPC restriction checks
-        repo._collab = collab
-        settings._collab = collab
-        doc_convert._collab = collab
+            # Attach collab to service instances for RPC restriction checks
+            repo._collab = collab
+            settings._collab = collab
+            doc_convert._collab = collab
 
-        server.add_class(repo)
-        server.add_class(settings)
-        server.add_class(doc_convert)
-        server.add_class(collab)
+            server.add_class(repo)
+            server.add_class(settings)
+            server.add_class(doc_convert)
+            server.add_class(collab)
+        else:
+            # Single-user mode — plain JRPCServer, localhost only.
+            collab = None
+            server = JRPCServer(server_port, remote_timeout=60)
+
+            server.add_class(repo)
+            server.add_class(settings)
+            server.add_class(doc_convert)
 
         # Step 5.5: Create LLM service and restore last session BEFORE the
         # server starts accepting connections.  This way get_current_state()
@@ -440,7 +452,7 @@ def main(args=None):
         llm_service = LLMService(
             config, repo=repo, symbol_index=None, deferred_init=True,
         )
-        llm_service._collab = collab  # For RPC restriction checks
+        llm_service._collab = collab  # For RPC restriction checks (None if single-user)
         llm_service._restore_last_session()
         server.add_class(llm_service)
 

@@ -5,8 +5,8 @@
 | Mode | Description | URL |
 |------|-------------|-----|
 | Hosted (default) | No local webapp. Browser opens GitHub Pages | `https://flatmax.github.io/AI-Coder-DeCoder/{sha}/?port={port}` |
-| Local dev (`--dev`) | Vite dev server (bound to `0.0.0.0`) + RPC server | `http://localhost:{webapp_port}/?port={server_port}` |
-| Local preview (`--preview`) | Production build served locally (bound to `0.0.0.0`) | Same as dev |
+| Local dev (`--dev`) | Vite dev server + RPC server | `http://localhost:{webapp_port}/?port={server_port}` |
+| Local preview (`--preview`) | Production build served locally | Same as dev |
 
 ## Version-Matching Flow
 
@@ -47,8 +47,8 @@ Base URL overridable via `AC_WEBAPP_BASE_URL` environment variable.
 For `--dev` mode, a Vite dev server runs as a child process:
 - **Port check**: skip if port already in use (assumes another instance)
 - **Prerequisite check**: verify `node_modules/` exists, prompt `npm install` if not
-- **Process lifecycle**: `subprocess.Popen` with `npm run dev -- --host 0.0.0.0`, terminated on exit
-- **Bind address**: `0.0.0.0` (all interfaces) — required for collaboration mode so LAN clients can load the webapp
+- **Process lifecycle**: `subprocess.Popen` with `npm run dev -- --host {host}`, terminated on exit
+- **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (required for LAN clients to load the webapp)
 - **Cleanup**: `terminate()` with 5-second timeout, then `kill()` if needed
 
 ## Startup Sequence
@@ -107,6 +107,7 @@ The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not firs
 | `--dev` | false | Run local dev server |
 | `--preview` | false | Build and preview |
 | `--verbose` | false | Debug logging |
+| `--collab` | false | Enable collaboration mode (listen on all interfaces, admission-gated) |
 
 ### Port Selection
 
