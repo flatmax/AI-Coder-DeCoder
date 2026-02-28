@@ -91,12 +91,13 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 | [App Shell and Dialog](5-webapp/app_shell_and_dialog.md) | Root component, dialog, tabs, shortcuts, lifecycle |
 | [Chat Interface](5-webapp/chat_interface.md) | Messages, streaming display, scrolling, input, file mentions |
 | [File Picker](5-webapp/file_picker.md) | Tree view, selection, git status, context menu |
-| [Diff Viewer](5-webapp/diff_viewer.md) | Monaco editor, tabs, save flow, LSP integration |
+| [Diff Viewer](5-webapp/diff_viewer.md) | Monaco editor, save flow, LSP integration, markdown preview |
 | [SVG Viewer](5-webapp/svg_viewer.md) | Side-by-side SVG diff with synchronized pan/zoom |
 | [Viewers and HUD](5-webapp/viewers_and_hud.md) | Context viewer, cache viewer, token HUD |
 | [Search and Settings](5-webapp/search_and_settings.md) | Search tab, settings tab |
 | [URL Chips](5-webapp/url_chips.md) | URL detection display, fetch triggers, inclusion toggles |
 | [Speech to Text](5-webapp/speech_to_text.md) | Web Speech API voice dictation |
+| [File Navigation](5-webapp/file_navigation.md) | 2D spatial graph for file navigation with Alt+Arrow traversal and fullscreen HUD |
 
 ### Layer 6: Deployment
 

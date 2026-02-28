@@ -546,6 +546,21 @@ When collaboration is enabled (`--collab`), both the WebSocket RPC server and th
 
 In hosted mode, remote collaborators open the same GitHub Pages URL (shared via the collab popover's share link) and connect back to the host's WebSocket port over the LAN. The share link replaces `localhost` with the host's LAN IP in the URL.
 
+### WebSocket URI Derivation
+
+The webapp builds its WebSocket connection URI dynamically from the page URL via `getServerURI(port)`:
+
+```javascript
+function getServerURI(port) {
+  const host = window.location.hostname || 'localhost';
+  return `ws://${host}:${port}`;
+}
+```
+
+This means the WebSocket always connects to the same host that served the page. When a remote client accesses the webapp via `http://192.168.1.x:19001/?port=18081`, the WebSocket connects to `ws://192.168.1.x:18081/`. If the page is loaded via `localhost`, the WebSocket also targets `localhost` — which is correct for the host but fails for remote clients. Remote clients **must** access the page using the host machine's LAN IP, not `localhost`.
+
+The `port` parameter is read from the URL query string (`?port=N`), defaulting to `18080` if absent. The collab popover's share link includes the correct port automatically.
+
 ## Testing
 
 ### Connection Handling

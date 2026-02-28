@@ -174,6 +174,10 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `Enter` | Search results | Open match in diff viewer |
 | `Space/Enter` | File picker | Toggle file selection |
 | `↑/↓` | File picker | Navigate tree |
+| `Alt+←` | Global | Navigate file graph left |
+| `Alt+→` | Global | Navigate file graph right |
+| `Alt+↑` | Global | Navigate file graph up |
+| `Alt+↓` | Global | Navigate file graph down |
 | `Scroll wheel` | SVG viewer | Zoom in/out (centered on cursor) |
 | `Middle-drag` | SVG viewer | Pan the viewport |
 | `Click` | SVG editor | Select element (shows handles) |
@@ -502,6 +506,7 @@ webapp/
             token-hud.js         # Floating token usage overlay
             url-chips.js         # URL detection and fetch chips
             url-content-dialog.js # URL content viewer modal
+            file-nav.js          # 2D spatial file navigation graph and HUD overlay
 ```
 
 ## License
