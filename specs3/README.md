@@ -104,6 +104,14 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 |------|-------------|
 | [Build and Deployment](6-deployment/build_and_deployment.md) | Build pipeline, CI, versioning, startup sequence, CLI |
 
+### Layer 7: Future Architecture
+
+Target design for the next major version.
+
+| Spec | Description |
+|------|-------------|
+| [State Synchronization](7-future/state_synchronization.md) | Python-as-authority principle, round-trip rule, broadcast coverage for all shared state |
+
 ### Consolidated References
 
 The [Communication Layer](1-foundation/communication_layer.md) spec contains:
