@@ -510,6 +510,21 @@ class LLMService:
         self._session_id = self._new_session_id()
         # Don't reset stability_initialized — symbol tiers persist across sessions
         # Only history items are purged (done by clear_history -> purge_history_items)
+
+        # Broadcast to all clients so collaborators see the context reset
+        if self._event_callback:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("sessionChanged", {
+                            "session_id": self._session_id,
+                            "messages": [],
+                        })
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast sessionChanged: {e}")
+
         return {"session_id": self._session_id}
 
     # === Mode Switching (RPC) ===
@@ -791,6 +806,17 @@ class LLMService:
             result = await self._switch_to_doc_mode()
         else:
             result = self._switch_to_code_mode()
+
+        # Broadcast mode change to all clients so collaborators' UIs sync
+        if self._event_callback and "error" not in result:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("modeChanged", {"mode": result.get("mode", mode)})
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast modeChanged: {e}")
 
         return result
 
@@ -3424,6 +3450,21 @@ class LLMService:
             frontend_messages.append(entry)
 
         self._session_id = session_id
+
+        # Broadcast to all clients so collaborators see the loaded session
+        if self._event_callback:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("sessionChanged", {
+                            "session_id": session_id,
+                            "messages": frontend_messages,
+                        })
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast sessionChanged: {e}")
+
         return {
             "session_id": session_id,
             "message_count": len(msgs),

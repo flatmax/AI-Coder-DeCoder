@@ -407,6 +407,15 @@ When a user sends a chat message, the server broadcasts `AcApp.userMessage({cont
 
 The sending client ignores this broadcast — it already added the message optimistically in `_send()`. Collaborator clients (detected by having no active `_currentRequestId` or being in passive stream mode) add it to their message list.
 
+### Session Sync (Collaborator)
+
+When a `session-loaded` CustomEvent fires on `window` (dispatched by the app shell on receiving `AcApp.sessionChanged` from the server), the chat panel replaces its entire message list with the received messages. This handles two collaboration scenarios:
+
+- **New session**: another localhost client called `new_session` → messages array is empty, chat clears
+- **Loaded session**: another localhost client called `load_session_into_context` → messages array contains the loaded conversation
+
+The handler resets streaming state (`_streamingContent`, `_currentRequestId`, `streamingActive`), enables auto-scroll, and seeds input history from user messages in the loaded session. The same `session-loaded` event is also fired by the local history browser path, so both local and remote session loads converge on the same handler.
+
 ---
 
 ## Toast System

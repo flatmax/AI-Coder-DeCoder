@@ -263,6 +263,22 @@ Broadcast when a client disconnects.
 {"client_id": "xyz-789", "ip": "192.168.1.42", "role": "participant"}
 ```
 
+### `modeChanged(data: dict)`
+
+Broadcast when a localhost client switches between code and document modes.
+
+```json
+{"mode": "doc"}
+```
+
+### `sessionChanged(data: dict)`
+
+Broadcast when a localhost client starts a new session or loads a previous session. Contains the full message list so all clients can reset their chat panel.
+
+```json
+{"session_id": "sess_1234_abc", "messages": [...]}
+```
+
 ### `roleChanged(data: dict)`
 
 Sent to a specific client when their role changes (e.g., promoted to host).
@@ -417,6 +433,18 @@ Clicking it could show a popover with the client list and a **Kick** button (fut
 
 When a localhost client changes the file selection via `set_selected_files`, the server broadcasts a `filesChanged` event to all connected clients. This ensures all browsers show the same checked files in the file picker. Only localhost clients can change the selection, but everyone sees the result immediately.
 
+### Doc Index Selection Sync
+
+Doc index file checkboxes (used to include/exclude doc files from context) follow the same pattern as code file selection — they call `set_selected_files`, which already broadcasts `filesChanged` to all connected clients. No additional sync mechanism is needed.
+
+### Mode Sync
+
+When a localhost client switches between code mode and doc mode via `switch_mode`, the server broadcasts a `modeChanged` event to all connected clients. All browsers update their UI to reflect the active mode — tab visibility, mode toggle state, and available controls all stay in sync. Only localhost clients can initiate a mode switch, but the result is visible to everyone immediately.
+
+### Session Sync
+
+When a localhost client starts a new session (`new_session`) or loads a previous session (`load_session_into_context`), the server broadcasts a `sessionChanged` event containing the new session ID and message list. All browsers clear their chat panel and display the new conversation state. This ensures collaborators always see the same conversation context.
+
 ### Chat History
 
 On admission, the new client calls `get_current_state()` during its normal `setupDone` flow, which returns the conversation history. They see all messages exchanged so far. If streaming is in progress when they join, they miss already-sent chunks but see the complete message on `streamComplete`.
@@ -440,6 +468,8 @@ Since `self.call` already broadcasts to all JRPC remotes, the following events r
 | `userMessage` | All clients see user messages immediately (before streaming begins) |
 | `commitResult` | All clients see commit results (SHA, message) |
 | `filesChanged` | All clients see file selection changes (broadcast on every `set_selected_files` call and after not-in-context auto-adds) |
+| `modeChanged` | All clients see code/doc mode switches |
+| `sessionChanged` | All clients see new session / loaded session (chat panel resets) |
 | `compactionEvent` | All clients see compaction notifications |
 | `admissionRequest` | All clients see admission toasts |
 | `clientJoined` / `clientLeft` | All clients see connection changes |

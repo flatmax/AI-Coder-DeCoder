@@ -1170,6 +1170,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._onModeChanged = this._onModeChanged.bind(this);
     this._onCommitResult = this._onCommitResult.bind(this);
     this._onUserMessage = this._onUserMessage.bind(this);
+    this._onGlobalSessionLoaded = this._onGlobalSessionLoaded.bind(this);
   }
 
   connectedCallback() {
@@ -1180,6 +1181,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('mode-changed', this._onModeChanged);
     window.addEventListener('commit-result', this._onCommitResult);
     window.addEventListener('user-message', this._onUserMessage);
+    window.addEventListener('session-loaded', this._onGlobalSessionLoaded);
     this.addEventListener('view-url-content', this._onViewUrlContent);
   }
 
@@ -1191,6 +1193,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('mode-changed', this._onModeChanged);
     window.removeEventListener('commit-result', this._onCommitResult);
     window.removeEventListener('user-message', this._onUserMessage);
+    window.removeEventListener('session-loaded', this._onGlobalSessionLoaded);
     this.removeEventListener('view-url-content', this._onViewUrlContent);
     if (this._rafId) cancelAnimationFrame(this._rafId);
     if (this._observer) this._observer.disconnect();
@@ -1929,6 +1932,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       detail: { sessionId, messages },
       bubbles: true, composed: true,
     }));
+  }
+
+  /**
+   * Handle session-loaded events broadcast on window (from server via AcApp).
+   * This handles collaborator sync — when another client loads a session or
+   * starts a new session, all clients update their chat panel.
+   */
+  _onGlobalSessionLoaded(e) {
+    const { messages, session_id, sessionId } = e.detail || {};
+    const msgList = messages;
+    if (!Array.isArray(msgList)) return;
+
+    this.messages = [...msgList];
+    this._streamingContent = '';
+    this._currentRequestId = null;
+    this.streamingActive = false;
+    this._autoScroll = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+    this._seedInputHistory(msgList);
   }
 
   /**

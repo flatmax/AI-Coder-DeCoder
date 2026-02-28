@@ -606,6 +606,28 @@ class AcApp extends JRPCClient {
   }
 
   /**
+   * Receive mode change notification from server.
+   * Called via RPC: AcApp.modeChanged(data)
+   */
+  modeChanged(data) {
+    window.dispatchEvent(new CustomEvent('mode-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * Receive session change notification (new session or loaded session).
+   * Called via RPC: AcApp.sessionChanged(data)
+   */
+  sessionChanged(data) {
+    window.dispatchEvent(new CustomEvent('session-loaded', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
    * Receive admission request notification (another client wants to connect).
    * Called via RPC: AcApp.admissionRequest(data)
    *
