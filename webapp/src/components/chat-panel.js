@@ -2710,7 +2710,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     return html`
       <!-- Action Bar -->
       <div class="action-bar" role="toolbar" aria-label="Chat actions">
-        <button class="action-btn" title="New session" aria-label="New session" @click=${this._newSession}>✨</button>
+        <button class="action-btn" title="New session" aria-label="New session" @click=${this._newSession}
+          ?disabled=${!this._canMutate}>✨</button>
         <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
 
         <div class="chat-search">
@@ -2732,16 +2733,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
         <button class="action-btn" title="Copy diff" aria-label="Copy diff to clipboard" @click=${this._copyDiff}
           ?disabled=${!this.rpcConnected}>📋</button>
-        <button class="action-btn ${this._committing ? 'committing' : ''}"
-          title="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all & commit'}"
-          aria-label="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all and commit'}"
-          @click=${this._commitWithMessage}
-          ?disabled=${!this.rpcConnected || this._committing || this.streamingActive || this.reviewState?.active}>
-          ${this._committing ? '⏳' : '💾'}
-        </button>
-        <button class="action-btn danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
-          @click=${this._confirmReset}
-          ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
+        ${this._canMutate ? html`
+          <button class="action-btn ${this._committing ? 'committing' : ''}"
+            title="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all & commit'}"
+            aria-label="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all and commit'}"
+            @click=${this._commitWithMessage}
+            ?disabled=${!this.rpcConnected || this._committing || this.streamingActive || this.reviewState?.active}>
+            ${this._committing ? '⏳' : '💾'}
+          </button>
+          <button class="action-btn danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
+            @click=${this._confirmReset}
+            ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
+        ` : nothing}
       </div>
 
       <!-- Messages -->
@@ -2792,73 +2795,79 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       ` : nothing}
 
       <!-- Input Area -->
-      <div class="input-area">
-        <ac-input-history
-          @history-select=${this._onHistorySelect}
-          @history-cancel=${this._onHistoryCancel}
-        ></ac-input-history>
+      ${this._canMutate ? html`
+        <div class="input-area">
+          <ac-input-history
+            @history-select=${this._onHistorySelect}
+            @history-cancel=${this._onHistoryCancel}
+          ></ac-input-history>
 
-        <ac-url-chips></ac-url-chips>
+          <ac-url-chips></ac-url-chips>
 
-        ${this._images.length > 0 ? html`
-          <div class="image-previews">
-            ${this._images.map((img, i) => html`
-              <div class="image-preview">
-                <img src="${img}" alt="Pasted image">
-                <button class="remove-btn" @click=${() => this._removeImage(i)}>✕</button>
-              </div>
-            `)}
+          ${this._images.length > 0 ? html`
+            <div class="image-previews">
+              ${this._images.map((img, i) => html`
+                <div class="image-preview">
+                  <img src="${img}" alt="Pasted image">
+                  <button class="remove-btn" @click=${() => this._removeImage(i)}>✕</button>
+                </div>
+              `)}
+            </div>
+          ` : nothing}
+
+          ${this._snippetDrawerOpen && this._snippets.length > 0 ? html`
+            <div class="snippet-drawer">
+              ${this._snippets.map(s => html`
+                <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
+                  ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
+                </button>
+              `)}
+            </div>
+          ` : nothing}
+
+          <div class="input-row">
+            <div class="input-left-buttons">
+              <ac-speech-to-text
+                @transcript=${this._onTranscript}
+              ></ac-speech-to-text>
+              <button
+                class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
+                @click=${this._toggleSnippets}
+                title="Quick snippets"
+                aria-label="Toggle quick snippets"
+                aria-expanded="${this._snippetDrawerOpen}"
+              >📌</button>
+            </div>
+
+            <textarea
+              class="input-textarea"
+              placeholder="Message AC⚡DC..."
+              aria-label="Chat message input"
+              rows="1"
+              .value=${this._inputValue}
+              @input=${this._onInput}
+              @keydown=${this._onKeyDown}
+              @paste=${this._onPaste}
+            ></textarea>
+
+            ${this.streamingActive ? html`
+              <button class="send-btn stop" @click=${this._stop} title="Stop" aria-label="Stop generation">⏹</button>
+            ` : html`
+              <button
+                class="send-btn"
+                @click=${this._send}
+                ?disabled=${!this.rpcConnected}
+                title="Send (Enter)"
+                aria-label="Send message"
+              >↑</button>
+            `}
           </div>
-        ` : nothing}
-
-        ${this._snippetDrawerOpen && this._snippets.length > 0 ? html`
-          <div class="snippet-drawer">
-            ${this._snippets.map(s => html`
-              <button class="snippet-btn" @click=${() => this._insertSnippet(s)} title="${s.tooltip || ''}">
-                ${s.icon || '📌'} ${s.tooltip || s.message?.slice(0, 30) || 'Snippet'}
-              </button>
-            `)}
-          </div>
-        ` : nothing}
-
-        <div class="input-row">
-          <div class="input-left-buttons">
-            <ac-speech-to-text
-              @transcript=${this._onTranscript}
-            ></ac-speech-to-text>
-            <button
-              class="snippet-toggle ${this._snippetDrawerOpen ? 'active' : ''}"
-              @click=${this._toggleSnippets}
-              title="Quick snippets"
-              aria-label="Toggle quick snippets"
-              aria-expanded="${this._snippetDrawerOpen}"
-            >📌</button>
-          </div>
-
-          <textarea
-            class="input-textarea"
-            placeholder="Message AC⚡DC..."
-            aria-label="Chat message input"
-            rows="1"
-            .value=${this._inputValue}
-            @input=${this._onInput}
-            @keydown=${this._onKeyDown}
-            @paste=${this._onPaste}
-          ></textarea>
-
-          ${this.streamingActive ? html`
-            <button class="send-btn stop" @click=${this._stop} title="Stop" aria-label="Stop generation">⏹</button>
-          ` : html`
-            <button
-              class="send-btn"
-              @click=${this._send}
-              ?disabled=${!this.rpcConnected}
-              title="Send (Enter)"
-              aria-label="Send message"
-            >↑</button>
-          `}
         </div>
-      </div>
+      ` : html`
+        <div class="input-area" style="text-align: center; padding: 12px; color: var(--text-muted); font-size: 0.85rem;">
+          Viewing as participant — prompts are host-only
+        </div>
+      `}
 
       <!-- URL Content Dialog -->
       <ac-url-content-dialog></ac-url-content-dialog>

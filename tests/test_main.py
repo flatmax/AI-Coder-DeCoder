@@ -193,3 +193,120 @@ class TestCLI:
         """Custom repo path."""
         args = parse_args(["--repo-path", "/tmp/my-repo"])
         assert args.repo_path == "/tmp/my-repo"
+
+
+# === Repo Localhost Guards ===
+
+
+class TestRepoLocalhostGuards:
+    """Verify that mutating Repo methods are blocked for non-localhost callers."""
+
+    def _make_repo_with_collab(self, tmp_path, is_localhost):
+        """Create a Repo with a mock collab that returns the given localhost status."""
+        from unittest.mock import MagicMock
+        from ac_dc.repo import Repo
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init", str(repo_dir)], capture_output=True)
+        # Create an initial commit so HEAD exists
+        (repo_dir / "file.txt").write_text("hello")
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], capture_output=True)
+        subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "init"], capture_output=True)
+
+        repo = Repo(str(repo_dir))
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = is_localhost
+        repo._collab = collab
+        return repo
+
+    def test_write_file_blocked_for_remote(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=False)
+        result = repo.write_file("test.txt", "content")
+        assert result.get("error") == "restricted"
+
+    def test_write_file_allowed_for_localhost(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=True)
+        result = repo.write_file("test.txt", "content")
+        assert result.get("success") is True
+
+    def test_commit_blocked_for_remote(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=False)
+        result = repo.commit("test commit")
+        assert result.get("error") == "restricted"
+
+    def test_reset_hard_blocked_for_remote(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=False)
+        result = repo.reset_hard()
+        assert result.get("error") == "restricted"
+
+    def test_stage_all_blocked_for_remote(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=False)
+        result = repo.stage_all()
+        assert result.get("error") == "restricted"
+
+    def test_delete_file_blocked_for_remote(self, tmp_path):
+        repo = self._make_repo_with_collab(tmp_path, is_localhost=False)
+        result = repo.delete_file("test.txt")
+        assert result.get("error") == "restricted"
+
+    def test_no_collab_allows_all(self, tmp_path):
+        """Without collab (single-user mode), all operations are allowed."""
+        from ac_dc.repo import Repo
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init", str(repo_dir)], capture_output=True)
+        repo = Repo(str(repo_dir))
+        # _collab is None by default — should not block
+        result = repo.write_file("test.txt", "content")
+        assert result.get("success") is True
+
+
+# === Settings Localhost Guards ===
+
+
+class TestSettingsLocalhostGuards:
+    """Verify that mutating Settings methods are blocked for non-localhost callers."""
+
+    def test_save_config_blocked_for_remote(self):
+        from unittest.mock import MagicMock
+        from ac_dc.settings import Settings
+
+        config = MagicMock()
+        settings = Settings(config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = False
+        settings._collab = collab
+
+        result = settings.save_config_content("system", "new content")
+        assert result.get("error") == "restricted"
+        config.save_config_content.assert_not_called()
+
+    def test_reload_blocked_for_remote(self):
+        from unittest.mock import MagicMock
+        from ac_dc.settings import Settings
+
+        config = MagicMock()
+        settings = Settings(config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = False
+        settings._collab = collab
+
+        result = settings.reload_llm_config()
+        assert result.get("error") == "restricted"
+        config.reload_llm_config.assert_not_called()
+
+    def test_save_allowed_for_localhost(self):
+        from unittest.mock import MagicMock
+        from ac_dc.settings import Settings
+
+        config = MagicMock()
+        config.save_config_content.return_value = None
+        settings = Settings(config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = True
+        settings._collab = collab
+
+        result = settings.save_config_content("system", "new content")
+        assert result.get("success") is True
+        config.save_config_content.assert_called_once()

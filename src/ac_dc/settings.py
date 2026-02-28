@@ -13,6 +13,13 @@ class Settings:
 
     def __init__(self, config_manager):
         self._config = config_manager
+        self._collab = None  # Set by main.py when --collab is passed
+
+    def _check_localhost_only(self):
+        """Return error dict if caller is a non-localhost remote, else None."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
 
     def get_config_content(self, config_type):
         """Read a config file by type."""
@@ -23,6 +30,9 @@ class Settings:
 
     def save_config_content(self, config_type, content):
         """Write a config file by type."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             self._config.save_config_content(config_type, content)
             return {"success": True}
@@ -31,12 +41,18 @@ class Settings:
 
     def reload_llm_config(self):
         """Hot-reload LLM config and apply."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         result = self._config.reload_llm_config()
         logger.info(f"LLM config reloaded: {result}")
         return result
 
     def reload_app_config(self):
         """Hot-reload app config."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         result = self._config.reload_app_config()
         logger.info("App config reloaded")
         return result

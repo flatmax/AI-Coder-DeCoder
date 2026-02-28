@@ -129,10 +129,8 @@ The following operations are restricted to localhost connections:
 | **Session management** | `new_session`, `load_session_into_context`, `history_new_session` | `LLMService._check_localhost_only()` |
 | **LLM state** | `set_selected_files`, `switch_mode`, `set_cross_reference` | `LLMService._check_localhost_only()` |
 | **Review mode** | `start_review`, `end_review` | `LLMService._check_localhost_only()` |
-| **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `write_file`, `discard_changes`, `reset_hard`, `stage_all` | **Not yet enforced** — `Repo._collab` is set but no check method exists on `Repo` |
-| **Settings** | `save_config_content`, `reload_llm_config`, `reload_app_config` | **Not yet enforced** — `Settings._collab` is set but no check method exists on `Settings` |
-
-> **Implementation gap:** RPC restrictions are currently enforced only on `LLMService` methods via `_check_localhost_only()`. The `Repo` and `Settings` classes have `_collab` set but do not check it before mutating operations. In practice, participant UI restrictions (hidden buttons, disabled inputs) prevent non-localhost users from triggering these RPCs through the UI, but direct RPC calls are not blocked server-side.
+| **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `write_file`, `discard_changes`, `reset_hard`, `stage_all` | `Repo._check_localhost_only()` |
+| **Settings** | `save_config_content`, `reload_llm_config`, `reload_app_config` | `Settings._check_localhost_only()` |
 
 ### Everyone RPCs
 

@@ -21,12 +21,19 @@ class Repo:
 
     def __init__(self, repo_root):
         self._root = Path(repo_root).resolve()
+        self._collab = None  # Set by main.py when --collab is passed
         if not (self._root / ".git").exists():
             raise ValueError(f"Not a git repository: {self._root}")
 
     @property
     def root(self):
         return self._root
+
+    def _check_localhost_only(self):
+        """Return error dict if caller is a non-localhost remote, else None."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
 
     def _resolve_path(self, path):
         """Resolve and validate a path relative to repo root."""
@@ -78,6 +85,9 @@ class Repo:
 
     def write_file(self, path, content):
         """Write content to file. Creates parent directories."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             resolved = self._resolve_path(path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +98,9 @@ class Repo:
 
     def create_file(self, path, content):
         """Create new file. Errors if file exists."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             resolved = self._resolve_path(path)
             if resolved.exists():
@@ -161,6 +174,9 @@ class Repo:
 
     def delete_file(self, path):
         """Remove file from filesystem."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             resolved = self._resolve_path(path)
             if resolved.exists():
@@ -174,6 +190,9 @@ class Repo:
 
     def stage_files(self, paths):
         """Stage files for commit."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             self._run_git("add", "--", *paths)
             return {"success": True}
@@ -182,6 +201,9 @@ class Repo:
 
     def unstage_files(self, paths):
         """Remove from staging area."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             self._run_git("reset", "HEAD", "--", *paths)
             return {"success": True}
@@ -190,6 +212,9 @@ class Repo:
 
     def discard_changes(self, paths):
         """Tracked: restore from HEAD. Untracked: delete."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         results = []
         for path in paths:
             try:
@@ -210,6 +235,9 @@ class Repo:
 
     def stage_all(self):
         """Stage all changes."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         self._run_git("add", "-A")
         return {"success": True}
 
@@ -217,6 +245,9 @@ class Repo:
 
     def rename_file(self, old_path, new_path):
         """Rename file. git mv for tracked, filesystem for untracked."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             old_resolved = self._resolve_path(old_path)
             self._resolve_path(new_path)  # validate new path
@@ -253,6 +284,9 @@ class Repo:
 
     def commit(self, message):
         """Create commit."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             self._run_git("commit", "-m", message)
             sha = self._run_git("rev-parse", "HEAD").strip()
@@ -262,6 +296,9 @@ class Repo:
 
     def reset_hard(self):
         """Reset to HEAD."""
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
         try:
             self._run_git("reset", "--hard", "HEAD")
             return {"success": True}
