@@ -474,11 +474,27 @@ class LLMService:
         }
 
     def set_selected_files(self, files):
-        """Update selected file list. Returns copy."""
+        """Update selected file list. Returns copy.
+
+        Broadcasts filesChanged to all clients so collaborators see
+        the updated file selection in their file picker.
+        """
         restricted = self._check_localhost_only()
         if restricted:
             return restricted
         self._selected_files = list(files)
+
+        # Broadcast to all clients so collaborators' file pickers sync
+        if self._event_callback:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("filesChanged", list(self._selected_files))
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast filesChanged: {e}")
+
         return list(self._selected_files)
 
     def get_selected_files(self):

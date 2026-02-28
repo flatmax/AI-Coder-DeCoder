@@ -406,7 +406,7 @@ Clicking it could show a popover with the client list and a **Kick** button (fut
 
 ### File Selection Sync
 
-The existing `filesChanged` broadcast means all clients see the same selected files. Only localhost clients can change the selection, but everyone sees the result.
+When a localhost client changes the file selection via `set_selected_files`, the server broadcasts a `filesChanged` event to all connected clients. This ensures all browsers show the same checked files in the file picker. Only localhost clients can change the selection, but everyone sees the result immediately.
 
 ### Chat History
 
@@ -430,7 +430,7 @@ Since `self.call` already broadcasts to all JRPC remotes, the following events r
 | `streamComplete` | All clients see completed response with edit results |
 | `userMessage` | All clients see user messages immediately (before streaming begins) |
 | `commitResult` | All clients see commit results (SHA, message) |
-| `filesChanged` | All clients see file selection changes |
+| `filesChanged` | All clients see file selection changes (broadcast on every `set_selected_files` call and after not-in-context auto-adds) |
 | `compactionEvent` | All clients see compaction notifications |
 | `admissionRequest` | All clients see admission toasts |
 | `clientJoined` / `clientLeft` | All clients see connection changes |

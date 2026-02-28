@@ -218,6 +218,20 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (Array.isArray(files)) {
       this._syncMessagesFromChat();
       this._selectedFiles = files;
+
+      // Sync file picker checkboxes with the broadcast selection
+      const picker = this.shadowRoot?.querySelector('ac-file-picker');
+      if (picker) {
+        picker.selectedFiles = new Set(files);
+        picker.requestUpdate();
+      }
+
+      // Sync chat panel's selectedFiles so file mentions render correctly
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.selectedFiles = files;
+        chatPanel.requestUpdate();
+      }
     }
   }
 
