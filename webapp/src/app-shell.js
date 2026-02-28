@@ -36,6 +36,15 @@ function getPortFromURL() {
   return port ? parseInt(port, 10) : 18080;
 }
 
+/**
+ * Build the WebSocket URI using the page's hostname so remote clients
+ * connect back to the actual server host instead of their own localhost.
+ */
+function getServerURI(port) {
+  const host = window.location.hostname || 'localhost';
+  return `ws://${host}:${port}`;
+}
+
 class AcApp extends JRPCClient {
   static properties = {
     _statusBar: { type: String, state: true },
@@ -323,8 +332,9 @@ class AcApp extends JRPCClient {
     this._connectedClients = 1;
     this._rawWsListener = null;
 
-    // Set jrpc-oo connection properties
-    this.serverURI = `ws://localhost:${this._port}`;
+    // Set jrpc-oo connection properties — use page hostname so remote
+    // collab clients connect back to the actual server, not their own localhost.
+    this.serverURI = getServerURI(this._port);
     this.remoteTimeout = 60;
 
     // Bind event handlers
