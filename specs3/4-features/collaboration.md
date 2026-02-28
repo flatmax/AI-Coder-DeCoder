@@ -293,6 +293,14 @@ Sent to a specific client when their role changes (e.g., promoted to host).
 {"role": "host", "reason": "previous host disconnected"}
 ```
 
+### `navigateFile(data: dict)`
+
+Broadcast when any client navigates to a file (clicks in file picker, search result, edit block anchor, etc.). All clients open the same file in their viewer.
+
+```json
+{"path": "src/ac_dc/llm_service.py"}
+```
+
 ## Raw WebSocket Messages (Pre-JRPC)
 
 These are sent on the raw WebSocket before JRPC setup, for pending clients:
@@ -439,6 +447,10 @@ Clicking it could show a popover with the client list and a **Kick** button (fut
 
 When a localhost client changes the file selection via `set_selected_files`, the server broadcasts a `filesChanged` event to all connected clients. This ensures all browsers show the same checked files in the file picker. Only localhost clients can change the selection, but everyone sees the result immediately.
 
+### File Navigation Sync
+
+When any client navigates to a file (clicking in the file picker, a search result, or an edit block anchor), the browser calls `LLMService.navigate_file(path)`. The server broadcasts a `navigateFile` event to all connected clients. Each client opens the file in its diff viewer or SVG viewer. Events originating from a remote broadcast carry a `_remote` flag so the receiving client does not re-broadcast, preventing loops.
+
 ### Doc Index Selection Sync
 
 Doc index file checkboxes (used to include/exclude doc files from context) follow the same pattern as code file selection — they call `set_selected_files`, which already broadcasts `filesChanged` to all connected clients. No additional sync mechanism is needed.
@@ -481,6 +493,7 @@ Since `self.call` already broadcasts to all JRPC remotes, the following events r
 | `modeChanged` | All clients see code/doc mode switches and cross-reference toggle changes |
 | `sessionChanged` | All clients see new session / loaded session (chat panel resets) |
 | `compactionEvent` | All clients see compaction notifications |
+| `navigateFile` | All clients open the same file in their viewer |
 | `admissionRequest` | All clients see admission toasts |
 | `clientJoined` / `clientLeft` | All clients see connection changes |
 

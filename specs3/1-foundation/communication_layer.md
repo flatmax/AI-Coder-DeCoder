@@ -363,6 +363,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.lsp_get_references` | `(path, line, col) → [{file, range}]` | Find references |
 | `LLMService.lsp_get_completions` | `(path, line, col, prefix?) → [{label, kind, detail}]` | Code completions |
 | `LLMService.set_cross_reference` | `(enabled) → {status, cross_ref_enabled, message?}` | Enable/disable cross-reference mode |
+| `LLMService.navigate_file` | `(path) → {status, path}` | Broadcast file navigation to all clients |
 
 ### Settings Methods
 
@@ -401,6 +402,7 @@ Three top-level service classes, registered via `add_class()`:
 | `AcApp.clientJoined` | `(data) → true` | Client completed admission |
 | `AcApp.clientLeft` | `(data) → true` | Client disconnected |
 | `AcApp.roleChanged` | `(data) → true` | Client's role changed (e.g., promoted to host) |
+| `AcApp.navigateFile` | `(data) → true` | File navigation broadcast (all clients open same file) |
 
 ## Error Handling
 

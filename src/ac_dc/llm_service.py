@@ -3557,3 +3557,25 @@ class LLMService:
         """Clear all cached URLs. (RPC)"""
         self._url_service.clear_url_cache()
         return {"success": True}
+
+    def navigate_file(self, path):
+        """Broadcast a file navigation event to all clients. (RPC)
+
+        Called when a user clicks a file in the picker.  The server
+        re-broadcasts it so every connected collaborator opens the
+        same file.
+        """
+        if not path:
+            return {"error": "No path specified"}
+
+        if self._event_callback:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("navigateFile", {"path": path})
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast navigateFile: {e}")
+
+        return {"status": "ok", "path": path}

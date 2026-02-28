@@ -606,6 +606,20 @@ class AcApp extends JRPCClient {
   }
 
   /**
+   * Receive file navigation broadcast from server.
+   * Called via RPC: AcApp.navigateFile(data)
+   */
+  navigateFile(data) {
+    if (!data?.path) return true;
+    // Dispatch locally so diff-viewer/svg-viewer open the file.
+    // Use a flag to prevent re-broadcasting back to the server.
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path: data.path, _remote: true },
+    }));
+    return true;
+  }
+
+  /**
    * Receive mode change notification from server.
    * Called via RPC: AcApp.modeChanged(data)
    */
@@ -903,6 +917,13 @@ class AcApp extends JRPCClient {
   _onNavigateFile(e) {
     const detail = e.detail;
     if (!detail?.path) return;
+
+    // Broadcast to collaborators (skip if this event originated from a remote)
+    if (!detail._remote && this.call) {
+      try {
+        this.call['LLMService.navigate_file'](detail.path);
+      } catch (_) {}
+    }
 
     // Save viewport state of the currently-open file before navigating away
     // (non-blocking — avoid synchronous layout queries during navigation)
