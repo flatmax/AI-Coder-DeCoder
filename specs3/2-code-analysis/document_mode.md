@@ -976,6 +976,8 @@ The header progress bar is driven by `doc_index_progress` events received after 
 
 The `_modeSwitchInFlight` guard is checked at three points in `_refreshMode()`: at entry, after the `get_mode` await, and before the saved-preference auto-switch. The flag is cleared in a `finally` block to ensure cleanup even on errors.
 
+**Collaboration mode sync.** `_refreshMode()` syncs localStorage to the server's authoritative mode after every `get_mode()` call. This prevents non-localhost clients (who cannot call `switch_mode`) from reading a stale preference and attempting to "correct" the mode back. The auto-switch path is additionally gated on `_canMutate` — non-localhost clients skip it entirely and passively follow the server's reported mode. Cross-reference toggle changes are also broadcast via `modeChanged` events so all clients stay in sync.
+
 **Granularity** — Enrichment toast updates fire after each file completes keyword extraction. Per-file granularity gives smooth visual feedback (50 updates for 50 files) without excessive RPC overhead. During background enrichment, each file is a separate `run_in_executor` call with an `asyncio.sleep(0)` yield after completion, so events are delivered to the browser between files.
 
 ### Keywords — Always Included

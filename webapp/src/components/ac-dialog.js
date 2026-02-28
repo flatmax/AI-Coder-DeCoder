@@ -413,6 +413,7 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('stream-complete', () => { this._refreshHistoryBar(); this._refreshMode(); });
       window.addEventListener('compaction-event', () => this._refreshHistoryBar());
       window.addEventListener('state-loaded', () => { this._refreshHistoryBar(); this._refreshMode(); });
+      window.addEventListener('mode-changed', () => this._refreshMode());
       window.addEventListener('session-loaded', () => this._refreshHistoryBar());
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
@@ -541,12 +542,21 @@ export class AcDialog extends RpcMixin(LitElement) {
           this._modeSwitchPercent = 0;
           this._docIndexBuilding = false;
         }
+        // Sync localStorage to match the server's authoritative mode.
+        // This prevents non-localhost clients (who can't call switch_mode)
+        // from fighting the server by reading a stale preference.
+        if (result.mode) {
+          this._savePref(this._modeKey(), result.mode);
+        }
       }
     } catch (e) {
       // Ignore — RPC may not be ready
     }
-    // Also restore persisted mode preference and sync if needed
+    // Also restore persisted mode preference and sync if needed.
+    // Only localhost clients should attempt to switch — non-localhost
+    // clients just follow the server's mode (synced above).
     if (this._modeSwitchInFlight) return;
+    if (this._canMutate === false) return;
     const saved = this._loadPref(this._modeKey(), null);
     if (saved && saved !== this._mode && this._docIndexReady) {
       await this._switchMode(saved);

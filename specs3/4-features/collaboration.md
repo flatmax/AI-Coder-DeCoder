@@ -265,10 +265,16 @@ Broadcast when a client disconnects.
 
 ### `modeChanged(data: dict)`
 
-Broadcast when a localhost client switches between code and document modes.
+Broadcast when a localhost client switches between code and document modes, or toggles cross-reference mode.
 
 ```json
 {"mode": "doc"}
+```
+
+When triggered by a cross-reference toggle, includes the cross-ref state:
+
+```json
+{"mode": "code", "cross_ref_enabled": true}
 ```
 
 ### `sessionChanged(data: dict)`
@@ -441,6 +447,10 @@ Doc index file checkboxes (used to include/exclude doc files from context) follo
 
 When a localhost client switches between code mode and doc mode via `switch_mode`, the server broadcasts a `modeChanged` event to all connected clients. All browsers update their UI to reflect the active mode — tab visibility, mode toggle state, and available controls all stay in sync. Only localhost clients can initiate a mode switch, but the result is visible to everyone immediately.
 
+Non-localhost clients passively follow the server's authoritative mode. When a `modeChanged` event arrives, the remote client's `_refreshMode()` calls `get_mode()` (read-only) to sync its UI and updates its localStorage preference to match the server. This prevents stale localStorage preferences from triggering `switch_mode` calls that would be rejected by `_check_localhost_only()`. The `_canMutate` guard ensures non-localhost clients never attempt to call `switch_mode` — they only read and display.
+
+Cross-reference toggle changes (`set_cross_reference`) also broadcast `modeChanged` events with the `cross_ref_enabled` field, so all clients see the cross-reference checkbox state update immediately.
+
 ### Session Sync
 
 When a localhost client starts a new session (`new_session`) or loads a previous session (`load_session_into_context`), the server broadcasts a `sessionChanged` event containing the new session ID and message list. All browsers clear their chat panel and display the new conversation state. This ensures collaborators always see the same conversation context.
@@ -468,7 +478,7 @@ Since `self.call` already broadcasts to all JRPC remotes, the following events r
 | `userMessage` | All clients see user messages immediately (before streaming begins) |
 | `commitResult` | All clients see commit results (SHA, message) |
 | `filesChanged` | All clients see file selection changes (broadcast on every `set_selected_files` call and after not-in-context auto-adds) |
-| `modeChanged` | All clients see code/doc mode switches |
+| `modeChanged` | All clients see code/doc mode switches and cross-reference toggle changes |
 | `sessionChanged` | All clients see new session / loaded session (chat panel resets) |
 | `compactionEvent` | All clients see compaction notifications |
 | `admissionRequest` | All clients see admission toasts |

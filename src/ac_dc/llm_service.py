@@ -576,9 +576,25 @@ class LLMService:
             }
 
         if enabled:
-            return self._enable_cross_reference()
+            result = self._enable_cross_reference()
         else:
-            return self._disable_cross_reference()
+            result = self._disable_cross_reference()
+
+        # Broadcast so collaborators' UIs sync the cross-ref toggle
+        if self._event_callback and "error" not in result:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("modeChanged", {
+                            "mode": self._context.mode.value,
+                            "cross_ref_enabled": self._cross_ref_enabled,
+                        })
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast cross-ref change: {e}")
+
+        return result
 
     def _enable_cross_reference(self):
         """Enable cross-reference mode — add the other index's items to the tracker."""
