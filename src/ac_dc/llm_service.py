@@ -1626,6 +1626,9 @@ class LLMService:
             result["response"] = full_content
             result["token_usage"] = usage
 
+            # Include user message in result so collaborators see both sides
+            result["user_message"] = message
+
             # Parse edit blocks
             blocks = parse_edit_blocks(full_content)
             if blocks:

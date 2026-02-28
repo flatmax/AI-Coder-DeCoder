@@ -1280,7 +1280,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onStreamChunk(e) {
     const { requestId, content } = e.detail;
-    if (requestId !== this._currentRequestId) return;
+
+    // Collaborator mode: adopt an incoming stream we didn't initiate
+    if (requestId !== this._currentRequestId) {
+      if (this._currentRequestId || this.streamingActive) return; // already busy
+      this._currentRequestId = requestId;
+      this._isPassiveStream = true;
+    }
 
     this.streamingActive = true;
     // Coalesce per animation frame
@@ -1342,8 +1348,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._pendingChunk = null;
     }
 
+    const wasPassive = this._isPassiveStream;
     this.streamingActive = false;
+    this._lastRequestId = requestId;
     this._currentRequestId = null;
+    this._isPassiveStream = false;
+
+    // For passive (collaborator) streams, add the user message first
+    if (wasPassive && result?.user_message) {
+      this.messages = [...this.messages, { role: 'user', content: result.user_message }];
+    }
 
     if (result?.error) {
       // Show error as assistant message
@@ -1658,6 +1672,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this._currentRequestId = requestId;
     this._lastRequestId = requestId;
+    this._isPassiveStream = false;
     const images = this._images.length > 0 ? [...this._images] : null;
     const files = this.selectedFiles?.length > 0 ? [...this.selectedFiles] : null;
 
