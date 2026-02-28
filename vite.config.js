@@ -20,8 +20,10 @@ export default defineConfig({
   server: {
     port: 18999,
     strictPort: false,
+    host: '0.0.0.0',
   },
   preview: {
     port: 18999,
+    host: '0.0.0.0',
   },
 });

@@ -231,7 +231,7 @@ def _start_vite_dev_server(webapp_port):
     logger.info(f"Starting Vite dev server on port {webapp_port} (project: {project_root})")
     try:
         proc = subprocess.Popen(
-            ["npm", "run", "dev", "--", "--port", str(webapp_port)],
+            ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", str(webapp_port)],
             cwd=str(project_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -284,7 +284,7 @@ def _start_vite_preview_server(webapp_port):
     logger.info(f"Starting Vite preview server on port {webapp_port}")
     try:
         proc = subprocess.Popen(
-            ["npm", "run", "preview", "--", "--port", str(webapp_port)],
+            ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", str(webapp_port)],
             cwd=str(project_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

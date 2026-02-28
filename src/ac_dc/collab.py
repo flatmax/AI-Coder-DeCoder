@@ -272,6 +272,26 @@ class Collab:
             "client_id": info["client_id"],
         }
 
+    def get_share_info(self):
+        """Return info needed to build a share link for collaborators.
+
+        Returns the server's LAN IP addresses and WebSocket port so
+        clients can construct a ws://IP:PORT URL for sharing.
+        """
+        local_ips = _get_local_ips()
+        # Filter out loopback and link-local — only return routable LAN addresses
+        routable = sorted(
+            ip for ip in local_ips
+            if not ip.startswith("127.")      # entire IPv4 loopback range
+            and ip not in ("::1", "localhost")
+            and not ip.startswith("fe80:")     # link-local IPv6
+        )
+        port = self._server._port if self._server else None
+        return {
+            "ips": routable,
+            "port": port,
+        }
+
 
 class CollabServer(JRPCServer):
     """WebSocket server with connection admission screening.
@@ -285,6 +305,7 @@ class CollabServer(JRPCServer):
 
     def __init__(self, port, collab=None, remote_timeout=60, ssl_context=None):
         super().__init__(port, remote_timeout=remote_timeout, ssl_context=ssl_context)
+        self._port = port
         self._collab = collab or Collab()
         self._collab._server = self
         self._current_caller_uuid = None

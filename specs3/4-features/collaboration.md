@@ -515,6 +515,17 @@ The split is necessary because `add_class()` exposes *all* public methods of a c
 
 No new configuration is required. The server always uses `CollabServer`. In single-user mode (only one connection), the behavior is identical to today — the admission flow is never triggered.
 
+## Network Binding
+
+Both the WebSocket RPC server and the Vite dev/preview server bind to `0.0.0.0` (all network interfaces). This is required for collaboration mode — without it, LAN clients could not connect to the WebSocket server or load the webapp in `--dev`/`--preview` modes.
+
+- **WebSocket server**: `0.0.0.0:{server_port}` — handled by jrpc-oo's `JRPCServer`
+- **Vite dev server** (`--dev`): `0.0.0.0:{webapp_port}` — via `--host 0.0.0.0` CLI flag and `vite.config.js`
+- **Vite preview server** (`--preview`): `0.0.0.0:{webapp_port}` — same as dev
+- **Hosted mode** (default): no local HTTP server needed — the webapp is served from GitHub Pages. LAN clients only need WebSocket access to `{server_port}`.
+
+In hosted mode, remote collaborators open the same GitHub Pages URL (shared via the collab popover's share link) and connect back to the host's WebSocket port over the LAN. The share link replaces `localhost` with the host's LAN IP in the URL.
+
 ## Testing
 
 ### Connection Handling

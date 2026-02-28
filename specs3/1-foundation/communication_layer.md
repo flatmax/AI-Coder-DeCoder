@@ -22,7 +22,8 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 | Property | Value |
 |----------|-------|
 | Default server port | 18080 (configurable via CLI) |
-| Bind address | `0.0.0.0` (all interfaces — admission-gated, see [Collaboration](../4-features/collaboration.md)) |
+| WebSocket bind address | `0.0.0.0` (all interfaces — admission-gated, see [Collaboration](../4-features/collaboration.md)) |
+| Vite dev/preview bind address | `0.0.0.0` (all interfaces — so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
 | Remote timeout | 60 seconds |

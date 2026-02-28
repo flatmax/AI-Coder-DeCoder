@@ -47,6 +47,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     _repoName: { type: String, state: true },
     _docConvertAvailable: { type: Boolean, state: true },
     _connectedClients: { type: Number, state: true },
+    _collabPopoverOpen: { type: Boolean, state: true },
+    _collabClients: { type: Array, state: true },
+    _shareUrl: { type: String, state: true },
+    _shareCopied: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -317,6 +321,131 @@ export class AcDialog extends RpcMixin(LitElement) {
       opacity: 0.3;
       border-radius: 2px;
     }
+
+    /* Collab popover */
+    .collab-anchor {
+      position: relative;
+    }
+    .collab-popover {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      min-width: 260px;
+      max-width: 340px;
+      z-index: 200;
+      padding: 12px;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+    }
+    .collab-popover-title {
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+    }
+    .collab-client-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .collab-client-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 6px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-secondary);
+    }
+    .collab-client-role {
+      font-size: 0.75rem;
+      padding: 1px 6px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-primary);
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .collab-client-role.host {
+      color: var(--accent-green);
+    }
+    .collab-client-ip {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      flex: 1;
+    }
+    .collab-client-local {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+    .collab-divider {
+      border: none;
+      border-top: 1px solid var(--border-primary);
+      margin: 10px 0;
+    }
+    .collab-share-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .collab-share-label {
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 0.82rem;
+    }
+    .collab-share-url {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .collab-share-url input {
+      flex: 1;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 4px 8px;
+      outline: none;
+    }
+    .collab-share-url input:focus {
+      border-color: var(--accent-primary);
+    }
+    .collab-share-url button {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .collab-share-url button:hover {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    .collab-share-url button.copied {
+      color: var(--accent-green);
+      border-color: var(--accent-green);
+    }
+    .collab-share-hint {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+    .collab-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 199;
+    }
   `];
 
   constructor() {
@@ -337,6 +466,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._repoName = null;
     this._docConvertAvailable = false;
     this._connectedClients = 1;
+    this._collabPopoverOpen = false;
+    this._collabClients = [];
+    this._shareUrl = '';
+    this._shareCopied = false;
     this._visitedTabs = new Set(['files']);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._undocked = false;
@@ -380,6 +513,60 @@ export class AcDialog extends RpcMixin(LitElement) {
   _onClientEvent(e) {
     if (typeof e.detail?.count === 'number') {
       this._connectedClients = e.detail.count;
+    }
+  }
+
+  async _toggleCollabPopover() {
+    if (this._collabPopoverOpen) {
+      this._collabPopoverOpen = false;
+      return;
+    }
+    this._collabPopoverOpen = true;
+    this._shareCopied = false;
+    // Fetch clients and share info in parallel
+    try {
+      const [clients, shareInfo] = await Promise.all([
+        this.rpcExtract('Collab.get_connected_clients'),
+        this.rpcExtract('Collab.get_share_info'),
+      ]);
+      if (Array.isArray(clients)) {
+        this._collabClients = clients;
+        this._connectedClients = clients.length;
+      }
+      if (shareInfo && shareInfo.port) {
+        const ip = shareInfo.ips?.[0];
+        if (ip) {
+          // Build a share URL using the current page's URL structure
+          // but replacing localhost with the LAN IP
+          const currentUrl = new URL(window.location.href);
+          currentUrl.hostname = ip;
+          currentUrl.searchParams.set('port', String(shareInfo.port));
+          this._shareUrl = currentUrl.toString();
+        } else {
+          this._shareUrl = '';
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to fetch collab info:', e);
+    }
+  }
+
+  _closeCollabPopover() {
+    this._collabPopoverOpen = false;
+  }
+
+  async _copyShareUrl() {
+    if (!this._shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(this._shareUrl);
+      this._shareCopied = true;
+      setTimeout(() => { this._shareCopied = false; }, 2000);
+    } catch (e) {
+      // Fallback: select the input text
+      const input = this.shadowRoot?.querySelector('.collab-share-url input');
+      if (input) {
+        input.select();
+      }
     }
   }
 
@@ -1013,13 +1200,55 @@ export class AcDialog extends RpcMixin(LitElement) {
         ` : ''}
 
         <div class="header-actions">
-          ${this._connectedClients > 1 ? html`
-            <span class="header-action" style="cursor: default; font-size: 0.8rem;"
-              title="${this._connectedClients} connected clients"
-              @mousedown=${(e) => e.stopPropagation()}>
-              👥 ${this._connectedClients}
-            </span>
-          ` : ''}
+          <div class="collab-anchor">
+            <button class="header-action" style="font-size: 0.8rem;"
+              title="Collaboration — ${this._connectedClients} connected"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._toggleCollabPopover()}>
+              👥${this._connectedClients > 1 ? html` ${this._connectedClients}` : ''}
+            </button>
+            ${this._collabPopoverOpen ? html`
+              <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
+              <div class="collab-popover">
+                <div class="collab-popover-title">Connected Clients</div>
+                ${this._collabClients.length > 0 ? html`
+                  <ul class="collab-client-list">
+                    ${this._collabClients.map(c => html`
+                      <li class="collab-client-item">
+                        <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
+                        <span class="collab-client-ip">${c.ip}</span>
+                        ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
+                      </li>
+                    `)}
+                  </ul>
+                ` : html`
+                  <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
+                `}
+                <hr class="collab-divider">
+                <div class="collab-share-section">
+                  <div class="collab-share-label">Share Link</div>
+                  ${this._shareUrl ? html`
+                    <div class="collab-share-url">
+                      <input type="text" readonly .value=${this._shareUrl}
+                        @click=${(e) => e.target.select()}>
+                      <button class="${this._shareCopied ? 'copied' : ''}"
+                        @click=${() => this._copyShareUrl()}>
+                        ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
+                      </button>
+                    </div>
+                    <div class="collab-share-hint">
+                      Share this link with others on your network to collaborate.
+                    </div>
+                  ` : html`
+                    <div class="collab-share-hint">
+                      No routable network address detected.<br>
+                      Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
+                    </div>
+                  `}
+                </div>
+              </div>
+            ` : ''}
+          </div>
           <label class="header-action" style="display: flex; align-items: center; gap: 3px; font-size: 0.72rem; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'}; opacity: ${this._canMutate ? 1 : 0.5};"
             title="${this._crossRefEnabled ? 'Disable cross-reference index' : 'Enable cross-reference index'}"
             @mousedown=${(e) => e.stopPropagation()}>
