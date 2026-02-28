@@ -422,36 +422,43 @@ class AcApp extends JRPCClient {
     super.serverChanged();
 
     // After super creates the WebSocket, add our raw message interceptor.
-    // jrpc-oo stores the WebSocket in different places depending on version;
-    // try common locations.
+    // jrpc-oo may use addEventListener('message') rather than ws.onmessage,
+    // so we use a capturing event listener that fires first and can suppress
+    // non-JRPC admission messages before jrpc-oo sees them.
     const ws = this._ws || this.ws;
     if (ws && ws.addEventListener) {
-      const origOnMessage = ws.onmessage;
-      ws.onmessage = (event) => {
-        // Try to intercept admission messages
+      // Remove any previous listener (in case serverChanged fires twice)
+      if (this._rawWsListener) {
+        ws.removeEventListener('message', this._rawWsListener);
+      }
+      this._rawWsListener = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data && data.type === 'admission_pending') {
             this._admissionPending = true;
             this._admissionClientId = data.client_id;
             this._admissionDenied = false;
-            return; // Don't pass to jrpc-oo
+            event.stopImmediatePropagation();
+            return;
           }
           if (data && data.type === 'admission_granted') {
             this._admissionPending = false;
             this._admissionDenied = false;
+            event.stopImmediatePropagation();
+            return;
           }
           if (data && data.type === 'admission_denied') {
             this._admissionPending = false;
             this._admissionDenied = true;
-            return; // Don't pass to jrpc-oo
+            event.stopImmediatePropagation();
+            return;
           }
         } catch (_) {
-          // Not JSON or not an admission message — pass through
+          // Not JSON or not an admission message — let jrpc-oo handle it
         }
-        // Pass to original handler
-        if (origOnMessage) origOnMessage.call(ws, event);
       };
+      // Use capture phase so we fire before jrpc-oo's listener
+      ws.addEventListener('message', this._rawWsListener);
     }
   }
 
