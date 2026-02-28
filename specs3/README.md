@@ -80,6 +80,7 @@ Each feature spec stands alone. Read as needed.
 | [URL Handling](4-features/url_handling.md) | Detection, fetching, summarization, caching (backend) |
 | [Image Persistence](4-features/image_persistence.md) | Image storage, reconstruction, history integration |
 | [Code Review](4-features/code_review.md) | Review mode via soft reset, symbol diff, review context |
+| [Collaboration](4-features/collaboration.md) | Multi-browser connection, admission flow, participant restrictions |
 
 ### Layer 5: Webapp
 

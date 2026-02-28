@@ -1,0 +1,462 @@
+# Collaboration Mode
+
+## Overview
+
+Collaboration mode allows multiple browsers to connect to a single AC⚡DC Python backend. The first connection is auto-admitted as the host. All subsequent connections require explicit admission from any already-admitted user via a toast prompt. Once admitted, non-localhost participants see the full UI and receive all broadcast events (streaming responses, file changes, etc.) but cannot send prompts, mutate LLM state, or perform git operations.
+
+## Connection Lifecycle
+
+### First Connection (Auto-Admit)
+
+The first WebSocket connection to the server is auto-admitted with no screening. This is the host — in normal usage, the person who started the Python process and opened their localhost browser. No admission toast is shown.
+
+### Subsequent Connections (Admission Required)
+
+All connections after the first are held in a pending state before JRPC setup completes. The server overrides the JRPC-oo `handle_connection` method to insert screening logic:
+
+1. New WebSocket connects
+2. Server detects this is not the first connection
+3. Server sends a raw WebSocket message: `{"type": "admission_pending"}` with a generated `client_id`
+4. Server does **not** call `super().handle_connection()` yet — no JRPC2 remote is created, no methods are exposed
+5. Server broadcasts an `admissionRequest` event to all admitted clients via `self.call`
+6. An admitted user clicks **Admit** or **Deny** in their UI
+7. On admit: server calls `super().handle_connection()`, completing normal JRPC setup. The client becomes a full participant.
+8. On deny: server closes the WebSocket with code 1008. No JRPC state was created.
+
+### Disconnection
+
+When a client disconnects, the server removes them from the client registry. If the host disconnects, the next admitted client (by admission order) becomes the host. If the last client disconnects, the server resets — the next connection will be auto-admitted as the first.
+
+## Server Architecture
+
+### CollabServer Subclass
+
+`CollabServer` extends the JRPC-oo `JRPCServer` class. It overrides `handle_connection` to insert admission screening and caller tracking. Once a connection is admitted, it runs its own message receive loop (mirroring `JRPCServer.handle_connection`) to set `_current_caller_uuid` before each dispatch.
+
+```python
+class CollabServer(JRPCServer):
+    async def handle_connection(self, websocket):
+        peer_ip = websocket.remote_address[0]
+
+        if self._is_first_connection():
+            self._register_client(websocket, peer_ip, role='host')
+        else:
+            admitted = await self._wait_for_admission(websocket, peer_ip)
+            if not admitted:
+                await websocket.close(1008, "Denied")
+                return
+
+        # Create JRPC remote and run receive loop with caller tracking
+        remote = self.create_remote(websocket)
+        client_id = self._register_remote(remote, peer_ip)
+        try:
+            async for message in websocket:
+                self._current_caller_uuid = remote.uuid
+                data = message if isinstance(message, str) else message.decode()
+                remote.receive(data)
+        finally:
+            self._unregister_client(remote.uuid)
+```
+
+### Client Registry
+
+The server maintains a registry of connected clients:
+
+| Field | Description |
+|-------|-------------|
+| `client_id` | UUID assigned on connection |
+| `ip` | Peer IP address from WebSocket |
+| `role` | `host` or `participant` |
+| `is_localhost` | Whether peer IP is loopback (`127.0.0.1`, `::1`) or a local interface |
+| `admitted_at` | Timestamp of admission |
+| `websocket` | Reference to the WebSocket connection |
+
+### Pending Queue
+
+Pending connections are tracked separately:
+
+| Field | Description |
+|-------|-------------|
+| `client_id` | UUID for this pending request |
+| `ip` | Peer IP address |
+| `websocket` | Raw WebSocket (pre-JRPC) |
+| `future` | `asyncio.Future` resolved by admit/deny |
+| `requested_at` | Timestamp |
+
+Pending requests that are not acted on within **120 seconds** are auto-denied and the WebSocket is closed. This prevents abandoned connections from accumulating.
+
+### Localhost Detection
+
+A connection is considered localhost if the peer IP matches:
+- `127.0.0.1`
+- `::1`
+- Any IP address assigned to a local network interface
+
+This handles the case where the host opens their browser to their LAN IP (e.g., `192.168.1.50`) instead of `localhost`.
+
+### Host Promotion
+
+When the current host disconnects:
+1. The next admitted client (by `admitted_at` timestamp) is promoted to host
+2. The promoted client receives a `roleChanged` event with their new role
+3. All clients receive an updated client list
+4. If the promoted client is non-localhost, they gain host role but still cannot send prompts — only localhost hosts can send prompts
+
+### Role vs Localhost
+
+Role and localhost are independent concepts:
+
+| | localhost | non-localhost |
+|---|---|---|
+| **host** | Full control (normal single-user behavior) | Can admit/deny, but cannot send prompts or mutate |
+| **participant** | Full control (same as host in practice) | Read-only: can browse, search, view |
+
+The meaningful restriction is **localhost vs non-localhost**, not host vs participant. The host role primarily determines who can admit/deny new connections when no localhost client is connected. Any localhost connection can always send prompts regardless of host/participant role.
+
+## RPC Restrictions
+
+### Localhost-Only RPCs
+
+The following operations are restricted to localhost connections:
+
+| Category | Methods |
+|----------|---------|
+| **LLM interaction** | `chat_streaming`, `generate_commit_message`, `cancel_streaming` |
+| **Session management** | `new_session`, `load_session` |
+| **LLM state** | `set_selected_files`, `set_mode` |
+| **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `save_file`, `write_file` |
+| **Review mode** | `start_review`, `exit_review` |
+| **Settings** | `update_llm_config`, `update_app_config`, `update_snippets` |
+
+### Everyone RPCs
+
+These are available to all admitted clients:
+
+| Category | Methods |
+|----------|---------|
+| **Read operations** | `get_file_content`, `get_file_tree`, `search`, `get_current_state` |
+| **Navigation** | `get_flat_file_list`, `get_symbol_map`, `get_context_breakdown` |
+| **History browse** | `list_sessions`, `get_session_messages` |
+| **Collaboration** | `Collab.admit_client`, `Collab.deny_client`, `Collab.get_connected_clients` |
+
+### Enforcement
+
+RPC restriction is enforced by identifying which remote triggered a call. `CollabServer` overrides `handle_connection` to run its own message receive loop (rather than delegating entirely to `super()`). Before each `remote.receive(message)` dispatch, it sets a context variable identifying the caller:
+
+```python
+async def handle_connection(self, websocket):
+    # ... admission logic, then:
+    remote = self.create_remote(websocket)
+    async for message in websocket:
+        self._current_caller_uuid = remote.uuid
+        data = message if isinstance(message, str) else message.decode()
+        remote.receive(data)
+```
+
+This mirrors the receive loop in `JRPCServer.handle_connection` but adds caller tracking. The restricted RPC methods check the caller:
+
+```python
+def chat_streaming(self, request_id, message, ...):
+    caller = self._clients.get(self._current_caller_uuid)
+    if caller and not caller['is_localhost']:
+        return {"error": "restricted", "reason": "Participants cannot send prompts"}
+    # ... normal logic
+```
+
+## New RPC Methods
+
+The following methods are on the `Collab` class, registered via `server.add_class(collab, 'Collab')`. RPC prefix is `Collab.*`.
+
+### `admit_client(client_id: str) → dict`
+
+Admits a pending client. Can be called by any admitted user.
+
+Returns: `{"ok": True, "client_id": client_id}`
+
+### `deny_client(client_id: str) → dict`
+
+Denies a pending client. Closes their WebSocket.
+
+Returns: `{"ok": True, "client_id": client_id}`
+
+### `get_connected_clients() → list`
+
+Returns the list of currently connected clients.
+
+```json
+[
+  {"client_id": "abc-123", "ip": "127.0.0.1", "role": "host", "is_localhost": true},
+  {"client_id": "def-456", "ip": "192.168.1.42", "role": "participant", "is_localhost": false}
+]
+```
+
+### `get_collab_role() → dict`
+
+Called by a client after JRPC setup to learn its own role.
+
+```json
+{"role": "participant", "is_localhost": false, "client_id": "def-456"}
+```
+
+## Server → Client Events
+
+### `admissionRequest(data: dict)`
+
+Broadcast to all admitted clients when a new connection is pending.
+
+```json
+{"client_id": "xyz-789", "ip": "192.168.1.42", "requested_at": "2025-01-15T10:30:00Z"}
+```
+
+### `admissionResult(data: dict)`
+
+Broadcast to all admitted clients when a pending request is resolved.
+
+```json
+{"client_id": "xyz-789", "ip": "192.168.1.42", "admitted": true}
+```
+
+### `clientJoined(data: dict)`
+
+Broadcast when a client completes admission and JRPC setup.
+
+```json
+{"client_id": "xyz-789", "ip": "192.168.1.42", "role": "participant", "is_localhost": false}
+```
+
+### `clientLeft(data: dict)`
+
+Broadcast when a client disconnects.
+
+```json
+{"client_id": "xyz-789", "ip": "192.168.1.42", "role": "participant"}
+```
+
+### `roleChanged(data: dict)`
+
+Sent to a specific client when their role changes (e.g., promoted to host).
+
+```json
+{"role": "host", "reason": "previous host disconnected"}
+```
+
+## Raw WebSocket Messages (Pre-JRPC)
+
+These are sent on the raw WebSocket before JRPC setup, for pending clients:
+
+### `admission_pending`
+
+Sent immediately when a non-first connection is held.
+
+```json
+{"type": "admission_pending", "client_id": "xyz-789"}
+```
+
+### `admission_granted`
+
+Sent when the pending client is admitted. The client then expects normal JRPC setup to follow.
+
+```json
+{"type": "admission_granted", "client_id": "xyz-789"}
+```
+
+### `admission_denied`
+
+Sent just before the WebSocket is closed.
+
+```json
+{"type": "admission_denied", "client_id": "xyz-789", "reason": "Denied by host"}
+```
+
+## Frontend
+
+### Pending State (Pre-JRPC)
+
+The webapp detects the pending state by listening for raw WebSocket messages before JRPC setup completes. When `admission_pending` is received, the app shows a centered waiting screen:
+
+```
+┌──────────────────────────────────┐
+│                                  │
+│     Waiting for admission...     │
+│                                  │
+│   Requesting access to ac-dc     │
+│                                  │
+│          [ Cancel ]              │
+│                                  │
+└──────────────────────────────────┘
+```
+
+The Cancel button closes the WebSocket.
+
+On `admission_granted`, the app proceeds with normal JRPC setup (`setupDone` etc.). On `admission_denied`, the app shows a brief "Access denied" message and disconnects.
+
+### Participant UI Restrictions
+
+When `get_collab_role()` returns `is_localhost: false`:
+
+- **Chat input area**: replaced with a static bar: `"Viewing as participant — prompts are host-only"`
+- **File picker context menu**: git-mutating items hidden (rename, delete, new file)
+- **File picker checkboxes**: hidden (cannot change LLM context)
+- **Commit button**: hidden
+- **Settings tab editing**: disabled
+- **Mode toggle**: disabled
+- **New Session / Load Session**: disabled
+- **Review mode controls**: hidden
+
+Everything else works normally: browsing files, viewing diffs, searching, reading chat history, viewing the SVG viewer, using tabs.
+
+### Admission Toast
+
+When an `admissionRequest` event arrives, a persistent (non-auto-dismissing) toast is shown:
+
+```
+┌──────────────────────────────────────┐
+│  🔔  192.168.1.42 wants to connect   │
+│                                      │
+│              [ Admit ]  [ Deny ]     │
+└──────────────────────────────────────┘
+```
+
+The toast remains until acted upon. Multiple pending requests show multiple toasts, stacked.
+
+Clicking **Admit** calls `rpc.admit_client(client_id)`. Clicking **Deny** calls `rpc.deny_client(client_id)`.
+
+When `admissionResult` is received, the toast is dismissed. If someone else already acted on it, the toast is also dismissed.
+
+### Connected Users Indicator
+
+A small indicator in the dialog header shows the count of connected clients:
+
+`👥 2` — visible when more than one client is connected. Hidden in single-user mode to avoid clutter.
+
+Clicking it could show a popover with the client list and a **Kick** button (future enhancement — not in phase 1).
+
+## Integration with Existing Systems
+
+### Communication Layer
+
+`CollabServer` replaces `JRPCServer` in `main.py`. A `Collab` instance is created and passed to `CollabServer`, then registered separately via `add_class()` to expose its RPC methods. The existing `LLMService` and `Repo` classes are added via `add_class()` as before.
+
+### Streaming
+
+`self.call` in JRPC-oo broadcasts to all connected remotes. This means `streamChunk`, `streamComplete`, `filesChanged`, and all other server-push events automatically reach all admitted clients. No changes needed.
+
+### File Selection Sync
+
+The existing `filesChanged` broadcast means all clients see the same selected files. Only localhost clients can change the selection, but everyone sees the result.
+
+### Chat History
+
+On admission, the new client calls `get_current_state()` during its normal `setupDone` flow, which returns the conversation history. They see all messages exchanged so far. If streaming is in progress when they join, they miss already-sent chunks but see the complete message on `streamComplete`.
+
+### Cache Tiering
+
+No changes. The stability tracker and cache tiers are server-side state. All clients see the same token HUD data when they request it.
+
+### Code Review Mode
+
+Review mode controls are restricted to localhost clients. If the host enters review mode, participants see the review UI (banner, diffs, etc.) via the normal broadcast events.
+
+## Existing Broadcast Behavior
+
+Since `self.call` already broadcasts to all JRPC remotes, the following events reach all admitted clients automatically:
+
+| Event | Effect |
+|-------|--------|
+| `streamChunk` | All clients see LLM response streaming |
+| `streamComplete` | All clients see completed response with edit results |
+| `filesChanged` | All clients see file selection changes |
+| `compactionEvent` | All clients see compaction notifications |
+| `admissionRequest` | All clients see admission toasts |
+| `clientJoined` / `clientLeft` | All clients see connection changes |
+
+## Module Structure
+
+New file: `src/ac_dc/collab.py`
+
+Contains:
+- `CollabServer(JRPCServer)` — subclass with admission screening in `handle_connection`
+- `Collab` — service class registered via `add_class()`, exposes admission and registry RPCs
+- Client registry management (shared between `CollabServer` and `Collab`)
+- Pending queue management
+- Localhost detection utility
+- Role/permission checking utility
+
+The split is necessary because `add_class()` exposes *all* public methods of a class. Putting RPCs directly on `CollabServer` would also expose inherited methods like `start`, `stop`, and `handle_connection`. The `Collab` class contains only the methods intended as RPC endpoints. `CollabServer` holds a reference to the `Collab` instance and delegates admission state to it.
+
+## Configuration
+
+No new configuration is required. The server always uses `CollabServer`. In single-user mode (only one connection), the behavior is identical to today — the admission flow is never triggered.
+
+## Testing
+
+### Connection Handling
+- First connection auto-admitted, gets host role
+- Second connection held pending, admission toast broadcast
+- Admit resolves pending, client gets JRPC setup
+- Deny closes WebSocket cleanly
+- Rapid connect/disconnect doesn't leak pending entries
+
+### Role Detection
+- `127.0.0.1` detected as localhost
+- `::1` detected as localhost
+- LAN IP detected as non-localhost
+- Local interface IPs detected as localhost
+
+### RPC Restrictions
+- Localhost client can call all RPCs
+- Non-localhost client can call read-only RPCs
+- Non-localhost client gets error on restricted RPCs
+- Restriction checked per-call, not cached
+
+### Host Promotion
+- Host disconnects → next admitted client promoted
+- All clients notified of role change
+- Last client disconnects → server resets
+
+### Admission Queue
+- Multiple pending connections handled independently
+- Admit one, deny another — both resolve correctly
+- Pending client disconnects before decision → cleaned up
+- Timeout: pending requests not acted on within 120 seconds are auto-denied
+
+### Frontend
+- Pending screen shown while waiting
+- Admission toast shown for pending requests
+- Toast dismissed when request resolved
+- Participant UI restrictions applied correctly
+- Connected users indicator updates on join/leave
+
+## Limitations
+
+### No Display Names
+Phase 1 shows IP addresses only. A future enhancement could prompt for a display name on connect.
+
+### No Kick
+Admitted clients cannot be removed in phase 1. The host can restart the server to clear all connections.
+
+### Single LLM Stream
+Only one LLM request can be active at a time (existing constraint). Participants cannot queue prompts.
+
+### Mid-Stream Join
+A client admitted while streaming is in progress will miss already-sent chunks. They see the complete message when streaming finishes.
+
+### No Follow Mode
+Phase 1 has no synchronized navigation. Each client browses independently. This is a planned future enhancement.
+
+## Future Enhancements
+
+### Display Names
+Prompt for a name on connect, show in admission toast and connected users list.
+
+### Kick / Ban
+Allow host to remove admitted clients. Ban by IP for the session.
+
+### Follow Mode
+Synchronized navigation: one user leads, others' viewers follow (file open, scroll position, editor selection).
+
+### Participant Prompt Queue
+Allow participants to submit prompt suggestions that the host can approve before sending.
+
+### Connection Indicators
+Show typing indicators, cursor positions, or "viewing file X" status for each connected user.

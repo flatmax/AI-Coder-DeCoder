@@ -15,14 +15,14 @@ Browser (WebSocket Client)
 Terminal App (WebSocket Server, localhost only)
 ```
 
-A single WebSocket connection carries all traffic, multiplexed by JSON-RPC request IDs. The server binds to `localhost` only — not externally accessible.
+A single WebSocket connection carries all traffic, multiplexed by JSON-RPC request IDs. The server binds to all interfaces (`0.0.0.0`) but uses an admission flow to screen non-first connections (see [Collaboration](../4-features/collaboration.md)).
 
 ## Transport Configuration
 
 | Property | Value |
 |----------|-------|
 | Default server port | 18080 (configurable via CLI) |
-| Bind address | `localhost` (127.0.0.1) |
+| Bind address | `0.0.0.0` (all interfaces — admission-gated, see [Collaboration](../4-features/collaboration.md)) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
 | Remote timeout | 60 seconds |
@@ -34,16 +34,16 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 **Setup:**
 
 ```python
-from jrpc_oo import JRPCServer
+from ac_dc.collab import CollabServer
 
-server = JRPCServer(port, remote_timeout=60)
+server = CollabServer(port, remote_timeout=60)
 server.add_class(repo_instance)       # exposes Repo.get_file_tree, etc.
 server.add_class(llm_instance)        # exposes LLM.chat_streaming, etc.
 server.add_class(settings_instance)   # exposes Settings.get_config_info, etc.
 await server.start()
 ```
 
-`add_class()` introspects the instance and exposes all public methods as `ClassName.method_name` RPC endpoints. No base class or decorator needed. Underscore-prefixed methods are not exposed.
+`CollabServer` extends `JRPCServer` with connection admission logic — see [Collaboration](../4-features/collaboration.md). `add_class()` introspects the instance and exposes all public methods as `ClassName.method_name` RPC endpoints. No base class or decorator needed. Underscore-prefixed methods are not exposed.
 
 **Calling the browser from Python:**
 
@@ -231,7 +231,7 @@ Only one LLM streaming request may be active at a time. The server tracks the ac
 
 ### Multiple Clients
 
-jrpc-oo supports multiple connected remotes. All clients share the same service instances. Streaming callbacks are directed to the originating remote only. Non-streaming calls are served concurrently.
+jrpc-oo supports multiple connected remotes. All clients share the same service instances. `self.call` broadcasts to all connected remotes, so streaming callbacks (`streamChunk`, `streamComplete`, `filesChanged`, etc.) reach all admitted clients. Non-streaming calls are served concurrently. Connection admission and RPC restrictions are handled by `CollabServer` — see [Collaboration](../4-features/collaboration.md).
 
 ### State Scope
 
@@ -241,7 +241,7 @@ All state is **global** across connected clients:
 |-------|----------------|
 | Selected files | Broadcast `filesChanged` to all clients on change |
 | Conversation history | One conversation; clients fetch on connect |
-| Streaming | Chunks to originator only; others see result on next state fetch |
+| Streaming | Chunks broadcast to all admitted clients via `self.call` |
 
 ### Reconnection
 
@@ -258,6 +258,7 @@ Three top-level service classes, registered via `add_class()`:
 | **Repo** | `Repo.*` | Git operations, file I/O, tree, search |
 | **LLMService** | `LLMService.*` | Chat streaming, context assembly, URL handling, history, symbol index |
 | **Settings** | `Settings.*` | Config read/write/reload |
+| **Collab** | `Collab.*` | Admission, client registry, role queries |
 
 **Note:** The LLM service class is named `LLMService` in code, so all RPC methods are prefixed `LLMService.*` (e.g., `LLMService.chat_streaming`, `LLMService.get_context_breakdown`). Other specs may refer to these methods with the full prefix or the shorthand `LLM.*` — both refer to the same endpoints.
 
@@ -351,6 +352,15 @@ Three top-level service classes, registered via `add_class()`:
 | `Settings.get_snippets` | `() → [{icon, tooltip, message}]` | Direct snippet access |
 | `Settings.get_review_snippets` | `() → [{icon, tooltip, message}]` | Direct review snippet access |
 
+### Collaboration Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Collab.admit_client` | `(client_id) → {ok, client_id}` | Admit a pending connection |
+| `Collab.deny_client` | `(client_id) → {ok, client_id}` | Deny and disconnect a pending connection |
+| `Collab.get_connected_clients` | `() → [{client_id, ip, role, is_localhost}]` | List all connected clients |
+| `Collab.get_collab_role` | `() → {role, is_localhost, client_id}` | Calling client's own role |
+
 ### Browser Methods (Server → Client)
 
 | Method | Signature | Description |
@@ -360,6 +370,11 @@ Three top-level service classes, registered via `add_class()`:
 | `AcApp.compactionEvent` | `(requestId, event) → true` | Progress notification |
 | `AcApp.filesChanged` | `(selectedFiles) → true` | File selection broadcast |
 | `AcApp.startupProgress` | `(stage, message, percent) → true` | Startup initialization progress |
+| `AcApp.admissionRequest` | `(data) → true` | New connection pending admission |
+| `AcApp.admissionResult` | `(data) → true` | Pending request resolved (admitted/denied) |
+| `AcApp.clientJoined` | `(data) → true` | Client completed admission |
+| `AcApp.clientLeft` | `(data) → true` | Client disconnected |
+| `AcApp.roleChanged` | `(data) → true` | Client's role changed (e.g., promoted to host) |
 
 ## Error Handling
 
@@ -387,11 +402,13 @@ llm_service = LLMService(
     deferred_init=True,       # skip session restore, stability init
 )
 
-# 3. Register with RPC server
-server = JRPCServer(port, remote_timeout=60)
+# 3. Register with RPC server (CollabServer gates connections via admission)
+collab = Collab()
+server = CollabServer(port, collab=collab, remote_timeout=60)
 server.add_class(repo)
 server.add_class(llm_service)
 server.add_class(settings)
+server.add_class(collab)
 
 # 4. Wire up callbacks (chunk_callback, event_callback)
 # 5. Start server — WebSocket now accepting connections
