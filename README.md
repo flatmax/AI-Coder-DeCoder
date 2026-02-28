@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
 - **Image paste support** — drop screenshots into chat with persistent storage across sessions.
 - **Document convert** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown from a dedicated dialog tab. PDFs and presentations extract text into markdown and export pages with images/vector graphics as SVGs. Requires a clean git working tree so all results appear as reviewable diffs. Install `pip install ac-dc[docs]` for conversion support. The full PDF/presentation pipeline also requires [LibreOffice](https://www.libreoffice.org/) (`soffice` on PATH) for format conversion and [PyMuPDF](https://pymupdf.readthedocs.io/) (`pip install pymupdf`) for page extraction — without them, `.pptx` falls back to python-pptx (basic SVG export) and `.pdf` conversion is unavailable.
+- **Collaboration mode** — multiple browsers can connect to one backend over LAN. The host is auto-admitted; subsequent connections require explicit approval via an in-browser toast. Non-localhost participants get a read-only view (browse files, view diffs, watch streaming) while the host retains full control. Enable with `--collab`.
 - **Voice dictation** via Web Speech API.
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
@@ -197,6 +198,7 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `--dev` | `false` | Run local Vite dev server |
 | `--preview` | `false` | Build and preview locally |
 | `--verbose` | `false` | Enable debug logging |
+| `--collab` | `false` | Enable collaboration mode (LAN-accessible, multi-browser) |
 
 ## Configuration
 
@@ -215,6 +217,24 @@ All configuration lives in `src/ac_dc/config/` (bundled defaults) or `{repo_root
 | `review.md` | Code review system prompt | Markdown |
 | `commit.md` | Commit message generation prompt | Markdown |
 | `system_reminder.md` | Edit block reminder injected before each user message | Markdown |
+
+### Collaboration Mode
+
+Collaboration is disabled by default. Enable it with `--collab`:
+
+```bash
+ac-dc --collab
+```
+
+When enabled:
+- The WebSocket server binds to `0.0.0.0` (all network interfaces) instead of `127.0.0.1`.
+- The first browser connection is auto-admitted as the **host**.
+- Subsequent connections from other machines are held pending until an admitted user clicks **Admit** in a toast prompt.
+- **Localhost clients** (including the host) have full control: chat, edit files, commit, switch modes.
+- **Non-localhost participants** get a read-only view: browse files, view diffs, watch streaming responses, search, and read history — but cannot send prompts, change file selection, or perform git operations.
+- All broadcast events (streaming chunks, file changes, commit results, mode switches, session loads) reach every admitted client automatically.
+
+A connected-users indicator (`👥 N`) appears in the dialog header when multiple clients are connected. Share the URL shown in the collab popover with collaborators on your LAN.
 
 ### LLM Config Fields
 
@@ -382,6 +402,7 @@ src/ac_dc/
     __init__.py
     __main__.py                  # Entry point for `python -m ac_dc`
     base_cache.py                # Shared mtime-based in-memory cache base class
+    collab.py                    # Collaboration mode — multi-browser admission, client registry, RPC restrictions
     config.py                    # Configuration loading and management
     context.py                   # Context manager, file context, prompt assembly
     doc_convert.py               # Document-to-markdown conversion (docx, pdf, pptx, etc.)
