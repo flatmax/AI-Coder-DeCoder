@@ -25,7 +25,7 @@ const TABS = [
   { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+3' },
   { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+4' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true },
   { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+6' },
 ];
 

@@ -513,6 +513,7 @@ class DocConvert:
         """
         self._repo = repo
         self._config = config_manager
+        self._collab = None  # Set by main.py when --collab is passed
 
     @property
     def _doc_convert_config(self):
@@ -656,6 +657,12 @@ class DocConvert:
             return "current"
         return "stale"
 
+    def _check_localhost_only(self):
+        """Return error dict if caller is a non-localhost remote, else None."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
+
     def convert_files(self, paths):
         """RPC: Convert selected files to markdown.
 
@@ -668,6 +675,10 @@ class DocConvert:
                 summary: {converted, failed, skipped}
             }
         """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+
         if not self._repo:
             return {"error": "No repository available"}
 

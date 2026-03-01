@@ -5,6 +5,7 @@ browser launch, and WebSocket server startup.
 """
 
 import argparse
+import http.server
 import logging
 import os
 import signal
@@ -12,9 +13,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 logger = logging.getLogger(__name__)
 
@@ -140,31 +143,18 @@ def find_available_port(start=18080, max_tries=50):
     raise RuntimeError(f"No available port found in range {start}-{start + max_tries - 1}")
 
 
-def _build_browser_url(server_port, version, dev_mode=False, webapp_port=None,
-                       base_url_override=None):
-    """Build the browser URL based on running mode.
+def _build_browser_url(server_port, webapp_port, host="localhost"):
+    """Build the browser URL for the locally-served webapp.
 
     Args:
         server_port: RPC WebSocket server port
-        version: version string
-        dev_mode: if True, use local dev server
-        webapp_port: local webapp port (for dev/preview modes)
-        base_url_override: AC_WEBAPP_BASE_URL env override
+        webapp_port: local webapp HTTP port
+        host: hostname to use in URL
 
     Returns:
         URL string
     """
-    if dev_mode and webapp_port:
-        return f"http://localhost:{webapp_port}/?port={server_port}"
-
-    sha = _extract_sha(version)
-    base = base_url_override or "https://flatmax.github.io/AI-Coder-DeCoder"
-
-    if sha:
-        return f"{base}/{sha}/?port={server_port}"
-    else:
-        # dev fallback — root redirect
-        return f"{base}/?port={server_port}"
+    return f"http://{host}:{webapp_port}/?port={server_port}"
 
 
 def _handle_not_a_repo(repo_path):
@@ -296,6 +286,82 @@ def _start_vite_preview_server(webapp_port, host="127.0.0.1"):
         return None
 
 
+def _find_webapp_dist():
+    """Locate the bundled webapp dist directory.
+
+    Search order:
+    1. PyInstaller bundle: sys._MEIPASS/ac_dc/webapp_dist
+    2. Source tree: <project_root>/webapp/dist
+    3. Installed package: <package_dir>/webapp_dist
+
+    Returns Path or None.
+    """
+    # 1. PyInstaller bundle
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass) / "ac_dc" / "webapp_dist"
+        if candidate.is_dir():
+            return candidate
+
+    # 2. Source tree (main.py is at src/ac_dc/main.py → project root is 3 levels up)
+    source_dist = Path(__file__).resolve().parent.parent.parent / "webapp" / "dist"
+    if source_dist.is_dir():
+        return source_dist
+
+    # 3. Installed package data
+    pkg_dist = Path(__file__).resolve().parent / "webapp_dist"
+    if pkg_dist.is_dir():
+        return pkg_dist
+
+    return None
+
+
+def _start_static_server(webapp_dir, port, host="127.0.0.1"):
+    """Start a simple HTTP static file server in a background thread.
+
+    Serves the pre-built webapp dist directory.  Returns the port actually
+    used, or None on failure.
+    """
+    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(webapp_dir), **kw)
+
+        def log_message(self, fmt, *a):
+            pass  # silence per-request logging
+
+        def do_GET(self):
+            # SPA fallback — serve index.html for paths that don't match a file
+            parsed = urlparse(self.path)
+            clean = unquote(parsed.path).lstrip("/")
+            fs_path = Path(str(webapp_dir)) / clean
+            if not fs_path.exists() and "." not in clean.split("/")[-1]:
+                self.path = "/index.html"
+            try:
+                super().do_GET()
+            except BrokenPipeError:
+                pass  # client closed connection mid-transfer
+
+    class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+        """Threaded HTTP server that silences broken-pipe errors."""
+        def handle_error(self, request, client_address):
+            # Suppress BrokenPipeError / ConnectionResetError from stderr
+            import sys
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                return
+            super().handle_error(request, client_address)
+
+    try:
+        httpd = _ThreadingHTTPServer((host, port), _QuietHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Static webapp server on http://{host}:{port} -> {webapp_dir}")
+        return port
+    except OSError as e:
+        logger.error(f"Failed to start static server on port {port}: {e}")
+        return None
+
+
 def _cleanup_vite(proc):
     """Terminate Vite dev server process."""
     if proc is None:
@@ -397,13 +463,34 @@ def main(args=None):
     settings = Settings(config)
     doc_convert = DocConvert(repo, config)
 
-    # Step 4: Start Vite dev/preview server
+    # Step 4: Start webapp server (bundled static, Vite dev, or Vite preview)
     vite_proc = None
-    vite_host = "0.0.0.0" if parsed.collab else "127.0.0.1"
+    webapp_host = "0.0.0.0" if parsed.collab else "127.0.0.1"
     if parsed.dev:
-        vite_proc = _start_vite_dev_server(webapp_port, host=vite_host)
+        vite_proc = _start_vite_dev_server(webapp_port, host=webapp_host)
     elif parsed.preview:
-        vite_proc = _start_vite_preview_server(webapp_port, host=vite_host)
+        vite_proc = _start_vite_preview_server(webapp_port, host=webapp_host)
+    else:
+        # Serve bundled webapp via built-in static server
+        webapp_dist = _find_webapp_dist()
+        if webapp_dist:
+            try:
+                webapp_port = find_available_port(webapp_port)
+            except RuntimeError:
+                logger.error("No available port for webapp server")
+                sys.exit(1)
+            result = _start_static_server(webapp_dist, webapp_port, host=webapp_host)
+            if not result:
+                logger.error("Failed to start webapp server")
+                sys.exit(1)
+            logger.info(f"Serving bundled webapp from {webapp_dist}")
+        else:
+            logger.error(
+                "No bundled webapp found. Build it first:\n"
+                "  npm install && npm run build\n"
+                "Or use --dev mode for development."
+            )
+            sys.exit(1)
 
     # Step 5: Start RPC WebSocket server EARLY — before heavy init
     # This lets the browser connect immediately and show progress.
@@ -459,15 +546,11 @@ def main(args=None):
         await server.start()
 
         version = _get_version()
-        base_url = os.environ.get("AC_WEBAPP_BASE_URL")
-        url = _build_browser_url(
-            server_port, version,
-            dev_mode=(parsed.dev or parsed.preview),
-            webapp_port=webapp_port,
-            base_url_override=base_url,
-        )
+        browser_host = "localhost"
+        url = _build_browser_url(server_port, webapp_port, host=browser_host)
 
         logger.info(f"AC⚡DC server running on ws://localhost:{server_port}")
+        logger.info(f"Webapp: {url}")
         logger.info(f"Version: {version}")
 
         # Step 6: Open browser EARLY — before heavy init

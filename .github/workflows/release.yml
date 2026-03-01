@@ -112,7 +112,7 @@ jobs:
             --hidden-import=ac_dc.token_counter \
             --hidden-import=ac_dc.topic_detector \
             --hidden-import=ac_dc.stability_tracker \
-            --hidden-import=ac_dc.context_builder \
+            --hidden-import=ac_dc.collab \
             --hidden-import=ac_dc.url_handler \
             --hidden-import=ac_dc.url_cache \
             --hidden-import=ac_dc.symbol_index \
@@ -123,6 +123,9 @@ jobs:
             --hidden-import=ac_dc.symbol_index.index \
             --hidden-import=ac_dc.symbol_index.reference_index \
             --hidden-import=ac_dc.symbol_index.extractors \
+            --hidden-import=ac_dc.symbol_index.extractors.python_extractor \
+            --hidden-import=ac_dc.symbol_index.extractors.javascript_extractor \
+            --hidden-import=ac_dc.symbol_index.extractors.c_extractor \
             --hidden-import=ac_dc.doc_index \
             --hidden-import=ac_dc.doc_index.cache \
             --hidden-import=ac_dc.doc_index.index \
@@ -130,6 +133,8 @@ jobs:
             --hidden-import=ac_dc.doc_index.keyword_enricher \
             --hidden-import=ac_dc.doc_index.reference_index \
             --hidden-import=ac_dc.doc_index.extractors \
+            --hidden-import=ac_dc.doc_index.extractors.markdown_extractor \
+            --hidden-import=ac_dc.doc_index.extractors.svg_extractor \
             --hidden-import=ac_dc.doc_convert \
             --hidden-import=ac_dc.base_cache \
             --hidden-import=jrpc_oo \

@@ -305,6 +305,48 @@ class TestConvertFiles:
         assert not old_img.exists()
 
 
+class TestDocConvertLocalhostGuard:
+    """Tests for localhost-only restriction on convert_files."""
+
+    def test_convert_blocked_for_remote(self):
+        repo = MagicMock()
+        config = MagicMock()
+        config.doc_convert_config = {}
+        converter = DocConvert(repo, config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = False
+        converter._collab = collab
+        result = converter.convert_files(["test.docx"])
+        assert result.get("error") == "restricted"
+
+    @patch("ac_dc.doc_convert._is_markitdown_available", return_value=False)
+    def test_convert_allowed_for_localhost(self, mock_avail):
+        repo = MagicMock()
+        config = MagicMock()
+        config.doc_convert_config = {}
+        converter = DocConvert(repo, config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = True
+        converter._collab = collab
+        # Passes the guard, then hits "markitdown not installed" check
+        result = converter.convert_files(["test.docx"])
+        assert result.get("error") != "restricted"
+        assert "markitdown" in result.get("error", "").lower()
+
+    def test_scan_not_restricted(self):
+        repo = MagicMock()
+        repo.root = MagicMock()
+        config = MagicMock()
+        config.doc_convert_config = {"enabled": False}
+        converter = DocConvert(repo, config)
+        collab = MagicMock()
+        collab._is_caller_localhost.return_value = False
+        converter._collab = collab
+        # scan is read-only — should not be restricted
+        result = converter.scan_convertible_files()
+        assert result.get("error") != "restricted"
+
+
 class TestGracefulDegradation:
     @patch("ac_dc.doc_convert._is_markitdown_available", return_value=False)
     def test_is_available_false(self, mock_avail):

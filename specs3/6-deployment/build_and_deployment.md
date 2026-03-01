@@ -4,51 +4,50 @@
 
 | Mode | Description | URL |
 |------|-------------|-----|
-| Hosted (default) | No local webapp. Browser opens GitHub Pages | `https://flatmax.github.io/AI-Coder-DeCoder/{sha}/?port={port}` |
+| Bundled (default) | Built-in static server serves bundled webapp | `http://localhost:{webapp_port}/?port={server_port}` |
 | Local dev (`--dev`) | Vite dev server + RPC server | `http://localhost:{webapp_port}/?port={server_port}` |
-| Local preview (`--preview`) | Production build served locally | Same as dev |
+| Local preview (`--preview`) | Vite production build + preview server | Same as dev |
 
-## Version-Matching Flow
+## Bundled Webapp
 
-```
-git push master
-    ├─ deploy-pages.yml: builds webapp at /{sha}/
-    └─ release.yml: bakes version into binary
-         │
-         ▼
-User runs binary
-    ├─ Reads VERSION → "2025.01.15-14.32-a1b2c3d4"
-    ├─ Extracts SHA → "a1b2c3d4"
-    └─ Opens https://flatmax.github.io/AI-Coder-DeCoder/a1b2c3d4/?port=18080
-         │
-         ▼
-Browser → ws://localhost:18080
-```
+The webapp is pre-built and bundled with the Python package. At startup, `main.py` locates the built webapp and serves it via a built-in HTTP static file server on the `--webapp-port` (default 18999). The browser opens `http://localhost:{webapp_port}/?port={server_port}`.
 
-### Version Detection Priority
+### Webapp Location Priority
+
+1. **PyInstaller bundle**: `sys._MEIPASS/ac_dc/webapp_dist/`
+2. **Source tree**: `<project_root>/webapp/dist/` (for development after `npm run build`)
+3. **Installed package data**: `<package_dir>/webapp_dist/` (for `pip install`)
+
+If no bundled webapp is found, the server exits with an error message instructing the user to build the webapp first (`npm install && npm run build`) or use `--dev` mode.
+
+### Static File Server
+
+A minimal `http.server.HTTPServer` runs in a daemon thread, serving files from the webapp dist directory. Features:
+
+- **SPA fallback**: requests for paths without a file extension that don't match a real file are served `index.html` (for client-side routing)
+- **Silent logging**: per-request logs suppressed to avoid noise
+- **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed
+
+### Vite Base Path
+
+`vite.config.js` sets `base: './'` so all asset references use relative paths. This allows the built webapp to be served from any origin without path rewriting.
+
+### Version Detection
+
+Version detection is retained for display/logging purposes:
 
 1. Baked VERSION file (PyInstaller bundle or source install)
 2. `git rev-parse HEAD`
 3. `.git/HEAD` direct read
-4. Fallback: `"dev"` (triggers root redirect)
-
-### SHA Extraction
-
-| Format | Example | SHA |
-|--------|---------|-----|
-| Baked | `2025.01.15-14.32-a1b2c3d4` | `a1b2c3d4` (rsplit on `-`) |
-| Git | `a1b2c3d4...` | first 8 chars |
-| Fallback | `dev` | None (root redirect) |
-
-Base URL overridable via `AC_WEBAPP_BASE_URL` environment variable.
+4. Fallback: `"dev"`
 
 ## Vite Dev Server Management
 
-For `--dev` mode, a Vite dev server runs as a child process:
+For `--dev` and `--preview` modes only, a Vite server runs as a child process (these modes are for webapp development, not normal usage):
 - **Port check**: skip if port already in use (assumes another instance)
 - **Prerequisite check**: verify `node_modules/` exists, prompt `npm install` if not
 - **Process lifecycle**: `subprocess.Popen` with `npm run dev -- --host {host}`, terminated on exit
-- **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (required for LAN clients to load the webapp)
+- **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed
 - **Cleanup**: `terminate()` with 5-second timeout, then `kill()` if needed
 
 ## Startup Sequence
@@ -60,8 +59,8 @@ The startup is split into two phases to give the user early feedback. The browse
 1. Validate git repository (not a repo → write self-contained HTML to temp file, open as `file://` in browser, print terminal banner with `git init` / `cd` instructions, exit)
 2. Find available ports
 3. Initialize lightweight services: ConfigManager, Repo, Settings
-4. Create LLMService with `deferred_init=True` (no symbol index, no session restore)
-5. If `--dev`: start Vite subprocess
+4. Start webapp server: bundled static server (default), Vite dev (`--dev`), or Vite preview (`--preview`)
+5. Create LLMService with `deferred_init=True` (no symbol index, no session restore)
 6. Register services with JRPCServer and start WebSocket server
 7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
 
@@ -113,43 +112,6 @@ The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not firs
 
 `find_available_port(start, max_tries=50)` — tries binding to `127.0.0.1:{start}` through `{start+49}`.
 
-## GitHub Pages Deployment
-
-### Workflow: `deploy-pages.yml`
-
-Trigger: push to `master` or manual dispatch.
-
-1. Build webapp: `npm run build -- --base=/AI-Coder-DeCoder/{sha}/`
-2. Copy to `gh-pages/{sha}/`
-3. Update `versions.json` manifest (new versions prepended, `latest` updated)
-4. Clean up old versions — trim `versions.json` to 20 entries, delete orphan SHA directories
-5. Create root redirect `index.html` (fetches `versions.json`, redirects to latest, preserves `?port=` query)
-6. Deploy
-
-### Version Registry (`versions.json`)
-
-```json
-{
-    "latest": "a1b2c3d4",
-    "versions": [
-        {"sha": "a1b2c3d4", "full_sha": "abc123...", "date": "2025-01-15T14:32:00Z", "branch": "master"},
-        {"sha": "e5f6g7h8", "full_sha": "def456...", "date": "2025-01-14T10:00:00Z", "branch": "master"}
-    ]
-}
-```
-
-### Deployed Structure
-
-```
-/AI-Coder-DeCoder/
-├── index.html          ← redirect to latest
-├── versions.json
-├── a1b2c3d4/          ← per-commit build
-│   ├── index.html
-│   └── assets/...
-└── ...                 ← up to 20 retained
-```
-
 ## Binary Releases
 
 ### Workflow: `release.yml`
@@ -175,7 +137,7 @@ Platforms: Linux, Windows, macOS (ARM).
        --hidden-import=boto3 --hidden-import=botocore \
        src/ac_dc/main.py
    ```
-   **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime.
+   **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime. The bundled `webapp_dist` is served locally by the built-in static file server — no internet connection required.
 4. Create GitHub Release with all platform binaries attached
 
 ## Config Lifecycle in Packaged Builds

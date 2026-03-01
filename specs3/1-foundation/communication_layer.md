@@ -22,8 +22,9 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 | Property | Value |
 |----------|-------|
 | Default server port | 18080 (configurable via CLI) |
+| Default webapp port | 18999 (configurable via CLI) |
 | WebSocket bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (admission-gated, see [Collaboration](../4-features/collaboration.md)) |
-| Vite dev/preview bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
+| Webapp bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
 | Remote timeout | 60 seconds |
@@ -494,7 +495,7 @@ From a background thread (e.g., LLM streaming worker), use `asyncio.run_coroutin
 
 ## Version Reporting
 
-On `setupDone`, the server includes its version SHA in the connection metadata. The client logs this to console for debugging. No version negotiation or compatibility enforcement — the hosted webapp URL already includes the matching SHA.
+On `setupDone`, the server includes its version SHA in the connection metadata. The client logs this to console for debugging. No version negotiation or compatibility enforcement — the webapp is bundled with the server and always matches.
 
 ## serverURI Changes
 

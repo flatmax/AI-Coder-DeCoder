@@ -537,14 +537,14 @@ When `--collab` is **not** passed (default):
 
 ## Network Binding
 
-When collaboration is enabled (`--collab`), both the WebSocket RPC server and the Vite dev/preview server bind to `0.0.0.0` (all network interfaces). Without `--collab`, they bind to `127.0.0.1` (localhost only).
+When collaboration is enabled (`--collab`), both the WebSocket RPC server and the webapp server bind to `0.0.0.0` (all network interfaces). Without `--collab`, they bind to `127.0.0.1` (localhost only).
 
 - **WebSocket server**: `0.0.0.0:{server_port}` (with `--collab`) — handled by jrpc-oo's `JRPCServer`
+- **Webapp server** (default): `0.0.0.0:{webapp_port}` (with `--collab`) — built-in static file server
 - **Vite dev server** (`--dev`): `0.0.0.0:{webapp_port}` (with `--collab`) — via `--host` CLI flag
 - **Vite preview server** (`--preview`): `0.0.0.0:{webapp_port}` (with `--collab`) — same as dev
-- **Hosted mode** (default): no local HTTP server needed — the webapp is served from GitHub Pages. LAN clients only need WebSocket access to `{server_port}`.
 
-In hosted mode, remote collaborators open the same GitHub Pages URL (shared via the collab popover's share link) and connect back to the host's WebSocket port over the LAN. The share link replaces `localhost` with the host's LAN IP in the URL.
+Remote collaborators open the share link (which uses the host's LAN IP) to load the webapp and connect back to the host's WebSocket port over the LAN.
 
 ### WebSocket URI Derivation
 

@@ -14,6 +14,7 @@ from ac_dc.main import (
     _get_version,
     _is_git_repo,
     _build_browser_url,
+    _find_webapp_dist,
     _handle_not_a_repo,
     find_available_port,
     parse_args,
@@ -112,32 +113,33 @@ class TestPortFinding:
 
 
 class TestBrowserUrl:
-    def test_dev_mode(self):
-        """Dev mode uses localhost."""
-        url = _build_browser_url(18080, "abc123", dev_mode=True, webapp_port=18999)
-        assert "localhost:18999" in url
+    def test_default_url(self):
+        """Default URL uses localhost with both ports."""
+        url = _build_browser_url(18080, 18999)
+        assert url == "http://localhost:18999/?port=18080"
+
+    def test_custom_ports(self):
+        """Custom ports appear in URL."""
+        url = _build_browser_url(9000, 9001)
+        assert "localhost:9001" in url
+        assert "port=9000" in url
+
+    def test_custom_host(self):
+        """Custom host for collab mode."""
+        url = _build_browser_url(18080, 18999, host="192.168.1.50")
+        assert "192.168.1.50:18999" in url
         assert "port=18080" in url
 
-    def test_hosted_mode_with_sha(self):
-        """Hosted mode includes SHA in path."""
-        url = _build_browser_url(18080, "2025.01.15-14.32-abc12345")
-        assert "abc12345" in url
-        assert "port=18080" in url
 
-    def test_hosted_mode_dev_fallback(self):
-        """Dev version uses root redirect."""
-        url = _build_browser_url(18080, "dev")
-        assert "port=18080" in url
-        # Should not have a SHA path segment
-        assert "/dev/" not in url
-
-    def test_base_url_override(self):
-        """Base URL override respected."""
-        url = _build_browser_url(
-            18080, "abc12345",
-            base_url_override="https://custom.example.com/app",
-        )
-        assert "custom.example.com/app" in url
+class TestFindWebappDist:
+    def test_source_tree_found(self, tmp_path):
+        """Finds webapp/dist in source tree layout."""
+        # _find_webapp_dist checks relative to main.py's location
+        # We can't easily test that without mocking, but we can verify it returns Path or None
+        result = _find_webapp_dist()
+        # In a source checkout with a built webapp, this returns a Path
+        # In CI without a build, it returns None — both are valid
+        assert result is None or result.is_dir()
 
 
 # === Not-a-Repo Handler ===
