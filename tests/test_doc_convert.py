@@ -517,9 +517,9 @@ class TestExtractDocxImages:
         out_dir.mkdir()
         saved = _extract_docx_images(docx, out_dir, "doc")
         assert len(saved) == 3
-        assert saved[0] == "doc_img1.gif"   # sorted alphabetically
+        assert saved[0] == "doc_img1.png"   # sorted alphabetically by original name
         assert saved[1] == "doc_img2.jpg"   # .jpeg normalised to .jpg
-        assert saved[2] == "doc_img3.png"
+        assert saved[2] == "doc_img3.gif"
 
     def test_jpeg_normalised_to_jpg(self, tmp_path):
         docx = self._make_docx_zip(tmp_path, {
