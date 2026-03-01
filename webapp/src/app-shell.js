@@ -15,6 +15,7 @@ import './components/ac-dialog.js';
 import './components/diff-viewer.js';
 import './components/svg-viewer.js';
 import './components/token-hud.js';
+import './components/file-nav.js';
 
 const STORAGE_KEY_LAST_FILE = 'ac-last-open-file';
 const STORAGE_KEY_LAST_VIEWPORT = 'ac-last-viewport';
@@ -345,6 +346,7 @@ class AcApp extends JRPCClient {
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onSearchNavigate = this._onSearchNavigate.bind(this);
     this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
+    this._onGlobalKeyUp = this._onGlobalKeyUp.bind(this);
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
@@ -365,8 +367,9 @@ class AcApp extends JRPCClient {
     window.addEventListener('search-navigate', this._onSearchNavigate);
     window.addEventListener('active-file-changed', this._onActiveFileChanged);
 
-    // Intercept Ctrl+S globally to prevent browser Save dialog
-    window.addEventListener('keydown', this._onGlobalKeyDown);
+    // Intercept Ctrl+S globally and Alt+Arrow for file navigation
+    window.addEventListener('keydown', this._onGlobalKeyDown, true);
+    window.addEventListener('keyup', this._onGlobalKeyUp);
 
     // Global toast event listener
     window.addEventListener('ac-toast', this._onToastEvent);
@@ -386,7 +389,8 @@ class AcApp extends JRPCClient {
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
     window.removeEventListener('active-file-changed', this._onActiveFileChanged);
-    window.removeEventListener('keydown', this._onGlobalKeyDown);
+    window.removeEventListener('keydown', this._onGlobalKeyDown, true);
+    window.removeEventListener('keyup', this._onGlobalKeyUp);
     window.removeEventListener('ac-toast', this._onToastEvent);
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     window.removeEventListener('resize', this._onWindowResize);
@@ -923,10 +927,22 @@ class AcApp extends JRPCClient {
   /**
    * Route navigate-file events from file picker, chat edit blocks, and search
    * to the appropriate viewer (SVG viewer for .svg files, diff viewer otherwise).
+   *
+   * Also registers each file-open in the navigation graph (unless it came from
+   * the graph itself via _fromNav flag).
    */
   _onNavigateFile(e) {
     const detail = e.detail;
     if (!detail?.path) return;
+
+    // Register in navigation graph (unless this event came from the nav graph
+    // itself — _fromNav — or from a programmatic refresh)
+    if (!detail._fromNav && !detail._refresh) {
+      const fileNav = this.shadowRoot?.querySelector('ac-file-nav');
+      if (fileNav) {
+        fileNav.openFile(detail.path);
+      }
+    }
 
     // Broadcast to collaborators (skip if this event originated from a remote)
     if (!detail._remote && this.call) {
@@ -1065,11 +1081,64 @@ class AcApp extends JRPCClient {
   }
 
   /**
-   * Intercept Ctrl+S globally to prevent browser Save dialog.
+   * Intercept global keyboard shortcuts:
+   * - Ctrl+S: prevent browser Save dialog
+   * - Alt+Arrow: file navigation graph traversal
+   * - Escape: dismiss file nav HUD
    */
   _onGlobalKeyDown(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
+      return;
+    }
+
+    // Alt+Arrow — file navigation graph
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      const dirMap = {
+        ArrowRight: 'right',
+        ArrowLeft: 'left',
+        ArrowUp: 'up',
+        ArrowDown: 'down',
+      };
+      const dir = dirMap[e.key];
+      if (dir) {
+        const fileNav = this.shadowRoot?.querySelector('ac-file-nav');
+        if (!fileNav || !fileNav.hasNodes) return;
+
+        fileNav.show();
+
+        const targetPath = fileNav.navigateDirection(dir);
+        if (targetPath) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(new CustomEvent('navigate-file', {
+            detail: { path: targetPath, _fromNav: true },
+          }));
+        } else {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+    }
+
+    // Escape — dismiss file nav HUD
+    if (e.key === 'Escape') {
+      const fileNav = this.shadowRoot?.querySelector('ac-file-nav');
+      if (fileNav?.visible) {
+        fileNav.hideImmediate();
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+  }
+
+  _onGlobalKeyUp(e) {
+    if (e.key === 'Alt') {
+      const fileNav = this.shadowRoot?.querySelector('ac-file-nav');
+      if (fileNav?.visible) {
+        fileNav.hide();
+      }
     }
   }
 
@@ -1107,6 +1176,7 @@ class AcApp extends JRPCClient {
       </div>
 
       <ac-token-hud></ac-token-hud>
+      <ac-file-nav></ac-file-nav>
 
       ${this._admissionPending ? html`
         <div class="admission-overlay" role="status" aria-live="polite">

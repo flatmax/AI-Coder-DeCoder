@@ -120,7 +120,7 @@ When an Alt+Arrow key is pressed:
 4. The file at the neighbor node is opened in the appropriate viewer (diff viewer or SVG viewer, based on file extension)
 5. The HUD updates to show the new position
 
-These shortcuts are handled at the **app shell level** to intercept before Monaco's word-navigation Alt+Arrow bindings.
+These shortcuts are handled at the **app shell level** with a capture-phase listener to intercept before Monaco's word-navigation Alt+Arrow bindings. When the graph has nodes, all Alt+Arrow events are consumed (`preventDefault` + `stopPropagation`) regardless of whether a neighbor exists in the pressed direction — this prevents unintended edits in Monaco while the HUD is visible.
 
 ### HUD Click Teleport
 
@@ -346,7 +346,7 @@ When collaboration is active, `navigateFile` broadcasts cause all clients to ope
 
 ### Monaco Editor
 
-Monaco uses Alt+← and Alt+→ for word-level cursor navigation, and Alt+↑ and Alt+↓ for moving lines up/down. The app shell must intercept all four Alt+Arrow combinations at the **document level** (`addEventListener('keydown', ..., true)` with capture) before they reach Monaco. When the graph has a neighbor in the pressed direction, the event is consumed (`preventDefault` + `stopPropagation`). When there is no neighbor, the event propagates normally to Monaco — preserving word navigation and line movement when the graph doesn't need the shortcut.
+Monaco uses Alt+← and Alt+→ for word-level cursor navigation, and Alt+↑ and Alt+↓ for moving lines up/down. The app shell intercepts all four Alt+Arrow combinations at the **document level** (`addEventListener('keydown', ..., true)` with capture) before they reach Monaco. When the graph has nodes, all Alt+Arrow events are consumed (`preventDefault` + `stopPropagation`) regardless of whether a neighbor exists — this prevents unintended side effects (word jumps, line moves) in the editor while the HUD is showing. When the graph is empty (no files opened yet), the events propagate normally.
 
 ### Existing App Shortcuts
 
