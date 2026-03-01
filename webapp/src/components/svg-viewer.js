@@ -213,6 +213,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._svgEditor = null;       // only used in 'select' mode
     this._resizeObserver = null;
     this._undoStack = [];         // per-file undo: array of SVG strings
+    this._originalRightViewBox = null;  // stash original viewBox for fit-all
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContextMenu = this._onContextMenu.bind(this);
@@ -527,24 +528,44 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     const leftSvg = this.shadowRoot.querySelector('.svg-left svg');
     if (!leftSvg) return;
 
-    // Only compute a viewBox from getBBox if the SVG doesn't already have
-    // an authored viewBox.  Many SVGs (especially those with <defs> containing
-    // font glyphs or clip paths in fractional coordinates) produce misleading
-    // getBBox results that don't reflect the intended visible area.
-    const existingVb = leftSvg.getAttribute('viewBox');
-    if (!existingVb) {
-      try {
-        const bbox = leftSvg.getBBox();
-        if (bbox.width > 0 && bbox.height > 0) {
-          const margin = 0.03;
-          const mx = bbox.x - bbox.width * margin;
-          const my = bbox.y - bbox.height * margin;
-          const mw = bbox.width * (1 + margin * 2);
-          const mh = bbox.height * (1 + margin * 2);
-          leftSvg.setAttribute('viewBox', `${mx} ${my} ${mw} ${mh}`);
+    // Ensure the viewBox covers the full rendered content.  The authored
+    // viewBox may be a narrow crop (e.g. set by a previous editor session)
+    // that doesn't encompass all drawn elements.  We use getBBox() to get
+    // true content bounds and expand the viewBox if needed.  When getBBox()
+    // fails or returns degenerate results (e.g. SVGs with <defs> containing
+    // font glyphs or clip paths in fractional coordinates) we keep the
+    // existing viewBox unchanged.
+    try {
+      const bbox = leftSvg.getBBox();
+      if (bbox.width > 1 && bbox.height > 1) {
+        const margin = 0.03;
+        const bx = bbox.x - bbox.width * margin;
+        const by = bbox.y - bbox.height * margin;
+        const bw = bbox.width * (1 + margin * 2);
+        const bh = bbox.height * (1 + margin * 2);
+
+        // Parse existing viewBox (if any) and take the union with getBBox
+        const existingVb = leftSvg.getAttribute('viewBox');
+        if (existingVb) {
+          const parts = existingVb.split(/[\s,]+/).map(Number);
+          if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+            const vx = parts[0], vy = parts[1], vw = parts[2], vh = parts[3];
+            const ux = Math.min(bx, vx);
+            const uy = Math.min(by, vy);
+            const uw = Math.max(bx + bw, vx + vw) - ux;
+            const uh = Math.max(by + bh, vy + vh) - uy;
+            leftSvg.setAttribute('viewBox', `${ux} ${uy} ${uw} ${uh}`);
+          } else {
+            leftSvg.setAttribute('viewBox', `${bx} ${by} ${bw} ${bh}`);
+          }
+        } else {
+          leftSvg.setAttribute('viewBox', `${bx} ${by} ${bw} ${bh}`);
         }
-      } catch {
-        // getBBox can fail for hidden/empty SVGs — keep default
+      }
+    } catch {
+      // getBBox can fail for hidden/empty SVGs — keep existing viewBox
+      if (!leftSvg.getAttribute('viewBox')) {
+        leftSvg.setAttribute('viewBox', '0 0 800 600');
       }
     }
 
@@ -771,29 +792,54 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.center();
     }
 
-    // In select mode, fit the editor to its content.  If the SVG has an
-    // authored viewBox we set it directly — fitContent() uses getBBox()
-    // which can produce misleading results for SVGs with <defs> containing
-    // font glyphs or clip paths in fractional coordinates.
+    // In select mode, fit the editor to its content.  We prefer getBBox()
+    // to get the true content bounds (which may differ from the authored
+    // viewBox if the SVG was previously edited or has content outside the
+    // viewBox).  Fall back to the stashed original viewBox only when
+    // getBBox() returns degenerate results (e.g. SVGs with <defs> containing
+    // font glyphs or clip paths in fractional coordinates).
     if (this._mode === 'select' && this._svgEditor) {
-      const rightSvg = this.shadowRoot.querySelector('.svg-right svg');
-      const origVb = rightSvg && this._getOriginalViewBox(rightSvg);
-      if (origVb && origVb.w > 0 && origVb.h > 0) {
-        // Fit the authored viewBox into the container while preserving
-        // aspect ratio (same logic as fitContent but without getBBox).
-        const container = this.shadowRoot.querySelector('.svg-right');
-        if (container) {
-          const cr = container.getBoundingClientRect();
-          if (cr.width > 0 && cr.height > 0) {
-            const scaleX = cr.width / origVb.w;
-            const scaleY = cr.height / origVb.h;
-            const scale = Math.min(scaleX, scaleY);
-            const fitW = cr.width / scale;
-            const fitH = cr.height / scale;
-            const fitX = origVb.x - (fitW - origVb.w) / 2;
-            const fitY = origVb.y - (fitH - origVb.h) / 2;
-            this._svgEditor.setViewBox(fitX, fitY, fitW, fitH);
+      const container = this.shadowRoot.querySelector('.svg-right');
+      const rightSvg = container?.querySelector('svg');
+      let fitVb = null;
+
+      // Try getBBox first for true content bounds
+      if (rightSvg) {
+        try {
+          const bbox = rightSvg.getBBox();
+          if (bbox.width > 1 && bbox.height > 1) {
+            const margin = 0.03;
+            fitVb = {
+              x: bbox.x - bbox.width * margin,
+              y: bbox.y - bbox.height * margin,
+              w: bbox.width * (1 + margin * 2),
+              h: bbox.height * (1 + margin * 2),
+            };
           }
+        } catch {
+          // getBBox can fail for hidden/empty SVGs
+        }
+      }
+
+      // Fall back to stashed original viewBox
+      if (!fitVb) {
+        const origVb = this._originalRightViewBox;
+        if (origVb && origVb.w > 0 && origVb.h > 0) {
+          fitVb = origVb;
+        }
+      }
+
+      if (fitVb && container) {
+        const cr = container.getBoundingClientRect();
+        if (cr.width > 0 && cr.height > 0) {
+          const scaleX = cr.width / fitVb.w;
+          const scaleY = cr.height / fitVb.h;
+          const scale = Math.min(scaleX, scaleY);
+          const fitW = cr.width / scale;
+          const fitH = cr.height / scale;
+          const fitX = fitVb.x - (fitW - fitVb.w) / 2;
+          const fitY = fitVb.y - (fitH - fitVb.h) / 2;
+          this._svgEditor.setViewBox(fitX, fitY, fitW, fitH);
         }
       } else {
         this._svgEditor.fitContent();
@@ -1151,6 +1197,10 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
 
     this._prepareSvgElement(leftContainer);
     this._prepareSvgElement(rightContainer, { editable: true });
+
+    // Stash the original viewBox of the right SVG before the editor modifies it
+    const rightSvgEl = rightContainer.querySelector('svg');
+    this._originalRightViewBox = rightSvgEl ? this._getOriginalViewBox(rightSvgEl) : null;
 
     // Resolve relative image references (e.g. sibling .jpg/.png files from
     // doc-convert slides) by fetching them as base64 data URIs from the repo.
