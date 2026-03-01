@@ -190,7 +190,6 @@ jobs:
           ### Requirements
           
           - Run from within a git repository directory
-          - Set your LLM API key (e.g., `ANTHROPIC_API_KEY` environment variable)
           
           ### Optional: Document Mode Keywords
           
