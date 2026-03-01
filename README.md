@@ -26,6 +26,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
+- **2D file navigation grid** — open files arrange spatially in a grid overlay. Navigate with `Alt+Arrow` keys for fast directional switching between files without reaching for tabs.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
 - **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. A cross-reference toggle lets the LLM see document outlines alongside the symbol map in code mode (and vice versa), so it can trace connections between code and documentation without a full mode switch. Install `pip install ac-dc[docs]` for keyword extraction and document conversion support (optional — document mode works without it).
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
@@ -43,6 +44,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Deterministic edits** — The LLM proposes changes using anchored edit blocks with exact context matching. No fuzzy patching, no guessing.
 - **Visual SVG editing** — SVG files open in a dedicated viewer with pan/zoom and a structural editor. Select, drag, reshape, and duplicate elements directly — no external tools needed.
 - **Git-native** — Every applied edit is staged automatically. Commit messages are LLM-generated. The file picker shows git status natively.
+- **Team peer collaboration** — Collaboration mode lets multiple developers connect to one backend over LAN, working together in the same codebase context. The team sees the same streaming responses, file changes, and diffs in real time — pair programming scales beyond two people.
 - **Bidirectional RPC** — Terminal and browser are symmetric peers over WebSocket (JSON-RPC 2.0). Either side can call the other.
 
 ## Workflow
