@@ -1092,7 +1092,7 @@ class AcApp extends JRPCClient {
       return;
     }
 
-    // Alt+Arrow — file navigation graph
+    // Alt+Arrow — file navigation grid
     if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
       const dirMap = {
         ArrowRight: 'right',

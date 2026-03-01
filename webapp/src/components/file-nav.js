@@ -11,7 +11,6 @@ import { theme } from '../styles/theme.js';
 
 // --- Constants ---
 
-const MAX_NODES = 200;
 const GRID_SPACING_X = 180;
 const GRID_SPACING_Y = 100;
 const NODE_WIDTH = 150;
@@ -20,11 +19,11 @@ const NODE_RADIUS = 8;
 const FADE_DURATION = 150;
 const UNDO_TIMEOUT = 3000;
 
-// Priority order for placing new nodes
+// Priority order for placing new nodes in adjacent cells
 const PLACEMENT_ORDER = ['right', 'up', 'down', 'left'];
 
-// Reverse priority for eviction tie-breaking (least-preferred first)
-const EVICTION_ORDER = ['left', 'down', 'up', 'right'];
+// Reverse priority for replacement tie-breaking (least-preferred first)
+const REPLACEMENT_ORDER = ['left', 'down', 'up', 'right'];
 
 // Direction → grid offset
 const DIR_OFFSET = {
@@ -32,14 +31,6 @@ const DIR_OFFSET = {
   left:  { dx: -1, dy: 0 },
   up:    { dx: 0, dy: -1 },
   down:  { dx: 0, dy: 1 },
-};
-
-// Opposite direction
-const OPPOSITE = {
-  right: 'left',
-  left: 'right',
-  up: 'down',
-  down: 'up',
 };
 
 // File extension → color
@@ -72,17 +63,24 @@ function _basename(path) {
 }
 
 /**
- * Create a graph node.
+ * Create a grid node.
  */
 function _createNode(id, path, gridX, gridY) {
-  return {
-    id,
-    path,
-    gridX,
-    gridY,
-    edges: {},         // direction → neighbor node id
-    travelCounts: {},  // direction → count
-  };
+  return { id, path, gridX, gridY };
+}
+
+/**
+ * Canonical key for a node pair (for travel counts).
+ */
+function _pairKey(idA, idB) {
+  return idA < idB ? `${idA}-${idB}` : `${idB}-${idA}`;
+}
+
+/**
+ * Grid coordinate key for the spatial index.
+ */
+function _gridKey(x, y) {
+  return `${x},${y}`;
 }
 
 export class AcFileNav extends LitElement {
@@ -266,8 +264,12 @@ export class AcFileNav extends LitElement {
 
   constructor() {
     super();
-    /** @type {Map<number, object>} */
+    /** @type {Map<number, object>} id → node */
     this._nodes = new Map();
+    /** @type {Map<string, number>} "x,y" → node id */
+    this._gridIndex = new Map();
+    /** @type {Map<string, number>} "minId-maxId" → traversal count */
+    this._travelCounts = new Map();
     this._currentNodeId = null;
     this._nextId = 1;
     this._renderTick = 0;
@@ -300,24 +302,26 @@ export class AcFileNav extends LitElement {
     // First node ever
     if (!current) {
       const node = _createNode(this._nextId++, path, 0, 0);
-      this._nodes.set(node.id, node);
+      this._addNode(node);
       this._currentNodeId = node.id;
       this._tick();
       return { path, created: true };
     }
 
-    // Find first available slot in priority order
+    // Find first free adjacent cell in priority order
     let dir = null;
     for (const d of PLACEMENT_ORDER) {
-      if (current.edges[d] == null) {
+      const off = DIR_OFFSET[d];
+      const key = _gridKey(current.gridX + off.dx, current.gridY + off.dy);
+      if (!this._gridIndex.has(key)) {
         dir = d;
         break;
       }
     }
 
-    // All slots occupied — evict least-traveled
+    // All 4 neighbors occupied — replace the least-traveled one
     if (dir == null) {
-      dir = this._evictEdge(current);
+      dir = this._pickReplacement(current);
     }
 
     // Compute target grid position
@@ -325,18 +329,12 @@ export class AcFileNav extends LitElement {
     const gx = current.gridX + offset.dx;
     const gy = current.gridY + offset.dy;
 
-    // Grid collision — remove existing node at target position
+    // Remove existing node at target position (if any)
     this._removeNodeAtGrid(gx, gy);
-
-    // Enforce size limit
-    this._enforceSizeLimit();
 
     // Create new node
     const newNode = _createNode(this._nextId++, path, gx, gy);
-    this._nodes.set(newNode.id, newNode);
-
-    // Create bidirectional edge
-    this._linkNodes(current, dir, newNode);
+    this._addNode(newNode);
 
     this._currentNodeId = newNode.id;
     this._tick();
@@ -352,16 +350,17 @@ export class AcFileNav extends LitElement {
     const current = this._currentNodeId != null ? this._nodes.get(this._currentNodeId) : null;
     if (!current) return null;
 
-    const neighborId = current.edges[dir];
+    const off = DIR_OFFSET[dir];
+    const key = _gridKey(current.gridX + off.dx, current.gridY + off.dy);
+    const neighborId = this._gridIndex.get(key);
     if (neighborId == null) return null;
 
     const neighbor = this._nodes.get(neighborId);
     if (!neighbor) return null;
 
-    // Increment travel count on both ends
-    current.travelCounts[dir] = (current.travelCounts[dir] || 0) + 1;
-    const oppDir = OPPOSITE[dir];
-    neighbor.travelCounts[oppDir] = (neighbor.travelCounts[oppDir] || 0) + 1;
+    // Increment travel count for this pair
+    const pk = _pairKey(current.id, neighbor.id);
+    this._travelCounts.set(pk, (this._travelCounts.get(pk) || 0) + 1);
 
     this._currentNodeId = neighbor.id;
     this._tick();
@@ -397,13 +396,15 @@ export class AcFileNav extends LitElement {
   }
 
   /**
-   * Reset the graph, keeping current file as root.
+   * Reset the grid, keeping current file as root.
    */
   clear() {
     const current = this._currentNodeId != null ? this._nodes.get(this._currentNodeId) : null;
     const currentPath = current?.path;
 
     this._nodes.clear();
+    this._gridIndex.clear();
+    this._travelCounts.clear();
     this._currentNodeId = null;
     this._nextId = 1;
     this._undoState = null;
@@ -411,7 +412,7 @@ export class AcFileNav extends LitElement {
 
     if (currentPath) {
       const node = _createNode(this._nextId++, currentPath, 0, 0);
-      this._nodes.set(node.id, node);
+      this._addNode(node);
       this._currentNodeId = node.id;
     }
 
@@ -419,116 +420,116 @@ export class AcFileNav extends LitElement {
   }
 
   /**
-   * Whether the graph has any nodes.
+   * Whether the grid has any nodes.
    */
   get hasNodes() {
     return this._nodes.size > 0;
   }
 
-  // === Internal: Graph Operations ===
+  // === Internal: Grid Operations ===
 
   _tick() {
     this._renderTick++;
   }
 
-  _linkNodes(nodeA, dir, nodeB) {
-    // If nodeB already has something in the opposite slot, clear that first
-    const oppDir = OPPOSITE[dir];
-    if (nodeB.edges[oppDir] != null) {
-      const oldNeighborId = nodeB.edges[oppDir];
-      const oldNeighbor = this._nodes.get(oldNeighborId);
-      if (oldNeighbor) {
-        delete oldNeighbor.edges[dir];
-        delete oldNeighbor.travelCounts[dir];
-      }
-      delete nodeB.edges[oppDir];
-      delete nodeB.travelCounts[oppDir];
-    }
-
-    nodeA.edges[dir] = nodeB.id;
-    nodeB.edges[oppDir] = nodeA.id;
-    nodeA.travelCounts[dir] = nodeA.travelCounts[dir] || 0;
-    nodeB.travelCounts[oppDir] = nodeB.travelCounts[oppDir] || 0;
+  /**
+   * Add a node to both the nodes map and the grid index.
+   */
+  _addNode(node) {
+    this._nodes.set(node.id, node);
+    this._gridIndex.set(_gridKey(node.gridX, node.gridY), node.id);
   }
 
-  _evictEdge(node) {
-    // Find edge with lowest travel count
-    let minCount = Infinity;
-    let evictDir = null;
+  /**
+   * Get the travel count between the current node and a neighbor.
+   */
+  _getTravelCount(idA, idB) {
+    return this._travelCounts.get(_pairKey(idA, idB)) || 0;
+  }
 
-    for (const d of EVICTION_ORDER) {
-      if (node.edges[d] == null) continue;
-      const count = (node.travelCounts[d] || 0);
+  /**
+   * Pick which neighbor to replace when all 4 adjacent cells are occupied.
+   * Returns the direction of the least-traveled neighbor, with tie-breaking
+   * in reverse priority order (left → down → up → right).
+   */
+  _pickReplacement(current) {
+    let minCount = Infinity;
+    let replaceDir = null;
+
+    for (const d of REPLACEMENT_ORDER) {
+      const off = DIR_OFFSET[d];
+      const key = _gridKey(current.gridX + off.dx, current.gridY + off.dy);
+      const neighborId = this._gridIndex.get(key);
+      if (neighborId == null) continue;
+      const count = this._getTravelCount(current.id, neighborId);
       if (count < minCount) {
         minCount = count;
-        evictDir = d;
+        replaceDir = d;
       }
     }
 
-    if (!evictDir) {
-      // Shouldn't happen if all 4 are occupied, but fallback
-      evictDir = 'left';
+    // Capture undo state before replacing
+    const off = DIR_OFFSET[replaceDir];
+    const gx = current.gridX + off.dx;
+    const gy = current.gridY + off.dy;
+    const replacedId = this._gridIndex.get(_gridKey(gx, gy));
+    const replacedNode = replacedId != null ? this._nodes.get(replacedId) : null;
+
+    if (replacedNode) {
+      // Collect all travel counts involving the replaced node for undo
+      const savedCounts = [];
+      for (const [pk, count] of this._travelCounts) {
+        if (pk.startsWith(`${replacedNode.id}-`) || pk.endsWith(`-${replacedNode.id}`)) {
+          savedCounts.push([pk, count]);
+        }
+      }
+
+      this._clearUndoTimer();
+      this._undoState = {
+        currentNodeId: current.id,
+        dir: replaceDir,
+        replacedNode: { ...replacedNode },
+        savedCounts,
+      };
+      this._undoTimer = setTimeout(() => {
+        this._undoState = null;
+        this._tick();
+      }, UNDO_TIMEOUT);
     }
 
-    // Capture undo state before evicting
-    const evictedNeighborId = node.edges[evictDir];
-    const evictedNeighbor = this._nodes.get(evictedNeighborId);
-    const evictedTravelCount = node.travelCounts[evictDir] || 0;
-    const oppDir = OPPOSITE[evictDir];
-    const neighborTravelCount = evictedNeighbor ? (evictedNeighbor.travelCounts[oppDir] || 0) : 0;
-
-    // Remove the edge (disconnect, but leave the neighbor node in the graph)
-    if (evictedNeighbor) {
-      delete evictedNeighbor.edges[oppDir];
-      delete evictedNeighbor.travelCounts[oppDir];
-    }
-    delete node.edges[evictDir];
-    delete node.travelCounts[evictDir];
-
-    // Set undo state
-    this._clearUndoTimer();
-    this._undoState = {
-      nodeId: node.id,
-      dir: evictDir,
-      neighborId: evictedNeighborId,
-      neighborPath: evictedNeighbor?.path || '',
-      travelCount: evictedTravelCount,
-      neighborTravelCount,
-    };
-    this._undoTimer = setTimeout(() => {
-      this._undoState = null;
-      this._tick();
-    }, UNDO_TIMEOUT);
-
-    return evictDir;
+    return replaceDir;
   }
 
   _performUndo() {
     if (!this._undoState) return;
 
-    const { nodeId, dir, neighborId, travelCount, neighborTravelCount } = this._undoState;
-    const node = this._nodes.get(nodeId);
-    const neighbor = this._nodes.get(neighborId);
+    const { currentNodeId, dir, replacedNode, savedCounts } = this._undoState;
+    const current = this._nodes.get(currentNodeId);
 
-    if (!node || !neighbor) {
+    if (!current) {
       this._undoState = null;
       this._clearUndoTimer();
       this._tick();
       return;
     }
 
-    // Remove the new node that was placed in the freed slot
-    const newNodeId = node.edges[dir];
+    // Remove the new node that was placed in the replacement cell
+    const off = DIR_OFFSET[dir];
+    const gx = current.gridX + off.dx;
+    const gy = current.gridY + off.dy;
+    const newNodeId = this._gridIndex.get(_gridKey(gx, gy));
     if (newNodeId != null) {
       this._removeNode(newNodeId);
     }
 
-    // Restore the evicted edge
-    const oppDir = OPPOSITE[dir];
-    node.edges[dir] = neighborId;
-    node.travelCounts[dir] = travelCount;
-    neighbor.edges[oppDir] = nodeId;
-    neighbor.travelCounts[oppDir] = neighborTravelCount;
+    // Restore the replaced node
+    const restored = _createNode(replacedNode.id, replacedNode.path, replacedNode.gridX, replacedNode.gridY);
+    this._addNode(restored);
+
+    // Restore travel counts
+    for (const [pk, count] of savedCounts) {
+      this._travelCounts.set(pk, count);
+    }
 
     this._undoState = null;
     this._clearUndoTimer();
@@ -543,11 +544,10 @@ export class AcFileNav extends LitElement {
   }
 
   _removeNodeAtGrid(gx, gy) {
-    for (const [id, node] of this._nodes) {
-      if (node.gridX === gx && node.gridY === gy) {
-        this._removeNode(id);
-        return;
-      }
+    const key = _gridKey(gx, gy);
+    const id = this._gridIndex.get(key);
+    if (id != null) {
+      this._removeNode(id);
     }
   }
 
@@ -555,45 +555,20 @@ export class AcFileNav extends LitElement {
     const node = this._nodes.get(id);
     if (!node) return;
 
-    // Clear all edges to/from this node
-    for (const [dir, neighborId] of Object.entries(node.edges)) {
-      const neighbor = this._nodes.get(neighborId);
-      if (neighbor) {
-        const oppDir = OPPOSITE[dir];
-        delete neighbor.edges[oppDir];
-        delete neighbor.travelCounts[oppDir];
+    // Remove from grid index
+    this._gridIndex.delete(_gridKey(node.gridX, node.gridY));
+
+    // Clear all travel counts involving this node
+    for (const pk of [...this._travelCounts.keys()]) {
+      if (pk.startsWith(`${id}-`) || pk.endsWith(`-${id}`)) {
+        this._travelCounts.delete(pk);
       }
     }
 
     this._nodes.delete(id);
 
-    // If we removed the current node, the caller must handle that
     if (this._currentNodeId === id) {
       this._currentNodeId = null;
-    }
-  }
-
-  _enforceSizeLimit() {
-    while (this._nodes.size >= MAX_NODES) {
-      let victimId = null;
-      let victimScore = Infinity;
-      let victimAge = Infinity;
-
-      for (const [id, node] of this._nodes) {
-        if (id === this._currentNodeId) continue;
-        const totalTravel = Object.values(node.travelCounts).reduce((s, v) => s + v, 0);
-        if (totalTravel < victimScore || (totalTravel === victimScore && id < victimAge)) {
-          victimScore = totalTravel;
-          victimId = id;
-          victimAge = id;
-        }
-      }
-
-      if (victimId != null) {
-        this._removeNode(victimId);
-      } else {
-        break; // only current node left
-      }
     }
   }
 
@@ -626,7 +601,7 @@ export class AcFileNav extends LitElement {
     const nodeId = this._ctxMenu.nodeId;
     this._dismissCtxMenu();
 
-    if (nodeId === this._currentNodeId) return; // can't remove current
+    if (nodeId === this._currentNodeId) return;
 
     this._removeNode(nodeId);
     this._tick();
@@ -678,7 +653,7 @@ export class AcFileNav extends LitElement {
       return html`
         <div class="hud-backdrop"></div>
         <div class="hud-canvas">
-          <div class="empty-hint">Open a file to start the navigation graph</div>
+          <div class="empty-hint">Open a file to start the navigation grid</div>
         </div>
       `;
     }
@@ -688,25 +663,29 @@ export class AcFileNav extends LitElement {
     const cx = current ? current.gridX : 0;
     const cy = current ? current.gridY : 0;
 
-    // Build edges for SVG
-    const edges = [];
-    const edgeSeen = new Set();
+    // Build connector lines between grid-adjacent node pairs
+    const connectors = [];
+    const connectorSeen = new Set();
     for (const node of nodes) {
-      for (const [dir, neighborId] of Object.entries(node.edges)) {
-        const key = [Math.min(node.id, neighborId), Math.max(node.id, neighborId)].join('-');
-        if (edgeSeen.has(key)) continue;
-        edgeSeen.add(key);
+      for (const d of Object.keys(DIR_OFFSET)) {
+        const off = DIR_OFFSET[d];
+        const nKey = _gridKey(node.gridX + off.dx, node.gridY + off.dy);
+        const neighborId = this._gridIndex.get(nKey);
+        if (neighborId == null) continue;
+
+        const pk = _pairKey(node.id, neighborId);
+        if (connectorSeen.has(pk)) continue;
+        connectorSeen.add(pk);
 
         const neighbor = this._nodes.get(neighborId);
         if (!neighbor) continue;
 
-        const travelCount = (node.travelCounts[dir] || 0);
-        edges.push({
+        connectors.push({
           x1: node.gridX * GRID_SPACING_X,
           y1: node.gridY * GRID_SPACING_Y,
           x2: neighbor.gridX * GRID_SPACING_X,
           y2: neighbor.gridY * GRID_SPACING_Y,
-          count: travelCount,
+          count: this._travelCounts.get(pk) || 0,
         });
       }
     }
@@ -721,15 +700,15 @@ export class AcFileNav extends LitElement {
              style="transform: translate(calc(50vw + ${offsetX}px), calc(50vh + ${offsetY}px))">
           <svg width="100%" height="100%"
                style="position:absolute;top:0;left:0;overflow:visible;pointer-events:none;">
-            ${edges.map(e => svg`
+            ${connectors.map(c => svg`
               <line class="edge-line"
-                    x1="${e.x1}" y1="${e.y1}"
-                    x2="${e.x2}" y2="${e.y2}" />
-              ${e.count > 0 ? svg`
+                    x1="${c.x1}" y1="${c.y1}"
+                    x2="${c.x2}" y2="${c.y2}" />
+              ${c.count > 0 ? svg`
                 <text class="edge-label"
-                      x="${(e.x1 + e.x2) / 2}"
-                      y="${(e.y1 + e.y2) / 2 - 6}">
-                  ${e.count}
+                      x="${(c.x1 + c.x2) / 2}"
+                      y="${(c.y1 + c.y2) / 2 - 6}">
+                  ${c.count}
                 </text>
               ` : nothing}
             `)}
@@ -782,7 +761,7 @@ export class AcFileNav extends LitElement {
 
         ${this._undoState ? html`
           <div class="undo-toast">
-            Edge to ${_basename(this._undoState.neighborPath)} dropped
+            Replaced ${_basename(this._undoState.replacedNode.path)}
             <button @click=${() => this._performUndo()}>Undo</button>
           </div>
         ` : nothing}
