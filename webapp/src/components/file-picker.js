@@ -730,6 +730,12 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     this._contextInput = { type: 'rename', path: node.path, value: node.path };
   }
 
+  _ctxDuplicate(node) {
+    this._contextMenu = null;
+    // Pre-fill with the same path; the user can edit the filename portion
+    this._contextInput = { type: 'duplicate', path: node.path, value: node.path };
+  }
+
   async _ctxDelete(path) {
     this._contextMenu = null;
     if (!confirm(`Delete ${path}?`)) return;
@@ -778,6 +784,11 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     try {
       if (input.type === 'rename') {
         await this.rpcExtract('Repo.rename_file', input.path, value);
+      } else if (input.type === 'duplicate') {
+        // Read content from source file, then create the new file
+        const srcResult = await this.rpcExtract('Repo.get_file_content', input.path);
+        const srcContent = typeof srcResult === 'string' ? srcResult : (srcResult?.content ?? '');
+        await this.rpcExtract('Repo.create_file', value, srcContent);
       } else if (input.type === 'new-file') {
         const newPath = input.path ? `${input.path}/${value}` : value;
         await this.rpcExtract('Repo.create_file', newPath, '');
@@ -951,7 +962,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
         </span>
       </div>
 
-      ${this._contextInput && this._contextInput.path === node.path && this._contextInput.type === 'rename' ? html`
+      ${this._contextInput && this._contextInput.path === node.path && (this._contextInput.type === 'rename' || this._contextInput.type === 'duplicate') ? html`
         <div style="padding-left: ${depth * 16 + 40}px; padding-right: 8px;">
           <input
             class="inline-input"
@@ -1002,6 +1013,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxUnstage([path])}>➖ Unstage</div>
           <div class="context-menu-separator" role="separator"></div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxDuplicate(node)}>📄 Duplicate</div>
           <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDiscard(path)}>↩️ Discard Changes</div>
           <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDelete(path)}>🗑️ Delete</div>
         `}
