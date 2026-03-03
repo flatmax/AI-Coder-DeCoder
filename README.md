@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
 - **Structured code edits** with anchor-based matching, validation, and automatic git staging.
 - **Side-by-side diff viewer** — Monaco editor with hover, go-to-definition, references, and completions.
-- **SVG viewer & editor** — pan/zoom SVG files with inline editing: drag elements, reshape paths and curves, resize shapes, edit text in place, and copy/paste/duplicate objects.
+- **SVG viewer & editor** — pan/zoom SVG files with inline editing: drag elements, reshape paths and curves, resize shapes, edit text in place, copy/paste/duplicate objects, and a full-width presentation mode (F11).
 - **File picker** with git status badges, diff stats, context menu, and keyboard navigation.
 - **Code review mode** — select a commit, soft reset, and discuss changes with the LLM.
 - **URL detection and fetching** — paste a link and AC⚡DC fetches, summarizes, and caches the content. Works with GitHub repos too.
@@ -192,6 +192,8 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `Ctrl+D` | SVG editor | Duplicate in place |
 | `Delete` | SVG editor | Delete selected element |
 | `Escape` | SVG editor | Deselect / cancel text edit |
+| `F11` | SVG viewer | Toggle presentation mode (full-width editor) |
+| `Escape` | SVG viewer (present) | Exit presentation mode |
 
 ## CLI Options
 
