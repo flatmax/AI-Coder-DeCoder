@@ -15,7 +15,7 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 | `.docx` | Word document | Full content including tables, headings, lists |
 | `.pdf` | PDF document | Text extracted into markdown paragraphs; pages with images/vector graphics also get per-page SVG exports |
 | `.pptx` | PowerPoint | Text extracted into markdown via PyMuPDF; slides with images/diagrams also get SVG exports. Falls back to python-pptx (full SVG per slide) when LibreOffice/PyMuPDF unavailable |
-| `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables |
+| `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables. Cell background colours preserved via emoji markers with a legend |
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
 | `.odt` | OpenDocument text | Full content similar to `.docx` |
@@ -111,6 +111,16 @@ When the primary PyMuPDF pipeline is used, text-only slides appear as markdown p
 ### odfpy
 
 **odfpy** is included as an explicit dependency alongside `markitdown[all]` (which also pulls it in transitively). It provides native ODF format parsing for `.odt` files. The explicit dependency ensures `.odt` support is available even if markitdown's dependency groups change in future versions.
+
+### Colour-Aware Excel Extraction
+
+`.xlsx` files use a dedicated **openpyxl-based pipeline** (`_extract_xlsx_with_colors`) instead of markitdown, preserving cell background colours as emoji markers in the markdown output. The pipeline uses a two-pass approach:
+
+1. **Pass 1** — Read all cells across all sheets, collecting text values and raw hex fill colours. Build a set of all unique non-ignorable fills (near-white and near-black fills are ignored)
+2. **Colour mapping** — Well-known hues (red, green, yellow, blue, etc.) are assigned named emoji markers (🔴, 🟢, 🟡, 🔵). Remaining colours are clustered by Euclidean RGB distance (threshold 40) and assigned distinct fallback markers (⬛, ◆, ▲, ●, ■, ★) per cluster. This ensures visually distinct shades — e.g. three shades of brown — each get their own symbol
+3. **Pass 2** — Emit markdown tables using the colour map. Coloured cells get their marker prepended. Empty columns and fully-empty rows are stripped. A legend mapping markers to colour names is appended
+
+If openpyxl is not installed or fails to read the file, the pipeline falls back to markitdown.
 
 ### Installation
 
@@ -468,3 +478,12 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - Custom extension list in config is respected
 - Files exceeding `max_source_size_mb` are shown with warning and skipped during conversion
 - Converted `.md` files are indexed normally by doc index (HTML comment invisible to extractor)
+- Colour-aware xlsx extraction preserves cell background colours as emoji markers
+- Named-bucket colours (red, green, yellow, blue, purple) get their standard emoji markers
+- Near-white and near-black fills are ignored (not marked)
+- Unrecognised colours are clustered by RGB distance; visually distinct shades get distinct fallback markers
+- Identical fills across cells receive the same marker
+- A colour legend is appended to the markdown output listing all markers used
+- Empty columns and fully-empty rows are stripped from xlsx output
+- Multiple sheets each get an `## SheetName` heading
+- Falls back to markitdown if openpyxl is unavailable
