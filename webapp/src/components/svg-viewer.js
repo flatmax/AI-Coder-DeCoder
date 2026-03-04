@@ -823,8 +823,16 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   }
 
   _handleResize() {
-    if (this._panZoomLeft) this._panZoomLeft.resize();
-    if (this._panZoomRight) this._panZoomRight.resize();
+    if (this._panZoomLeft) {
+      this._panZoomLeft.resize();
+      this._panZoomLeft.fit();
+      this._panZoomLeft.center();
+    }
+    if (this._panZoomRight) {
+      this._panZoomRight.resize();
+      this._panZoomRight.fit();
+      this._panZoomRight.center();
+    }
   }
 
   // === Toolbar Actions ===
