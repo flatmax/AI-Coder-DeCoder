@@ -289,11 +289,13 @@ class TestConvertFiles:
         source.write_bytes(b"fake content")
         sha = _sha256_file(source)
 
-        # Pre-existing output with an image reference
+        # Pre-existing output with an image reference in subdirectory
         output = git_repo / "doc.md"
-        header = _build_provenance_header("doc.docx", "old_hash", ["old_img.png"])
+        header = _build_provenance_header("doc.docx", "old_hash", ["doc/old_img.png"])
         output.write_text(f"{header}\n\n# Old")
-        old_img = git_repo / "old_img.png"
+        assets_dir = git_repo / "doc"
+        assets_dir.mkdir(exist_ok=True)
+        old_img = assets_dir / "old_img.png"
         old_img.write_bytes(b"old image")
 
         with patch("ac_dc.doc_convert.DocConvert._convert_with_markitdown",
@@ -680,21 +682,22 @@ class TestDocxConversionIntegration:
 
         assert result["summary"]["converted"] == 1
 
-        # Check that the image was extracted
-        img_file = git_repo / "report_img1.png"
+        # Check that the image was extracted into the subdirectory
+        img_file = git_repo / "report" / "report_img1.png"
         assert img_file.exists()
         assert img_file.read_bytes() == img_data
 
         # Check that the output markdown references the extracted image
+        # with the subdirectory prefix
         output = git_repo / "report.md"
         assert output.exists()
         text = output.read_text()
-        assert "report_img1.png" in text
+        assert "report/report_img1.png" in text
         assert "data:image" not in text
 
-        # Check provenance lists the image
+        # Check provenance lists the image with subdirectory prefix
         assert "images=" in text
-        assert "report_img1.png" in text
+        assert "report/report_img1.png" in text
 
     @patch("ac_dc.doc_convert._is_markitdown_available", return_value=True)
     def test_non_docx_skips_docx_extraction(self, mock_avail, converter, git_repo):

@@ -794,22 +794,31 @@ class DocConvert:
                 "error": "Conversion produced no output",
             }
 
+        # Create a subdirectory named after the stem for all associated
+        # images and auxiliary files (mirrors presentation/PDF behaviour).
+        stem = Path(rel_path).stem
+        output_dir = output_abs.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        assets_dir = output_dir / stem
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
         # For .docx files, extract real images from the zip archive and
         # replace markitdown's truncated data-URI placeholders.
         docx_image_names = []
         if ext == ".docx":
-            output_dir = output_abs.parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-            docx_image_names = _extract_docx_images(
-                abs_path, output_dir, Path(rel_path).stem,
+            raw_docx_names = _extract_docx_images(
+                abs_path, assets_dir, stem,
             )
+            # Prefix with subdirectory so markdown links resolve correctly
+            docx_image_names = [f"{stem}/{n}" for n in raw_docx_names]
             if docx_image_names:
                 md_content = _replace_truncated_uris(md_content, docx_image_names)
 
         # Extract and save images from the conversion result (real
         # base64 data URIs only — truncated ones were already handled).
         images = self._extract_and_save_images(
-            md_content, rel_path, abs_path, source_name, source_hash
+            md_content, rel_path, abs_path, source_name, source_hash,
+            assets_dir=assets_dir,
         )
         image_names = docx_image_names + [img["filename"] for img in images]
 
@@ -821,7 +830,6 @@ class DocConvert:
 
         # Write output
         full_content = header + "\n\n" + md_content
-        output_abs.parent.mkdir(parents=True, exist_ok=True)
         output_abs.write_text(full_content)
 
         # Clean up orphan images from previous conversion
@@ -836,6 +844,13 @@ class DocConvert:
                             logger.info(f"Removed orphan image: {old_img}")
                         except OSError:
                             pass
+
+        # Remove the assets subdirectory if it ended up empty
+        try:
+            if assets_dir.exists() and not any(assets_dir.iterdir()):
+                assets_dir.rmdir()
+        except OSError:
+            pass
 
         logger.info(f"Converted {rel_path} → {output_rel}")
 
@@ -1231,7 +1246,8 @@ class DocConvert:
             raise
 
     def _extract_and_save_images(self, md_content, rel_path, abs_path,
-                                  source_name, source_hash):
+                                  source_name, source_hash,
+                                  assets_dir=None):
         """Extract images from conversion output and save them.
 
         Handles two cases:
@@ -1241,13 +1257,18 @@ class DocConvert:
         Truncated data URIs (ending with literal ``...``) are skipped —
         those are handled by ``_replace_truncated_uris`` instead.
 
+        Args:
+            assets_dir: optional Path to the subdirectory for saving images.
+                If provided, images are saved there and filenames are prefixed
+                with the subdirectory name so markdown links resolve correctly.
+
         Returns a list of {filename, path, source} dicts where *source*
         is ``"data_uri"`` or ``"file"``.
         """
         import base64
 
         images = []
-        output_dir = Path(abs_path).parent
+        output_dir = assets_dir if assets_dir else Path(abs_path).parent
         stem = Path(rel_path).stem
 
         # Extract data URI images by finding ![...]( then scanning for
@@ -1292,6 +1313,9 @@ class DocConvert:
             )
             if saved:
                 saved["source"] = "data_uri"
+                # Prefix with subdirectory name so markdown links resolve
+                if assets_dir:
+                    saved["filename"] = f"{stem}/{saved['filename']}"
                 images.append(saved)
             search_start = paren_close + 1
 
@@ -1303,13 +1327,17 @@ class DocConvert:
 
         # File-referenced images (non-data-URI)
         file_img_re = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+        parent_dir = Path(abs_path).parent
         for m in file_img_re.finditer(md_content):
             img_path = m.group(2)
 
             if img_path.startswith(("data:", "http://", "https://")):
                 continue
 
+            # Check in the assets subdirectory first, then the parent dir
             full_img = output_dir / img_path
+            if not full_img.exists():
+                full_img = parent_dir / img_path
             if full_img.exists():
                 images.append({
                     "filename": os.path.basename(img_path),
