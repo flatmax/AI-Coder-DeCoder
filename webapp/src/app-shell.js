@@ -380,8 +380,9 @@ class AcApp extends JRPCClient {
     // Re-layout on window resize (display change, maximize, etc.)
     window.addEventListener('resize', this._onWindowResize);
 
-    // Track viewport width for proportional dialog resizing
+    // Track viewport dimensions for proportional dialog resizing
     this._lastViewportWidth = window.innerWidth;
+    this._lastViewportHeight = window.innerHeight;
   }
 
   disconnectedCallback() {
@@ -1164,17 +1165,29 @@ class AcApp extends JRPCClient {
 
       // Scale dialog container proportionally
       const container = this.shadowRoot?.querySelector('.dialog-container');
-      if (container && this._lastViewportWidth) {
-        const oldWidth = container.offsetWidth;
-        const newVW = window.innerWidth;
-        if (oldWidth && newVW !== this._lastViewportWidth) {
-          const ratio = oldWidth / this._lastViewportWidth;
-          const newWidth = Math.max(300, Math.round(ratio * newVW));
-          container.style.width = `${newWidth}px`;
-          try { localStorage.setItem('ac-dc-dialog-width', String(newWidth)); } catch (_) {}
+      const newVW = window.innerWidth;
+      const newVH = window.innerHeight;
+      if (container) {
+        if (this._lastViewportWidth && newVW !== this._lastViewportWidth) {
+          const oldWidth = container.offsetWidth;
+          if (oldWidth) {
+            const ratio = oldWidth / this._lastViewportWidth;
+            const newWidth = Math.max(300, Math.round(ratio * newVW));
+            container.style.width = `${newWidth}px`;
+            try { localStorage.setItem('ac-dc-dialog-width', String(newWidth)); } catch (_) {}
+          }
+        }
+        if (this._lastViewportHeight && newVH !== this._lastViewportHeight) {
+          const oldHeight = container.offsetHeight;
+          if (oldHeight) {
+            const ratio = oldHeight / this._lastViewportHeight;
+            const newHeight = Math.round(ratio * newVH);
+            container.style.height = `${newHeight}px`;
+          }
         }
       }
-      this._lastViewportWidth = window.innerWidth;
+      this._lastViewportWidth = newVW;
+      this._lastViewportHeight = newVH;
 
       const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
       if (diffV?._editor) {

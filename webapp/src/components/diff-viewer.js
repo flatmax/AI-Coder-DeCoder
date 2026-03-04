@@ -369,12 +369,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   firstUpdated() {
     this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
                              this.shadowRoot.querySelector('.editor-container');
+    this._resizeObserver = new ResizeObserver(() => {
+      if (this._editor) {
+        this._editor.layout();
+      }
+    });
+    // Observe the host element — its height: 100dvh ensures the callback
+    // fires on vertical window resizes even when the inner flex child
+    // doesn't trigger a ResizeObserver entry on its own.
+    this._resizeObserver.observe(this);
     if (this._editorContainer) {
-      this._resizeObserver = new ResizeObserver(() => {
-        if (this._editor) {
-          this._editor.layout();
-        }
-      });
       this._resizeObserver.observe(this._editorContainer);
     }
   }
@@ -1189,11 +1193,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this.updateComplete.then(() => {
       this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
                                this.shadowRoot.querySelector('.editor-container');
+      if (this._resizeObserver) this._resizeObserver.disconnect();
+      this._resizeObserver = new ResizeObserver(() => {
+        if (this._editor) this._editor.layout();
+      });
+      this._resizeObserver.observe(this);
       if (this._editorContainer) {
-        if (this._resizeObserver) this._resizeObserver.disconnect();
-        this._resizeObserver = new ResizeObserver(() => {
-          if (this._editor) this._editor.layout();
-        });
         this._resizeObserver.observe(this._editorContainer);
       }
       this._showEditor();
