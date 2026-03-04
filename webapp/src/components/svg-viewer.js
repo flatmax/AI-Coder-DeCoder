@@ -833,6 +833,25 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.fit();
       this._panZoomRight.center();
     }
+    if (this._svgEditor) {
+      this._fitAll();
+    }
+    // svg-pan-zoom may need a second pass after layout settles
+    requestAnimationFrame(() => {
+      if (this._panZoomLeft) {
+        this._panZoomLeft.resize();
+        this._panZoomLeft.fit();
+        this._panZoomLeft.center();
+      }
+      if (this._panZoomRight) {
+        this._panZoomRight.resize();
+        this._panZoomRight.fit();
+        this._panZoomRight.center();
+      }
+      if (this._svgEditor) {
+        this._fitAll();
+      }
+    });
   }
 
   // === Toolbar Actions ===
