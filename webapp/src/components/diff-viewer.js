@@ -156,6 +156,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       overflow: hidden;
     }
 
+    /* Ensure Monaco's diff editor root fills the container */
+    .editor-container > .monaco-diff-editor {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
     /* Empty state */
     .empty-state {
       display: flex;
@@ -218,6 +224,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       min-width: 0;
       position: relative;
       overflow: hidden;
+    }
+
+    /* Ensure Monaco's diff editor root fills the pane in split mode */
+    .split-container .editor-pane > .monaco-diff-editor {
+      width: 100% !important;
+      height: 100% !important;
     }
     .split-container .preview-pane {
       flex: 1;

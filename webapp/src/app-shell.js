@@ -379,6 +379,9 @@ class AcApp extends JRPCClient {
 
     // Re-layout on window resize (display change, maximize, etc.)
     window.addEventListener('resize', this._onWindowResize);
+
+    // Track viewport width for proportional dialog resizing
+    this._lastViewportWidth = window.innerWidth;
   }
 
   disconnectedCallback() {
@@ -1150,11 +1153,29 @@ class AcApp extends JRPCClient {
    * Force viewers to re-layout when the window is resized
    * (e.g. laptop lid reopen, maximize, display change).
    * Throttled to one layout per animation frame to avoid jank.
+   *
+   * Also scales the dialog container proportionally so the
+   * dialog / editor split ratio is preserved across window sizes.
    */
   _onWindowResize() {
     if (this._resizeRAF) return;
     this._resizeRAF = requestAnimationFrame(() => {
       this._resizeRAF = null;
+
+      // Scale dialog container proportionally
+      const container = this.shadowRoot?.querySelector('.dialog-container');
+      if (container && this._lastViewportWidth) {
+        const oldWidth = container.offsetWidth;
+        const newVW = window.innerWidth;
+        if (oldWidth && newVW !== this._lastViewportWidth) {
+          const ratio = oldWidth / this._lastViewportWidth;
+          const newWidth = Math.max(300, Math.round(ratio * newVW));
+          container.style.width = `${newWidth}px`;
+          try { localStorage.setItem('ac-dc-dialog-width', String(newWidth)); } catch (_) {}
+        }
+      }
+      this._lastViewportWidth = window.innerWidth;
+
       const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
       if (diffV?._editor) {
         diffV._editor.layout();
