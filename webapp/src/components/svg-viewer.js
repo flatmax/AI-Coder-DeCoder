@@ -25,7 +25,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     _activeIndex: { type: Number, state: true },
     _dirtySet:    { type: Object, state: true },
     _zoomLevel:   { type: Number, state: true },
-    _mode:        { type: String, state: true },       // 'select' | 'pan'
+    _mode:        { type: String, state: true },       // 'select' | 'pan' | 'present'
     _selectedTag: { type: String, state: true },       // tag name of selected element
   };
 
@@ -83,7 +83,53 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       cursor: grabbing;
     }
 
-    /* Fit button — floating bottom-right */
+    /* Presentation mode — hide left panel, full width editor */
+    :host(.present-mode) .left-panel,
+    :host(.present-mode) .splitter {
+      display: none;
+    }
+    :host(.present-mode) .diff-panel {
+      flex: 1;
+    }
+
+    /* Floating action buttons — bottom-right stack */
+    .floating-actions {
+      position: absolute;
+      bottom: 12px;
+      right: 16px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .float-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-size: 1rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, color 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .float-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .float-btn.active {
+      background: var(--accent-primary, #4fc3f7);
+      color: #111;
+      border-color: var(--accent-primary, #4fc3f7);
+    }
+
+    /* Legacy alias — keep existing references working */
     .fit-btn {
       position: absolute;
       bottom: 12px;
@@ -473,8 +519,32 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     this._mode = mode;
     this._selectedTag = '';
 
-    // Re-inject and re-initialize for the new mode
-    this.updateComplete.then(() => this._injectSvgContent());
+    // Toggle the host CSS class for presentation mode
+    if (mode === 'present') {
+      this.classList.add('present-mode');
+    } else {
+      this.classList.remove('present-mode');
+    }
+
+    // Re-inject and re-initialize for the new mode.
+    // Double-await: first for Lit to re-render, then an extra rAF so the
+    // browser has applied the CSS layout change (hiding/showing the left
+    // panel) before we measure container dimensions in _fitAll.
+    this.updateComplete.then(() => {
+      requestAnimationFrame(() => this._injectSvgContent());
+    });
+  }
+
+  /**
+   * Toggle presentation mode: full-width editor with the left panel hidden.
+   * If already in present mode, returns to select mode.
+   */
+  _togglePresent() {
+    if (this._mode === 'present') {
+      this._setMode('select');
+    } else {
+      this._setMode('present');
+    }
   }
 
   /**
@@ -780,7 +850,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   }
 
   _fitAll() {
-    if (this._panZoomLeft) {
+    if (this._panZoomLeft && this._mode !== 'present') {
       this._panZoomLeft.resize();
       this._panZoomLeft.fit();
       this._panZoomLeft.center();
@@ -792,13 +862,13 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       this._panZoomRight.center();
     }
 
-    // In select mode, fit the editor to its content.  We prefer getBBox()
-    // to get the true content bounds (which may differ from the authored
-    // viewBox if the SVG was previously edited or has content outside the
-    // viewBox).  Fall back to the stashed original viewBox only when
-    // getBBox() returns degenerate results (e.g. SVGs with <defs> containing
-    // font glyphs or clip paths in fractional coordinates).
-    if (this._mode === 'select' && this._svgEditor) {
+    // In select/present mode, fit the editor to its content.  We prefer
+    // getBBox() to get the true content bounds (which may differ from the
+    // authored viewBox if the SVG was previously edited or has content
+    // outside the viewBox).  Fall back to the stashed original viewBox only
+    // when getBBox() returns degenerate results (e.g. SVGs with <defs>
+    // containing font glyphs or clip paths in fractional coordinates).
+    if ((this._mode === 'select' || this._mode === 'present') && this._svgEditor) {
       const container = this.shadowRoot.querySelector('.svg-right');
       const rightSvg = container?.querySelector('svg');
       let fitVb = null;
@@ -1107,10 +1177,20 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-      if (this._mode === 'select') {
+      if (this._mode === 'select' || this._mode === 'present') {
         e.preventDefault();
         this._undo();
       }
+      return;
+    }
+    if (e.key === 'F11') {
+      e.preventDefault();
+      this._togglePresent();
+      return;
+    }
+    if (e.key === 'Escape' && this._mode === 'present') {
+      e.preventDefault();
+      this._setMode('select');
       return;
     }
   }
@@ -1188,14 +1268,18 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     // Dispose everything before replacing content
     this._disposeAll();
 
-    // Inject original SVG (left, always read-only)
+    // Inject original SVG (left, read-only — skip in present mode)
     const originalSvg = file.original || file.modified || '';
     const modifiedSvg = file.modified || '';
 
-    leftContainer.innerHTML = originalSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
-    rightContainer.innerHTML = modifiedSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
+    if (this._mode !== 'present') {
+      leftContainer.innerHTML = originalSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
+      this._prepareSvgElement(leftContainer);
+    } else {
+      leftContainer.innerHTML = '';
+    }
 
-    this._prepareSvgElement(leftContainer);
+    rightContainer.innerHTML = modifiedSvg.trim() || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
     this._prepareSvgElement(rightContainer, { editable: true });
 
     // Stash the original viewBox of the right SVG before the editor modifies it
@@ -1205,10 +1289,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     // Resolve relative image references (e.g. sibling .jpg/.png files from
     // doc-convert slides) by fetching them as base64 data URIs from the repo.
     const filePath = file.path;
-    Promise.all([
-      this._resolveImageHrefs(leftContainer, filePath),
-      this._resolveImageHrefs(rightContainer, filePath),
-    ]).catch(err => console.warn('Image resolution failed:', err));
+    const resolvePromises = [this._resolveImageHrefs(rightContainer, filePath)];
+    if (this._mode !== 'present') {
+      resolvePromises.push(this._resolveImageHrefs(leftContainer, filePath));
+    }
+    Promise.all(resolvePromises).catch(err => console.warn('Image resolution failed:', err));
 
     // Attach context menu to right panel
     rightContainer.removeEventListener('contextmenu', this._onContextMenu);
@@ -1219,9 +1304,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       // Skip if a newer _injectSvgContent call has superseded this one
       if (gen !== this._injectGeneration) return;
 
-      this._initLeftPanZoom();
+      if (this._mode !== 'present') {
+        this._initLeftPanZoom();
+      }
 
-      if (this._mode === 'select') {
+      if (this._mode === 'select' || this._mode === 'present') {
         this._initEditor();
       } else {
         this._initRightPanZoom();
@@ -1250,8 +1337,15 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             aria-label="${file.path}${isDirty ? ', unsaved changes, press to save' : file.is_new ? ', new file' : ', no changes'}"
             @click=${() => isDirty ? this._save() : null}
           ></button>
-          <button class="fit-btn" @click=${this._fitAll} title="Fit to view">⊡</button>
-          <div class="diff-panel">
+          <div class="floating-actions">
+            <button
+              class="float-btn ${this._mode === 'present' ? 'active' : ''}"
+              @click=${this._togglePresent}
+              title="${this._mode === 'present' ? 'Exit presentation (Esc / F11)' : 'Presentation mode (F11)'}"
+            >◱</button>
+            <button class="float-btn" @click=${this._fitAll} title="Fit to view">⊡</button>
+          </div>
+          <div class="diff-panel left-panel">
             <div class="svg-container svg-left"></div>
           </div>
           <div class="splitter"></div>

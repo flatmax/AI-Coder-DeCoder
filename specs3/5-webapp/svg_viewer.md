@@ -31,9 +31,11 @@ Both viewers maintain independent tab state. Switching between an open `.svg` ta
 
 ## Layout
 
+### Normal Layout (Select / Pan Mode)
+
 ```
 ┌──────────────────────────────────────────────────┐
-│                                         [●] [⊡]  │
+│                                      [●] [◱][⊡]  │
 │                                                   │
 │   ┌──────────┐    │    ┌──────────┐              │
 │   │  SVG     │    │    │  SVG     │              │
@@ -44,8 +46,27 @@ Both viewers maintain independent tab state. Switching between an open `.svg` ta
 │   (read-only)      │   (editable)                │
 └──────────────────────────────────────────────────┘
         [●] = status LED (top-right)
+        [◱] = presentation mode toggle (bottom-right)
         [⊡] = fit button (bottom-right)
 ```
+
+### Presentation Layout
+
+```
+┌──────────────────────────────────────────────────┐
+│                                      [●] [◱][⊡]  │
+│                                                   │
+│   ┌──────────────────────────────────────────┐   │
+│   │                                          │   │
+│   │           SVG modified                   │   │
+│   │           (editable, full width)         │   │
+│   │                                          │   │
+│   └──────────────────────────────────────────┘   │
+│                                                   │
+└──────────────────────────────────────────────────┘
+```
+
+In presentation mode the left panel and splitter are hidden via CSS (`display: none`), and the right panel expands to fill the full width. The `SvgEditor` remains active so all editing operations (drag, resize, text edit, undo) continue to work. The left panel's SVG content is not injected and its `svg-pan-zoom` instance is not initialized, avoiding unnecessary work on a hidden element.
 
 There is no tab bar or bottom toolbar — the viewer is a minimal chrome layout with only floating overlay controls.
 
@@ -79,8 +100,9 @@ The viewer has two modes, switchable programmatically via `_setMode()` (no UI to
 |------|-----------|-------------|---------|
 | **Select** (default) | `svg-pan-zoom` (read-only navigation) | `SvgEditor` (visual editing) | Edit SVG elements by dragging, resizing, and typing |
 | **Pan** | `svg-pan-zoom` (navigation) | `svg-pan-zoom` (navigation) | Navigate both panels without editing |
+| **Present** | Hidden | `SvgEditor` (visual editing, full width) | Full-width editor with left panel hidden |
 
-Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger.
+Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger. Presentation mode is toggled via the `◱` floating button or the F11 keyboard shortcut.
 
 ## Synchronized Pan/Zoom
 
@@ -200,9 +222,18 @@ Ctrl+S or clicking the dirty status LED saves the modified SVG content to disk v
 
 There is no persistent toolbar. The viewer uses floating overlay buttons and keyboard shortcuts for all actions.
 
+### Floating Action Buttons
+
+The bottom-right corner of the diff container holds a vertical stack of 32×32px floating buttons (`.floating-actions`), each with a rounded border, box-shadow, and hover highlight:
+
+| Button | Icon | Action |
+|--------|------|--------|
+| Presentation toggle | `◱` | Toggle presentation mode (full-width editor). Highlighted with accent color when active |
+| Fit | `⊡` | Fit content to view |
+
 ### Fit Button
 
-A floating `⊡` button in the bottom-right corner of the diff container. Fits both panels so SVG content is fully visible within the available space. Styled as a 32×32px rounded button with border, background blur, and box-shadow for visibility over SVG content. Hover state lightens the background and text color.
+The `⊡` button fits both panels so SVG content is fully visible within the available space.
 
 Fitting respects the SVG's authored `viewBox` when one exists. Many SVGs — especially those with `<defs>` containing font glyphs, clip paths, or symbol definitions with fractional coordinates — produce misleading `getBBox()` results that don't reflect the intended visible area. The authored viewBox is the correct viewport in these cases.
 
@@ -309,6 +340,8 @@ All toolbar-level actions are accessible only via keyboard shortcuts. Element-le
 | Ctrl+S | Viewer | Save modified SVG |
 | Ctrl+Z | Viewer (Select mode) | Undo last edit |
 | Ctrl+Shift+C | Viewer | Copy SVG as PNG image to clipboard |
+| F11 | Viewer | Toggle presentation mode |
+| Escape | Viewer (Present mode) | Exit presentation mode (back to Select) |
 | Ctrl+C | SvgEditor | Copy selected element(s) |
 | Ctrl+V | SvgEditor | Paste copied element(s) with offset |
 | Ctrl+D | SvgEditor | Duplicate selected element(s) in place |
@@ -387,6 +420,10 @@ Click on an SVG element to see its attributes, path data, and position in the SV
 ### Source Editor Panel
 
 A split view with a Monaco text editor showing the SVG source alongside the rendered view, with live preview updates on keystroke.
+
+### Full-Screen Presentation
+
+~~A full-width editing view that hides the left panel for focused editing or presenting.~~ Implemented as presentation mode — toggled via the `◱` button or F11, exited via Escape or toggling again.
 
 ### Export
 

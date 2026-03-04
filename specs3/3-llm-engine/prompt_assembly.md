@@ -168,7 +168,9 @@ README.md
 src/main.py
 ```
 
-### URL Context (Uncached)
+### URL Context (Partially Cached)
+
+URL content that has graduated to a cached tier (L1–L0) is included in that tier's content block (concatenated into the tier's files section with a `# URL Context (continued)` header). Only URLs **not** in any cached tier appear in the uncached URL context pair:
 
 ```pseudo
 {"role": "user", "content": URL_CONTEXT_HEADER + joined_url_parts}
@@ -184,6 +186,8 @@ The following content was fetched from URLs mentioned in the conversation:
 ```
 
 Multiple URLs joined with `\n---\n`. Each URL formatted as title + content + optional symbol map.
+
+URL content is static once fetched, so `url:{hash}` items enter the stability tracker directly at L1 (entry_n = 9) on first appearance. They promote through tiers normally from there. When all URLs are in cached tiers, the uncached URL context pair is omitted entirely.
 
 ### Active Files (Uncached)
 
@@ -306,6 +310,14 @@ for tier in [L0, L1, L2, L3]:
             if content:
                 files_text += format_as_fenced_block(path, content) + "\n\n"
 
+        elif key starts with "url:":
+            url_hash = key.removeprefix("url:")
+            url_content = url_service.get_url_content_by_hash(url_hash)
+            if url_content:
+                formatted = url_content.format_for_prompt()
+                if formatted:
+                    files_text += "\n---\n" + formatted + "\n"
+
         elif key starts with "history:":
             index = int(key.removeprefix("history:"))
             # Collect history message pairs by index
@@ -320,11 +332,12 @@ for tier in [L0, L1, L2, L3]:
 
 ### Step 3: Determine Exclusions
 
-Files in any cached tier must be excluded from the active "Working Files" section and from the symbol map output:
+Files in any cached tier must be excluded from the active "Working Files" section and from the symbol map output. URLs in any cached tier must be excluded from the uncached URL context pair:
 
 ```pseudo
 graduated_files = set()
 symbol_map_exclude = set()
+graduated_urls = set()  # URL hashes in cached tiers
 
 for tier in [L0, L1, L2, L3]:
     for key in tracker.get_tier_items(tier):
@@ -335,6 +348,8 @@ for tier in [L0, L1, L2, L3]:
         elif key starts with "sym:" or key starts with "doc:":
             path = key.split(":", 1)[1]
             symbol_map_exclude.add(path)  # index block in tier, exclude from main map
+        elif key starts with "url:":
+            graduated_urls.add(key.removeprefix("url:"))
 
 # Also exclude selected files whose symbol blocks are in active
 for path in selected_files:
@@ -366,10 +381,12 @@ messages = context_manager.assemble_tiered_messages(
 | `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; index block excluded from main map |
 | `sym:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
 | `doc:{path}` in tier | `DocIndex.get_file_doc_block(path)` | Excluded from main doc index output |
+| `url:{hash}` in tier | `URLService.get_url_content(url).format_for_prompt()` | Excluded from uncached URL context pair |
 | `history:{N}` in tier | `ContextManager.get_history()[N]` | Excluded from active history messages |
 | `file:{path}` in active | `FileContext.get_content(path)` | Index block excluded from main map (full content present) |
 | `sym:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
 | `doc:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
+| `url:{hash}` in active | Not rendered separately | Listed in active items for N-tracking only (first request only — enters L1 immediately) |
 
 ### A File Never Appears Twice
 
@@ -378,3 +395,9 @@ A file's content is present in exactly one location:
 - **Full content** in the active Working Files section — index block excluded from main map
 - **Index block only** in a cached tier — when full content is not selected
 - **Index block only** in the main map — default for unselected, non-graduated files
+
+### A URL Never Appears Twice
+
+A URL's content is present in exactly one location:
+- **Formatted content** in a cached tier block (L1 or above) — excluded from uncached URL context pair
+- **Formatted content** in the uncached URL context pair — only on the first request before tier entry

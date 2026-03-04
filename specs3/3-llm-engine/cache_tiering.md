@@ -4,7 +4,7 @@
 
 The cache tiering system organizes LLM prompt content into stability-based tiers that align with provider cache breakpoints (e.g., Anthropic's `cache_control: {"type": "ephemeral"}`). Content that remains unchanged across requests promotes to higher tiers; changed content demotes. This reduces re-ingestion costs.
 
-Three categories of content are managed: **files** (full content), **symbol map entries** (compact structure), and **history messages** (conversation pairs).
+Four categories of content are managed: **files** (full content), **symbol map entries** (compact structure), **history messages** (conversation pairs), and **URL content** (fetched web pages, GitHub repos, documentation).
 
 ## Tier Structure
 
@@ -41,6 +41,12 @@ SHA256 hash of: file content (for files), compact symbol block (for symbols), or
 ## Graduation: Active → L3
 
 Files/symbols with N ≥ 3 graduate to L3 **regardless of whether they're still in the active items list**. Still-selected files have their content move from the uncached "Working Files" section to the cached L3 block.
+
+### URL Content — Direct Tier Entry
+
+URL content is static once fetched (web pages, GitHub repos, documentation). Unlike files which may be edited, fetched URL content never changes. URLs therefore skip the active → L3 graduation path entirely and enter directly at **L1** with `entry_n = 9`. This ensures they are cached from their first appearance, avoiding unnecessary re-ingestion costs.
+
+Tracked as `url:{url_hash}` items where `url_hash` is a short hash of the URL string. When a URL is removed from context (via the URL chips UI), its tracker entry is removed and the affected tier is marked as broken. When a URL is re-fetched (cache invalidation), its content hash changes, causing a normal demotion to active — but since the content is again static, it re-stabilizes quickly.
 
 ### History Graduation
 
@@ -98,7 +104,8 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 - **File unchecked** — `file:{path}` entry removed from its tier (causing a cache miss); the `sym:{path}` (or `doc:{path}`) entry **remains in whichever tier it has earned** independently (it was always tracked separately). The index block is no longer excluded from the symbol map / doc index output since the full file content is no longer in context
 - **File deleted** — both file and symbol entries removed entirely
-- Either causes a cache miss in the affected tier
+- **URL removed** — `url:{hash}` entry removed from its tier (causing a cache miss). Removed via URL chips UI (exclude or delete)
+- Any of the above causes a cache miss in the affected tier
 
 **Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
@@ -147,8 +154,9 @@ No `cross_ref_ready` gating is needed — the toggle appears unconditionally aft
 |---|---|---|
 | `sym:` | Symbol index | `symbol_index.get_file_symbol_block()` |
 | `doc:` | Doc index | `doc_index.get_file_doc_block()` |
+| `url:` | URL service | `url_service.get_url_content(url).format_for_prompt()` |
 
-Content dispatch is prefix-based, not mode-based. This allows both indexes to coexist in the tracker without collisions.
+Content dispatch is prefix-based, not mode-based. This allows both indexes and URL content to coexist in the tracker without collisions. The `url:` prefix uses a 16-char SHA256 hash of the URL string as the key suffix (same hash function as `url_cache.url_hash()`).
 
 ## The Active Items List
 
@@ -157,8 +165,11 @@ On each request, the system builds an active items list — the set of items exp
 1. **Selected file paths** — files the user has checked in the file picker
 2. **Index entries for selected files** — `sym:{path}` (code mode) or `doc:{path}` (document mode) for each selected file (excluded from symbol map / doc index output since full content is present)
 3. **Non-graduating history messages** — `history:N` entries not yet graduated
+4. **Fetched URL content** — `url:{hash}` entries for all non-excluded URLs in the URL service
 
 Index entries for **unselected** files are never in this list — they live in whichever cached tier they've earned through initialization or promotion.
+
+URL items enter directly at L1 on first appearance (see § URL Content — Direct Tier Entry) since their content is static. They appear in the active items list for hash-tracking purposes but skip the normal N ≥ 3 graduation requirement.
 
 When a selected file graduates to L3, its full content moves from the "Working Files" (uncached active) prompt section to the L3 cached block. The symbol map exclusion for that file is lifted since it's no longer in the active section.
 
@@ -240,7 +251,7 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 ## Testing Invariants
 
 - N increments only on unchanged content; resets to 0 on hash mismatch or modification
-- Graduation requires N ≥ 3 for files/symbols; history graduates via piggyback or token threshold
+- Graduation requires N ≥ 3 for files/symbols; history graduates via piggyback or token threshold; URLs enter L1 directly
 - Promoted items enter destination tier with that tier's `entry_n`, not preserved N
 - Ripple cascade propagates only into broken/empty tiers; stable tiers block promotion
 - Anchored items (below `cache_target_tokens`) have frozen N
@@ -248,5 +259,6 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 - Underfilled tiers demote one level down
 - Stale items (deleted files) are removed; affected tier marked broken
 - A file never appears as both index block and full content — when full content is in any tier, the index block (`sym:` or `doc:`) is excluded
+- A URL never appears in both a cached tier and the uncached URL context section — when `url:{hash}` is in any tier, that URL is excluded from the uncached URL context pair
 - History purge after compaction removes all `history:*` entries from tracker
 - Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate
