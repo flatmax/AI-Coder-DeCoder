@@ -11,10 +11,15 @@ import pytest
 
 from ac_dc.doc_convert import (
     DocConvert,
+    _build_color_map,
     _build_provenance_header,
     _build_svg_provenance_header,
+    _classify_fill_color,
+    _cluster_colors,
     _extract_docx_images,
+    _extract_xlsx_with_colors,
     _externalize_svg_images,
+    _fill_to_hex,
     _is_markitdown_available,
     _output_path_for,
     _parse_provenance,
@@ -654,6 +659,342 @@ class TestReplaceTruncatedUris:
         md = "![Architecture Diagram](data:image/png;base64...)"
         result = _replace_truncated_uris(md, ["arch.png"])
         assert "![Architecture Diagram](arch.png)" in result
+
+
+class TestFillToHex:
+    """Tests for _fill_to_hex helper."""
+
+    def test_solid_fill_returns_hex(self):
+        openpyxl = pytest.importorskip("openpyxl")
+        from openpyxl.styles import PatternFill
+        from ac_dc.doc_convert import _fill_to_hex
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"].fill = PatternFill(patternType="solid", fgColor="FF33AA77")
+        assert _fill_to_hex(ws["A1"]) == "33aa77"
+        wb.close()
+
+    def test_no_fill_returns_none(self):
+        openpyxl = pytest.importorskip("openpyxl")
+        from ac_dc.doc_convert import _fill_to_hex
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "plain"
+        assert _fill_to_hex(ws["A1"]) is None
+        wb.close()
+
+    def test_black_fill_returns_none(self):
+        openpyxl = pytest.importorskip("openpyxl")
+        from openpyxl.styles import PatternFill
+        from ac_dc.doc_convert import _fill_to_hex
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"].fill = PatternFill(patternType="solid", fgColor="FF000000")
+        assert _fill_to_hex(ws["A1"]) is None
+        wb.close()
+
+
+class TestClassifyFillColor:
+    """Tests for _classify_fill_color bucket logic."""
+
+    def test_bright_green(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("00aa00")
+        assert marker == "🟢"
+        assert name == "green"
+
+    def test_bright_red(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("cc2222")
+        assert marker == "🔴"
+        assert name == "red"
+
+    def test_yellow(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("ffcc00")
+        assert marker == "🟡"
+        assert name == "yellow"
+
+    def test_light_blue(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("66bbff")
+        assert marker == "🔵"
+        assert name == "light blue"
+
+    def test_near_white_ignored(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("f8f8f8")
+        assert marker is None
+
+    def test_near_black_ignored(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("0a0a0a")
+        assert marker is None
+
+    def test_none_returns_none(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color(None)
+        assert marker is None
+
+    def test_unrecognised_returns_none(self):
+        from ac_dc.doc_convert import _classify_fill_color
+        marker, name = _classify_fill_color("888888")
+        assert marker is None
+        assert name is None
+
+
+class TestColorClustering:
+    """Tests for _cluster_colors and _build_color_map."""
+
+    def test_identical_colors_single_cluster(self):
+        from ac_dc.doc_convert import _cluster_colors
+        clusters = _cluster_colors({"aa5500", "aa5500"})
+        assert len(clusters) == 1
+
+    def test_similar_colors_merged(self):
+        from ac_dc.doc_convert import _cluster_colors
+        # Two very close browns
+        clusters = _cluster_colors({"995533", "996633"})
+        assert len(clusters) == 1
+
+    def test_distant_colors_separate(self):
+        from ac_dc.doc_convert import _cluster_colors
+        # Dark brown vs light tan — distance well over 40
+        clusters = _cluster_colors({"663300", "ddbb88"})
+        assert len(clusters) == 2
+
+    def test_three_shades_get_three_clusters(self):
+        from ac_dc.doc_convert import _cluster_colors
+        # Dark, medium, light — each ~80+ apart
+        clusters = _cluster_colors({"552200", "996633", "ddbb88"})
+        assert len(clusters) == 3
+
+    def test_build_color_map_named_buckets_preserved(self):
+        from ac_dc.doc_convert import _build_color_map
+        cmap = _build_color_map({"cc2222", "00aa00"})
+        assert cmap["cc2222"][0] == "🔴"
+        assert cmap["00aa00"][0] == "🟢"
+
+    def test_build_color_map_fallback_markers_distinct(self):
+        from ac_dc.doc_convert import _build_color_map
+        cmap = _build_color_map({"552200", "ddbb88"})
+        marker_dark = cmap["552200"][0]
+        marker_light = cmap["ddbb88"][0]
+        assert marker_dark != marker_light
+
+    def test_build_color_map_single_unknown_gets_single_marker(self):
+        from ac_dc.doc_convert import _build_color_map
+        cmap = _build_color_map({"996633"})
+        assert len(cmap) == 1
+        marker, desc = cmap["996633"]
+        assert marker is not None
+        assert "#996633" in desc
+
+
+class TestExtractXlsxWithColors:
+    """Tests for colour-aware .xlsx extraction."""
+
+    @pytest.fixture
+    def colored_workbook(self, git_repo):
+        openpyxl = pytest.importorskip("openpyxl")
+        from openpyxl.styles import PatternFill
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Assignments"
+
+        ws["A1"] = "Task"
+        ws["B1"] = "Sprint A"
+        ws["C1"] = "Sprint B"
+
+        ws["A2"] = "Widget"
+        ws["B2"].fill = PatternFill(patternType="solid", fgColor="FF00AA00")
+        ws["C2"] = ""
+
+        ws["A3"] = "Gadget"
+        ws["C3"].fill = PatternFill(patternType="solid", fgColor="FFFFCC00")
+
+        ws["A4"] = "Doohickey"
+        ws["B4"].fill = PatternFill(patternType="solid", fgColor="FF66BBFF")
+
+        path = git_repo / "tasks.xlsx"
+        wb.save(str(path))
+        wb.close()
+        return path
+
+    def test_markers_present(self, colored_workbook):
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(colored_workbook)
+        assert result is not None
+        assert "NaN" not in result
+        has_marker = any(ch in result for ch in "🔴🟠🟡🟢🔵🔷🟣⬛")
+        assert has_marker
+
+    def test_legend_appended(self, colored_workbook):
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(colored_workbook)
+        assert "Cell colour legend:" in result
+
+    def test_values_preserved(self, colored_workbook):
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(colored_workbook)
+        assert "Widget" in result
+        assert "Gadget" in result
+        assert "Doohickey" in result
+        assert "Sprint A" in result
+
+    def test_empty_columns_removed(self, git_repo):
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Name"
+        ws["B1"] = None
+        ws["C1"] = "Score"
+        ws["A2"] = "Alpha"
+        ws["B2"] = None
+        ws["C2"] = "99"
+        path = git_repo / "sparse.xlsx"
+        wb.save(str(path))
+        wb.close()
+
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(path)
+        assert result is not None
+        assert "Alpha" in result
+        assert "99" in result
+        for line in result.splitlines():
+            if "Alpha" in line:
+                assert line.count("|") == 3
+                break
+
+    def test_empty_rows_removed(self, git_repo):
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Hdr"
+        ws["A2"] = "Bravo"
+        ws["A3"] = None
+        ws["A4"] = None
+        ws["A5"] = "Charlie"
+        path = git_repo / "gaps.xlsx"
+        wb.save(str(path))
+        wb.close()
+
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(path)
+        data_rows = [
+            l for l in result.splitlines()
+            if l.startswith("|") and "---" not in l and "Hdr" not in l
+        ]
+        assert len(data_rows) == 2
+
+    def test_sheet_title_as_heading(self, colored_workbook):
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(colored_workbook)
+        assert "## Assignments" in result
+
+    def test_multiple_sheets(self, git_repo):
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Apples"
+        ws1["A1"] = "Count"
+        ws1["A2"] = "42"
+        ws2 = wb.create_sheet("Oranges")
+        ws2["A1"] = "Weight"
+        ws2["A2"] = "7kg"
+        path = git_repo / "fruit.xlsx"
+        wb.save(str(path))
+        wb.close()
+
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(path)
+        assert "## Apples" in result
+        assert "## Oranges" in result
+        assert "42" in result
+        assert "7kg" in result
+
+    def test_three_shades_get_distinct_markers(self, git_repo):
+        """Three visually distinct shades should each get a unique marker."""
+        openpyxl = pytest.importorskip("openpyxl")
+        from openpyxl.styles import PatternFill
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Tiers"
+
+        ws["A1"] = "Row"
+        ws["B1"] = "Status"
+
+        # Three shades far enough apart to be separate clusters
+        dark = PatternFill(patternType="solid", fgColor="FF552200")
+        medium = PatternFill(patternType="solid", fgColor="FF996633")
+        light = PatternFill(patternType="solid", fgColor="FFDDBB88")
+
+        ws["A2"] = "Zeta"
+        ws["B2"].fill = dark
+        ws["A3"] = "Eta"
+        ws["B3"].fill = medium
+        ws["A4"] = "Theta"
+        ws["B4"].fill = light
+
+        path = git_repo / "shades.xlsx"
+        wb.save(str(path))
+        wb.close()
+
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(path)
+        assert result is not None
+
+        # Collect the distinct markers used in data rows
+        markers_seen = set()
+        for line in result.splitlines():
+            if not line.startswith("|"):
+                continue
+            if "---" in line or "Row" in line:
+                continue
+            for ch in line:
+                if ch in "⬛◆▲●■★◇▶🔴🟠🟡🟢🔵🔷🟣":
+                    markers_seen.add(ch)
+        assert len(markers_seen) == 3
+
+    def test_same_shade_gets_single_marker(self, git_repo):
+        """Identical fills across cells should all use the same marker."""
+        openpyxl = pytest.importorskip("openpyxl")
+        from openpyxl.styles import PatternFill
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Uniform"
+
+        same = PatternFill(patternType="solid", fgColor="FF996633")
+        ws["A1"] = "Col"
+        ws["A2"] = "Iota"
+        ws["B2"].fill = same
+        ws["A3"] = "Kappa"
+        ws["B3"].fill = same
+
+        path = git_repo / "uniform.xlsx"
+        wb.save(str(path))
+        wb.close()
+
+        from ac_dc.doc_convert import _extract_xlsx_with_colors
+        result = _extract_xlsx_with_colors(path)
+        assert result is not None
+
+        markers_seen = set()
+        for line in result.splitlines():
+            if not line.startswith("|"):
+                continue
+            if "---" in line or "Col" in line:
+                continue
+            for ch in line:
+                if ch in "⬛◆▲●■★◇▶🔴🟠🟡🟢🔵🔷🟣":
+                    markers_seen.add(ch)
+        assert len(markers_seen) == 1
 
 
 class TestDocxConversionIntegration:

@@ -137,6 +137,258 @@ def _output_path_for(source_path):
 # Extensions that produce per-page/per-slide SVG output instead of markdown
 _SVG_EXPORT_EXTENSIONS = {".pptx", ".odp", ".pdf"}
 
+# Extensions handled by the openpyxl colour-aware pipeline
+_XLSX_EXTENSIONS = {".xlsx", ".xls"}
+
+
+def _fill_to_hex(cell):
+    """Return the background colour hex of a cell, or None."""
+    fill = cell.fill
+    if fill is None or fill.patternType in (None, "none"):
+        return None
+    color = fill.fgColor
+    if color is None:
+        return None
+    if color.type == "rgb" and color.rgb and isinstance(color.rgb, str):
+        rgb = color.rgb
+        if len(rgb) == 8:
+            rgb = rgb[2:]
+        if len(rgb) == 6 and rgb != "000000":
+            return rgb.lower()
+    return None
+
+
+_COLOR_BUCKETS = [
+    (lambda r, g, b: r > 180 and g < 120 and b < 120, "🔴", "red"),
+    (lambda r, g, b: r > 180 and g > 100 and g < 170 and b < 80, "🟠", "orange"),
+    (lambda r, g, b: r > 180 and g > 170 and b < 120, "🟡", "yellow"),
+    (lambda r, g, b: g > 140 and g > r and g > b, "🟢", "green"),
+    (lambda r, g, b: b > 140 and b > r and g > 120, "🔵", "light blue"),
+    (lambda r, g, b: b > 150 and r < 100 and g < 100, "🔷", "blue"),
+    (lambda r, g, b: r > 120 and b > 120 and g < 100, "🟣", "purple"),
+]
+
+# Ordered pool of markers for colours that don't match a named bucket.
+# Each distinct colour cluster gets the next available marker.
+_FALLBACK_MARKERS = ["⬛", "◆", "▲", "●", "■", "★", "◇", "▶"]
+
+
+def _is_ignorable_fill(hex_rgb):
+    """Return True if a hex colour is too close to white or black to mark."""
+    if not hex_rgb:
+        return True
+    try:
+        r = int(hex_rgb[0:2], 16)
+        g = int(hex_rgb[2:4], 16)
+        b = int(hex_rgb[4:6], 16)
+    except (ValueError, IndexError):
+        return True
+    brightness = (r + g + b) / 3
+    return brightness > 230 or brightness < 25
+
+
+def _classify_fill_color(hex_rgb):
+    """Map a hex RGB colour to a named-bucket marker and colour name.
+
+    Returns ``(marker, name)`` for well-known hues, or
+    ``(None, None)`` for colours that need relative clustering.
+    Near-white and near-black fills also return ``(None, None)``.
+    """
+    if not hex_rgb:
+        return None, None
+    if _is_ignorable_fill(hex_rgb):
+        return None, None
+    try:
+        r = int(hex_rgb[0:2], 16)
+        g = int(hex_rgb[2:4], 16)
+        b = int(hex_rgb[4:6], 16)
+    except (ValueError, IndexError):
+        return None, None
+    for test_fn, marker, name in _COLOR_BUCKETS:
+        if test_fn(r, g, b):
+            return marker, name
+    return None, None
+
+
+def _color_distance(hex_a, hex_b):
+    """Euclidean RGB distance between two 6-char hex colours."""
+    ra, ga, ba = int(hex_a[0:2], 16), int(hex_a[2:4], 16), int(hex_a[4:6], 16)
+    rb, gb, bb = int(hex_b[0:2], 16), int(hex_b[2:4], 16), int(hex_b[4:6], 16)
+    return ((ra - rb) ** 2 + (ga - gb) ** 2 + (ba - bb) ** 2) ** 0.5
+
+
+def _cluster_colors(hex_set, threshold=40):
+    """Group hex colours into clusters by proximity.
+
+    Returns a list of ``(representative_hex, {member_hexes})`` tuples,
+    sorted darkest-first so that the most prominent shade gets the
+    first marker.
+    """
+    # Sort by brightness (darkest first) for stable marker assignment
+    def _brightness(h):
+        return int(h[0:2], 16) + int(h[2:4], 16) + int(h[4:6], 16)
+
+    ordered = sorted(hex_set, key=_brightness)
+    clusters = []  # [(rep, {members})]
+    for h in ordered:
+        placed = False
+        for rep, members in clusters:
+            if _color_distance(rep, h) < threshold:
+                members.add(h)
+                placed = True
+                break
+        if not placed:
+            clusters.append((h, {h}))
+    return clusters
+
+
+def _build_color_map(unique_hexes):
+    """Build a mapping from hex colour → (marker, legend_description).
+
+    Named-bucket colours (red, green, etc.) keep their emoji marker.
+    Remaining colours are clustered by proximity and assigned fallback
+    markers so that visually distinct shades get distinct symbols.
+
+    Returns ``{hex_rgb: (marker, description)}``.
+    """
+    result = {}
+    unclustered = set()
+
+    for h in unique_hexes:
+        marker, name = _classify_fill_color(h)
+        if marker:
+            result[h] = (marker, name)
+        elif not _is_ignorable_fill(h):
+            unclustered.add(h)
+
+    if not unclustered:
+        return result
+
+    clusters = _cluster_colors(unclustered)
+
+    # If every unclustered colour lands in one cluster, use a single
+    # marker — no need for numbered descriptions.
+    for ci, (rep, members) in enumerate(clusters):
+        marker = _FALLBACK_MARKERS[ci % len(_FALLBACK_MARKERS)]
+        desc = f"#{rep}"
+        if len(clusters) > 1 and len(members) > 1:
+            desc = f"#{rep} (and similar)"
+        for h in members:
+            result[h] = (marker, desc)
+
+    return result
+
+
+def _extract_xlsx_with_colors(abs_path):
+    """Read an .xlsx workbook preserving cell background colours.
+
+    Returns markdown with one section per sheet.  Coloured cells get a
+    marker emoji.  Empty columns and fully-empty rows are stripped.
+    A legend of observed colours is appended.  Returns None if openpyxl
+    is not installed or the file cannot be read.
+
+    Uses a two-pass approach: first collects all unique fill colours
+    across the entire workbook, clusters visually similar shades, and
+    assigns distinct markers per cluster so that e.g. three shades of
+    brown each get their own symbol.
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return None
+    try:
+        wb = load_workbook(str(abs_path), data_only=True)
+    except Exception as e:
+        logger.warning("openpyxl failed to open %s: %s", abs_path, e)
+        return None
+
+    # --- Pass 1: read all cells, collect text + raw hex fills -----------
+    sheet_data = []  # [(title, rows)]  where rows = [[(text, hex|None)]]
+    all_hexes = set()
+
+    for ws in wb.worksheets:
+        rows_raw = []
+        max_col = 0
+        for row in ws.iter_rows():
+            cells = []
+            for cell in row:
+                val = cell.value
+                text = "" if val is None else str(val).strip()
+                if text.lower() in ("nan", "none"):
+                    text = ""
+                hex_col = _fill_to_hex(cell)
+                if hex_col and not _is_ignorable_fill(hex_col):
+                    all_hexes.add(hex_col)
+                cells.append((text, hex_col))
+            rows_raw.append(cells)
+            if len(cells) > max_col:
+                max_col = len(cells)
+        sheet_data.append((ws.title, rows_raw, max_col))
+
+    wb.close()
+
+    # Build a unified colour map across the whole workbook
+    color_map = _build_color_map(all_hexes)
+
+    # --- Pass 2: emit markdown using the colour map --------------------
+    md_parts = []
+    legend = {}
+
+    for title, rows_raw, max_col in sheet_data:
+        if not rows_raw or max_col == 0:
+            continue
+
+        # Pad rows to uniform width
+        for row in rows_raw:
+            while len(row) < max_col:
+                row.append(("", None))
+
+        # Find columns with any content (text or colour)
+        keep_cols = [
+            ci for ci in range(max_col)
+            if any(row[ci][0] or (row[ci][1] and row[ci][1] in color_map)
+                   for row in rows_raw)
+        ]
+        if not keep_cols:
+            continue
+
+        # Apply colour markers and project to kept columns
+        rendered_rows = []
+        for row in rows_raw:
+            rendered = []
+            for ci in keep_cols:
+                text, hex_col = row[ci]
+                if hex_col and hex_col in color_map:
+                    marker, desc = color_map[hex_col]
+                    legend[marker] = desc
+                    text = f"{marker} {text}".strip() if text else marker
+                rendered.append(text)
+            rendered_rows.append(rendered)
+
+        # Drop fully-empty rows
+        rendered_rows = [r for r in rendered_rows if any(c for c in r)]
+        if not rendered_rows:
+            continue
+
+        md_parts.append(f"## {title}\n")
+        header = rendered_rows[0]
+        md_parts.append("| " + " | ".join(header) + " |")
+        md_parts.append("| " + " | ".join("---" for _ in header) + " |")
+        for row in rendered_rows[1:]:
+            while len(row) < len(header):
+                row.append("")
+            md_parts.append("| " + " | ".join(row) + " |")
+        md_parts.append("")
+
+    if legend:
+        md_parts.append("---\n")
+        md_parts.append("**Cell colour legend:**")
+        for marker, name in sorted(legend.items(), key=lambda x: x[1]):
+            md_parts.append(f"- {marker} = {name}")
+        md_parts.append("")
+
+    return "\n".join(md_parts) if md_parts else None
+
 
 def _is_libreoffice_available():
     """Check if LibreOffice is available on the PATH."""
@@ -784,8 +1036,16 @@ class DocConvert:
                 source_name, source_hash, ext,
             )
 
-        # Convert using markitdown
-        md_content = self._convert_with_markitdown(abs_path)
+        # Spreadsheets: try colour-aware extraction first
+        md_content = None
+        if ext in _XLSX_EXTENSIONS:
+            md_content = _extract_xlsx_with_colors(abs_path)
+            if md_content:
+                logger.info("Used colour-aware extraction for %s", rel_path)
+
+        # Fallback to markitdown for all formats
+        if md_content is None:
+            md_content = self._convert_with_markitdown(abs_path)
 
         if md_content is None:
             return {
