@@ -29,7 +29,7 @@ The badge truncates long branch names with ellipsis (max 140px) and shows a tool
 
 ### Filtering
 
-Text filter narrows visible nodes by path substring. Directories auto-expand when filtered.
+Text filter narrows visible nodes using **fuzzy matching** against the full path — all characters in the query must appear in the path in order, but not necessarily consecutively. For example, `edt` matches `edit_parser.py` and `sii` matches `symbol_index/index.py`. Matching is case-insensitive. Directories auto-expand when filtered, and a directory remains visible if any descendant matches.
 
 ### @-Filter
 

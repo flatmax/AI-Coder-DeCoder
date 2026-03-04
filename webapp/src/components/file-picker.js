@@ -584,11 +584,23 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     } catch {}
   }
 
+  _fuzzyMatch(text, pattern) {
+    const t = text.toLowerCase();
+    const p = pattern.toLowerCase();
+    let ti = 0;
+    for (let pi = 0; pi < p.length; pi++) {
+      const idx = t.indexOf(p[pi], ti);
+      if (idx < 0) return false;
+      ti = idx + 1;
+    }
+    return true;
+  }
+
   _matchesFilter(node) {
     if (!this._filter) return true;
     const f = this._filter.toLowerCase();
-    // Check this node
-    if (node.path.toLowerCase().includes(f)) return true;
+    // Check this node — fuzzy match against the full path
+    if (this._fuzzyMatch(node.path, f)) return true;
     // Check descendants
     if (node.children) {
       return node.children.some(c => this._matchesFilter(c));
