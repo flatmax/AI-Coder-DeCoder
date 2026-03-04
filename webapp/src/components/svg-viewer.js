@@ -609,22 +609,34 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       const bbox = leftSvg.getBBox();
       if (bbox.width > 1 && bbox.height > 1) {
         const margin = 0.03;
-        const bx = bbox.x - bbox.width * margin;
-        const by = bbox.y - bbox.height * margin;
-        const bw = bbox.width * (1 + margin * 2);
-        const bh = bbox.height * (1 + margin * 2);
+        let bx = bbox.x - bbox.width * margin;
+        let by = bbox.y - bbox.height * margin;
+        let bw = bbox.width * (1 + margin * 2);
+        let bh = bbox.height * (1 + margin * 2);
 
-        // Parse existing viewBox (if any) and take the union with getBBox
+        // Parse existing viewBox (if any)
         const existingVb = leftSvg.getAttribute('viewBox');
         if (existingVb) {
           const parts = existingVb.split(/[\s,]+/).map(Number);
           if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
             const vx = parts[0], vy = parts[1], vw = parts[2], vh = parts[3];
-            const ux = Math.min(bx, vx);
-            const uy = Math.min(by, vy);
-            const uw = Math.max(bx + bw, vx + vw) - ux;
-            const uh = Math.max(by + bh, vy + vh) - uy;
-            leftSvg.setAttribute('viewBox', `${ux} ${uy} ${uw} ${uh}`);
+
+            // Sanity check: if getBBox is vastly larger than the authored
+            // viewBox (e.g. off-screen text at x=-28000), the union would
+            // produce a huge viewport where real content is a tiny sliver.
+            // In that case, trust the authored viewBox instead.
+            const bboxArea = bw * bh;
+            const vbArea = vw * vh;
+            if (bboxArea > vbArea * 4) {
+              // getBBox is suspiciously large — keep authored viewBox
+            } else {
+              // Take the union of getBBox and authored viewBox
+              const ux = Math.min(bx, vx);
+              const uy = Math.min(by, vy);
+              const uw = Math.max(bx + bw, vx + vw) - ux;
+              const uh = Math.max(by + bh, vy + vh) - uy;
+              leftSvg.setAttribute('viewBox', `${ux} ${uy} ${uw} ${uh}`);
+            }
           } else {
             leftSvg.setAttribute('viewBox', `${bx} ${by} ${bw} ${bh}`);
           }
@@ -906,12 +918,28 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
           const bbox = rightSvg.getBBox();
           if (bbox.width > 1 && bbox.height > 1) {
             const margin = 0.03;
-            fitVb = {
+            const candidateVb = {
               x: bbox.x - bbox.width * margin,
               y: bbox.y - bbox.height * margin,
               w: bbox.width * (1 + margin * 2),
               h: bbox.height * (1 + margin * 2),
             };
+
+            // Sanity check: if getBBox area is vastly larger than the
+            // authored viewBox (e.g. off-screen text at x=-28000), the
+            // fit would make real content a tiny sliver.  Fall back to
+            // the stashed original viewBox in that case.
+            const origVb = this._originalRightViewBox;
+            if (origVb && origVb.w > 0 && origVb.h > 0) {
+              const bboxArea = candidateVb.w * candidateVb.h;
+              const origArea = origVb.w * origVb.h;
+              if (bboxArea <= origArea * 4) {
+                fitVb = candidateVb;
+              }
+              // else: skip — fall through to stashed viewBox below
+            } else {
+              fitVb = candidateVb;
+            }
           }
         } catch {
           // getBBox can fail for hidden/empty SVGs
