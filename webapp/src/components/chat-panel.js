@@ -1375,10 +1375,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       // Build edit results map from backend data
       const editMeta = {};
       if (result.edit_results) {
-        editMeta.editResults = {};
-        for (const er of result.edit_results) {
-          editMeta.editResults[er.file] = { status: er.status, message: er.message, error_type: er.error_type || '' };
-        }
+        editMeta.editResults = result.edit_results.map(er => ({
+          file: er.file,
+          status: er.status,
+          message: er.message,
+          error_type: er.error_type || '',
+        }));
       }
       if (result.passed || result.failed || result.skipped || result.not_in_context || result.already_applied) {
         editMeta.passed = result.passed || 0;
@@ -2326,9 +2328,19 @@ export class AcChatPanel extends RpcMixin(LitElement) {
    * @returns Lit template
    */
   _renderAssistantContent(content, showEditResults, isFinal) {
-    const editResultsMap = showEditResults || {};
+    const editResultsList = showEditResults || [];
     const segments = segmentResponse(content);
     const parts = [];
+
+    // Build a per-file index counter to match edit segments to results in order
+    const fileCounters = {};   // filePath → next result index for that file
+    const resultsByFile = {};  // filePath → [result, result, ...]
+    if (Array.isArray(editResultsList)) {
+      for (const er of editResultsList) {
+        if (!resultsByFile[er.file]) resultsByFile[er.file] = [];
+        resultsByFile[er.file].push(er);
+      }
+    }
 
     for (const seg of segments) {
       if (seg.type === 'text') {
@@ -2341,7 +2353,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         }
         parts.push(rendered);
       } else if (seg.type === 'edit' || seg.type === 'edit-pending') {
-        const result = editResultsMap[seg.filePath] || {};
+        const fileResults = resultsByFile[seg.filePath] || [];
+        const idx = fileCounters[seg.filePath] || 0;
+        fileCounters[seg.filePath] = idx + 1;
+        const result = fileResults[idx] || {};
         parts.push(this._renderEditBlockHtml(seg, result));
       }
     }
@@ -2422,10 +2437,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     // Collect individual non-success entries for detailed listing
     const failureEntries = [];
-    if (msg.editResults) {
-      for (const [file, er] of Object.entries(msg.editResults)) {
+    if (Array.isArray(msg.editResults)) {
+      for (const er of msg.editResults) {
         if (er.status === 'failed' || er.status === 'skipped' || er.status === 'not_in_context') {
-          failureEntries.push({ file, status: er.status, message: er.message || '', error_type: er.error_type || '' });
+          failureEntries.push({ file: er.file, status: er.status, message: er.message || '', error_type: er.error_type || '' });
         }
       }
     }
@@ -2585,7 +2600,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
 
     // Assistant message — render with edit blocks and file mentions
-    const editFilePaths = msg.editResults ? Object.keys(msg.editResults) : [];
+    const editFilePaths = Array.isArray(msg.editResults)
+      ? [...new Set(msg.editResults.map(er => er.file))]
+      : [];
     const renderedHtml = this._renderAssistantContent(content, msg.editResults, true);
 
     // Apply file mentions on the full rendered output
