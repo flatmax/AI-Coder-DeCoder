@@ -1279,8 +1279,20 @@ class DocConvert:
                 )
                 svg_path.write_text(prov + "\n" + svg)
                 svg_filenames.append(rel_filename)
-                md_lines.append(f"![{heading_label} {padded}]({rel_filename})")
-                md_lines.append("")
+
+                # When a page has both readable text and externalized
+                # raster images, embed those images directly instead of
+                # the full-page SVG (which duplicates the text visually).
+                # Fall back to the full-page SVG when there is no text
+                # or no externalized images.
+                if text and ext_images:
+                    for img_fn in ext_images:
+                        img_label = Path(img_fn).stem
+                        md_lines.append(f"![{img_label}]({stem}/{img_fn})")
+                        md_lines.append("")
+                else:
+                    md_lines.append(f"![{heading_label} {padded}]({rel_filename})")
+                    md_lines.append("")
                 logger.info(f"Saved {page_label} {i}: {rel_filename}")
 
         # Build final markdown with provenance header
