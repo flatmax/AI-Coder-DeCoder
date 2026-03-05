@@ -48,6 +48,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     _expandedTiers: { type: Object, state: true },
     _filter: { type: String, state: true },
     _stale: { type: Boolean, state: true },
+    _sortMode: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -137,6 +138,25 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     }
     .refresh-btn:hover {
       color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .sort-btn {
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .sort-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+    .sort-btn.active {
+      color: var(--accent-primary);
       border-color: var(--accent-primary);
     }
 
@@ -335,6 +355,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     this._expandedTiers = this._loadExpandedTiers();
     this._filter = '';
     this._stale = false;
+    this._sortMode = this._loadSortMode();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -455,6 +476,31 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     return fi === f.length;
   }
 
+  _toggleSort() {
+    this._sortMode = this._sortMode === 'size' ? 'name' : 'size';
+    this._saveSortMode(this._sortMode);
+  }
+
+  _saveSortMode(mode) {
+    try { localStorage.setItem('ac-dc-cache-sort', mode); } catch {}
+  }
+
+  _loadSortMode() {
+    try { return localStorage.getItem('ac-dc-cache-sort') || 'size'; } catch {}
+    return 'size';
+  }
+
+  _sortContents(contents) {
+    return [...contents].sort((a, b) => {
+      if (this._sortMode === 'size') {
+        return (b.tokens || 0) - (a.tokens || 0);
+      }
+      const nameA = (a.name || a.path || '').toLowerCase();
+      const nameB = (b.name || b.path || '').toLowerCase();
+      return nameA.localeCompare(nameB);
+    });
+  }
+
   async _viewMapBlock(item) {
     const path = item.path;
     if (!path) return;
@@ -539,11 +585,13 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     const cached = block.cached;
     const tokens = block.tokens || 0;
 
-    // Filter contents
-    const contents = (block.contents || []).filter(item => {
-      const name = item.name || item.path || item.type || '';
-      return this._fuzzyMatch(name, this._filter);
-    });
+    // Filter and sort contents
+    const contents = this._sortContents(
+      (block.contents || []).filter(item => {
+        const name = item.name || item.path || item.type || '';
+        return this._fuzzyMatch(name, this._filter);
+      })
+    );
 
     // If filter active and no matching contents, hide tier
     if (this._filter && contents.length === 0) return nothing;
@@ -651,6 +699,11 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           .value=${this._filter}
           @input=${this._onFilterInput}
         >
+        <button class="sort-btn ${this._sortMode === 'size' ? 'active' : ''}"
+          @click=${() => this._toggleSort()}
+          aria-label="Sort by ${this._sortMode === 'size' ? 'name' : 'size'}"
+          title="Sort by ${this._sortMode === 'size' ? 'name' : 'size'}"
+        >${this._sortMode === 'size' ? '⬇ Size' : '⬇ Name'}</button>
         ${this._stale ? html`<span class="stale-badge" aria-label="Data is stale">● stale</span>` : nothing}
         <button class="refresh-btn" @click=${() => this._refresh()}
           ?disabled=${this._loading}
