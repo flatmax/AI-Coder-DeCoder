@@ -303,6 +303,14 @@ Status is determined by:
 
 `current` files are shown but visually muted — they don't need re-conversion. `conflict` files show a warning icon; hovering reveals a tooltip: *"report.md exists and wasn't created by doc convert"*.
 
+### Tooltips
+
+All file paths in the tab show native browser tooltips (via `title` attributes) on hover, since paths are commonly truncated by `text-overflow: ellipsis`:
+
+- **File list rows**: hovering the file path shows `{source_path} → {output_path}` (e.g., `docs/architecture.docx → docs/architecture.md`)
+- **Progress items**: hovering the source path shows the full source and output path; hovering the output path shows the full output path; hovering error text shows the full error message
+- **Over-size warning**: the 📏 icon shows "Exceeds size limit" on hover
+
 ### Conversion Flow
 
 1. User opens Doc Convert tab
