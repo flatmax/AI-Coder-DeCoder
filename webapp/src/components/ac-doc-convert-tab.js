@@ -154,6 +154,7 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
       color: var(--text-primary);
       font-family: var(--font-mono);
       font-size: 0.76rem;
+      min-width: 0;
     }
 
     .file-size {
@@ -211,11 +212,16 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
     }
     .progress-item .status-text {
       color: var(--text-muted);
       font-size: 0.72rem;
       flex-shrink: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 50%;
     }
     .progress-item .error-text {
       color: var(--accent-red);
@@ -563,7 +569,7 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
           ?disabled=${isDisabled}
           @click=${(e) => e.stopPropagation()}
           @change=${() => this._toggleFile(file.path)}>
-        <span class="file-path" title="${file.path}">${file.path}</span>
+        <span class="file-path" title="${file.path} → ${file.output_path}">${file.path}</span>
         <span class="file-size">${formatSize(file.size)}</span>
         <span class="file-badge" style="color: ${badge.color}; border: 1px solid ${badge.color}33;">
           ${badge.label}
@@ -594,13 +600,13 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
               r.status === 'converting' ? '⚙️' :
               '⏳'
             }</span>
-            <span class="path">${r.path}</span>
+            <span class="path" title="${r.path}${r.output_path ? ` → ${r.output_path}` : ''}">${r.path}</span>
             ${r.status === 'converted' ? html`
-              <span class="status-text">→ ${r.output_path}</span>
+              <span class="status-text" title="${r.output_path}">→ ${r.output_path}</span>
             ` : r.status === 'converting' ? html`
               <span class="status-text">converting…</span>
             ` : r.error ? html`
-              <span class="error-text">${r.error}</span>
+              <span class="error-text" title="${r.error}">${r.error}</span>
             ` : html`
               <span class="status-text">${r.status}</span>
             `}
