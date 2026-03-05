@@ -766,6 +766,7 @@ class DocConvert:
         self._repo = repo
         self._config = config_manager
         self._collab = None  # Set by main.py when --collab is passed
+        self._event_callback = None  # Set by main.py for progress events
 
     @property
     def _doc_convert_config(self):
@@ -918,14 +919,15 @@ class DocConvert:
     def convert_files(self, paths):
         """RPC: Convert selected files to markdown.
 
+        Returns immediately with {status: "started"} and sends per-file
+        progress events via _event_callback. The final event contains
+        the full summary.
+
         Args:
             paths: list of relative paths to source documents
 
         Returns:
-            {
-                results: [{path, status, output_path, error?, images?}],
-                summary: {converted, failed, skipped}
-            }
+            {status: "started", total: int} immediately
         """
         restricted = self._check_localhost_only()
         if restricted:
@@ -937,6 +939,163 @@ class DocConvert:
         if not self.available:
             return {"error": "markitdown is not installed. Install with: pip install ac-dc[docs]"}
 
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._convert_files_background(list(paths)))
+            else:
+                # Fallback: synchronous conversion (shouldn't happen in normal flow)
+                return self._convert_files_sync(list(paths))
+        except Exception:
+            return self._convert_files_sync(list(paths))
+
+        return {"status": "started", "total": len(paths)}
+
+    async def _convert_files_background(self, paths):
+        """Background task: convert files one at a time with progress events."""
+        import asyncio
+        import traceback
+        from concurrent.futures import ThreadPoolExecutor
+
+        config = self._doc_convert_config
+        max_size_mb = config.get("max_source_size_mb", 50)
+        max_size_bytes = max_size_mb * 1024 * 1024
+
+        root = self._repo.root
+        results = []
+        converted = 0
+        failed = 0
+        skipped = 0
+        total = len(paths)
+
+        # Use a dedicated single-thread executor so conversion work
+        # doesn't compete with the default executor used by the server.
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="docconv")
+
+        try:
+            for i, rel_path in enumerate(paths, start=1):
+                abs_path = root / rel_path
+                output_rel = _output_path_for(rel_path)
+                output_abs = root / output_rel
+
+                # Send "converting" progress event
+                try:
+                    await self._send_convert_event({
+                        "stage": "converting",
+                        "path": rel_path,
+                        "index": i,
+                        "total": total,
+                    })
+                except Exception:
+                    pass
+
+                result_entry = None
+
+                # Validate path
+                try:
+                    self._repo._resolve_path(rel_path)
+                except ValueError as e:
+                    result_entry = {
+                        "path": rel_path,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                    failed += 1
+
+                # Check existence
+                if result_entry is None and not abs_path.exists():
+                    result_entry = {
+                        "path": rel_path,
+                        "status": "failed",
+                        "error": "File not found",
+                    }
+                    failed += 1
+
+                # Check size
+                if result_entry is None:
+                    try:
+                        size = abs_path.stat().st_size
+                    except OSError:
+                        size = 0
+
+                    if size > max_size_bytes:
+                        result_entry = {
+                            "path": rel_path,
+                            "status": "skipped",
+                            "error": f"File exceeds {max_size_mb}MB limit",
+                        }
+                        skipped += 1
+
+                # Convert
+                if result_entry is None:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        result_entry = await loop.run_in_executor(
+                            executor,
+                            lambda rp=rel_path, ap=abs_path, orel=output_rel, oabs=output_abs:
+                                self._convert_single(rp, ap, orel, oabs),
+                        )
+                        if result_entry["status"] == "converted":
+                            converted += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        logger.error("Conversion failed for %s: %s\n%s", rel_path, e, traceback.format_exc())
+                        result_entry = {
+                            "path": rel_path,
+                            "status": "failed",
+                            "error": str(e),
+                        }
+                        failed += 1
+
+                results.append(result_entry)
+
+                # Send per-file result event
+                try:
+                    await self._send_convert_event({
+                        "stage": "file_done",
+                        "path": rel_path,
+                        "index": i,
+                        "total": total,
+                        "result": result_entry,
+                    })
+                except Exception:
+                    pass
+
+                # Yield to event loop so WebSocket frames flush
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error("_convert_files_background crashed: %s\n%s", e, traceback.format_exc())
+        finally:
+            executor.shutdown(wait=False)
+
+        # Send final summary event
+        summary = {
+            "converted": converted,
+            "failed": failed,
+            "skipped": skipped,
+        }
+        try:
+            await self._send_convert_event({
+                "stage": "complete",
+                "results": results,
+                "summary": summary,
+            })
+        except Exception as e:
+            logger.error("Failed to send final convert event: %s", e)
+
+    async def _send_convert_event(self, data):
+        """Send a doc convert progress event to all clients."""
+        if self._event_callback:
+            try:
+                await self._event_callback("docConvertProgress", data)
+            except Exception as e:
+                logger.warning(f"Failed to send convert progress event: {e}")
+
+    def _convert_files_sync(self, paths):
+        """Synchronous fallback for convert_files (no event loop available)."""
         config = self._doc_convert_config
         max_size_mb = config.get("max_source_size_mb", 50)
         max_size_bytes = max_size_mb * 1024 * 1024

@@ -528,9 +528,9 @@ class AcApp extends JRPCClient {
       this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})...`;
       this.requestUpdate();
 
-      // jrpc-oo reconnect: re-open the WebSocket
+      // jrpc-oo reconnect: re-trigger WebSocket connection
       try {
-        this.open(this.serverURI);
+        this.serverChanged();
       } catch (e) {
         console.error('Reconnect failed:', e);
         this._scheduleReconnect();
@@ -660,6 +660,17 @@ class AcApp extends JRPCClient {
   }
 
   /**
+   * Receive document conversion progress from server.
+   * Called via RPC: AcApp.docConvertProgress(data)
+   */
+  docConvertProgress(data) {
+    window.dispatchEvent(new CustomEvent('doc-convert-progress', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
    * Receive admission request notification (another client wants to connect).
    * Called via RPC: AcApp.admissionRequest(data)
    *
@@ -747,6 +758,10 @@ class AcApp extends JRPCClient {
       // Dismiss overlay with a short delay for the animation
       setTimeout(() => {
         this._startupVisible = false;
+        if (this._pendingReopen) {
+          this._pendingReopen = false;
+          this._reopenLastFileNow();
+        }
       }, 400);
     }
 
@@ -778,8 +793,8 @@ class AcApp extends JRPCClient {
       if (role) {
         SharedRpc.setCollabRole(role);
       }
-    } catch (e) {
-      console.warn('Failed to fetch collab role:', e);
+    } catch (_) {
+      // Expected in non-collab mode — Collab class not registered
     }
   }
 
@@ -793,8 +808,8 @@ class AcApp extends JRPCClient {
           detail: { count: this._connectedClients },
         }));
       }
-    } catch (e) {
-      console.warn('Failed to fetch connected clients:', e);
+    } catch (_) {
+      // Expected in non-collab mode — Collab class not registered
     }
   }
 
@@ -821,10 +836,14 @@ class AcApp extends JRPCClient {
       }
 
       // If server already finished initialization (e.g. browser connected
-      // after suspend/resume or slow page load), dismiss the startup overlay.
-      // The startupProgress("ready") RPC may have been sent while disconnected.
+      // after suspend/resume or slow page load), dismiss the startup overlay
+      // and reopen the last file.
       if (state?.init_complete) {
         this._startupVisible = false;
+        if (this._pendingReopen) {
+          this._pendingReopen = false;
+          this._reopenLastFileNow();
+        }
       }
 
       // Broadcast mode from server state
@@ -858,8 +877,21 @@ class AcApp extends JRPCClient {
 
   /**
    * Re-open the last viewed file after a page refresh.
+   * Delayed slightly to avoid blocking the event loop during startup
+   * when heavy init tasks are running server-side.
    */
   _reopenLastFile() {
+    // Wait for startup to finish before reopening files — file fetch
+    // RPCs block the server event loop and can cause disconnects
+    // during heavy initialization.
+    if (this._startupVisible) {
+      this._pendingReopen = true;
+    } else {
+      this._reopenLastFileNow();
+    }
+  }
+
+  _reopenLastFileNow() {
     try {
       const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;

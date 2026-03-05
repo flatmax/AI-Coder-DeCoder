@@ -293,8 +293,21 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     this._available = false;
     this._converting = false;
     this._conversionResults = null;
+    this._conversionSummary = null;
     this._loading = false;
     this._filter = '';
+
+    this._onConvertProgress = this._onConvertProgress.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener('doc-convert-progress', this._onConvertProgress);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('doc-convert-progress', this._onConvertProgress);
   }
 
   onRpcReady() {
@@ -353,11 +366,47 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     this._selected = new Set();
   }
 
+  /**
+   * Handle incremental progress events from the server.
+   */
+  _onConvertProgress(e) {
+    const data = e.detail;
+    if (!data) return;
+
+    if (data.stage === 'converting') {
+      // Mark file as actively converting
+      if (this._conversionResults) {
+        this._conversionResults = this._conversionResults.map(r =>
+          r.path === data.path ? { ...r, status: 'converting' } : r
+        );
+      }
+    } else if (data.stage === 'file_done') {
+      // Update with actual result for this file
+      if (this._conversionResults && data.result) {
+        this._conversionResults = this._conversionResults.map(r =>
+          r.path === data.path ? { ...data.result } : r
+        );
+      }
+    } else if (data.stage === 'complete') {
+      // Final summary — conversion finished
+      this._conversionResults = data.results || this._conversionResults;
+      this._conversionSummary = data.summary;
+      this._converting = false;
+
+      // Refresh file picker tree
+      const paths = (this._conversionResults || []).map(r => r.path);
+      window.dispatchEvent(new CustomEvent('files-modified', {
+        detail: { paths },
+      }));
+    }
+  }
+
   async _convert() {
     if (this._selected.size === 0) return;
     if (this._converting) return;
 
     this._converting = true;
+    this._conversionSummary = null;
     this._conversionResults = [...this._selected].map(p => ({
       path: p,
       status: 'pending',
@@ -382,19 +431,28 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
         }];
         return;
       }
-      this._conversionResults = result.results || [];
-      this._conversionSummary = result.summary;
-
-      // Refresh file picker tree
-      window.dispatchEvent(new CustomEvent('files-modified', {
-        detail: { paths: paths },
-      }));
+      // result.status === 'started' — progress comes via events
+      // If synchronous fallback returned full results, handle that too
+      if (result.results) {
+        this._conversionResults = result.results;
+        this._conversionSummary = result.summary;
+        window.dispatchEvent(new CustomEvent('files-modified', {
+          detail: { paths },
+        }));
+      }
     } catch (e) {
-      this._conversionResults = [{
-        path: 'all',
-        status: 'failed',
-        error: e.message || 'Conversion failed',
-      }];
+      // If progress events already arrived, don't overwrite with error
+      const hasProgress = this._conversionResults?.some(
+        r => r.status !== 'pending'
+      );
+      if (!hasProgress) {
+        this._converting = false;
+        this._conversionResults = [{
+          path: 'all',
+          status: 'failed',
+          error: e.message || 'Conversion failed',
+        }];
+      }
     }
   }
 
@@ -522,7 +580,9 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
     return html`
       <div class="progress-view">
         <div class="progress-header">
-          ${summary ? 'Conversion complete' : 'Converting…'}
+          ${summary
+            ? `Conversion complete — ${summary.converted} converted${summary.failed ? `, ${summary.failed} failed` : ''}${summary.skipped ? `, ${summary.skipped} skipped` : ''}`
+            : `Converting… ${results.filter(r => r.status !== 'pending' && r.status !== 'converting').length} / ${results.length}`}
         </div>
 
         ${results.map(r => html`
@@ -531,11 +591,14 @@ export class AcDocConvertTab extends RpcMixin(LitElement) {
               r.status === 'converted' ? '✅' :
               r.status === 'failed' ? '❌' :
               r.status === 'skipped' ? '⏭️' :
+              r.status === 'converting' ? '⚙️' :
               '⏳'
             }</span>
             <span class="path">${r.path}</span>
             ${r.status === 'converted' ? html`
               <span class="status-text">→ ${r.output_path}</span>
+            ` : r.status === 'converting' ? html`
+              <span class="status-text">converting…</span>
             ` : r.error ? html`
               <span class="error-text">${r.error}</span>
             ` : html`

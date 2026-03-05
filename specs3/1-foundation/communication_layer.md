@@ -27,7 +27,7 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 | Webapp bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
-| Remote timeout | 60 seconds |
+| Remote timeout | 120 seconds |
 
 ## jrpc-oo Patterns
 
@@ -411,6 +411,7 @@ Three top-level service classes, registered via `add_class()`:
 - RPC errors follow JSON-RPC 2.0 error format
 - Application-level errors return `{error: "message"}` dicts
 - Connection loss triggers reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
+- Reconnection uses `serverChanged()` (jrpc-oo's WebSocket re-establishment method)
 
 ## Server Initialization Pseudocode
 
@@ -437,10 +438,10 @@ llm_service = LLMService(
 #    Without --collab: plain JRPCServer, binds 127.0.0.1 (localhost only)
 if collab_enabled:
     collab = Collab()
-    server = CollabServer(port, collab=collab, remote_timeout=60)
+    server = CollabServer(port, collab=collab, remote_timeout=120)
     server.add_class(collab)
 else:
-    server = JRPCServer(port, remote_timeout=60)
+    server = JRPCServer(port, remote_timeout=120)
 server.add_class(repo)
 server.add_class(llm_service)
 server.add_class(settings)
@@ -455,31 +456,46 @@ webbrowser.open(url)
 
 ### Phase 2: Deferred Initialization (with Progress)
 
+Phase 2 runs as an `asyncio.ensure_future()` background task so the event loop remains free to handle WebSocket frames (pings, RPC calls) throughout. Each CPU-bound step uses `run_in_executor` to avoid GIL starvation.
+
 ```pseudo
 # 7. Wait briefly for browser to connect
 await asyncio.sleep(0.5)
 
-# 8. Initialize symbol index (optional — may fail if tree-sitter unavailable)
-await send_progress("symbol_index", "Initializing symbol parser...", 10)
-symbol_index = SymbolIndex(repo_root)
+# 8. Fire heavy init as a non-blocking background task
+async def _heavy_init():
+    # 8a. Initialize symbol index via run_in_executor
+    await send_progress("symbol_index", "Initializing symbol parser...", 10)
+    symbol_index = await run_in_executor(SymbolIndex(repo_root))
 
-# 9. Complete deferred init — restore last session
-await send_progress("session_restore", "Restoring session...", 30)
-llm_service.complete_deferred_init(symbol_index)
+    # 8b. Complete deferred init (wires symbol index, no session restore — already done)
+    await send_progress("session_restore", "Completing initialization...", 30)
+    await run_in_executor(llm_service.complete_deferred_init(symbol_index))
 
-# 10. Index repository (heaviest step — parses all source files)
-await send_progress("indexing", "Indexing repository...", 50)
-await run_in_executor(symbol_index.index_repo, file_list)
+    # 8c. Index repository in small batches (20 files per batch)
+    #     with asyncio.sleep(0) between batches to yield to event loop
+    await send_progress("indexing", "Indexing repository...", 50)
+    for batch in batched(file_list, 20):
+        await run_in_executor([symbol_index.index_file(f) for f in batch])
+        await asyncio.sleep(0)  # let WebSocket pings flow
+    symbol_index._ref_index.build(symbol_index._all_symbols)
 
-# 11. Initialize stability tracker (tier assignments, reference graph)
-await send_progress("stability", "Building cache tiers...", 80)
-llm_service._try_initialize_stability()
+    # 8d. Initialize stability tracker (tier assignments, reference graph)
+    await send_progress("stability", "Building cache tiers...", 80)
+    await run_in_executor(llm_service._try_initialize_stability())
 
-# 12. Signal ready — browser dismisses startup overlay
-await send_progress("ready", "Ready", 100)
+    # 8e. Signal ready — browser dismisses startup overlay
+    await send_progress("ready", "Ready", 100)
+
+    # 8f. Start background doc index (after overlay dismissed)
+    llm_service._start_background_doc_index()
+
+asyncio.ensure_future(_heavy_init())
 ```
 
 Progress is sent via `AcApp.startupProgress(stage, message, percent)` — best-effort, since the browser may not be connected yet during early stages. The `_init_complete` flag gates `chat_streaming` so requests are rejected with a user-friendly message until initialization finishes.
+
+**GIL considerations:** `run_in_executor` with the default `ThreadPoolExecutor` does not fully release the GIL during CPU-bound Python work (tree-sitter parsing, string processing). The `asyncio.sleep(0)` between batches gives the event loop a chance to process queued WebSocket frames. The `ensure_future` wrapper ensures the entire init sequence is non-blocking — the event loop returns to serving WebSocket traffic immediately after scheduling the task.
 
 **Event callback variance:** Different events pass different argument shapes:
 - `streamComplete(request_id, result)` — 2 args

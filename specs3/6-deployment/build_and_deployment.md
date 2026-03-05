@@ -64,21 +64,26 @@ The startup is split into two phases to give the user early feedback. The browse
 6. Register services with JRPCServer and start WebSocket server
 7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
 
-### Phase 2: Deferred (progress reported to browser)
+### Phase 2: Deferred (non-blocking background task with progress)
+
+Phase 2 runs entirely inside `asyncio.ensure_future()` so the event loop stays free to handle WebSocket frames. Each CPU-bound step uses `run_in_executor` to avoid blocking pings/pongs.
 
 8. Wait briefly (500ms) for browser WebSocket connection
-9. Initialize SymbolIndex (tree-sitter parser) — progress: 10%
-10. Complete deferred LLM init (restore last session) — progress: 30%
-11. Index repository (parse all source files, heaviest step, runs in executor) — progress: 50%
-12. Initialize stability tracker (tier assignments, reference graph) — progress: 80%
-13. Signal ready — progress: 100%, browser dismisses startup overlay
-14. Start background doc index build:
+9. Initialize SymbolIndex via `run_in_executor` (tree-sitter parser) — progress: 10%
+10. Complete deferred LLM init via `run_in_executor` (wire symbol index) — progress: 30%
+11. Index repository in batches of 20 files via `run_in_executor`, with `asyncio.sleep(0)` between batches — progress: 50–90%
+12. Build reference index once after all files indexed
+13. Initialize stability tracker via `run_in_executor` (tier assignments, reference graph) — progress: 80%
+14. Signal ready — progress: 100%, browser dismisses startup overlay
+15. Start background doc index build:
     - Structure extraction (<250ms for 50 files) → doc mode toggle enabled immediately
     - Reference index build (<50ms)
     - Queue all files for background keyword enrichment → persistent enrichment toast in chat panel
 15. Serve forever
 
-Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 14 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
+Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 15 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
+
+**File reopen deferral:** The browser delays reopening the last-viewed file until the startup overlay dismisses (i.e., after the `ready` signal). This prevents file-fetch RPC calls from blocking the server's event loop during heavy initialization. On reconnect (when `init_complete` is already true), the file reopens immediately.
 
 ### Startup Overlay (Browser)
 
@@ -89,7 +94,7 @@ The browser shows a full-screen overlay with the AC⚡DC brand, a status message
 | (connected) | `Connected — initializing...` | 5% |
 | `symbol_index` | `Initializing symbol parser...` | 10% |
 | `session_restore` | `Restoring session...` | 30% |
-| `indexing` | `Indexing repository...` | 50% |
+| `indexing` | `Indexing repository... N/M` | 50–90% |
 | `stability` | `Building cache tiers...` | 80% |
 | `ready` | `Ready` | 100% |
 
