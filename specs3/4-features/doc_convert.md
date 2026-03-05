@@ -440,14 +440,14 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
-Conversion runs in a background executor and does not block UI interaction. The progress view provides per-file feedback.
+Conversion runs in a dedicated single-thread executor and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted back to the event loop from the worker thread via `call_soon_threadsafe` + `ensure_future`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The progress view provides per-file feedback.
 
 ## RPC Methods
 
 | Method | Description |
 |--------|-------------|
 | `DocConvert.scan_convertible_files()` | Returns list of convertible files with status badges. Includes clean-tree check |
-| `DocConvert.convert_files(paths: list[str])` | Converts selected files. Returns per-file results. Requires clean tree |
+| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree |
 | `DocConvert.is_available()` | Returns dict with availability of markitdown, LibreOffice, PyMuPDF, and combined pdf_pipeline status |
 
 ## Testing

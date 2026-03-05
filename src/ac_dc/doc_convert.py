@@ -954,7 +954,14 @@ class DocConvert:
         return {"status": "started", "total": len(paths)}
 
     async def _convert_files_background(self, paths):
-        """Background task: convert files one at a time with progress events."""
+        """Background task: convert files one at a time with progress events.
+
+        Runs the entire sequential conversion inside a single
+        ``run_in_executor`` call so that GIL-heavy C-extension work
+        (openpyxl, PyMuPDF) cannot starve the asyncio event loop.
+        Progress events are posted from the worker thread via
+        ``call_soon_threadsafe`` so WebSocket pings keep flowing.
+        """
         import asyncio
         import traceback
         from concurrent.futures import ThreadPoolExecutor
@@ -964,32 +971,40 @@ class DocConvert:
         max_size_bytes = max_size_mb * 1024 * 1024
 
         root = self._repo.root
-        results = []
-        converted = 0
-        failed = 0
-        skipped = 0
         total = len(paths)
+        loop = asyncio.get_event_loop()
 
         # Use a dedicated single-thread executor so conversion work
         # doesn't compete with the default executor used by the server.
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="docconv")
 
-        try:
+        def _post_event(data):
+            """Post a progress event from the worker thread (non-blocking)."""
+            try:
+                loop.call_soon_threadsafe(
+                    lambda d=data: asyncio.ensure_future(self._send_convert_event(d))
+                )
+            except Exception:
+                pass
+
+        def _convert_all():
+            """Run all conversions sequentially in the executor thread."""
+            results = []
+            converted = 0
+            failed = 0
+            skipped = 0
+
             for i, rel_path in enumerate(paths, start=1):
                 abs_path = root / rel_path
                 output_rel = _output_path_for(rel_path)
                 output_abs = root / output_rel
 
-                # Send "converting" progress event
-                try:
-                    await self._send_convert_event({
-                        "stage": "converting",
-                        "path": rel_path,
-                        "index": i,
-                        "total": total,
-                    })
-                except Exception:
-                    pass
+                _post_event({
+                    "stage": "converting",
+                    "path": rel_path,
+                    "index": i,
+                    "total": total,
+                })
 
                 result_entry = None
 
@@ -1031,18 +1046,18 @@ class DocConvert:
                 # Convert
                 if result_entry is None:
                     try:
-                        loop = asyncio.get_event_loop()
-                        result_entry = await loop.run_in_executor(
-                            executor,
-                            lambda rp=rel_path, ap=abs_path, orel=output_rel, oabs=output_abs:
-                                self._convert_single(rp, ap, orel, oabs),
+                        result_entry = self._convert_single(
+                            rel_path, abs_path, output_rel, output_abs,
                         )
                         if result_entry["status"] == "converted":
                             converted += 1
                         else:
                             failed += 1
                     except Exception as e:
-                        logger.error("Conversion failed for %s: %s\n%s", rel_path, e, traceback.format_exc())
+                        logger.error(
+                            "Conversion failed for %s: %s\n%s",
+                            rel_path, e, traceback.format_exc(),
+                        )
                         result_entry = {
                             "path": rel_path,
                             "status": "failed",
@@ -1052,31 +1067,33 @@ class DocConvert:
 
                 results.append(result_entry)
 
-                # Send per-file result event
-                try:
-                    await self._send_convert_event({
-                        "stage": "file_done",
-                        "path": rel_path,
-                        "index": i,
-                        "total": total,
-                        "result": result_entry,
-                    })
-                except Exception:
-                    pass
+                _post_event({
+                    "stage": "file_done",
+                    "path": rel_path,
+                    "index": i,
+                    "total": total,
+                    "result": result_entry,
+                })
 
-                # Yield to event loop so WebSocket frames flush
-                await asyncio.sleep(0.1)
+            return results, {
+                "converted": converted,
+                "failed": failed,
+                "skipped": skipped,
+            }
+
+        try:
+            results, summary = await loop.run_in_executor(executor, _convert_all)
         except Exception as e:
-            logger.error("_convert_files_background crashed: %s\n%s", e, traceback.format_exc())
+            logger.error(
+                "_convert_files_background crashed: %s\n%s",
+                e, traceback.format_exc(),
+            )
+            results = []
+            summary = {"converted": 0, "failed": len(paths), "skipped": 0}
         finally:
             executor.shutdown(wait=False)
 
-        # Send final summary event
-        summary = {
-            "converted": converted,
-            "failed": failed,
-            "skipped": skipped,
-        }
+        # Send final summary event (from the event loop thread)
         try:
             await self._send_convert_event({
                 "stage": "complete",
@@ -1087,10 +1104,17 @@ class DocConvert:
             logger.error("Failed to send final convert event: %s", e)
 
     async def _send_convert_event(self, data):
-        """Send a doc convert progress event to all clients."""
+        """Send a doc convert progress event to all clients.
+
+        Uses ensure_future to avoid blocking the conversion loop —
+        the server→browser RPC call awaits a response, and if the
+        browser is slow processing a previous event the entire
+        conversion pipeline stalls.
+        """
         if self._event_callback:
+            import asyncio
             try:
-                await self._event_callback("docConvertProgress", data)
+                asyncio.ensure_future(self._event_callback("docConvertProgress", data))
             except Exception as e:
                 logger.warning(f"Failed to send convert progress event: {e}")
 
