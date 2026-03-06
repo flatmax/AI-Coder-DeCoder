@@ -893,12 +893,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     if (this.minimized) {
       this.minimized = false;
     }
-    // Trigger lazy import for the tab
-    if (lazyImports[tabId]) {
-      lazyImports[tabId]();
-    }
+    // Trigger lazy import for the tab (and capture the promise)
+    const lazyReady = lazyImports[tabId] ? lazyImports[tabId]() : Promise.resolve();
     // Notify newly visible tab and handle focus
-    this.updateComplete.then(() => {
+    this.updateComplete.then(async () => {
       const panel = this.shadowRoot?.querySelector(`.tab-panel.active`);
       if (panel) {
         const child = panel.firstElementChild;
@@ -907,8 +905,15 @@ export class AcDialog extends RpcMixin(LitElement) {
         }
       }
       if (tabId === 'search') {
+        // Wait for lazy import to complete so the custom element is defined
+        await lazyReady;
+        // Wait one more update cycle for the element to render its shadow DOM
+        await this.updateComplete;
         const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
-        if (searchTab) searchTab.focus();
+        if (searchTab) {
+          await searchTab.updateComplete;
+          searchTab.focus();
+        }
       }
     });
   }
