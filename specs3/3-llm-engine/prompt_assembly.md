@@ -332,12 +332,15 @@ for tier in [L0, L1, L2, L3]:
 
 ### Step 3: Determine Exclusions
 
-Files in any cached tier must be excluded from the active "Working Files" section and from the symbol map output. URLs in any cached tier must be excluded from the uncached URL context pair:
+Files in any cached tier must be excluded from the active "Working Files" section and from the symbol map output. URLs in any cached tier must be excluded from the uncached URL context pair. User-excluded index files (via the file picker's three-state checkbox) must be excluded from all map output:
 
 ```pseudo
 graduated_files = set()
 symbol_map_exclude = set()
 graduated_urls = set()  # URL hashes in cached tiers
+
+# User-excluded files — completely removed from index
+symbol_map_exclude |= excluded_index_files
 
 for tier in [L0, L1, L2, L3]:
     for key in tracker.get_tier_items(tier):

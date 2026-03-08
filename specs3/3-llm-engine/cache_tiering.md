@@ -244,6 +244,19 @@ The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (
 
 When a file is in active context (selected), its index entry (`sym:` or `doc:`) is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted. This applies independently to both primary and cross-reference index entries.
 
+### User-Excluded Files
+
+Users can explicitly exclude files from the index via the file picker's three-state checkbox (see [File Picker — Index Exclusion](../5-webapp/file_picker.md#index-exclusion-three-state-checkbox)). Excluded files are:
+
+1. **Removed from the stability tracker** — all `symbol:` and `doc:` entries for the path are deleted, affected tiers marked as broken
+2. **Excluded from map generation** — merged into the `exclude_files` set passed to `get_symbol_map()` / `get_doc_map()`
+3. **Skipped in active items** — `_update_stability()` does not create active items for excluded paths
+4. **Excluded from tier recomputation** — the tier exclusion set includes user-excluded files alongside selected files
+
+This is distinct from file deselection (which only removes `file:*` entries and leaves `sym:`/`doc:` entries in their earned tier). Exclusion removes the file from context entirely — no full content, no index block, no tracker item.
+
+**Use case:** Repositories with extensive documentation (e.g., GB of converted docs) where the doc map alone exceeds the context budget. Users exclude directories of less-relevant docs to free token budget.
+
 ## History Compaction Interaction
 
 When compaction runs, all `history:*` entries are purged from the tracker. Compacted messages re-enter as new active items with N = 0. This causes a one-time cache miss for tiers that contained history. The cost is temporary — the shorter history re-stabilizes within a few requests.
