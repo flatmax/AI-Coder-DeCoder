@@ -82,6 +82,51 @@ Files mentioned in assistant responses toggle selection via `file-mention-click`
 2. If already selected: file removed from selected files set, picker checkbox unchecked
 3. In both cases: file opened in diff viewer
 
+## Index Exclusion (Three-State Checkbox)
+
+Files have three context states controlled via the file picker checkbox:
+
+| State | Checkbox | Visual | Context Effect |
+|-------|----------|--------|----------------|
+| **Index-only** (default) | ☐ Unchecked | Normal | File's symbol/doc map entry is in context |
+| **Selected** | ☑ Checked | Normal | Full file content in context (map entry excluded — redundant) |
+| **Excluded** | ☐ Unchecked | Strikethrough, dimmed, ✕ badge | No content, no map entry, no tracker item |
+
+### Interaction Model
+
+- **Regular click**: toggles between index-only and selected (existing behavior)
+- **Shift+click**: toggles between index-only and excluded. Uses `preventDefault()` to suppress the native checkbox toggle — without this, the browser fires its own checked-state change before Lit re-renders, causing a visual glitch where the checkbox appears toggled even though no selection change occurred.
+- **Shift+click on selected file**: excludes (removes from both selection and index)
+- **Regular click on excluded file**: un-excludes and selects (full content)
+- **Shift+click on directory**: toggles exclusion for all children
+- **Regular click to select directory children**: un-excludes any excluded children
+
+### Visual Treatment
+
+Excluded files display:
+- File name with strikethrough and muted opacity (0.45)
+- Checkbox at reduced opacity (0.5)
+- Small `✕` badge in the badges area
+- Tooltip: "Excluded from index — Shift+click to re-include"
+
+The checkbox tooltip for all files reads: "Click to select · Shift+click to exclude from index".
+
+### Context Menu
+
+Both file and directory context menus include "Exclude from Index" / "Include in Index" items as an alternative to shift+click.
+
+### Backend State
+
+The excluded files set is stored server-side via `LLMService.set_excluded_index_files(files)` and persisted in session state (returned by `get_current_state()`). Excluded files are:
+- Removed from the stability tracker (all `symbol:` and `doc:` entries)
+- Excluded from `get_symbol_map()` / `get_doc_map()` calls
+- Excluded from `get_context_breakdown()` calculations
+- Skipped in `_update_stability()` active items loop
+
+### Use Case
+
+Large repositories with extensive documentation (e.g., GB of converted docs) where the doc map alone exceeds the context budget. Users can shift+click directories of less-relevant docs to exclude them from the index, freeing token budget for the files they're actively working with.
+
 ## Auto-Add from Not-In-Context Edits
 
 When the LLM attempts to edit files that aren't in the active context, those files are automatically added to the selected files list (see [Edit Protocol — Not-In-Context Edit Handling](../3-llm-engine/edit_protocol.md#not-in-context-edit-handling)). The file picker receives the updated selection via the standard `filesChanged` broadcast and updates checkboxes accordingly. Parent directories of auto-added files are auto-expanded to make the new selections visible.

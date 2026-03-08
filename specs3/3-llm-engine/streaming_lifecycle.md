@@ -93,6 +93,8 @@ for path in current_context_files - selected_files:
 
 This is distinct from the cache tiering deselection cleanup (see [Cache Tiering — Item Removal](cache_tiering.md#item-removal)), which handles `file:*` entries in the stability tracker. Both operate on the same user action (unchecking a file) but manage different state stores.
 
+User-excluded index files (see [Cache Tiering — User-Excluded Files](cache_tiering.md#user-excluded-files)) are merged into the `exclude_files` set for all map generation calls (`get_symbol_map`, `get_doc_map`) and for `_update_stability` active items computation. Excluded files have no presence in context — no full content, no index block, no tracker item.
+
 ## Client-Side Initiation
 
 1. Guard — skip if empty input
@@ -330,6 +332,8 @@ Session total: 182,756
 ### State Management
 - get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_enabled
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
+- set_excluded_index_files stores exclusion set, removes tracker items, broadcasts filesChanged
+- get_current_state includes excluded_index_files field
 
 ### Streaming Guards
 - Concurrent stream rejected with error

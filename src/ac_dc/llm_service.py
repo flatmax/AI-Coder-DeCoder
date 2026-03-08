@@ -214,6 +214,10 @@ class LLMService:
         self._review_stats = {}
         self._symbol_map_before = None
 
+        # Excluded index files — files the user wants completely removed from
+        # context (no full content, no symbol/doc map entry, no tracker item)
+        self._excluded_index_files = set()
+
         # Collaboration — set by main.py after construction
         self._collab = None
 
@@ -463,6 +467,7 @@ class LLMService:
         return {
             "messages": self._context.get_history(),
             "selected_files": list(self._selected_files),
+            "excluded_index_files": list(self._excluded_index_files),
             "streaming_active": self._streaming_active,
             "session_id": self._session_id,
             "repo_name": self._repo.root.name if self._repo else None,
@@ -500,6 +505,52 @@ class LLMService:
     def get_selected_files(self):
         """Return independent copy of selected files."""
         return list(self._selected_files)
+
+    def set_excluded_index_files(self, files):
+        """Update the set of files excluded from the index/map.
+
+        Excluded files are completely removed from context — no full content,
+        no symbol/doc map entry, no stability tracker item.
+
+        Broadcasts filesChanged so collaborators see the updated state.
+        """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+        self._excluded_index_files = set(files or [])
+
+        # Remove tracker items for newly excluded files
+        self._remove_excluded_from_tracker()
+
+        # Broadcast to all clients so collaborators' file pickers sync
+        if self._event_callback:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._event_callback("filesChanged", list(self._selected_files))
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast filesChanged: {e}")
+
+        return list(self._excluded_index_files)
+
+    def get_excluded_index_files(self):
+        """Return independent copy of excluded index files."""
+        return list(self._excluded_index_files)
+
+    def _remove_excluded_from_tracker(self):
+        """Remove stability tracker items for excluded index files."""
+        tracker = self._doc_stability_tracker if self._context.mode == Mode.DOC else self._stability_tracker
+        if not tracker:
+            return
+        for path in self._excluded_index_files:
+            for prefix in ("symbol:", "doc:"):
+                key = f"{prefix}{path}"
+                if key in tracker._items:
+                    tier = tracker._items[key].tier
+                    del tracker._items[key]
+                    tracker._broken_tiers.add(tier)
 
     def new_session(self):
         """Start a new session — clears history and generates new session ID."""
@@ -1482,7 +1533,7 @@ class LLMService:
                     # Enrichment will happen in the background — don't block chat
 
                 symbol_map = self._doc_index.get_doc_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 symbol_legend = self._doc_index.get_legend()
             elif self._symbol_index:
@@ -1524,7 +1575,7 @@ class LLMService:
                         self._stability_initialized = True  # don't retry
 
                 symbol_map = self._symbol_index.get_symbol_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 symbol_legend = self._symbol_index.get_legend()
 
@@ -1635,7 +1686,7 @@ class LLMService:
             # not also appear in the uncached symbol map (spec: "A File Never
             # Appears Twice").
             if tiered_content:
-                tier_exclude = set(self._selected_files)
+                tier_exclude = set(self._selected_files) | self._excluded_index_files
                 tracker = self._doc_stability_tracker if self._context.mode == Mode.DOC else self._stability_tracker
                 if tracker:
                     for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
@@ -1644,7 +1695,7 @@ class LLMService:
                                 path = key.split(":", 1)[1]
                                 tier_exclude.add(path)
 
-                # Regenerate maps with full exclusions
+                # Regenerate maps with full exclusions (includes user-excluded index files)
                 if self._context.mode == Mode.DOC and self._doc_index:
                     symbol_map = self._doc_index.get_doc_map(
                         exclude_files=tier_exclude
@@ -2092,6 +2143,8 @@ class LLMService:
             for path in all_indexed:
                 if path in selected_set:
                     continue  # full file content is active; skip index entry
+                if path in excluded_set:
+                    continue  # user excluded this file from index
                 if self._context.mode == Mode.DOC:
                     block = self._doc_index.get_file_doc_block(path) if self._doc_index else ""
                 else:
@@ -2510,7 +2563,7 @@ class LLMService:
             if legend:
                 legend_tokens = counter.count(legend)
             sm = self._doc_index.get_doc_map(
-                exclude_files=set(self._selected_files)
+                exclude_files=set(self._selected_files) | self._excluded_index_files
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
@@ -2520,7 +2573,7 @@ class LLMService:
             if legend:
                 legend_tokens = counter.count(legend)
             sm = self._symbol_index.get_symbol_map(
-                exclude_files=set(self._selected_files)
+                exclude_files=set(self._selected_files) | self._excluded_index_files
             )
             if sm:
                 symbol_map_tokens = counter.count(sm)
@@ -2533,7 +2586,7 @@ class LLMService:
                 if cross_legend:
                     legend_tokens += counter.count(cross_legend)
                 cross_map = self._doc_index.get_doc_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 if cross_map:
                     symbol_map_tokens += counter.count(cross_map)
@@ -2543,7 +2596,7 @@ class LLMService:
                 if cross_legend:
                     legend_tokens += counter.count(cross_legend)
                 cross_map = self._symbol_index.get_symbol_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 if cross_map:
                     symbol_map_tokens += counter.count(cross_map)
@@ -2899,14 +2952,14 @@ class LLMService:
             cross_map_tokens = 0
             if is_doc and self._symbol_index:
                 cross_sm = self._symbol_index.get_symbol_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 if cross_sm:
                     cross_map_tokens = counter.count(cross_sm)
                 cross_label = "Symbol Map:"
             elif not is_doc and self._doc_index:
                 cross_sm = self._doc_index.get_doc_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(self._selected_files) | self._excluded_index_files
                 )
                 if cross_sm:
                     cross_map_tokens = counter.count(cross_sm)
