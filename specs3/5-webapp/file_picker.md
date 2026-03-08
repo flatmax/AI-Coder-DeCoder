@@ -95,7 +95,7 @@ Files have three context states controlled via the file picker checkbox:
 ### Interaction Model
 
 - **Regular click**: toggles between index-only and selected (existing behavior)
-- **Shift+click**: toggles between index-only and excluded
+- **Shift+click**: toggles between index-only and excluded. Uses `preventDefault()` to suppress the native checkbox toggle — without this, the browser fires its own checked-state change before Lit re-renders, causing a visual glitch where the checkbox appears toggled even though no selection change occurred.
 - **Shift+click on selected file**: excludes (removes from both selection and index)
 - **Regular click on excluded file**: un-excludes and selects (full content)
 - **Shift+click on directory**: toggles exclusion for all children

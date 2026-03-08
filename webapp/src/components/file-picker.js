@@ -640,6 +640,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
     // Shift+click toggles index exclusion
     if (e.shiftKey) {
+      e.preventDefault();
       this._toggleExclude(node);
       return;
     }
