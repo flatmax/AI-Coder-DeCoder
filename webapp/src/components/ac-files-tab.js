@@ -25,6 +25,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     _pickerWidth: { type: Number, state: true },
     _pickerCollapsed: { type: Boolean, state: true },
     _selectedFiles: { type: Array, state: true },
+    _excludedIndexFiles: { type: Array, state: true },
     _messages: { type: Array, state: true },
     _streamingActive: { type: Boolean, state: true },
     _reviewState: { type: Object, state: true },
@@ -121,6 +122,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._pickerWidth = this._loadWidth();
     this._pickerCollapsed = this._loadCollapsed();
     this._selectedFiles = [];
+    this._excludedIndexFiles = [];
     this._messages = [];
     this._streamingActive = false;
     this._isDragging = false;
@@ -233,6 +235,17 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         chatPanel.requestUpdate();
       }
     }
+
+    // Also sync excluded files if present in the event
+    const excluded = e.detail?.excludedFiles;
+    if (Array.isArray(excluded)) {
+      this._excludedIndexFiles = excluded;
+      const picker = this.shadowRoot?.querySelector('ac-file-picker');
+      if (picker) {
+        picker.excludedFiles = new Set(excluded);
+        picker.requestUpdate();
+      }
+    }
   }
 
   _onSelectionChanged(e) {
@@ -249,6 +262,15 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (chatPanel) {
       chatPanel.selectedFiles = files;
       chatPanel.requestUpdate();
+    }
+  }
+
+  _onExclusionChanged(e) {
+    const files = e.detail?.excludedFiles || [];
+    this._excludedIndexFiles = files;
+    // Notify server
+    if (this.rpcConnected) {
+      this.rpcCall('LLMService.set_excluded_index_files', files).catch(() => {});
     }
   }
 
@@ -377,13 +399,19 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (state) {
       this._messages = state.messages || [];
       this._selectedFiles = state.selected_files || [];
+      this._excludedIndexFiles = state.excluded_index_files || [];
       this._streamingActive = state.streaming_active || false;
 
-      // Sync file picker selection
+      // Sync file picker selection and exclusion
       requestAnimationFrame(() => {
         const picker = this.shadowRoot?.querySelector('ac-file-picker');
-        if (picker && this._selectedFiles.length > 0) {
-          picker.selectedFiles = new Set(this._selectedFiles);
+        if (picker) {
+          if (this._selectedFiles.length > 0) {
+            picker.selectedFiles = new Set(this._selectedFiles);
+          }
+          if (this._excludedIndexFiles.length > 0) {
+            picker.excludedFiles = new Set(this._excludedIndexFiles);
+          }
         }
       });
     }

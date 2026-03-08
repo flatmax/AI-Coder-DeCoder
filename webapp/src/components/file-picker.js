@@ -12,6 +12,7 @@ import { RpcMixin } from '../rpc-mixin.js';
 export class AcFilePicker extends RpcMixin(LitElement) {
   static properties = {
     selectedFiles: { type: Object, hasChanged: () => true },     // Set<string> — always re-render on set
+    excludedFiles: { type: Object, hasChanged: () => true },     // Set<string> — files excluded from index
     reviewState: { type: Object },
     _tree: { type: Object, state: true },
     _modified: { type: Array, state: true },
@@ -178,6 +179,29 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       color: var(--accent-red);
       text-decoration: line-through;
       opacity: 0.75;
+    }
+    .node-name.index-excluded {
+      color: var(--text-muted);
+      opacity: 0.45;
+      text-decoration: line-through;
+      text-decoration-color: var(--text-muted);
+    }
+
+    .tree-checkbox.excluded {
+      opacity: 0.5;
+    }
+    .tree-checkbox.excluded::after {
+      content: '';
+    }
+
+    .index-badge {
+      font-size: 0.6rem;
+      font-weight: 600;
+      padding: 0 4px;
+      border-radius: 2px;
+      color: var(--text-muted);
+      background: rgba(128, 128, 128, 0.15);
+      line-height: 1.4;
     }
 
     /* Branch badge next to repo name */
@@ -355,6 +379,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   constructor() {
     super();
     this.selectedFiles = new Set();
+    this.excludedFiles = new Set();
     this._tree = null;
     this._modified = [];
     this._staged = [];
@@ -612,8 +637,22 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _toggleSelect(node, e) {
     e.stopPropagation();
+
+    // Shift+click toggles index exclusion
+    if (e.shiftKey) {
+      this._toggleExclude(node);
+      return;
+    }
+
     if (node.type === 'file') {
       const next = new Set(this.selectedFiles);
+      // If file was excluded, un-exclude it first
+      if (this.excludedFiles.has(node.path)) {
+        const nextExcl = new Set(this.excludedFiles);
+        nextExcl.delete(node.path);
+        this.excludedFiles = nextExcl;
+        this._notifyExclusion();
+      }
       if (next.has(node.path)) {
         next.delete(node.path);
       } else {
@@ -626,16 +665,80 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       this._collectPaths(node, childPaths);
       const allSelected = childPaths.every(p => this.selectedFiles.has(p));
       const next = new Set(this.selectedFiles);
+      // Un-exclude any excluded children being selected
+      let exclChanged = false;
+      const nextExcl = new Set(this.excludedFiles);
       for (const p of childPaths) {
         if (allSelected) {
           next.delete(p);
         } else {
           next.add(p);
+          if (nextExcl.has(p)) {
+            nextExcl.delete(p);
+            exclChanged = true;
+          }
         }
       }
       this.selectedFiles = next;
+      if (exclChanged) {
+        this.excludedFiles = nextExcl;
+        this._notifyExclusion();
+      }
     }
     this._notifySelection();
+  }
+
+  _toggleExclude(node) {
+    if (node.type === 'file') {
+      const nextExcl = new Set(this.excludedFiles);
+      if (nextExcl.has(node.path)) {
+        // Un-exclude → back to index-only
+        nextExcl.delete(node.path);
+      } else {
+        // Exclude from index
+        nextExcl.add(node.path);
+        // Also remove from selected if it was selected
+        if (this.selectedFiles.has(node.path)) {
+          const nextSel = new Set(this.selectedFiles);
+          nextSel.delete(node.path);
+          this.selectedFiles = nextSel;
+          this._notifySelection();
+        }
+      }
+      this.excludedFiles = nextExcl;
+    } else {
+      // Directory: toggle exclusion for all children
+      const childPaths = [];
+      this._collectPaths(node, childPaths);
+      const allExcluded = childPaths.every(p => this.excludedFiles.has(p));
+      const nextExcl = new Set(this.excludedFiles);
+      const nextSel = new Set(this.selectedFiles);
+      let selChanged = false;
+      for (const p of childPaths) {
+        if (allExcluded) {
+          nextExcl.delete(p);
+        } else {
+          nextExcl.add(p);
+          if (nextSel.has(p)) {
+            nextSel.delete(p);
+            selChanged = true;
+          }
+        }
+      }
+      this.excludedFiles = nextExcl;
+      if (selChanged) {
+        this.selectedFiles = nextSel;
+        this._notifySelection();
+      }
+    }
+    this._notifyExclusion();
+  }
+
+  _notifyExclusion() {
+    this.dispatchEvent(new CustomEvent('exclusion-changed', {
+      detail: { excludedFiles: [...this.excludedFiles] },
+      bubbles: true, composed: true,
+    }));
   }
 
   _getCheckState(node) {
@@ -645,6 +748,9 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     const childPaths = [];
     this._collectPaths(node, childPaths);
     if (childPaths.length === 0) return 'unchecked';
+    // If all children are excluded, report unchecked (exclusion visual handled separately)
+    const exclCount = childPaths.filter(p => this.excludedFiles.has(p)).length;
+    if (exclCount === childPaths.length) return 'unchecked';
     const selCount = childPaths.filter(p => this.selectedFiles.has(p)).length;
     if (selCount === 0) return 'unchecked';
     if (selCount === childPaths.length) return 'checked';
@@ -899,6 +1005,13 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     return null;
   }
 
+  _isDirExcluded(node) {
+    if (node.type === 'file') return this.excludedFiles.has(node.path);
+    const childPaths = [];
+    this._collectPaths(node, childPaths);
+    return childPaths.length > 0 && childPaths.every(p => this.excludedFiles.has(p));
+  }
+
   _getLineCountColor(lines) {
     if (lines > 170) return 'red';
     if (lines >= 130) return 'orange';
@@ -916,6 +1029,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     const diffStat = isDir ? null : this._diffStats[node.path];
     const isFocused = this._focusedPath === node.path;
     const isActive = this._activeInViewer === node.path;
+    const isExcluded = isDir ? this._isDirExcluded(node) : this.excludedFiles.has(node.path);
 
     return html`
       <div
@@ -937,15 +1051,16 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
         <input
           type="checkbox"
-          class="tree-checkbox"
-          aria-label="Select ${node.name}"
+          class="tree-checkbox ${isExcluded ? 'excluded' : ''}"
+          aria-label="${isExcluded ? 'Excluded from index' : 'Select'} ${node.name}"
+          title="Click to select · Shift+click to ${isExcluded ? 'include in' : 'exclude from'} index"
           .checked=${checkState === 'checked'}
           .indeterminate=${checkState === 'indeterminate'}
           @click=${(e) => this._toggleSelect(node, e)}
           @change=${(e) => e.stopPropagation()}
         />
 
-        <span class="node-name ${isDir ? 'dir' : ''}${!isDir && gitStatus ? ` ${gitStatus}` : ''}">${node.name}</span>
+        <span class="node-name ${isDir ? 'dir' : ''}${!isDir && gitStatus ? ` ${gitStatus}` : ''}${isExcluded ? ' index-excluded' : ''}">${node.name}</span>
 
         ${isDir && node.path === '' && this._branch ? html`
           <span class="branch-badge ${this._branchDetached ? 'detached' : ''}"
@@ -955,6 +1070,10 @@ export class AcFilePicker extends RpcMixin(LitElement) {
         ` : nothing}
 
         <span class="badges">
+          ${isExcluded ? html`
+            <span class="index-badge" title="Excluded from index — Shift+click to re-include">✕</span>
+          ` : nothing}
+
           ${!isDir && node.lines > 0 ? html`
             <span class="line-count ${this._getLineCountColor(node.lines)}">${node.lines}</span>
           ` : nothing}
@@ -1026,6 +1145,13 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <div class="context-menu-separator" role="separator"></div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxDuplicate(node)}>📄 Duplicate</div>
+          <div class="context-menu-separator" role="separator"></div>
+          ${this.excludedFiles.has(path) ? html`
+            <div class="context-menu-item" role="menuitem" @click=${() => { this._contextMenu = null; this._toggleExclude(node); }}>📊 Include in Index</div>
+          ` : html`
+            <div class="context-menu-item" role="menuitem" @click=${() => { this._contextMenu = null; this._toggleExclude(node); }}>🚫 Exclude from Index</div>
+          `}
+          <div class="context-menu-separator" role="separator"></div>
           <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDiscard(path)}>↩️ Discard Changes</div>
           <div class="context-menu-item danger" role="menuitem" @click=${() => this._ctxDelete(path)}>🗑️ Delete</div>
         `}
