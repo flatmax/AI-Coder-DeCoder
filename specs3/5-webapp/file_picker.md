@@ -166,6 +166,7 @@ The `ac-files-tab` component (parent of both file picker and chat panel) serves 
 | Responsibility | Mechanism |
 |---------------|-----------|
 | Selection sync | Receives `selection-changed` from picker, updates server and chat panel directly |
+| Exclusion sync | Receives `exclusion-changed` from picker, forwards to server via `set_excluded_index_files` RPC |
 | File mentions | Receives `file-mention-click` from chat, toggles selection, updates picker and chat panel |
 | Message preservation | Calls `_syncMessagesFromChat()` before selection updates to prevent stale message overwrites |
 | Review lifecycle | Clears selection on review entry, refreshes tree, updates chat panel's review state |
@@ -186,7 +187,7 @@ When selection changes, the files tab updates both the picker's `selectedFiles` 
 4. Directly set `picker.selectedFiles = new Set(newFiles)` + `picker.requestUpdate()`
 5. Notify server via `rpcCall('LLMService.set_selected_files', newFiles)`
 
-**Where it's used:** `_onSelectionChanged`, `_onFileMentionClick`, `_onFilesChanged`, `_onReviewStarted`, `_onStateLoaded`
+**Where it's used:** `_onSelectionChanged`, `_onFileMentionClick`, `_onFilesChanged`, `_onReviewStarted`, `_onStateLoaded`, `_onExclusionChanged`
 
 Without `_syncMessagesFromChat()`, the following failure occurs: user sends a message → chat panel updates its `messages` array → user clicks a file mention → files tab re-renders → chat panel receives the files tab's stale `_messages` prop → latest messages are lost.
 

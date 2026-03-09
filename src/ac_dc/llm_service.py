@@ -544,13 +544,17 @@ class LLMService:
         tracker = self._doc_stability_tracker if self._context.mode == Mode.DOC else self._stability_tracker
         if not tracker:
             return
+        removed = 0
         for path in self._excluded_index_files:
-            for prefix in ("symbol:", "doc:"):
+            for prefix in ("symbol:", "doc:", "file:"):
                 key = f"{prefix}{path}"
                 if key in tracker._items:
                     tier = tracker._items[key].tier
                     del tracker._items[key]
                     tracker._broken_tiers.add(tier)
+                    removed += 1
+        if removed:
+            logger.info(f"Removed {removed} excluded items from tracker")
 
     def new_session(self):
         """Start a new session — clears history and generates new session ID."""
@@ -2120,6 +2124,7 @@ class LLMService:
         if index:
             selected_set = set(self._selected_files)
             primary_prefix = "doc:" if self._context.mode == Mode.DOC else "symbol:"
+            excluded_set = self._excluded_index_files
 
             # Remove primary and cross-ref entries for selected files — they now have file: entries
             for path in selected_set:
@@ -2225,6 +2230,18 @@ class LLMService:
             except Exception:
                 pass
 
+        # Remove excluded items from tracker before update cycle —
+        # they exist on disk so remove_stale won't catch them, but
+        # they must not occupy tier slots or appear in context.
+        if self._excluded_index_files:
+            for excl_path in self._excluded_index_files:
+                for prefix in ("symbol:", "doc:", "file:"):
+                    key = f"{prefix}{excl_path}"
+                    if key in tracker._items:
+                        tier = tracker._items[key].tier
+                        del tracker._items[key]
+                        tracker._broken_tiers.add(tier)
+
         # Run update cycle
         result = tracker.update(active_items, existing_files)
 
@@ -2255,6 +2272,7 @@ class LLMService:
                 return None
 
         history = self._context.get_history()
+        excluded = self._excluded_index_files
         tiered = {}
 
         for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
@@ -2278,6 +2296,12 @@ class LLMService:
             graduated_history_indices = []
 
             for key, item in tier_items.items():
+                # Skip excluded index files — they should not appear in any tier
+                if key.startswith(("symbol:", "doc:", "file:")):
+                    path = key.split(":", 1)[1]
+                    if path in excluded:
+                        continue
+
                 if key.startswith("system:"):
                     # System prompt handled separately by assemble_tiered_messages
                     continue

@@ -480,8 +480,10 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       >
         <ac-file-picker
           .selectedFiles=${new Set(this._selectedFiles)}
+          .excludedFiles=${new Set(this._excludedIndexFiles)}
           .reviewState=${this._reviewState}
           @selection-changed=${this._onSelectionChanged}
+          @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}
           @insert-path=${this._onInsertPath}
           @open-review=${this._openReviewSelector}
