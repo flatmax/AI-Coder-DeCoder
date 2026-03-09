@@ -405,9 +405,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     // Check if already open
     const existingIdx = this._files.findIndex(f => f.path === path);
     if (existingIdx !== -1) {
+      const wasActive = this._activeIndex === existingIdx;
       this._activeIndex = existingIdx;
       await this.updateComplete;
-      this._showEditor();
+      // Only rebuild the editor if switching to a different tab;
+      // if the file is already active, skip _showEditor to avoid
+      // recreating models (which resets scroll and cancels Delayers).
+      if (!wasActive) {
+        this._showEditor();
+      }
       if (line != null) {
         this._scrollToLine(line);
       } else if (searchText) {
