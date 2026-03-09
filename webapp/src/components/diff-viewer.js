@@ -463,10 +463,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     await this.updateComplete;
     this._showEditor();
 
-    if (line != null) {
-      this._scrollToLine(line);
-    } else if (searchText) {
-      this._scrollToSearchText(searchText);
+    // Scroll after diff computation finishes — scrolling immediately gets
+    // overwritten by the async diff layout that resets the viewport.
+    if (line != null || searchText) {
+      await this._waitForDiffReady();
+      if (line != null) {
+        this._scrollToLine(line);
+      } else if (searchText) {
+        this._scrollToSearchText(searchText);
+      }
     }
 
     this._dispatchActiveFileChanged(path);
@@ -778,6 +783,27 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     }
     this._highlightDecorations = [];
+  }
+
+  /**
+   * Wait for the diff editor's async diff computation to finish.
+   * Monaco resets scroll/layout when the diff result arrives, so any
+   * scroll positioning must happen after this resolves.
+   */
+  _waitForDiffReady() {
+    return new Promise((resolve) => {
+      if (!this._editor) { resolve(); return; }
+      const disposable = this._editor.onDidUpdateDiff(() => {
+        disposable.dispose();
+        // One extra frame to let Monaco finish its layout pass
+        requestAnimationFrame(() => resolve());
+      });
+      // Safety timeout — if diff never fires (e.g. identical content)
+      setTimeout(() => {
+        try { disposable.dispose(); } catch (_) { /* already disposed */ }
+        resolve();
+      }, 2000);
+    });
   }
 
   _checkDirty() {
