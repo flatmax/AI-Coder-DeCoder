@@ -844,6 +844,20 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     } catch (e) { console.error('Discard failed:', e); }
   }
 
+  async _ctxLoadInPanel(node, panel) {
+    this._contextMenu = null;
+    try {
+      const result = await this.rpcExtract('Repo.get_file_content', node.path);
+      const content = typeof result === 'string' ? result : (result?.content ?? '');
+      this.dispatchEvent(new CustomEvent('load-diff-panel', {
+        detail: { content, panel, label: node.path },
+        bubbles: true, composed: true,
+      }));
+    } catch (e) {
+      console.error('Failed to load file for panel:', e);
+    }
+  }
+
   _ctxRename(node) {
     this._contextMenu = null;
     this._contextInput = { type: 'rename', path: node.path, value: node.path };
@@ -1146,6 +1160,9 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <div class="context-menu-separator" role="separator"></div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxDuplicate(node)}>📄 Duplicate</div>
+          <div class="context-menu-separator" role="separator"></div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxLoadInPanel(node, 'left')}>◧ Load in Left Panel</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxLoadInPanel(node, 'right')}>◨ Load in Right Panel</div>
           <div class="context-menu-separator" role="separator"></div>
           ${this.excludedFiles.has(path) ? html`
             <div class="context-menu-item" role="menuitem" @click=${() => { this._contextMenu = null; this._toggleExclude(node); }}>📊 Include in Index</div>

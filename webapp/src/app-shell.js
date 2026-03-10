@@ -349,6 +349,7 @@ class AcApp extends JRPCClient {
     this._onGlobalKeyUp = this._onGlobalKeyUp.bind(this);
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
     this._onWindowResize = this._onWindowResize.bind(this);
     this._resizeRAF = null;
@@ -366,6 +367,7 @@ class AcApp extends JRPCClient {
     window.addEventListener('files-modified', this._onFilesModified);
     window.addEventListener('search-navigate', this._onSearchNavigate);
     window.addEventListener('active-file-changed', this._onActiveFileChanged);
+    window.addEventListener('load-diff-panel', this._onLoadDiffPanel);
 
     // Intercept Ctrl+S globally and Alt+Arrow for file navigation
     window.addEventListener('keydown', this._onGlobalKeyDown, true);
@@ -393,6 +395,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
     window.removeEventListener('active-file-changed', this._onActiveFileChanged);
+    window.removeEventListener('load-diff-panel', this._onLoadDiffPanel);
     window.removeEventListener('keydown', this._onGlobalKeyDown, true);
     window.removeEventListener('keyup', this._onGlobalKeyUp);
     window.removeEventListener('ac-toast', this._onToastEvent);
@@ -1175,6 +1178,27 @@ class AcApp extends JRPCClient {
       if (fileNav?.visible) {
         fileNav.hide();
       }
+    }
+  }
+
+  _onLoadDiffPanel(e) {
+    const { content, panel, label } = e.detail || {};
+    if (!content || !panel) return;
+
+    // Ensure diff viewer is visible
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgV = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffV) {
+      diffV.classList.add('viewer-visible');
+      diffV.classList.remove('viewer-hidden');
+    }
+    if (svgV) {
+      svgV.classList.add('viewer-hidden');
+      svgV.classList.remove('viewer-visible');
+    }
+
+    if (diffV) {
+      diffV.loadPanel(content, panel, label);
     }
   }
 

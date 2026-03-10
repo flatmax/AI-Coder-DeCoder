@@ -554,6 +554,81 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return [...this._dirtySet];
   }
 
+  /**
+   * Load content into a specific panel (left or right) of the current diff.
+   * If no file is open, creates a virtual comparison file.
+   * @param {string} content - Text content to load
+   * @param {'left'|'right'} panel - Which panel to update
+   * @param {string} [label] - Source label for display
+   */
+  loadPanel(content, panel, label) {
+    if (!this._editor || this._activeIndex < 0) {
+      // No file open — create a virtual comparison
+      const path = 'virtual://compare';
+      const fileObj = {
+        path,
+        original: panel === 'left' ? content : '',
+        modified: panel === 'right' ? content : '',
+        is_new: false,
+        is_read_only: true,
+        is_config: false,
+        config_type: null,
+        real_path: null,
+        savedContent: panel === 'right' ? content : '',
+      };
+
+      const existingIdx = this._files.findIndex(f => f.path === 'virtual://compare');
+      if (existingIdx !== -1) {
+        const existing = this._files[existingIdx];
+        fileObj.original = panel === 'left' ? content : existing.original;
+        fileObj.modified = panel === 'right' ? content : existing.modified;
+        fileObj.savedContent = fileObj.modified;
+        this._files = this._files.map((f, i) => i === existingIdx ? fileObj : f);
+        this._activeIndex = existingIdx;
+      } else {
+        this._files = [...this._files, fileObj];
+        this._activeIndex = this._files.length - 1;
+      }
+
+      this.updateComplete.then(() => this._showEditor());
+      this._dispatchActiveFileChanged(fileObj.path);
+      return;
+    }
+
+    // File is open — update the appropriate side
+    const file = this._files[this._activeIndex];
+    const model = this._editor.getModel();
+    if (!model) return;
+
+    if (panel === 'left') {
+      const updated = { ...file, original: content };
+      this._files = this._files.map((f, i) => i === this._activeIndex ? updated : f);
+      const lang = detectLanguage(file.path);
+      const oldOriginal = model.original;
+      const newOriginalModel = monaco.editor.createModel(content, lang);
+      this._editor.setModel({
+        original: newOriginalModel,
+        modified: model.modified,
+      });
+      if (oldOriginal) oldOriginal.dispose();
+    } else {
+      const updated = { ...file, modified: content, savedContent: content };
+      this._files = this._files.map((f, i) => i === this._activeIndex ? updated : f);
+      const lang = detectLanguage(file.path);
+      const oldModified = model.modified;
+      const newModifiedModel = monaco.editor.createModel(content, lang);
+      this._editor.setModel({
+        original: model.original,
+        modified: newModifiedModel,
+      });
+      if (oldModified) oldModified.dispose();
+    }
+
+    const newDirty = new Set(this._dirtySet);
+    newDirty.delete(file.path);
+    this._dirtySet = newDirty;
+  }
+
   // === Viewport State (for restore on refresh) ===
 
   /**
