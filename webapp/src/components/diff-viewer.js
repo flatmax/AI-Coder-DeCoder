@@ -313,6 +313,47 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       margin: 1.5em 0;
     }
 
+    /* Floating file-name labels for left/right diff panels */
+    .panel-label {
+      position: absolute;
+      top: 8px;
+      z-index: 9;
+      max-width: 45%;
+      padding: 3px 10px;
+      border-radius: 4px;
+      background: rgba(22, 27, 34, 0.78);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border: 1px solid var(--border-primary, #30363d);
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      font-family: var(--font-mono, monospace);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: auto;
+      user-select: none;
+      transition: opacity 0.15s;
+      opacity: 0.85;
+    }
+    .panel-label:hover {
+      opacity: 1;
+      background: rgba(22, 27, 34, 0.92);
+    }
+    .panel-label.left {
+      right: calc(50% + 8px);
+    }
+    .panel-label.right {
+      right: 120px;
+    }
+    /* In inline (non-side-by-side) mode, only show the right label */
+    .panel-label.left.inline-mode {
+      display: none;
+    }
+    .panel-label.right.inline-mode {
+      right: 120px;
+    }
+
     /* Highlight animation for scroll-to-edit */
     .highlight-decoration {
       background: rgba(79, 195, 247, 0.2);
@@ -611,6 +652,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         modified: model.modified,
       });
       if (oldOriginal) oldOriginal.dispose();
+      this._leftLabel = label ? this._makePanelLabel(label) : null;
     } else {
       const updated = { ...file, modified: content, savedContent: content };
       this._files = this._files.map((f, i) => i === this._activeIndex ? updated : f);
@@ -622,11 +664,13 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         modified: newModifiedModel,
       });
       if (oldModified) oldModified.dispose();
+      this._rightLabel = label ? this._makePanelLabel(label) : null;
     }
 
     const newDirty = new Set(this._dirtySet);
     newDirty.delete(file.path);
     this._dirtySet = newDirty;
+    this.requestUpdate();
   }
 
   // === Viewport State (for restore on refresh) ===
@@ -741,6 +785,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const language = detectLanguage(file.path);
 
     const renderSideBySide = !this._previewMode;
+
+    // Update floating panel labels
+    this._updatePanelLabels(file);
 
     if (this._editor) {
       // Capture old models — they must be disposed AFTER setModel() detaches
@@ -858,6 +905,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     }
     this._highlightDecorations = [];
+    this._leftLabel = null;
+    this._rightLabel = null;
   }
 
   /**
@@ -1132,6 +1181,43 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     window.dispatchEvent(new CustomEvent('active-file-changed', {
       detail: { path },
     }));
+  }
+
+  // === Panel Labels ===
+
+  /**
+   * Build a label object from a file path or descriptive string.
+   * @param {string} pathOrLabel
+   * @returns {{name: string, fullPath: string}}
+   */
+  _makePanelLabel(pathOrLabel) {
+    if (!pathOrLabel) return null;
+    const lastSlash = pathOrLabel.lastIndexOf('/');
+    const name = lastSlash >= 0 ? pathOrLabel.slice(lastSlash + 1) : pathOrLabel;
+    return { name, fullPath: pathOrLabel };
+  }
+
+  /**
+   * Update left/right floating labels based on the active file.
+   * For normal diffs (same file, HEAD vs working): show "HEAD" left, file name right.
+   * For virtual compare or loadPanel: labels are set explicitly.
+   */
+  _updatePanelLabels(file) {
+    if (!file) {
+      this._leftLabel = null;
+      this._rightLabel = null;
+      this.requestUpdate();
+      return;
+    }
+    // If this is a virtual compare created by loadPanel, keep existing labels
+    if (file.path === 'virtual://compare') {
+      this.requestUpdate();
+      return;
+    }
+    // Normal file diff (same file, HEAD vs working) — no labels needed
+    this._leftLabel = null;
+    this._rightLabel = null;
+    this.requestUpdate();
   }
 
   // === LSP Providers ===
@@ -1499,6 +1585,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         <div class="split-container">
           <div class="editor-pane">
             ${this._renderOverlayButtons(file, isDirty, false)}
+            ${this._renderPanelLabels(true)}
           </div>
           <div class="preview-pane"
                @scroll=${() => this._scrollEditorToPreviewLine()}>
@@ -1519,12 +1606,31 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return html`
       <div class="editor-container">
         ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
+        ${this._renderPanelLabels(false)}
         ${!hasFiles ? html`
           <div class="empty-state">
             <div class="watermark">AC⚡DC</div>
           </div>
         ` : nothing}
       </div>
+    `;
+  }
+
+  _renderPanelLabels(inlineMode) {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return nothing;
+    const inlineCls = inlineMode ? ' inline-mode' : '';
+    return html`
+      ${this._leftLabel ? html`
+        <div class="panel-label left${inlineCls}" title="${this._leftLabel.fullPath}">
+          ${this._leftLabel.name}
+        </div>
+      ` : nothing}
+      ${this._rightLabel ? html`
+        <div class="panel-label right${inlineCls}" title="${this._rightLabel.fullPath}">
+          ${this._rightLabel.name}
+        </div>
+      ` : nothing}
     `;
   }
 
