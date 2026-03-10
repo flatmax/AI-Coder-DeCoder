@@ -332,7 +332,7 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 
 ### Speech to Text
 
-🎤 toggle for continuous voice dictation. See [Speech to Text](speech_to_text.md).
+🎤 toggle for continuous voice dictation. Transcribed text is inserted at the current cursor position in the textarea (not appended), with automatic space separators and cursor repositioning. See [Speech to Text](speech_to_text.md).
 
 ### Images
 
