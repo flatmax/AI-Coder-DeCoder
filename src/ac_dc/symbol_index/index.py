@@ -74,14 +74,15 @@ class SymbolIndex:
         except (OSError, UnicodeDecodeError):
             return None
 
-        # Parse
-        tree = self._parser.parse(source, language)
-        if not tree:
-            return None
-
         # Extract
         extractor_cls = EXTRACTORS.get(language)
         if not extractor_cls:
+            return None
+
+        # Parse (some extractors like MatlabExtractor are regex-based and
+        # don't need a tree-sitter tree; they accept tree=None)
+        tree = self._parser.parse(source, language)
+        if tree is None and not getattr(extractor_cls, 'tree_optional', False):
             return None
 
         extractor = extractor_cls()
