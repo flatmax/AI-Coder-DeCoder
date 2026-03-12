@@ -161,6 +161,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       overflow: hidden;
       text-overflow: ellipsis;
       color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
     }
     .node-name.dir {
       color: var(--text-secondary);
