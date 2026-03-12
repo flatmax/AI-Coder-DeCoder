@@ -547,7 +547,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     // Root node (repo name) — show as expandable root directory
     if (node.path === '' && node.type === 'dir') {
       items.push({ node, depth: 0 });
-      if (this._expanded.has('') || this._filter) {
+      if (this._expanded.has('')) {
         const children = this._sortChildren(node.children || []);
         for (const child of children) {
           items.push(...this._flattenTree(child, 1));
@@ -561,7 +561,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
     items.push({ node, depth });
 
-    if (node.type === 'dir' && (this._expanded.has(node.path) || this._filter)) {
+    if (node.type === 'dir' && this._expanded.has(node.path)) {
       const children = this._sortChildren(node.children || []);
       for (const child of children) {
         items.push(...this._flattenTree(child, depth + 1));
@@ -1004,10 +1004,39 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _onFilterInput(e) {
     this._filter = e.target.value;
+    if (this._filter) this._expandFilteredDirs();
   }
 
   setFilter(text) {
     this._filter = text || '';
+    if (this._filter) this._expandFilteredDirs();
+  }
+
+  /**
+   * Expand all directories that contain filter-matching descendants,
+   * so results are visible immediately. User can still collapse them.
+   */
+  _expandFilteredDirs() {
+    if (!this._tree) return;
+    const next = new Set(this._expanded);
+    this._expandMatchingDirs(this._tree, next);
+    this._expanded = next;
+  }
+
+  _expandMatchingDirs(node, expanded) {
+    if (!node || node.type === 'file') return false;
+    let hasMatch = false;
+    if (node.children) {
+      for (const child of node.children) {
+        if (child.type === 'file') {
+          if (this._matchesFilter(child)) hasMatch = true;
+        } else {
+          if (this._expandMatchingDirs(child, expanded)) hasMatch = true;
+        }
+      }
+    }
+    if (hasMatch) expanded.add(node.path);
+    return hasMatch;
   }
 
   // === Git Status Helpers ===
