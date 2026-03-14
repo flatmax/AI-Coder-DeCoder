@@ -285,7 +285,7 @@ class ConfigManager:
     @property
     def doc_index_config(self):
         return self._app_config.get("doc_index", {
-            "keyword_model": "all-mpnet-base-v2",
+            "keyword_model": "BAAI/bge-small-en-v1.5",
             "keywords_enabled": True,
             "keywords_top_n": 3,
             "keywords_ngram_range": [1, 2],

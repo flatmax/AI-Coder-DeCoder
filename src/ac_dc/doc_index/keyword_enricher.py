@@ -43,7 +43,7 @@ _LARGE_SECTION_BONUS = 2
 class KeywordEnricher:
     """Extract keywords per heading section using KeyBERT."""
 
-    def __init__(self, model_name="all-mpnet-base-v2", top_n=3,
+    def __init__(self, model_name="BAAI/bge-small-en-v1.5", top_n=3,
                  ngram_range=(1, 2), min_section_chars=50,
                  min_score=0.3, diversity=0.5,
                  tfidf_fallback_chars=150, max_doc_freq=0.6):

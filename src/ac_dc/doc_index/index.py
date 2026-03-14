@@ -50,7 +50,7 @@ class DocIndex:
         kw_enabled = self._config.get("keywords_enabled", True)
         if kw_enabled:
             self._enricher = KeywordEnricher(
-                model_name=self._config.get("keyword_model", "all-mpnet-base-v2"),
+                model_name=self._config.get("keyword_model", "BAAI/bge-small-en-v1.5"),
                 top_n=self._config.get("keywords_top_n", 3),
                 ngram_range=tuple(self._config.get("keywords_ngram_range", [1, 2])),
                 min_section_chars=self._config.get("keywords_min_section_chars", 50),

@@ -83,12 +83,19 @@ FileSymbols:
 | JavaScript | `.js`, `.mjs`, `.jsx` |
 | TypeScript | `.ts`, `.tsx` |
 | C/C++ | `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hxx` |
+| MATLAB/Octave | `.m` |
 
 ### Grammar Acquisition
 
 Tree-sitter grammars are provided via individual `tree-sitter-{language}` pip packages. The parser imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. If a package is not installed, that language is silently unavailable.
 
 The parser is a singleton. Language initialization runs once on first use. If some packages are installed and others are not, the parser operates with partial language support — there is no retry mechanism.
+
+### Regex-Based Extractors (No Tree-Sitter)
+
+Some languages use **regex-based extraction** instead of tree-sitter parsing. These extractors set `tree_optional = True` on the class, signalling to the index that no parse tree is required. The `index_file()` method checks this flag and passes `tree=None` to the extractor when the language has no tree-sitter grammar available.
+
+This pattern is used for MATLAB/Octave, where no maintained tree-sitter grammar exists. The regex-based approach produces the same `FileSymbols` output as tree-sitter extractors, so downstream consumers (cache, formatter, reference index) are unaware of the extraction method.
 
 ### Adding a New Language
 
@@ -109,6 +116,41 @@ Each extractor subclass overrides the base to handle language-specific AST struc
 | Instance variables | Match `self.x = ...` inside `__init__` (Python) |
 | Properties | `@property` (Python), getter/setter keywords (JS) |
 | Inheritance | Parse superclass/heritage nodes |
+
+### MATLAB/Octave Extractor
+
+The MATLAB extractor (`MatlabExtractor`) uses **regex-based parsing** — no tree-sitter grammar is required. It sets `tree_optional = True` and receives `tree=None` from the index.
+
+**Extracted constructs:**
+
+| Construct | Pattern | Symbol Kind |
+|-----------|---------|-------------|
+| `classdef MyClass < Base1 & Base2` | `_CLASS_RE` regex | `class` with `bases` |
+| `function [a, b] = myFunc(x, y)` | `_FUNC_RE` regex | `function` (top-level) or `method` (inside `classdef`) |
+| `import pkg.Class` | `_IMPORT_RE` regex | `Import` |
+| Top-level `VAR = ...` | `_VAR_RE` regex | `variable` (outside class/function bodies) |
+
+**Function body analysis:**
+
+For each function, the extractor also scans the body text to extract:
+- **Call sites** — identifiers followed by `(`, excluding MATLAB keywords. Produced as `CallSite` objects for the reference index
+- **Local variables** — LHS identifiers in assignments (`x = ...` or `[a, b] = ...`), excluding parameters, output args, and keywords. Attached as `variable`-kind children of the function symbol
+- **Read variables** — identifiers that appear in the body but are never assigned locally and are not parameters, outputs, or MATLAB builtins. Also attached as `variable`-kind children
+
+**Nesting and `end` tracking:**
+
+MATLAB uses `end` to close `function`, `classdef`, `if`, `for`, `while`, `switch`, `try`, and `parfor` blocks. The `_find_end()` helper scans forward from a block-opening line, tracking nesting depth, to find the matching `end`. This determines function/class extent for:
+- Deciding whether a `function` inside a `classdef` is a method
+- Scoping local variable and call site extraction to the function body
+- Excluding function/class interiors from top-level variable detection
+
+**Method detection:** A function whose source line falls within a `classdef` block's span is reclassified from `kind="function"` to `kind="method"` and attached as a child of the class symbol.
+
+**Output arguments as return type:** If a function declares output arguments (`function [a, b] = myFunc(...)`), the output names are joined with `, ` and stored as `return_type` on the symbol (e.g., `"a, b"`).
+
+**Comment and string stripping:** Before pattern matching, line comments (`%...`) and string literals (`'...'` and `"..."`) are stripped from a copy of the source text to avoid false positives in call site and variable detection.
+
+**Builtin exclusion:** A large set of common MATLAB builtins (`disp`, `fprintf`, `zeros`, `plot`, etc.) and keywords (`if`, `for`, `end`, etc.) are excluded from read-variable detection to reduce noise in the symbol map.
 
 ## Import Resolution
 
@@ -323,6 +365,17 @@ These directories are skipped during repository-wide indexing. The import resolv
 ### C Extractor
 - Struct extracted as class; functions with parameters
 - #include extracted as imports
+
+### MATLAB Extractor
+- `classdef` with inheritance (`< Base1 & Base2`) extracted as class with bases
+- Functions with output arguments (`[a, b] = myFunc(x, y)`) — return type is joined output names
+- Functions inside `classdef` blocks detected as methods (child of class)
+- `import pkg.Class` extracted as imports
+- Top-level variable assignments extracted (private `_`-prefixed excluded)
+- Call sites extracted from function bodies (keywords excluded)
+- Local variable assignments and read-only variables attached as function children
+- `end` nesting tracked correctly for block scoping
+- Works without tree-sitter grammar (`tree_optional = True`, regex-based)
 
 ### Symbol Cache
 - Put/get by path and mtime; stale mtime returns None

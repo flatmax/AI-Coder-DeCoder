@@ -131,6 +131,7 @@ The following operations are restricted to localhost connections:
 | **Review mode** | `start_review`, `end_review` | `LLMService._check_localhost_only()` |
 | **Git operations** | `commit`, `stage_files`, `unstage_files`, `rename_file`, `delete_file`, `create_file`, `write_file`, `discard_changes`, `reset_hard`, `stage_all` | `Repo._check_localhost_only()` |
 | **Settings** | `save_config_content`, `reload_llm_config`, `reload_app_config` | `Settings._check_localhost_only()` |
+| **Doc convert** | `convert_files` | `DocConvert._check_localhost_only()` |
 
 ### Everyone RPCs
 

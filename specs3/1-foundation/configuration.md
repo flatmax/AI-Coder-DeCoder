@@ -49,7 +49,7 @@ Configuration is split across multiple files, each serving a distinct purpose. A
     },
     doc_convert: {
         enabled: true,
-        extensions: [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt"],
+        extensions: [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
         max_source_size_mb: 50
     }
 }
@@ -98,7 +98,7 @@ Config directory relative to the application source.
 
 | Category | Files | Upgrade Behavior |
 |----------|-------|-----------------|
-| **Managed** | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}` |
+| **Managed** | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}`. Note: `commit.md` and `system_reminder.md` are managed files but are not exposed via the Settings RPC whitelist — they are loaded directly by `ConfigManager` methods |
 | **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
 
 ### Version-Aware Upgrade
@@ -152,6 +152,7 @@ A whitelisted set of config types can be read, written, and reloaded:
 | `system_extra` | Extra system prompt |
 | `compaction` | Compaction skill prompt |
 | `review` | Review system prompt |
+| `system_doc` | Document mode system prompt |
 
 Only these types are accepted — arbitrary file paths are rejected.
 
@@ -182,8 +183,20 @@ Only these types are accepted — arbitrary file paths are rejected.
 | `Settings.reload_app_config()` | Hot-reload app config |
 | `Settings.get_config_info()` | Current model names and config paths |
 | `Settings.get_snippets()` | Load prompt snippets (code mode — backwards compatible) |
+| `Settings.get_review_snippets()` | Load review-specific prompt snippets |
 
 **Note:** Snippet loading during active sessions is handled by `LLMService.get_snippets()`, which checks review/doc mode state and calls `ConfigManager.get_snippets(mode=...)` with the appropriate mode. All modes' snippets live in a single `snippets.json` file with a nested structure (`{"code": [...], "review": [...], "doc": [...]}`).
+
+### Non-Editable Config Files
+
+The following config files are loaded by `ConfigManager` methods but are **not** in the `CONFIG_TYPES` whitelist, so they cannot be edited via the Settings RPC:
+
+| File | Loader | Reason |
+|------|--------|--------|
+| `commit.md` | `get_commit_prompt()` | Rarely customized; used only for commit message generation |
+| `system_reminder.md` | `get_system_reminder()` | Appended to every user prompt; editing via UI could break edit protocol |
+
+These files can still be edited directly on disk in the config directory.
 
 ### Config Editing Flow
 

@@ -22,15 +22,18 @@ If no bundled webapp is found, the server exits with an error message instructin
 
 ### Static File Server
 
-A minimal `http.server.HTTPServer` runs in a daemon thread, serving files from the webapp dist directory. Features:
+A `http.server.ThreadingHTTPServer` runs in a daemon thread, serving files from the webapp dist directory. The threaded server handles concurrent requests (e.g., multiple browser tabs, parallel asset loads). Features:
 
 - **SPA fallback**: requests for paths without a file extension that don't match a real file are served `index.html` (for client-side routing)
 - **Silent logging**: per-request logs suppressed to avoid noise
 - **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed
+- **Error suppression**: `BrokenPipeError` and `ConnectionResetError` are silently caught in both the request handler (`do_GET`) and the server's `handle_error` override, preventing noisy tracebacks when clients disconnect mid-transfer
 
 ### Vite Base Path
 
 `vite.config.js` sets `base: './'` so all asset references use relative paths. This allows the built webapp to be served from any origin without path rewriting.
+
+**Note:** `vite.config.js` hardcodes `host: '0.0.0.0'` for both `server` and `preview` blocks. This only affects developers running `npm run dev` or `npm run preview` directly (outside the `ac-dc` CLI). When launched via the CLI, `main.py` passes `--host` to the Vite subprocess, which overrides the config file value. The hardcoded `0.0.0.0` is a development convenience and has no security impact on production builds (which use the built-in static server, not Vite).
 
 ### Version Detection
 
@@ -150,13 +153,13 @@ Platforms: Linux, Windows, macOS (ARM).
 The bundled `config/` directory contains sensible defaults:
 - `llm.json` — defaults to `anthropic/claude-sonnet-4-20250514` with empty env (no provider-specific settings)
 - `system.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md` — current prompts
-- `app.json`, `snippets.json`, `review-snippets.json` — default application settings
+- `app.json`, `snippets.json` — default application settings
 
 On first run, all configs are copied to the user config directory. On subsequent releases, managed files (prompts, default settings) are overwritten with backups; user files (`llm.json`, `system_extra.md`) are preserved. See [Configuration — Packaged Builds](../1-foundation/configuration.md#packaged-builds) for details.
 
 ## Python Version
 
-The `pyproject.toml` specifies the minimum Python version via `requires-python`. **Note:** The current `pyproject.toml` states `requires-python = ">=3.14"`, which is likely an error — Python 3.14 is not yet released. The intended minimum is Python 3.10 or newer. This should be corrected to `requires-python = ">=3.10"`.
+The `pyproject.toml` specifies `requires-python = ">=3.10"`. The CI release workflow (`release.yml`) builds with Python 3.14.
 
 ## Security
 

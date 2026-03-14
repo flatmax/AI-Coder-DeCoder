@@ -94,7 +94,7 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 
 ### Anchoring Implementation Detail
 
-Anchoring state is tracked per-item during each cascade pass. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
+Anchoring state is tracked per-item during each cascade pass via a dynamically-set `_anchored` attribute on `TrackedItem` objects (not a declared dataclass field). The attribute is set to `True` or `False` during veteran processing and read via `getattr(item, '_anchored', False)` during promotion checks. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
 
 ## Demotion
 
@@ -224,6 +224,10 @@ For each item in the active items list:
 3. Changed: N=0, demote to active
 4. Unchanged: N++
 
+**Integrated cleanup:** Phase 1 also removes `file:*` and `history:*` items that are no longer in the active items list (deselected files, compacted history). `symbol:*` and `doc:*` items are exempt — they persist in their earned tiers since they represent repo structure, not user-selected content. This cleanup is integrated into the same pass rather than being a separate phase.
+
+**First-measurement acceptance:** Items initialized with a placeholder content hash (empty string `""`) from `initialize_from_reference_graph()` accept their first real hash without triggering demotion. This prevents every initialized item from demoting on the first request after startup. Subsequent hash changes (non-empty → different non-empty) trigger normal demotion to active with N=0.
+
 ### Phase 2: Determine Items Entering L3
 Three sources:
 1. Items leaving active context with N ≥ 3
@@ -264,6 +268,7 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 ## Testing Invariants
 
 - N increments only on unchanged content; resets to 0 on hash mismatch or modification
+- First-measurement hash (empty → non-empty) accepted without demotion; tier and N preserved
 - Graduation requires N ≥ 3 for files/symbols; history graduates via piggyback or token threshold; URLs enter L1 directly
 - Promoted items enter destination tier with that tier's `entry_n`, not preserved N
 - Ripple cascade propagates only into broken/empty tiers; stable tiers block promotion
@@ -274,4 +279,5 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 - A file never appears as both index block and full content — when full content is in any tier, the index block (`sym:` or `doc:`) is excluded
 - A URL never appears in both a cached tier and the uncached URL context section — when `url:{hash}` is in any tier, that URL is excluded from the uncached URL context pair
 - History purge after compaction removes all `history:*` entries from tracker
+- Deselected `file:*` items removed during Phase 1 processing (not a separate phase); `symbol:*`/`doc:*` items persist
 - Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate

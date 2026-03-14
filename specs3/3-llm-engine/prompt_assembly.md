@@ -70,6 +70,25 @@ Content is organized into 5 stability tiers (see [Cache Tiering](cache_tiering.m
 
 Empty tiers are skipped entirely.
 
+### Cross-Reference Legend Headers
+
+When cross-reference mode is active, the secondary index's legend is appended to L0 with its own header. The header used is the **opposite mode's header** — ensuring each legend is introduced with a contextually appropriate description:
+
+| Primary Mode | Primary Header | Cross-Ref Legend Header |
+|---|---|---|
+| Code | `REPO_MAP_HEADER` | `DOC_MAP_HEADER` (for the doc legend) |
+| Document | `DOC_MAP_HEADER` | `REPO_MAP_HEADER` (for the symbol legend) |
+
+This means in code mode with cross-reference enabled, the L0 system message contains:
+1. System prompt
+2. `REPO_MAP_HEADER` + symbol legend + L0 symbol entries
+3. `DOC_MAP_HEADER` + doc legend
+
+And in document mode with cross-reference enabled:
+1. System prompt
+2. `DOC_MAP_HEADER` + doc legend + L0 doc entries
+3. `REPO_MAP_HEADER` + symbol legend
+
 ### Review Context (Conditional)
 
 When review mode is active (see [Code Review](../4-features/code_review.md)), a review context block is inserted between URL context and active files:
@@ -103,6 +122,7 @@ The following named constants are used when building the message array:
 | `FILES_L3_HEADER` | `# Reference Files (L3)\n\n...` |
 | `TIER_SYMBOLS_HEADER` | `# Repository Structure (continued)\n\n` |
 | `REVIEW_CONTEXT_HEADER` | `# Code Review Context\n\n` |
+| `DOC_MAP_HEADER` | `# Document Structure\n\nBelow is an outline map of documentation files...\n\n` |
 
 ## Block Details
 
@@ -111,15 +131,11 @@ The following named constants are used when building the message array:
 L0 is the **system role message** (not a user/assistant pair). It concatenates:
 
 1. **System prompt** — from files
-2. **Index legend(s)** — preceded by:
-   ```
-   # Repository Structure
+2. **Index legend(s)** — preceded by a mode-specific header:
+   - **Code mode**: `REPO_MAP_HEADER` — "# Repository Structure\n\nBelow is a map of the repository showing classes, functions, and their relationships..."
+   - **Document mode**: `DOC_MAP_HEADER` — "# Document Structure\n\nBelow is an outline map of documentation files showing headings, keywords, and cross-references..."
 
-   Below is a map of the repository showing classes, functions, and their relationships.
-   Use this to understand the codebase structure and find relevant code.
-
-   ```
-   Then the legend text (abbreviation key + path aliases). The context legend does not include `:N=line(s)` since line numbers are not present in the context symbol map. When cross-reference mode is active, both the symbol-map legend and the doc-index legend are included in L0.
+   Then the legend text (abbreviation key + path aliases). The context legend does not include `:N=line(s)` since line numbers are not present in the context symbol map. When cross-reference mode is active, both the symbol-map legend and the doc-index legend are included in L0, each preceded by its own mode-appropriate header (see [Cross-Reference Legend Headers](#cross-reference-legend-headers) below).
 3. **L0 index entries** — symbol/doc blocks for L0-stability files
 4. **L0 file contents** — preceded by:
    ```
