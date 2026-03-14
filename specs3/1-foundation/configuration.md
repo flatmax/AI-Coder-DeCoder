@@ -30,7 +30,15 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 }
 ```
 
-**Cache target tokens** = `cache_min_tokens × cache_buffer_multiplier` (default: 1536)
+**Cache target tokens** = `max(cache_min_tokens, min_cacheable_tokens) × cache_buffer_multiplier`
+
+The `min_cacheable_tokens` is model-aware — per Anthropic's prompt caching docs:
+- **4096 tokens** for Claude Opus 4.5/4.6, Haiku 4.5
+- **1024 tokens** for Claude Sonnet and other Claude models
+
+The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
+
+A fallback `cache_target_tokens` property (without model reference) computes `cache_min_tokens × cache_buffer_multiplier` (default: 1126) for callers that don't have a model reference.
 
 ### App Config
 
@@ -51,6 +59,17 @@ Configuration is split across multiple files, each serving a distinct purpose. A
         enabled: true,
         extensions: [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
         max_source_size_mb: 50
+    },
+    doc_index: {
+        keyword_model: "BAAI/bge-small-en-v1.5",
+        keywords_enabled: true,
+        keywords_top_n: 3,
+        keywords_ngram_range: [1, 2],
+        keywords_min_section_chars: 50,
+        keywords_min_score: 0.3,
+        keywords_diversity: 0.5,
+        keywords_tfidf_fallback_chars: 150,
+        keywords_max_doc_freq: 0.6
     }
 }
 ```
@@ -162,7 +181,8 @@ Only these types are accepted — arbitrary file paths are rejected.
 - Default LLM and app configs contain expected keys
 - Save and read-back round-trip for config content
 - Invalid config type key rejected with error
-- Cache target tokens computed from defaults (1024 × 1.5 = 1536)
+- Cache target tokens fallback computed from defaults (1024 × 1.1 = 1126)
+- Cache target tokens model-aware: Opus 4.6 → max(1024, 4096) × 1.1 = 4505, Sonnet → 1126
 - Snippets fallback returns non-empty list
 - System prompt assembly returns non-empty string
 - Commit prompt loads from commit.md and contains expected content

@@ -126,6 +126,7 @@ jobs:
             --hidden-import=ac_dc.symbol_index.extractors.python_extractor \
             --hidden-import=ac_dc.symbol_index.extractors.javascript_extractor \
             --hidden-import=ac_dc.symbol_index.extractors.c_extractor \
+            --hidden-import=ac_dc.symbol_index.extractors.matlab_extractor \
             --hidden-import=ac_dc.doc_index \
             --hidden-import=ac_dc.doc_index.cache \
             --hidden-import=ac_dc.doc_index.index \

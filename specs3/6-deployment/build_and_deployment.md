@@ -133,6 +133,7 @@ Platforms: Linux, Windows, macOS (ARM).
    pyinstaller --onefile --name ac-dc-{platform} \
        --add-data "src/ac_dc/VERSION:ac_dc" \
        --add-data "src/ac_dc/config:ac_dc/config" \
+       --add-data "webapp/dist:ac_dc/webapp_dist" \
        --collect-all=litellm \
        --collect-all=tiktoken --collect-all=tiktoken_ext \
        --collect-all=tree_sitter \
@@ -143,7 +144,7 @@ Platforms: Linux, Windows, macOS (ARM).
        --collect-all=tree_sitter_cpp \
        --collect-all=trafilatura \
        --hidden-import=boto3 --hidden-import=botocore \
-       src/ac_dc/main.py
+       src/ac_dc/__main__.py
    ```
    **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime. The bundled `webapp_dist` is served locally by the built-in static file server — no internet connection required.
 4. Create GitHub Release with all platform binaries attached

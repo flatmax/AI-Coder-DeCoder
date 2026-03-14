@@ -22,6 +22,8 @@ _MANAGED_FILES = {
     "system.md",
     "system_doc.md",
     "compaction.md",
+    "commit.md",
+    "system_reminder.md",
     "review.md",
     "app.json",
     "snippets.json",
