@@ -143,6 +143,26 @@ class TestContextBreakdown:
         totals = breakdown["session_totals"]
         assert totals["total"] == 0
 
+    def test_breakdown_has_url_data(self, service):
+        breakdown = service.get_context_breakdown()
+        bd = breakdown["breakdown"]
+        assert "urls" in bd
+        assert "url_details" in bd
+
+    def test_breakdown_has_blocks(self, service):
+        breakdown = service.get_context_breakdown()
+        assert "blocks" in breakdown
+        assert isinstance(breakdown["blocks"], list)
+
+    def test_breakdown_has_cache_hit_rate(self, service):
+        breakdown = service.get_context_breakdown()
+        assert "cache_hit_rate" in breakdown
+
+    def test_breakdown_has_promotions_demotions(self, service):
+        breakdown = service.get_context_breakdown()
+        assert "promotions" in breakdown
+        assert "demotions" in breakdown
+
 
 class TestSnippets:
     def test_code_snippets_default(self, service):

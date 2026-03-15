@@ -100,8 +100,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults
-- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()`
+- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults (model, smaller_model, empty env, cache params)
+- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()` (url_cache, history_compaction, doc_convert, doc_index)
 
 ## Phase 3: LLM Engine
 - [x] Context Engine
@@ -129,15 +129,19 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] Streaming chat: chat_streaming, cancel_streaming, _stream_chat
   - [x] Session management: new_session, load_session_into_context, _restore_last_session
   - [x] History: history_search, history_get_session, history_list_sessions, get_history_status
-  - [x] Context breakdown: get_context_breakdown
+  - [x] Context breakdown: get_context_breakdown (with blocks, promotions, cache_hit_rate, url data)
   - [x] Snippets: get_snippets (mode-aware)
   - [x] Commit: commit_all, generate_commit_message
   - [x] Review mode: start_review, end_review, get_review_state, check_review_ready
   - [x] URL handling: detect_urls, fetch_url, detect_and_fetch, get_url_content, invalidate/remove/clear
+  - [x] URL tracking in stability: url: items in _update_stability, url: content in _build_tiered_content
   - [x] LSP delegation: lsp_get_hover, lsp_get_definition, lsp_get_references, lsp_get_completions
   - [x] File navigation: navigate_file
   - [x] Stability tracker integration: _try_initialize_stability, _update_stability, _build_tiered_content
   - [x] Deferred initialization, collaboration localhost checks
+  - [x] Doc mode re-extraction before LLM calls (mtime-based)
+  - [x] Deferred doc enrichment after edit blocks (_run_deferred_enrichment)
+  - [x] Cache blocks builder for cache viewer (_build_cache_blocks)
 - [x] `tests/test_llm_service.py` — State, selection, mode, review, streaming guards, context breakdown, snippets, history, URLs
 
 ## Phase 4: Features
@@ -150,7 +154,7 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `src/ac_dc/url_service/service.py` — URLService orchestrator (detect, fetch, cache, summarize, format context)
   - [x] `tests/test_url_service.py` — Cache CRUD/TTL, detection/classification, display names, summary selection, URLContent serialization, service integration
 - [x] Image Persistence (already implemented in history_store.py — save_images, reconstruct_images, image_refs)
-- [ ] Code Review (review mode orchestration implemented in LLMService; frontend pending)
+- [x] Code Review (backend: review mode orchestration in LLMService + Repo; frontend: Phase 5)
 - [x] Document Convert
   - [x] `src/ac_dc/doc_convert.py` — DocConvert class
     - [x] scan_convertible_files (extension matching, excluded dirs, status badges)

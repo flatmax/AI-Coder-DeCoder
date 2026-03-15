@@ -85,6 +85,15 @@ class LLMService:
         self._active_request_id: Optional[str] = None
         self._cancelled_requests: set[str] = set()
 
+        # Session token totals
+        self._session_totals = {
+            "prompt": 0,
+            "completion": 0,
+            "total": 0,
+            "cache_hit": 0,
+            "cache_write": 0,
+        }
+
         # Review state
         self._review_active = False
         self._review_branch: Optional[str] = None
@@ -238,6 +247,9 @@ class LLMService:
             asyncio.ensure_future(
                 self._event_callback("filesChanged", self._selected_files)
             )
+            asyncio.ensure_future(
+                self._event_callback("modeChanged", {"mode": self._mode.value})
+            )
 
         result = {"status": "switched", "mode": self._mode.value}
 
@@ -270,6 +282,15 @@ class LLMService:
             # Remove cross-ref items
             prefix = "doc:" if self._mode == Mode.CODE else "sym:"
             tracker.remove_items_by_prefix(prefix)
+
+        # Broadcast mode change with cross-ref state
+        if self._event_callback:
+            asyncio.ensure_future(
+                self._event_callback("modeChanged", {
+                    "mode": self._mode.value,
+                    "cross_ref_enabled": self._cross_ref_enabled,
+                })
+            )
 
         return {
             "status": "enabled" if enabled else "disabled",
@@ -334,13 +355,27 @@ class LLMService:
     ):
         """Background task for streaming chat."""
         result = {}
+        token_usage = {}
         try:
+            # Get event loop for executor calls
+            loop = asyncio.get_running_loop()
+
             # Sync file context with selected files
             self._sync_file_context(files)
 
             # Initialize stability tracker if needed
             if not self._stability_initialized:
                 self._try_initialize_stability()
+
+            # Re-extract doc structures if in doc mode (mtime-based, instant)
+            if self._mode == Mode.DOC and self._doc_index:
+                try:
+                    repo_files = set(self._repo.get_flat_file_list().splitlines())
+                    await loop.run_in_executor(
+                        None, self._doc_index.index_repo, repo_files,
+                    )
+                except Exception as e:
+                    logger.debug(f"Doc re-extraction failed: {e}")
 
             # Detect and fetch URLs (up to 3)
             url_context = await self._fetch_urls_from_message(request_id, message)
@@ -388,9 +423,8 @@ class LLMService:
                 system_reminder=system_reminder,
             )
 
-            # Run LLM completion — capture loop ref for thread-safe callbacks
-            loop = asyncio.get_running_loop()
-            full_content, was_cancelled = await loop.run_in_executor(
+            # Run LLM completion in thread pool
+            full_content, was_cancelled, token_usage = await loop.run_in_executor(
                 None, self._run_llm_streaming, request_id, msgs, loop,
             )
 
@@ -405,6 +439,7 @@ class LLMService:
             edit_results = []
             files_modified = []
             files_auto_added = []
+            deferred_enrichment = []
             if not self._review_active and full_content:
                 blocks = parse_edit_blocks(full_content)
                 if blocks:
@@ -432,6 +467,12 @@ class LLMService:
                             self._doc_index.invalidate_file(path)
                             self._doc_index.index_file_structure_only(path)
 
+                    # Queue modified doc files for deferred enrichment
+                    if self._doc_index and files_modified:
+                        deferred_enrichment = self._doc_index.queue_enrichment(
+                            files_modified
+                        )
+
                     # Broadcast file changes if auto-added
                     if files_auto_added and self._event_callback:
                         await self._event_callback(
@@ -446,6 +487,19 @@ class LLMService:
                 files_modified=files_modified or None,
                 edit_results=edit_results or None,
             )
+
+            # Update session totals
+            if token_usage:
+                self._session_totals["prompt"] += token_usage.get("prompt_tokens", 0)
+                self._session_totals["completion"] += token_usage.get("completion_tokens", 0)
+                self._session_totals["cache_hit"] += token_usage.get("cache_read_tokens", 0)
+                self._session_totals["cache_write"] += token_usage.get("cache_write_tokens", 0)
+                self._session_totals["total"] = (
+                    self._session_totals["prompt"]
+                    + self._session_totals["completion"]
+                    + self._session_totals["cache_hit"]
+                    + self._session_totals["cache_write"]
+                )
 
             # Update stability
             if tracker:
@@ -466,6 +520,7 @@ class LLMService:
 
             result.update({
                 "response": full_content,
+                "token_usage": token_usage,
                 "edit_results": edit_results,
                 "shell_commands": shell_commands,
                 "passed": passed,
@@ -474,6 +529,7 @@ class LLMService:
                 "not_in_context": not_in_ctx,
                 "files_modified": files_modified,
                 "files_auto_added": files_auto_added,
+                "_deferred_enrichment": deferred_enrichment,
             })
 
         except Exception as e:
@@ -486,8 +542,16 @@ class LLMService:
             self._cancelled_requests.discard(request_id)
 
         # Send stream complete
+        deferred_enrichment = result.pop("_deferred_enrichment", [])
         if self._event_callback:
             await self._event_callback("streamComplete", request_id, result)
+
+        # Deferred doc enrichment (after streamComplete, non-blocking)
+        if deferred_enrichment and self._doc_index:
+            await asyncio.sleep(0)  # Flush WebSocket frame
+            asyncio.ensure_future(
+                self._run_deferred_enrichment(request_id, deferred_enrichment)
+            )
 
         # Post-response compaction (with delay)
         await asyncio.sleep(0.5)
@@ -496,8 +560,17 @@ class LLMService:
     def _run_llm_streaming(
         self, request_id: str, messages: list[dict],
         loop: Optional[asyncio.AbstractEventLoop] = None,
-    ) -> tuple[str, bool]:
-        """Run LLM completion in a thread (blocking). Returns (content, was_cancelled)."""
+    ) -> tuple[str, bool, dict]:
+        """Run LLM completion in a thread (blocking).
+
+        Returns (content, was_cancelled, token_usage).
+        """
+        token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
         try:
             import litellm
             response = litellm.completion(
@@ -510,7 +583,7 @@ class LLMService:
             full_content = ""
             for chunk in response:
                 if request_id in self._cancelled_requests:
-                    return full_content, True
+                    return full_content, True, token_usage
 
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if delta and delta.content:
@@ -521,7 +594,28 @@ class LLMService:
                             self._chunk_callback, request_id, full_content,
                         )
 
-            return full_content, False
+                # Extract usage from any chunk that has it
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    token_usage["prompt_tokens"] = getattr(usage, "prompt_tokens", 0) or 0
+                    token_usage["completion_tokens"] = getattr(usage, "completion_tokens", 0) or 0
+                    # Cache tokens — multiple provider field names
+                    token_usage["cache_read_tokens"] = (
+                        getattr(usage, "cache_read_input_tokens", 0)
+                        or getattr(usage, "cache_read_tokens", 0)
+                        or 0
+                    )
+                    token_usage["cache_write_tokens"] = (
+                        getattr(usage, "cache_creation_input_tokens", 0)
+                        or getattr(usage, "cache_creation_tokens", 0)
+                        or 0
+                    )
+
+            # Estimate completion tokens if not reported
+            if not token_usage["completion_tokens"] and full_content:
+                token_usage["completion_tokens"] = len(full_content) // 4
+
+            return full_content, False, token_usage
 
         except Exception as e:
             logger.error(f"LLM streaming error: {e}")
@@ -538,6 +632,20 @@ class LLMService:
         if tracker:
             tracker.purge_history()
         self._session_id = self._history_store.new_session()
+        self._session_totals = {
+            "prompt": 0, "completion": 0, "total": 0,
+            "cache_hit": 0, "cache_write": 0,
+        }
+
+        # Broadcast to collaborators
+        if self._event_callback:
+            asyncio.ensure_future(
+                self._event_callback("sessionChanged", {
+                    "session_id": self._session_id,
+                    "messages": [],
+                })
+            )
+
         return {"session_id": self._session_id}
 
     def load_session_into_context(self, session_id: str) -> dict:
@@ -558,6 +666,15 @@ class LLMService:
 
         # Get messages with images for frontend
         full_messages = self._history_store.get_session_messages(session_id)
+
+        # Broadcast to collaborators
+        if self._event_callback:
+            asyncio.ensure_future(
+                self._event_callback("sessionChanged", {
+                    "session_id": session_id,
+                    "messages": self._context.get_history(),
+                })
+            )
 
         return {
             "session_id": session_id,
@@ -655,10 +772,39 @@ class LLMService:
             for p, t in self._context.file_context.get_tokens_by_file(tc).items()
         ]
 
+        # URLs
+        url_tokens = 0
+        url_details = []
+        if self._url_service:
+            for uc in self._url_service.get_fetched_urls():
+                if uc.error:
+                    continue
+                formatted = uc.format_for_prompt()
+                if formatted:
+                    tokens = tc.count(formatted)
+                    url_tokens += tokens
+                    url_details.append({
+                        "name": uc.title or uc.url[:40],
+                        "url": uc.url,
+                        "tokens": tokens,
+                    })
+
         # History
         history_tokens = self._context.history_token_count()
 
-        total = system_tokens + legend_tokens + map_tokens + file_tokens + history_tokens
+        total = system_tokens + legend_tokens + map_tokens + file_tokens + url_tokens + history_tokens
+
+        # Build cache blocks from stability tracker
+        blocks = self._build_cache_blocks(tc)
+        promotions = []
+        demotions = []
+        tracker = self._get_active_tracker()
+        if tracker:
+            for change in tracker.get_changes():
+                if "📈" in change:
+                    promotions.append(change)
+                elif "📉" in change:
+                    demotions.append(change)
 
         return {
             "model": self._config.model,
@@ -666,6 +812,10 @@ class LLMService:
             "cross_ref_enabled": self._cross_ref_enabled,
             "total_tokens": total,
             "max_input_tokens": tc.max_input_tokens,
+            "cache_hit_rate": 0.0,
+            "blocks": blocks,
+            "promotions": promotions,
+            "demotions": demotions,
             "breakdown": {
                 "system": system_tokens,
                 "legend": legend_tokens,
@@ -674,16 +824,12 @@ class LLMService:
                 "files": file_tokens,
                 "file_count": len(self._selected_files),
                 "file_details": file_details,
+                "urls": url_tokens,
+                "url_details": url_details,
                 "history": history_tokens,
                 "history_messages": len(self._context.get_history()),
             },
-            "session_totals": {
-                "prompt": 0,
-                "completion": 0,
-                "total": 0,
-                "cache_hit": 0,
-                "cache_write": 0,
-            },
+            "session_totals": dict(self._session_totals),
         }
 
     # ── Snippets ──────────────────────────────────────────────────
@@ -1025,6 +1171,50 @@ class LLMService:
                 continue
             self._context.file_context.add_file(path, content)
 
+    def _build_cache_blocks(self, tc) -> list[dict]:
+        """Build cache block info for the cache viewer."""
+        tracker = self._get_active_tracker()
+        if not tracker:
+            return []
+
+        blocks = []
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
+            tier_items = tracker.get_tier_items(tier)
+            if not tier_items and tier != Tier.ACTIVE:
+                continue
+
+            contents = []
+            tier_tokens = 0
+            for key, item in tier_items.items():
+                entry = {
+                    "type": key.split(":")[0],
+                    "name": key.split(":", 1)[1] if ":" in key else key,
+                    "tokens": item.tokens,
+                }
+                if key.startswith(("sym:", "doc:", "file:")):
+                    entry["path"] = key.split(":", 1)[1]
+                if item.tier != Tier.ACTIVE:
+                    promo_n = None
+                    from ac_dc.context.stability_tracker import TIER_CONFIG
+                    cfg = TIER_CONFIG.get(item.tier)
+                    if cfg:
+                        promo_n = cfg.get("promotion_n")
+                    entry["n"] = item.n
+                    entry["threshold"] = promo_n
+                tier_tokens += item.tokens
+                contents.append(entry)
+
+            blocks.append({
+                "name": tier.value,
+                "tier": tier.value,
+                "tokens": tier_tokens,
+                "count": len(tier_items),
+                "cached": tier != Tier.ACTIVE,
+                "contents": contents,
+            })
+
+        return blocks
+
     def _sync_file_context_for_breakdown(self):
         """Sync file context for breakdown computation (silent)."""
         current = set(self._context.file_context.get_files())
@@ -1146,6 +1336,21 @@ class LLMService:
                     "tokens": tc.count(msg),
                 }
 
+        # Fetched URL content
+        if self._url_service:
+            from ac_dc.url_service.models import url_hash as compute_url_hash
+            for uc in self._url_service.get_fetched_urls():
+                if uc.error:
+                    continue
+                uh = compute_url_hash(uc.url)
+                formatted = uc.format_for_prompt()
+                if formatted:
+                    h = hashlib.sha256(formatted.encode()).hexdigest()[:16]
+                    active_items[f"url:{uh}"] = {
+                        "hash": h,
+                        "tokens": tc.count(formatted),
+                    }
+
         # Run update
         file_list_str = self._repo.get_flat_file_list()
         existing = set(file_list_str.splitlines()) if file_list_str else set()
@@ -1181,6 +1386,16 @@ class LLMService:
                     content = self._context.file_context.get_content(path)
                     if content:
                         files_text += f"{path}\n```\n{content}\n```\n\n"
+                elif key.startswith("url:"):
+                    url_hash = key.split(":", 1)[1]
+                    url_svc = self._get_url_service()
+                    for uc in url_svc.get_fetched_urls():
+                        from ac_dc.url_service.models import url_hash as compute_hash
+                        if compute_hash(uc.url) == url_hash:
+                            formatted = uc.format_for_prompt()
+                            if formatted:
+                                files_text += "\n---\n" + formatted + "\n"
+                            break
                 elif key.startswith("history:"):
                     idx_str = key.split(":", 1)[1]
                     try:
@@ -1343,6 +1558,48 @@ class LLMService:
 
         # Format URL context
         return url_svc.format_url_context()
+
+    async def _run_deferred_enrichment(self, request_id: str, paths: list[str]):
+        """Run keyword enrichment for modified doc files (non-blocking background)."""
+        try:
+            enrichable = self._doc_index.queue_enrichment(paths)
+            if not enrichable:
+                return
+
+            if self._event_callback:
+                await self._event_callback("compactionEvent", request_id, {
+                    "stage": "doc_enrichment_queued",
+                    "files": enrichable,
+                })
+
+            loop = asyncio.get_running_loop()
+            for path in enrichable:
+                try:
+                    await loop.run_in_executor(
+                        None, self._doc_index.enrich_single_file, path,
+                    )
+                    await asyncio.sleep(0)  # Yield for pings
+
+                    if self._event_callback:
+                        await self._event_callback("compactionEvent", request_id, {
+                            "stage": "doc_enrichment_file_done",
+                            "file": path,
+                        })
+                except Exception as e:
+                    logger.warning(f"Deferred enrichment failed for {path}: {e}")
+                    if self._event_callback:
+                        await self._event_callback("compactionEvent", request_id, {
+                            "stage": "doc_enrichment_failed",
+                            "file": path,
+                            "error": str(e),
+                        })
+
+            if self._event_callback:
+                await self._event_callback("compactionEvent", request_id, {
+                    "stage": "doc_enrichment_complete",
+                })
+        except Exception as e:
+            logger.warning(f"Deferred enrichment error: {e}")
 
     async def _post_response_compaction(self, request_id: str):
         """Run history compaction after response if threshold exceeded."""
