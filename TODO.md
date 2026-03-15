@@ -63,7 +63,20 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [x] `tests/test_repo.py`
 
 ### Step 6: Main entry point
-- [x] `src/ac_dc/main.py` — CLI argument parsing, service construction stub
+- [x] `src/ac_dc/main.py` — Full service construction and server startup
+  - [x] Port discovery (find_available_port)
+  - [x] Version detection (VERSION file, git SHA, fallback)
+  - [x] Git repo validation (instruction page if not a repo)
+  - [x] Static file server (ThreadingHTTPServer, SPA fallback, silent)
+  - [x] Vite dev/preview server management (subprocess)
+  - [x] Phase 1 fast startup (ConfigManager, Repo, Settings, DocConvert, LLMService deferred)
+  - [x] Session restore before server start
+  - [x] JRPCServer / CollabServer registration with --collab flag
+  - [x] Event callback and chunk callback wiring
+  - [x] Phase 2 deferred init (symbol index, batched indexing, stability tracker)
+  - [x] Background doc index (structure extraction + keyword enrichment)
+  - [x] Startup progress reporting via AcApp.startupProgress
+  - [x] Vite cleanup on exit
 
 ## Phase 2: Code Analysis
 - [x] Symbol Index (tree-sitter parser, extractors, cache, formatter, reference index)
@@ -87,8 +100,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [x] `src/ac_dc/config/llm.json` — updated to match `_default_llm_config()` defaults
-- [x] `src/ac_dc/config/app.json` — updated to contain full defaults matching `_default_app_config()`
+- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults
+- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()`
 
 ## Phase 3: LLM Engine
 - [x] Context Engine
@@ -154,7 +167,17 @@ File path appears on the line before `<<<<<<< SEARCH`.
     - [x] Orphan image cleanup on re-conversion
     - [x] Graceful degradation (markitdown, PyMuPDF, LibreOffice, python-pptx, openpyxl)
   - [x] `tests/test_doc_convert.py` — Provenance, status detection, scanning, conversion, DOCX images, SVG externalization, config, orphan cleanup, degradation
-- [ ] Collaboration
+- [x] Collaboration
+  - [x] `src/ac_dc/collab.py` — Collab class (RPC-exposed) and CollabServer
+    - [x] Client registry (register, unregister, host promotion)
+    - [x] Pending queue with admission timeout (120s)
+    - [x] Localhost detection (loopback + local network interfaces)
+    - [x] admit_client / deny_client / get_connected_clients / get_collab_role
+    - [x] Same-IP pending cancellation (browser refresh handling)
+    - [x] Broadcast helpers (admissionRequest/Result, clientJoined/Left, roleChanged)
+    - [x] CollabServer wrapping JRPCServer with admission-gated handle_connection
+    - [x] Per-message caller tracking (_current_caller_uuid)
+    - [x] Auto-admit first connection as host
 
 ## Phase 5: Webapp (Frontend)
 - [ ] App Shell & Dialog

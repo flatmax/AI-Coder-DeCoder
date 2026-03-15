@@ -71,22 +71,21 @@ class TestLLMConfig:
         config_mgr.reload_llm_config()
         assert config_mgr.smaller_model == "test/small"
 
-    def test_env_vars_applied(self, tmp_git_repo):
+    def test_env_vars_applied(self, config_mgr):
         """Env vars from llm.json are set in os.environ."""
         new_config = {
-            "env": {"AC_DC_TEST_ENV_VAR_2": "applied_value"},
+            "env": {"AC_DC_TEST_ENV_VAR_99": "test_value_99"},
             "model": "test/model",
             "cache_min_tokens": 1024,
             "cache_buffer_multiplier": 1.1,
         }
-        mgr = ConfigManager(tmp_git_repo)
-        mgr.save_config_content(
+        config_mgr.save_config_content(
             "litellm", json.dumps(new_config, indent=2)
         )
-        mgr.reload_llm_config()
-        assert os.environ.get("AC_DC_TEST_ENV_VAR_2") == "applied_value"
+        config_mgr.reload_llm_config()
+        assert os.environ.get("AC_DC_TEST_ENV_VAR_99") == "test_value_99"
         # Cleanup
-        os.environ.pop("AC_DC_TEST_ENV_VAR_2", None)
+        os.environ.pop("AC_DC_TEST_ENV_VAR_99", None)
 
 
 class TestAppConfig:

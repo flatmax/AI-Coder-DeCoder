@@ -29,6 +29,13 @@ class Repo:
         self._root = Path(repo_root).resolve()
         if not (self._root / ".git").exists():
             raise ValueError(f"Not a git repository: {self._root}")
+        self._collab = None  # Wired in main.py if --collab
+
+    def _check_localhost_only(self):
+        """Returns None if allowed, or error dict if restricted."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
 
     @property
     def root(self) -> Path:
@@ -89,6 +96,8 @@ class Repo:
 
     def write_file(self, path: str, content: str) -> dict:
         """Write content to file. Creates parent directories."""
+        if err := self._check_localhost_only():
+            return err
         try:
             resolved = self._resolve_path(path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +108,8 @@ class Repo:
 
     def create_file(self, path: str, content: str) -> dict:
         """Create new file. Errors if file already exists."""
+        if err := self._check_localhost_only():
+            return err
         try:
             resolved = self._resolve_path(path)
             if resolved.exists():
@@ -146,6 +157,8 @@ class Repo:
 
     def delete_file(self, path: str) -> dict:
         """Remove file from filesystem."""
+        if err := self._check_localhost_only():
+            return err
         try:
             resolved = self._resolve_path(path)
             if resolved.exists():
@@ -158,6 +171,8 @@ class Repo:
 
     def stage_files(self, paths: list[str]) -> dict:
         """Stage files for commit (git add)."""
+        if err := self._check_localhost_only():
+            return err
         if not paths:
             return {"status": "ok"}
         self._git("add", "--", *paths, check=False)
@@ -165,6 +180,8 @@ class Repo:
 
     def unstage_files(self, paths: list[str]) -> dict:
         """Remove files from staging area."""
+        if err := self._check_localhost_only():
+            return err
         if not paths:
             return {"status": "ok"}
         self._git("reset", "HEAD", "--", *paths, check=False)
@@ -172,6 +189,8 @@ class Repo:
 
     def discard_changes(self, paths: list[str]) -> dict:
         """Tracked: restore from HEAD. Untracked: delete."""
+        if err := self._check_localhost_only():
+            return err
         if not paths:
             return {"status": "ok"}
         for p in paths:
@@ -194,6 +213,8 @@ class Repo:
 
     def rename_file(self, old_path: str, new_path: str) -> dict:
         """Git mv for tracked, filesystem rename for untracked."""
+        if err := self._check_localhost_only():
+            return err
         try:
             old_resolved = self._resolve_path(old_path)
             new_resolved = self._resolve_path(new_path)
@@ -444,11 +465,15 @@ class Repo:
 
     def stage_all(self) -> dict:
         """git add -A."""
+        if err := self._check_localhost_only():
+            return err
         self._git("add", "-A", check=False)
         return {"status": "staged"}
 
     def commit(self, message: str) -> dict:
         """Create commit. Handles repos without HEAD."""
+        if err := self._check_localhost_only():
+            return err
         result = self._git("commit", "-m", message, check=False)
         if result.returncode != 0:
             return {"error": result.stderr.strip() or "Commit failed"}
@@ -459,6 +484,8 @@ class Repo:
 
     def reset_hard(self) -> dict:
         """git reset --hard HEAD."""
+        if err := self._check_localhost_only():
+            return err
         result = self._git("reset", "--hard", "HEAD", check=False)
         if result.returncode != 0:
             return {"error": result.stderr.strip() or "Reset failed"}

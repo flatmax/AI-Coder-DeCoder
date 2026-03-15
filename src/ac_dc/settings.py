@@ -17,6 +17,7 @@ class Settings:
 
     def __init__(self, config_manager: ConfigManager):
         self._config = config_manager
+        self._collab = None  # Wired in main.py if --collab
 
     def get_config_content(self, config_type: str) -> str | dict:
         """Read a config file by type key."""
@@ -25,8 +26,16 @@ class Settings:
         except ValueError as e:
             return {"error": str(e)}
 
+    def _check_localhost_only(self):
+        """Returns None if allowed, or error dict if restricted."""
+        if self._collab and not self._collab._is_caller_localhost():
+            return {"error": "restricted", "reason": "Participants cannot perform this action"}
+        return None
+
     def save_config_content(self, config_type: str, content: str) -> dict:
         """Write a config file by type key."""
+        if err := self._check_localhost_only():
+            return err
         try:
             self._config.save_config_content(config_type, content)
             return {"status": "saved"}
@@ -35,11 +44,15 @@ class Settings:
 
     def reload_llm_config(self) -> dict:
         """Hot-reload LLM config and apply env vars."""
+        if err := self._check_localhost_only():
+            return err
         self._config.reload_llm_config()
         return {"status": "reloaded", "model": self._config.model}
 
     def reload_app_config(self) -> dict:
         """Hot-reload app config."""
+        if err := self._check_localhost_only():
+            return err
         self._config.reload_app_config()
         return {"status": "reloaded"}
 
