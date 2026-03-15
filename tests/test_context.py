@@ -285,9 +285,17 @@ class TestPromptAssemblyTiered:
         # Should have a user/assistant pair for L1
         found = False
         for i, m in enumerate(msgs):
-            if "continued" in m.get("content", "") or "c Foo" in m.get("content", ""):
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+            if "continued" in content or "c Foo" in content:
                 found = True
-                assert msgs[i + 1]["content"] == "Ok."
+                # The assistant "Ok." may have been wrapped with cache_control
+                next_content = msgs[i + 1]["content"]
+                if isinstance(next_content, list):
+                    assert any(b.get("text") == "Ok." for b in next_content if isinstance(b, dict))
+                else:
+                    assert next_content == "Ok."
         assert found
 
     def test_empty_tiers_skipped(self):

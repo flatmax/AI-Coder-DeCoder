@@ -183,6 +183,18 @@ class TestValidation:
         assert result.status == EditStatus.FAILED.value
         assert "whitespace" in result.message.lower() or "not found" in result.message.lower()
 
+    def test_old_text_mismatch(self):
+        """Anchor (common prefix) found but remaining old lines don't match."""
+        block = EditBlock(
+            file_path="test.py",
+            old_lines=["def process():", "    old_body()"],
+            new_lines=["def process():", "    new_body()"],
+        )
+        # Anchor "def process():" exists, but next line differs
+        content = "def process():\n    different_body()\n"
+        result = validate_edit(block, content)
+        assert result.status == EditStatus.FAILED.value
+        assert result.error_type == "old_text_mismatch"
 
 # ── Application ───────────────────────────────────────────────────
 

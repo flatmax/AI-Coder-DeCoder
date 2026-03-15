@@ -90,6 +90,16 @@ class ContextManager:
         """Empty the history list."""
         self._history.clear()
 
+    def reregister_history_items(self):
+        """Purge history entries from stability tracker without clearing history.
+
+        Called after compaction to force re-registration of compacted messages
+        as new active items on the next request.
+        """
+        # Stability tracker integration will be wired in Phase 3 (Cache & Assembly).
+        # For now this is a no-op placeholder that the compaction flow can call.
+        pass
+
     def history_token_count(self) -> int:
         """Token count of current history."""
         return self.token_counter.count(self._history)
@@ -210,6 +220,8 @@ class ContextManager:
         if symbol_legend:
             system_content += "\n\n" + REPO_MAP_HEADER + symbol_legend
         if symbol_map:
+            if not symbol_legend:
+                system_content += "\n\n" + REPO_MAP_HEADER
             system_content += "\n\n" + symbol_map
         messages.append({"role": "system", "content": system_content})
 

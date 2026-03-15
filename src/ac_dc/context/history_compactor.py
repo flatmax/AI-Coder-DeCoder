@@ -149,8 +149,9 @@ class HistoryCompactor:
         # Prepend earlier messages to reach minimum
         needed = self._min_verbatim - user_count
         prepend = []
+        original_ids = {id(m) for m in result.messages}
         for msg in original:
-            if msg in result.messages:
+            if id(msg) in original_ids:
                 break
             prepend.append(msg)
             if msg.get("role") == "user":

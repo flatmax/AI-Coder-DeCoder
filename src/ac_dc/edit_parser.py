@@ -135,40 +135,80 @@ def parse_edit_blocks(text: str) -> list[EditBlock]:
 
 # ── Anchor Finding ────────────────────────────────────────────────
 
-def _find_anchor(content_lines: list[str], old_lines: list[str]) -> tuple[Optional[int], str]:
+def _compute_common_prefix(old_lines: list[str], new_lines: list[str]) -> int:
+    """Compute the number of leading lines identical in both sections (the anchor)."""
+    count = 0
+    for o, n in zip(old_lines, new_lines):
+        if o == n:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _find_anchor(
+    content_lines: list[str],
+    old_lines: list[str],
+    new_lines: Optional[list[str]] = None,
+) -> tuple[Optional[int], str, str]:
     """Find the unique anchor position in file content.
 
-    The anchor is the common prefix of old_lines and new_lines (computed
-    by caller before passing old_lines as the full old section).
+    Uses the common prefix of old_lines and new_lines as the anchor.
+    After locating the anchor, verifies the remaining old lines match.
 
-    Returns (start_index, error_message).
+    Returns (start_index, error_message, error_type).
     - start_index is None on failure.
+    - error_type is "anchor_not_found", "ambiguous_anchor", or "old_text_mismatch".
     """
     if not old_lines:
-        return None, ""
+        return None, "", ""
 
-    # Compute common prefix (anchor) from old_lines
-    # The caller has already ensured old_lines is the full EDIT section.
-    # We search for the entire old_lines block in content_lines.
+    # Compute anchor (common prefix between old and new)
+    if new_lines is not None:
+        anchor_len = _compute_common_prefix(old_lines, new_lines)
+    else:
+        anchor_len = 0
 
-    old_count = len(old_lines)
+    # If no common prefix, use the full old_lines as the search target
+    if anchor_len == 0:
+        anchor_lines = old_lines
+    else:
+        anchor_lines = old_lines[:anchor_len]
+
+    anchor_count = len(anchor_lines)
     matches = []
 
-    for i in range(len(content_lines) - old_count + 1):
+    for i in range(len(content_lines) - anchor_count + 1):
         match = True
-        for j in range(old_count):
-            if content_lines[i + j] != old_lines[j]:
+        for j in range(anchor_count):
+            if content_lines[i + j] != anchor_lines[j]:
                 match = False
                 break
         if match:
             matches.append(i)
 
     if len(matches) == 0:
-        return None, _diagnose_not_found(content_lines, old_lines)
-    elif len(matches) == 1:
-        return matches[0], ""
-    else:
-        return None, f"Ambiguous anchor: found {len(matches)} matches"
+        return None, _diagnose_not_found(content_lines, old_lines), "anchor_not_found"
+    elif len(matches) > 1:
+        return None, f"Ambiguous anchor: found {len(matches)} matches", "ambiguous_anchor"
+
+    # Exactly one anchor match — now verify remaining old lines
+    start = matches[0]
+    if anchor_len > 0 and anchor_len < len(old_lines):
+        remaining = old_lines[anchor_len:]
+        verify_start = start + anchor_len
+        for j, old_line in enumerate(remaining):
+            pos = verify_start + j
+            if pos >= len(content_lines) or content_lines[pos] != old_line:
+                actual = content_lines[pos] if pos < len(content_lines) else "<EOF>"
+                return (
+                    None,
+                    f"Old text mismatch at line {pos + 1}: "
+                    f"expected {repr(old_line)}, found {repr(actual)}",
+                    "old_text_mismatch",
+                )
+
+    return start, "", ""
 
 
 def _diagnose_not_found(content_lines: list[str], old_lines: list[str]) -> str:
@@ -213,17 +253,11 @@ def validate_edit(
             status=EditStatus.VALIDATED.value,
         )
 
-    # Find anchor
-    start, error = _find_anchor(content_lines, block.old_lines)
+    # Find anchor (uses common prefix of old/new for location, then verifies remainder)
+    start, error, error_type = _find_anchor(
+        content_lines, block.old_lines, block.new_lines,
+    )
     if start is None:
-        # Determine error type
-        if "Ambiguous" in error:
-            error_type = "ambiguous_anchor"
-        elif "whitespace" in error.lower():
-            error_type = "anchor_not_found"
-        else:
-            error_type = "anchor_not_found"
-
         return EditResult(
             file_path=block.file_path,
             status=EditStatus.FAILED.value,
@@ -282,7 +316,7 @@ def apply_edit(
         return content, result
 
     # Find anchor again
-    start, _ = _find_anchor(content_lines, block.old_lines)
+    start, _, _ = _find_anchor(content_lines, block.old_lines, block.new_lines)
     if start is None:
         return content, EditResult(
             file_path=block.file_path,

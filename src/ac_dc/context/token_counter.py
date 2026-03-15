@@ -43,8 +43,8 @@ class TokenCounter:
             if info:
                 self._max_input_tokens = info.get("max_input_tokens")
                 self._max_output_tokens = info.get("max_output_tokens")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"litellm model info unavailable for {self._model_name}: {e}")
 
         # Hardcoded fallbacks
         if not self._max_input_tokens:
