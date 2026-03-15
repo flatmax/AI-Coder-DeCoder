@@ -356,12 +356,26 @@ class LLMService:
         """Background task for streaming chat."""
         result = {}
         token_usage = {}
+        binary_files = []
+        invalid_files = []
+        tier_changes = []
         try:
             # Get event loop for executor calls
             loop = asyncio.get_running_loop()
 
             # Sync file context with selected files
-            self._sync_file_context(files)
+            binary_files, invalid_files = self._sync_file_context(files)
+
+            # Budget enforcement: emergency truncate if history is huge
+            self._context.emergency_truncate()
+
+            # Budget enforcement: shed largest files if over 90% of max input
+            shed_files = self._context.shed_files_if_needed()
+            if shed_files:
+                logger.info(f"Shed files for budget: {shed_files}")
+                for sf in shed_files:
+                    if sf in self._selected_files:
+                        self._selected_files.remove(sf)
 
             # Initialize stability tracker if needed
             if not self._stability_initialized:
@@ -502,8 +516,10 @@ class LLMService:
                 )
 
             # Update stability
+            tier_changes = []
             if tracker:
                 self._update_stability(tracker)
+                tier_changes = tracker.get_changes()
 
             # Save symbol map
             if self._symbol_index:
@@ -529,8 +545,13 @@ class LLMService:
                 "not_in_context": not_in_ctx,
                 "files_modified": files_modified,
                 "files_auto_added": files_auto_added,
+                "binary_files": binary_files if binary_files else None,
+                "invalid_files": invalid_files if invalid_files else None,
                 "_deferred_enrichment": deferred_enrichment,
             })
+
+            # Print terminal HUD (pass captured changes so get_changes() isn't called twice)
+            self._print_terminal_hud(token_usage, tracker, tier_changes)
 
         except Exception as e:
             logger.error(f"Streaming error: {e}\n{traceback.format_exc()}")
@@ -1143,8 +1164,13 @@ class LLMService:
             )
         return self._url_service
 
-    def _sync_file_context(self, files: Optional[list[str]] = None):
-        """Sync file context with selected files, removing deselected."""
+    def _sync_file_context(
+        self, files: Optional[list[str]] = None,
+    ) -> tuple[list[str], list[str]]:
+        """Sync file context with selected files, removing deselected.
+
+        Returns (binary_files, invalid_files) for reporting.
+        """
         if files is not None:
             self._selected_files = list(files)
 
@@ -1170,6 +1196,8 @@ class LLMService:
                 invalid_files.append(path)
                 continue
             self._context.file_context.add_file(path, content)
+
+        return binary_files, invalid_files
 
     def _build_cache_blocks(self, tc) -> list[dict]:
         """Build cache block info for the cache viewer."""
@@ -1216,7 +1244,11 @@ class LLMService:
         return blocks
 
     def _sync_file_context_for_breakdown(self):
-        """Sync file context for breakdown computation (silent)."""
+        """Sync file context for breakdown computation (silent).
+
+        Uses the same logic as _sync_file_context but discards
+        binary/invalid file lists (breakdown doesn't report them).
+        """
         current = set(self._context.file_context.get_files())
         selected = set(self._selected_files)
 
@@ -1259,9 +1291,9 @@ class LLMService:
                 self._measure_tracker_tokens(self._code_tracker)
 
                 self._stability_initialized = True
-                logger.info(
-                    f"Stability initialized: {self._code_tracker.get_tier_counts()}"
-                )
+
+                # Print startup init HUD
+                self._print_init_hud(self._code_tracker)
 
         except Exception as e:
             logger.warning(f"Stability initialization failed: {e}")
@@ -1515,6 +1547,157 @@ class LLMService:
                     parts.append(f"\n### {path}\n```diff\n{diff_text}\n```")
 
         return "\n".join(parts)
+
+    def _print_init_hud(self, tracker: StabilityTracker):
+        """Print one-time startup HUD with initial tier distribution."""
+        import sys
+
+        counts = tracker.get_tier_counts()
+        total = sum(counts.values())
+
+        lines_inner = []
+        for tier_name in ("L0", "L1", "L2", "L3", "active"):
+            count = counts.get(tier_name, 0)
+            if count > 0:
+                lines_inner.append(f"  {tier_name:<10} {count} items")
+
+        max_w = max((len(l) for l in lines_inner), default=20) + 2
+        title = " Initial Tier Distribution "
+        box_w = max(max_w, len(title) + 4)
+
+        hud = []
+        hud.append(f"╭─{title}{'─' * (box_w - len(title) - 2)}╮")
+        for line in lines_inner:
+            hud.append(f"│{line:<{box_w}}│")
+        hud.append(f"├{'─' * box_w}┤")
+        footer = f"  Total: {total} items"
+        hud.append(f"│{footer:<{box_w}}│")
+        hud.append(f"╰{'─' * box_w}╯")
+
+        print("\n".join(hud), file=sys.stderr)
+
+    def _print_terminal_hud(self, token_usage: dict,
+                            tracker: Optional[StabilityTracker] = None,
+                            tier_changes: Optional[list[str]] = None):
+        """Print terminal HUD after each LLM response."""
+        import sys
+
+        tc = self._context.token_counter
+
+        # System prompt tokens
+        if self._mode == Mode.DOC:
+            sys_tokens = tc.count(self._config.get_doc_system_prompt())
+        else:
+            sys_tokens = tc.count(self._config.get_system_prompt())
+
+        # Legend tokens
+        legend_tokens = 0
+        if self._mode == Mode.CODE and self._symbol_index:
+            legend_tokens = tc.count(self._symbol_index.get_legend())
+        elif self._mode == Mode.DOC and self._doc_index:
+            legend_tokens = tc.count(self._doc_index.get_legend())
+
+        # Map tokens
+        map_exclude = set(self._selected_files) | self._excluded_index_files
+        map_tokens = 0
+        map_label = "Symbol Map" if self._mode == Mode.CODE else "Doc Map"
+        if self._mode == Mode.CODE and self._symbol_index:
+            sm = self._symbol_index.get_symbol_map(exclude_files=map_exclude)
+            map_tokens = tc.count(sm)
+        elif self._mode == Mode.DOC and self._doc_index:
+            dm = self._doc_index.get_doc_map(exclude_files=map_exclude)
+            map_tokens = tc.count(dm)
+
+        # File tokens
+        file_tokens = self._context.file_context.count_tokens(tc)
+
+        # History tokens
+        history_tokens = self._context.history_token_count()
+
+        total = sys_tokens + legend_tokens + map_tokens + file_tokens + history_tokens
+        max_input = tc.max_input_tokens
+
+        prompt_in = token_usage.get("prompt_tokens", 0)
+        comp_out = token_usage.get("completion_tokens", 0)
+        cache_read = token_usage.get("cache_read_tokens", 0)
+        cache_write = token_usage.get("cache_write_tokens", 0)
+
+        # ── Cache Blocks ──────────────────────────────────────────
+        lines = []
+        if tracker:
+            block_lines = []
+            total_tier_tokens = 0
+            cached_tokens = 0
+
+            for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
+                tier_items = tracker.get_tier_items(tier)
+                tier_tokens = sum(i.tokens for i in tier_items.values())
+                if tier == Tier.L0:
+                    tier_tokens += sys_tokens + legend_tokens
+                total_tier_tokens += tier_tokens
+                if tier != Tier.ACTIVE:
+                    cached_tokens += tier_tokens
+
+                if not tier_items and tier != Tier.ACTIVE and tier != Tier.L0:
+                    continue
+
+                from ac_dc.context.stability_tracker import TIER_CONFIG
+                cfg = TIER_CONFIG.get(tier, {})
+                entry_n = cfg.get("entry_n")
+
+                if tier == Tier.ACTIVE:
+                    label = f"  active{' ' * 13}{tier_tokens:,} tokens"
+                else:
+                    n_str = f"({entry_n}+)" if entry_n is not None else ""
+                    label = (
+                        f"  {tier.value:<6} {n_str:>8}  "
+                        f"{tier_tokens:>7,} tokens [cached]"
+                    )
+                block_lines.append(label)
+
+            cache_pct = (
+                int(cached_tokens / total_tier_tokens * 100)
+                if total_tier_tokens > 0 else 0
+            )
+            footer = f"  Total: {total_tier_tokens:,} | Cache hit: {cache_pct}%"
+
+            # Box drawing
+            max_w = max(
+                (len(l) for l in block_lines + [footer]),
+                default=30,
+            ) + 2
+            title = " Cache Blocks "
+            lines.append(f"╭─{title}{'─' * (max_w - len(title) - 2)}╮")
+            for bl in block_lines:
+                lines.append(f"│{bl:<{max_w}}│")
+            lines.append(f"├{'─' * max_w}┤")
+            lines.append(f"│{footer:<{max_w}}│")
+            lines.append(f"╰{'─' * max_w}╯")
+
+        # ── Token Usage ───────────────────────────────────────────
+        lines.append(f"Model: {self._config.model}")
+        lines.append(f"System:     {sys_tokens + legend_tokens:>8,}")
+        lines.append(f"{map_label}:{' ' * (12 - len(map_label))}{map_tokens:>8,}")
+        lines.append(f"Files:      {file_tokens:>8,}")
+        lines.append(f"History:    {history_tokens:>8,}")
+        lines.append(f"Total:      {total:>8,} / {max_input:,}")
+        lines.append(f"Last request: {prompt_in:,} in, {comp_out:,} out")
+        if cache_read or cache_write:
+            cache_parts = []
+            if cache_read:
+                cache_parts.append(f"read: {cache_read:,}")
+            if cache_write:
+                cache_parts.append(f"write: {cache_write:,}")
+            lines.append(f"Cache:      {', '.join(cache_parts)}")
+        lines.append(f"Session total: {self._session_totals['total']:,}")
+
+        # ── Tier Changes ──────────────────────────────────────────
+        if tier_changes:
+            for change in tier_changes:
+                lines.append(change)
+
+        # Print to stderr
+        print("\n".join(lines), file=sys.stderr)
 
     async def _fetch_urls_from_message(
         self, request_id: str, message: str,

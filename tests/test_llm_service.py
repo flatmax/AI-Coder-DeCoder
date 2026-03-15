@@ -310,3 +310,87 @@ class TestNavigateFile:
         result = service.navigate_file("src/main.py")
         assert result["status"] == "ok"
         assert result["path"] == "src/main.py"
+
+
+class TestFileContextSync:
+    def test_sync_returns_binary_and_invalid(self, service):
+        """_sync_file_context returns lists of problem files."""
+        binary, invalid = service._sync_file_context(["nonexistent.py"])
+        assert "nonexistent.py" in invalid
+
+    def test_sync_binary_file_rejected(self, service, tmp_repo_with_files):
+        """Binary files are rejected and reported."""
+        bin_path = tmp_repo_with_files / "binary.dat"
+        bin_path.write_bytes(b"\x00\x01\x02\xff" * 100)
+        binary, invalid = service._sync_file_context(["binary.dat"])
+        assert "binary.dat" in binary
+
+    def test_sync_removes_deselected(self, service):
+        """Deselected files are removed from context."""
+        service._context.file_context.add_file("old.py", "content")
+        service._sync_file_context(["src/main.py"])
+        assert not service._context.file_context.has_file("old.py")
+
+
+class TestTerminalHUD:
+    def test_print_init_hud_no_crash(self, service_with_index):
+        """Init HUD prints without errors when tracker exists."""
+        import io
+        import sys
+
+        if not service_with_index._code_tracker:
+            # Initialize tracker
+            service_with_index._try_initialize_stability()
+
+        tracker = service_with_index._code_tracker
+        if tracker:
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            try:
+                service_with_index._print_init_hud(tracker)
+                output = sys.stderr.getvalue()
+                assert "Initial Tier Distribution" in output
+                assert "Total:" in output
+            finally:
+                sys.stderr = old_stderr
+
+    def test_print_terminal_hud_no_crash(self, service):
+        """Terminal HUD prints without errors."""
+        import io
+        import sys
+
+        token_usage = {
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "cache_read_tokens": 500,
+            "cache_write_tokens": 300,
+        }
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            service._print_terminal_hud(token_usage)
+            output = sys.stderr.getvalue()
+            assert "Model:" in output
+            assert "System:" in output
+            assert "Total:" in output
+            assert "Last request:" in output
+            assert "Cache:" in output
+        finally:
+            sys.stderr = old_stderr
+
+    def test_print_terminal_hud_with_changes(self, service):
+        """Terminal HUD renders tier changes when provided."""
+        import io
+        import sys
+
+        token_usage = {"prompt_tokens": 100, "completion_tokens": 50}
+        changes = ["📈 L3 → L2: sym:src/main.py"]
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            service._print_terminal_hud(token_usage, tier_changes=changes)
+            output = sys.stderr.getvalue()
+            assert "📈" in output
+            assert "src/main.py" in output
+        finally:
+            sys.stderr = old_stderr

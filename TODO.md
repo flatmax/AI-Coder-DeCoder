@@ -100,8 +100,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults (model, smaller_model, empty env, cache params)
-- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()` (url_cache, history_compaction, doc_convert, doc_index)
+- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults (model, smaller_model, empty env, cache params) ✅ fixed
+- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()` (url_cache, history_compaction, doc_convert, doc_index) ✅ fixed
 
 ## Phase 3: LLM Engine
 - [x] Context Engine
@@ -142,6 +142,9 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] Doc mode re-extraction before LLM calls (mtime-based)
   - [x] Deferred doc enrichment after edit blocks (_run_deferred_enrichment)
   - [x] Cache blocks builder for cache viewer (_build_cache_blocks)
+  - [x] Budget enforcement in _stream_chat (emergency_truncate, shed_files_if_needed)
+  - [x] Terminal HUD printing (_print_terminal_hud, _print_init_hud)
+  - [x] Binary/invalid file reporting in streamComplete result
 - [x] `tests/test_llm_service.py` — State, selection, mode, review, streaming guards, context breakdown, snippets, history, URLs
 
 ## Phase 4: Features
