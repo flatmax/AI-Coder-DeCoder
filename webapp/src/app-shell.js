@@ -34,6 +34,9 @@ export class AcApp extends JRPCClient {
     _reconnectAttempt: { type: Number, state: true },
     _toasts: { type: Array, state: true },
     _activeViewer: { type: String, state: true },
+    _admissionPending: { type: Boolean, state: true },
+    _admissionDenied: { type: Boolean, state: true },
+    _admissionRequests: { type: Array, state: true },
   };
 
   static styles = css`
@@ -106,6 +109,109 @@ export class AcApp extends JRPCClient {
       font-weight: 500;
     }
 
+    /* Admission pending screen */
+    .admission-pending {
+      position: fixed;
+      inset: 0;
+      z-index: 10002;
+      background: var(--bg-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .admission-pending .title {
+      font-size: 1.5rem;
+      color: var(--accent-primary);
+    }
+    .admission-pending .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    .admission-pending .cancel-btn {
+      background: none;
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 6px 16px;
+      font-size: 0.85rem;
+    }
+    .admission-pending .cancel-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .admission-denied {
+      position: fixed;
+      inset: 0;
+      z-index: 10002;
+      background: var(--bg-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .admission-denied .title {
+      font-size: 1.3rem;
+      color: var(--accent-red);
+    }
+
+    /* Admission request toasts */
+    .admission-toasts {
+      position: fixed;
+      top: 60px;
+      right: 16px;
+      z-index: 10001;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .admission-toast {
+      background: var(--bg-secondary);
+      border: 1px solid var(--accent-orange);
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 260px;
+    }
+    .admission-toast .info {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: var(--text-primary);
+    }
+    .admission-toast .actions {
+      display: flex;
+      gap: 8px;
+    }
+    .admission-toast .admit-btn {
+      background: var(--accent-green);
+      color: #000;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 12px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.8rem;
+    }
+    .admission-toast .deny-btn {
+      background: var(--accent-red);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 12px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.8rem;
+    }
+
     /* Global toasts */
     .toast-container {
       position: fixed;
@@ -168,6 +274,10 @@ export class AcApp extends JRPCClient {
     window.addEventListener('ac-toast', this._onGlobalToast.bind(this));
     window.addEventListener('resize', this._onWindowResize.bind(this));
     window.addEventListener('beforeunload', this._onBeforeUnload.bind(this));
+
+    // Collaboration role
+    this._isLocalhost = true;
+    this._collabRole = 'host';
   }
 
   disconnectedCallback() {
@@ -317,6 +427,13 @@ export class AcApp extends JRPCClient {
   }
 
   admissionRequest(data) {
+    // Show admission toast for this pending client
+    // Replace existing toast from same IP
+    const filtered = this._admissionRequests.filter(
+      r => r.ip !== data.ip
+    );
+    this._admissionRequests = [...filtered, data];
+
     window.dispatchEvent(new CustomEvent('admission-request', {
       detail: data,
     }));
@@ -324,6 +441,11 @@ export class AcApp extends JRPCClient {
   }
 
   admissionResult(data) {
+    // Remove the resolved request from admission toasts
+    this._admissionRequests = this._admissionRequests.filter(
+      r => r.client_id !== data.client_id
+    );
+
     window.dispatchEvent(new CustomEvent('admission-result', {
       detail: data,
     }));
@@ -399,9 +521,23 @@ export class AcApp extends JRPCClient {
 
       this._wasConnected = true;
 
-      // Dispatch state-loaded event
+      // Query collab role (best-effort — fails silently in non-collab mode)
+      try {
+        const roleRaw = await this.call['Collab.get_collab_role']();
+        const role = this._extract(roleRaw);
+        if (role) {
+          this._isLocalhost = role.is_localhost !== false;
+          this._collabRole = role.role || 'host';
+        }
+      } catch (_) {
+        // Not in collab mode — default to localhost/host
+        this._isLocalhost = true;
+        this._collabRole = 'host';
+      }
+
+      // Dispatch state-loaded event with collab info
       window.dispatchEvent(new CustomEvent('state-loaded', {
-        detail: state,
+        detail: { ...state, _isLocalhost: this._isLocalhost, _collabRole: this._collabRole },
       }));
 
       // If init already complete, dismiss startup and reopen file
@@ -473,6 +609,33 @@ export class AcApp extends JRPCClient {
         requestAnimationFrame(() => { this.serverURI = uri; });
       }
     }, delay);
+  }
+
+  // ── Admission actions ────────────────────────────────────────
+
+  async _admitClient(clientId) {
+    try {
+      await this.call['Collab.admit_client'](clientId);
+    } catch (e) {
+      console.warn('Admit failed:', e);
+    }
+  }
+
+  async _denyClient(clientId) {
+    try {
+      await this.call['Collab.deny_client'](clientId);
+    } catch (e) {
+      console.warn('Deny failed:', e);
+    }
+  }
+
+  _cancelAdmission() {
+    // Close WebSocket to cancel pending admission
+    const ws = this.ws;
+    if (ws) {
+      try { ws.close(); } catch (_) {}
+    }
+    this._admissionPending = false;
   }
 
   // ── Viewer switching ─────────────────────────────────────────
@@ -635,6 +798,39 @@ export class AcApp extends JRPCClient {
       ${!this._connected && this._wasConnected ? html`
         <div class="reconnect-banner">
           Reconnecting... (attempt ${this._reconnectAttempt})
+        </div>
+      ` : ''}
+
+      <!-- Admission pending screen (pre-JRPC) -->
+      ${this._admissionPending ? html`
+        <div class="admission-pending">
+          <div class="title">AC⚡DC</div>
+          <div class="subtitle">Waiting for admission...</div>
+          <div class="subtitle">Requesting access to the session</div>
+          <button class="cancel-btn" @click=${this._cancelAdmission}>Cancel</button>
+        </div>
+      ` : ''}
+
+      <!-- Admission denied screen -->
+      ${this._admissionDenied ? html`
+        <div class="admission-denied">
+          <div class="title">Access Denied</div>
+          <div style="color:var(--text-secondary)">Your connection request was denied.</div>
+        </div>
+      ` : ''}
+
+      <!-- Admission request toasts (for admitted clients) -->
+      ${this._admissionRequests.length ? html`
+        <div class="admission-toasts">
+          ${this._admissionRequests.map(r => html`
+            <div class="admission-toast">
+              <div class="info">🔔 ${r.ip} wants to connect</div>
+              <div class="actions">
+                <button class="admit-btn" @click=${() => this._admitClient(r.client_id)}>Admit</button>
+                <button class="deny-btn" @click=${() => this._denyClient(r.client_id)}>Deny</button>
+              </div>
+            </div>
+          `)}
         </div>
       ` : ''}
 

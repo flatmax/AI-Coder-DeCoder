@@ -397,15 +397,14 @@ class LLMService:
             if not self._stability_initialized:
                 self._try_initialize_stability()
 
-            # Re-extract doc structures if in doc mode (mtime-based, instant)
-            if self._mode == Mode.DOC and self._doc_index:
+            # Re-index symbol index (mtime-based — only changed files re-parsed)
+            if self._symbol_index:
                 try:
-                    repo_files = set(self._repo.get_flat_file_list().splitlines())
                     await loop.run_in_executor(
-                        None, self._doc_index.index_repo, repo_files,
+                        None, self._symbol_index.index_repo,
                     )
                 except Exception as e:
-                    logger.debug(f"Doc re-extraction failed: {e}")
+                    logger.debug(f"Symbol re-index failed: {e}")
 
             # Detect and fetch URLs (up to 3)
             url_context = await self._fetch_urls_from_message(request_id, message)
@@ -1387,6 +1386,9 @@ class LLMService:
 
             # Measure real tokens
             self._measure_tracker_tokens(self._doc_tracker)
+
+            # Print startup HUD for doc tracker
+            self._print_init_hud(self._doc_tracker)
 
             logger.info(f"Doc tracker initialized with {len(all_files)} files")
         except Exception as e:

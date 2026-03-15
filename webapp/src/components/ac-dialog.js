@@ -45,6 +45,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     _enrichingDocs: { type: Boolean, state: true },
     _enrichMessage: { type: String, state: true },
     _enrichPercent: { type: Number, state: true },
+    _isLocalhost: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -272,6 +273,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._enrichingDocs = false;
     this._enrichMessage = '';
     this._enrichPercent = 0;
+    this._isLocalhost = true;
 
     // Restore undocked position
     try {
@@ -585,6 +587,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     const state = e.detail;
     if (state?.mode) this._mode = state.mode;
     if (state?.cross_ref_enabled !== undefined) this._crossRefEnabled = state.cross_ref_enabled;
+    if (state?._isLocalhost !== undefined) this._isLocalhost = state._isLocalhost;
   }
 
   _onStreamComplete(e) {
@@ -647,23 +650,29 @@ export class AcDialog extends RpcMixin(LitElement) {
             `)}
           </div>
           <div class="header-actions">
-            <button class="mode-toggle ${this._mode === 'doc' ? 'doc' : ''}"
-                    title="Switch mode"
-                    @click=${(e) => { e.stopPropagation(); this._toggleMode(); }}>
-              ${this._mode === 'doc' ? '📝 Doc' : '💻 Code'}
-            </button>
-            <label class="crossref-label"
-                   @click=${(e) => e.stopPropagation()}>
-              <input type="checkbox"
-                     .checked=${this._crossRefEnabled}
-                     @change=${this._toggleCrossRef}>
-              ${this._mode === 'doc' ? '+code' : '+docs'}
-            </label>
-            <button class="review-toggle ${this._reviewActive ? 'review-active' : ''}"
-                    title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
-                    @click=${(e) => { e.stopPropagation(); this._onReviewToggle(); }}>
-              👁️
-            </button>
+            ${this._isLocalhost ? html`
+              <button class="mode-toggle ${this._mode === 'doc' ? 'doc' : ''}"
+                      title="Switch mode"
+                      @click=${(e) => { e.stopPropagation(); this._toggleMode(); }}>
+                ${this._mode === 'doc' ? '📝 Doc' : '💻 Code'}
+              </button>
+              <label class="crossref-label"
+                     @click=${(e) => e.stopPropagation()}>
+                <input type="checkbox"
+                       .checked=${this._crossRefEnabled}
+                       @change=${this._toggleCrossRef}>
+                ${this._mode === 'doc' ? '+code' : '+docs'}
+              </label>
+              <button class="review-toggle ${this._reviewActive ? 'review-active' : ''}"
+                      title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+                      @click=${(e) => { e.stopPropagation(); this._onReviewToggle(); }}>
+                👁️
+              </button>
+            ` : html`
+              <span style="font-size:0.68rem;color:var(--text-muted)">
+                ${this._mode === 'doc' ? '📝 Doc' : '💻 Code'}
+              </span>
+            `}
             <button class="minimize-btn"
                     title="Minimize (Alt+M)"
                     @click=${(e) => { e.stopPropagation(); this._toggleMinimize(); }}>

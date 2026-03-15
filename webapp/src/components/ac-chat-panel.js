@@ -19,6 +19,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     repoFiles: { type: Array },
     streamingActive: { type: Boolean },
     reviewState: { type: Object },
+    isLocalhost: { type: Boolean },
     _streamingContent: { type: String, state: true },
     _currentRequestId: { type: String, state: true },
     _inputValue: { type: String, state: true },
@@ -32,6 +33,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _searchQuery: { type: String, state: true },
     _searchMatches: { type: Array, state: true },
     _searchIndex: { type: Number, state: true },
+    _lightboxSrc: { type: String, state: true },
   };
 
   static styles = css`
@@ -687,6 +689,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       font-size: 0.85rem;
     }
 
+    /* Image lightbox */
+    .lightbox-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 950;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: zoom-out;
+    }
+    .lightbox-overlay img {
+      max-width: 90vw;
+      max-height: 90vh;
+      object-fit: contain;
+      border-radius: 6px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+    }
+
     /* Toast */
     .chat-toast {
       position: fixed;
@@ -777,6 +798,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.repoFiles = [];
     this.streamingActive = false;
     this.reviewState = null;
+    this.isLocalhost = true;
     this._streamingContent = '';
     this._currentRequestId = null;
     this._inputValue = '';
@@ -790,6 +812,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._pendingChunk = null;
     this._chunkRAF = null;
     this._lastScrollTop = 0;
+    this._scrollSentinelObserver = null;
     this._suppressNextPaste = false;
     this._lastMentionedFiles = null;
     this._searchQuery = '';
@@ -800,6 +823,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._historySelectedId = null;
     this._historyQuery = '';
     this._historySearchResults = null;
+    this._lightboxSrc = null;
   }
 
   connectedCallback() {
@@ -816,6 +840,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('user-message', this._userMsgHandler);
     this._sessionLoadedHandler = this._onSessionLoaded.bind(this);
     window.addEventListener('session-loaded', this._sessionLoadedHandler);
+
+  }
+
+  firstUpdated() {
+    // Set up IntersectionObserver for auto-scroll sentinel.
+    // The sentinel div is always in the template, so it should be
+    // available after first render. If not (edge case), retry once.
+    if (!this._setupScrollSentinel()) {
+      this.updateComplete.then(() => this._setupScrollSentinel());
+    }
   }
 
   disconnectedCallback() {
@@ -827,6 +861,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('user-message', this._userMsgHandler);
     window.removeEventListener('session-loaded', this._sessionLoadedHandler);
     if (this._chunkRAF) cancelAnimationFrame(this._chunkRAF);
+    if (this._scrollSentinelObserver) {
+      this._scrollSentinelObserver.disconnect();
+      this._scrollSentinelObserver = null;
+    }
   }
 
   onRpcReady() {
@@ -1449,11 +1487,37 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   // ── Scrolling ──────────────────────────────────────────────────
 
+  _setupScrollSentinel() {
+    if (this._scrollSentinelObserver) return true; // Already set up
+
+    const container = this.shadowRoot?.querySelector('.messages');
+    if (!container) return false;
+
+    const sentinel = container.querySelector('.scroll-sentinel');
+    if (!sentinel) return false;
+
+    this._scrollSentinelObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            // Re-engage auto-scroll when sentinel is visible
+            this._autoScroll = true;
+          }
+          // Never disengage via observer during streaming —
+          // only the manual scroll-up check disengages
+        }
+      },
+      { root: container, threshold: 0.1 },
+    );
+    this._scrollSentinelObserver.observe(sentinel);
+    return true;
+  }
+
   _onScroll(e) {
     const container = e.target;
     const scrollTop = container.scrollTop;
 
-    // Disengage auto-scroll on manual scroll up during streaming
+    // Disengage auto-scroll on manual scroll up during streaming (30px threshold)
     if (this.streamingActive && scrollTop < this._lastScrollTop - 30) {
       this._autoScroll = false;
     }
@@ -1514,6 +1578,28 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._inputValue = current + ` (added ${name})`;
     }
     this.updateComplete.then(() => this._autoResizeInput());
+  }
+
+  // ── Lightbox ───────────────────────────────────────────────────
+
+  _openLightbox(src) {
+    this._lightboxSrc = src;
+    // Auto-focus the overlay after render so keyboard events (Escape) work
+    this.updateComplete.then(() => {
+      const overlay = this.shadowRoot?.querySelector('.lightbox-overlay');
+      if (overlay) overlay.focus();
+    });
+  }
+
+  _closeLightbox(e) {
+    // Close on click anywhere or Escape
+    this._lightboxSrc = null;
+  }
+
+  _onLightboxKeyDown(e) {
+    if (e.key === 'Escape') {
+      this._lightboxSrc = null;
+    }
   }
 
   // ── Clipboard ──────────────────────────────────────────────────
@@ -1619,10 +1705,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ` : ''}
         </div>
         <button class="action-btn" title="Copy Staged Diff" @click=${this._copyDiff}>📋</button>
-        <button class="action-btn" title="Commit All"
-                ?disabled=${this._committing || isReview}
-                @click=${this._commitAll}>💾</button>
-        <button class="action-btn" title="Reset to HEAD" @click=${this._resetHard}>⚠️</button>
+        ${this.isLocalhost ? html`
+          <button class="action-btn" title="Commit All"
+                  ?disabled=${this._committing || isReview}
+                  @click=${this._commitAll}>💾</button>
+          <button class="action-btn" title="Reset to HEAD" @click=${this._resetHard}>⚠️</button>
+        ` : ''}
       </div>
 
       ${isReview ? this._renderReviewBar() : ''}
@@ -1647,6 +1735,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
             </div>
           </div>
         ` : ''}
+
+        <div class="scroll-sentinel" style="height:1px;width:1px"></div>
       </div>
 
       ${!this._autoScroll && (this.messages.length > 3 || this._streamingContent) ? html`
@@ -1654,54 +1744,70 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       ` : ''}
 
       <!-- Input area -->
-      <div class="input-area">
-        ${this._images.length ? html`
-          <div class="image-previews">
-            ${this._images.map((img, i) => html`
-              <div class="img-thumb">
-                <img src=${img} alt="Pasted image">
-                <button class="remove-img" @click=${() => this._removeImage(i)}>✕</button>
-              </div>
-            `)}
-          </div>
-        ` : ''}
-
-        ${this._snippetDrawerOpen && this._snippets.length ? html`
-          <div class="snippet-drawer">
-            ${this._snippets.map(s => html`
-              <button class="snippet-btn" title=${s.tooltip || ''}
-                      @click=${() => this._insertSnippet(s.message)}>
-                ${s.icon} ${s.tooltip || ''}
-              </button>
-            `)}
-          </div>
-        ` : ''}
-
-        <div class="input-row">
-          <textarea class="input-textarea"
-                    placeholder="Send a message... (Enter to send, Shift+Enter for newline)"
-                    .value=${this._inputValue}
-                    @input=${this._onInputChange}
-                    @keydown=${this._onInputKeyDown}
-                    @paste=${this._onPaste}
-                    rows="1"></textarea>
-          ${this.streamingActive ? html`
-            <button class="send-btn stop" @click=${this._stop}>⏹ Stop</button>
-          ` : html`
-            <button class="send-btn"
-                    ?disabled=${!this._inputValue.trim() && !this._images.length}
-                    @click=${this._send}>Send</button>
-          `}
+      ${!this.isLocalhost ? html`
+        <div class="input-area" style="text-align:center;padding:12px;color:var(--text-muted);font-size:0.85rem;">
+          Viewing as participant — prompts are host-only
         </div>
+      ` : html`
+        <div class="input-area">
+          ${this._images.length ? html`
+            <div class="image-previews">
+              ${this._images.map((img, i) => html`
+                <div class="img-thumb">
+                  <img src=${img} alt="Pasted image">
+                  <button class="remove-img" @click=${() => this._removeImage(i)}>✕</button>
+                </div>
+              `)}
+            </div>
+          ` : ''}
 
-        <div style="display:flex;gap:4px;margin-top:4px">
-          <button class="action-btn" title="Toggle snippets"
-                  style="font-size:0.75rem"
-                  @click=${this._toggleSnippets}>
-            ${this._snippetDrawerOpen ? '▼' : '▶'} Snippets
-          </button>
+          ${this._snippetDrawerOpen && this._snippets.length ? html`
+            <div class="snippet-drawer">
+              ${this._snippets.map(s => html`
+                <button class="snippet-btn" title=${s.tooltip || ''}
+                        @click=${() => this._insertSnippet(s.message)}>
+                  ${s.icon} ${s.tooltip || ''}
+                </button>
+              `)}
+            </div>
+          ` : ''}
+
+          <div class="input-row">
+            <textarea class="input-textarea"
+                      placeholder="Send a message... (Enter to send, Shift+Enter for newline)"
+                      .value=${this._inputValue}
+                      @input=${this._onInputChange}
+                      @keydown=${this._onInputKeyDown}
+                      @paste=${this._onPaste}
+                      rows="1"></textarea>
+            ${this.streamingActive ? html`
+              <button class="send-btn stop" @click=${this._stop}>⏹ Stop</button>
+            ` : html`
+              <button class="send-btn"
+                      ?disabled=${!this._inputValue.trim() && !this._images.length}
+                      @click=${this._send}>Send</button>
+            `}
+          </div>
+
+          <div style="display:flex;gap:4px;margin-top:4px">
+            <button class="action-btn" title="Toggle snippets"
+                    style="font-size:0.75rem"
+                    @click=${this._toggleSnippets}>
+              ${this._snippetDrawerOpen ? '▼' : '▶'} Snippets
+            </button>
+          </div>
         </div>
-      </div>
+      `}
+
+      ${this._lightboxSrc ? html`
+        <div class="lightbox-overlay"
+             tabindex="0"
+             @click=${this._closeLightbox}
+             @keydown=${this._onLightboxKeyDown}>
+          <img src=${this._lightboxSrc} alt="Full-size image"
+               @click=${(e) => e.stopPropagation()}>
+        </div>
+      ` : ''}
 
       ${this._historyOpen ? this._renderHistoryBrowser() : ''}
 
@@ -1727,7 +1833,9 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         ${msg.images?.length ? html`
           <div class="image-previews">
             ${msg.images.map(img => html`
-              <div class="img-thumb"><img src=${img} alt="Image"></div>
+              <div class="img-thumb" @click=${() => this._openLightbox(img)} style="cursor:pointer">
+                <img src=${img} alt="Image">
+              </div>
             `)}
           </div>
         ` : ''}

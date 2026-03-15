@@ -209,3 +209,18 @@ File path appears on the line before `<<<<<<< SEARCH`.
 
 ## Phase 6: Deployment
 - [ ] Build pipeline, PyInstaller, Vite, startup sequence
+
+## Implemented in Latest Pass
+- [x] ContextManager.add_file() convenience method (spec requirement)
+- [x] Symbol index re-index before each LLM request (mtime-based, stale file detection)
+- [x] Doc tracker prints init HUD after initialization
+- [x] Frontend: Admission pending screen (waiting for admission)
+- [x] Frontend: Admission denied screen
+- [x] Frontend: Admission request toasts with Admit/Deny buttons
+- [x] Frontend: Participant UI restrictions (_isLocalhost guard)
+  - Chat input replaced with "Viewing as participant" bar
+  - Commit/Reset buttons hidden for non-localhost
+  - Mode toggle, cross-ref checkbox, review toggle hidden for non-localhost
+- [x] Frontend: IntersectionObserver sentinel for auto-scroll engagement
+- [x] Frontend: Image lightbox overlay (click thumbnail → full-size, Escape to close)
+- [x] Collab role queried on initial state load, propagated to dialog + files tab + chat panel

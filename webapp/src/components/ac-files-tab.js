@@ -18,6 +18,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     _repoFiles: { type: Array, state: true },
     _pickerWidth: { type: Number, state: true },
     _pickerCollapsed: { type: Boolean, state: true },
+    _isLocalhost: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -82,6 +83,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._repoFiles = [];
     this._pickerWidth = parseInt(localStorage.getItem('ac-dc-picker-width') || '280', 10);
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
+    this._isLocalhost = true;
     this._resizing = false;
     // Cached Set instances to avoid re-creating on every render
     this._selectedSet = new Set();
@@ -123,6 +125,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }
     if (state?.messages) {
       this._messages = [...state.messages];
+    }
+    if (state?._isLocalhost !== undefined) {
+      this._isLocalhost = state._isLocalhost;
     }
     // Sync picker and chat panel after tree loads
     requestAnimationFrame(() => {
@@ -379,6 +384,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
           .selectedFiles=${this._selectedFiles}
           .repoFiles=${this._repoFiles}
           .streamingActive=${false}
+          .isLocalhost=${this._isLocalhost}
           @file-mention-click=${this._onFileMentionClick}
         ></ac-chat-panel>
       </div>

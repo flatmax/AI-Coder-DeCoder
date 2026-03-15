@@ -140,6 +140,12 @@ class ContextManager:
     def get_url_context(self) -> str:
         return self._url_context
 
+    # ── File Context Convenience ──────────────────────────────────
+
+    def add_file(self, path: str, content: Optional[str] = None) -> bool:
+        """Add a file to context (delegates to file_context)."""
+        return self.file_context.add_file(path, content)
+
     # ── System Prompt ─────────────────────────────────────────────
 
     def set_system_prompt(self, prompt: str):
