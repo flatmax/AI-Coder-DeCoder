@@ -2029,8 +2029,22 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   }
 
   _renderEditSummary(msg) {
-    const { passed = 0, failed = 0, skipped = 0, not_in_context = 0, files_auto_added = [] } = msg;
+    const { passed = 0, failed = 0, skipped = 0, not_in_context = 0, files_auto_added = [], editResults } = msg;
     if (!passed && !failed && !skipped && !not_in_context) return '';
+
+    // Collect individual non-success results
+    const failures = [];
+    if (editResults) {
+      for (const [filePath, r] of Object.entries(editResults)) {
+        if (r.status === 'failed' || r.status === 'skipped' || r.status === 'not_in_context') {
+          failures.push({ file: filePath, status: r.status, message: r.message || '', error_type: r.error_type || '' });
+        }
+      }
+    }
+
+    // Check if a retry prompt was prepared
+    const hasRetryPrompt = files_auto_added?.length > 0 ||
+      failures.some(f => f.message?.includes('Ambiguous anchor') || f.message?.includes('Old text mismatch'));
 
     return html`
       <div class="edit-summary">
@@ -2038,12 +2052,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         ${failed ? html`<span class="stat red">❌ ${failed} failed</span>` : ''}
         ${skipped ? html`<span class="stat orange">⚠️ ${skipped} skipped</span>` : ''}
         ${not_in_context ? html`<span class="stat amber">⚠️ ${not_in_context} not in context</span>` : ''}
-        ${files_auto_added?.length ? html`
+        ${hasRetryPrompt ? html`
           <span style="font-size:0.72rem;color:var(--text-muted)">
-            — Files added to context. A retry prompt has been prepared below.
+            — A retry prompt has been prepared in the input below.
           </span>
         ` : ''}
       </div>
+      ${failures.length ? html`
+        <div style="padding:4px 10px;font-size:0.75rem;">
+          ${failures.map(f => html`
+            <div style="display:flex;gap:6px;align-items:baseline;padding:2px 0;">
+              <span class="edit-file-path" data-file=${f.file}
+                    style="cursor:pointer;color:var(--accent-primary);font-size:0.75rem;"
+                    @click=${() => window.dispatchEvent(new CustomEvent('navigate-file', { detail: { path: f.file } }))}>${f.file}</span>
+              ${f.error_type ? html`<span style="font-size:0.65rem;padding:1px 4px;border-radius:2px;background:var(--bg-input);color:var(--text-muted)">${f.error_type}</span>` : ''}
+              <span style="color:var(--accent-red);font-size:0.72rem">${f.message}</span>
+            </div>
+          `)}
+        </div>
+      ` : ''}
     `;
   }
 

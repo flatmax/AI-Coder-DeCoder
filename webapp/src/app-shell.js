@@ -253,6 +253,8 @@ export class AcApp extends JRPCClient {
     this._resizeRAF = null;
     this._pendingReopen = false;
     this._admissionPending = false;
+    this._admissionDenied = false;
+    this._admissionRequests = [];
     this._rawWsListener = null;
     this._activeViewer = 'diff';
   }

@@ -102,6 +102,10 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.addEventListener('filter-from-chat', this._filterFromChatHandler);
     this._streamCompleteHandler = this._onStreamComplete.bind(this);
     window.addEventListener('stream-complete', this._streamCompleteHandler);
+    this._reviewStartedHandler = this._onReviewStarted.bind(this);
+    window.addEventListener('review-started', this._reviewStartedHandler);
+    this._reviewEndedHandler = this._onReviewEnded.bind(this);
+    window.addEventListener('review-ended', this._reviewEndedHandler);
   }
 
   disconnectedCallback() {
@@ -111,6 +115,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.removeEventListener('files-modified', this._filesModifiedHandler);
     window.removeEventListener('filter-from-chat', this._filterFromChatHandler);
     window.removeEventListener('stream-complete', this._streamCompleteHandler);
+    window.removeEventListener('review-started', this._reviewStartedHandler);
+    window.removeEventListener('review-ended', this._reviewEndedHandler);
   }
 
   _onStateLoaded(e) {
@@ -141,6 +147,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       if (chatPanel) {
         chatPanel.selectedFiles = this._selectedFiles;
         chatPanel.messages = this._messages;
+        chatPanel.isLocalhost = this._isLocalhost;
         if (state?.streaming_active) {
           chatPanel.streamingActive = true;
         }
@@ -196,6 +203,43 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     const result = e.detail?.result;
     if (result?.files_modified?.length) {
       this._loadRepoFiles();
+    }
+  }
+
+  _onReviewStarted(e) {
+    const review = e.detail || {};
+    this._syncMessagesFromChat();
+    // Clear file selection for clean review start
+    this._selectedFiles = [];
+    this._updateSelectedSet();
+
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.selectedFiles = this._selectedSet;
+      picker.requestUpdate();
+      picker.loadTree();  // Refresh tree to show staged changes from soft reset
+    }
+
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.selectedFiles = [];
+      chatPanel.reviewState = review;
+      chatPanel.requestUpdate();
+    }
+
+    // Notify server of cleared selection
+    this.rpcExtract('LLMService.set_selected_files', []).catch(() => {});
+  }
+
+  _onReviewEnded() {
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) picker.loadTree();
+    this._loadRepoFiles();
+
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.reviewState = null;
+      chatPanel.requestUpdate();
     }
   }
 

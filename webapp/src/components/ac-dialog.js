@@ -46,6 +46,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     _enrichMessage: { type: String, state: true },
     _enrichPercent: { type: Number, state: true },
     _isLocalhost: { type: Boolean, state: true },
+    _connectedClients: { type: Number, state: true },
   };
 
   static styles = css`
@@ -274,6 +275,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._enrichMessage = '';
     this._enrichPercent = 0;
     this._isLocalhost = true;
+    this._modeSwitchInFlight = false;
+    this._connectedClients = 0;
 
     // Restore undocked position
     try {
@@ -308,6 +311,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('review-started', this._reviewStartedHandler);
     this._reviewEndedHandler = () => { this._reviewActive = false; };
     window.addEventListener('review-ended', this._reviewEndedHandler);
+    this._clientJoinedHandler = () => { this._updateClientCount(); };
+    window.addEventListener('client-joined', this._clientJoinedHandler);
+    this._clientLeftHandler = () => { this._updateClientCount(); };
+    window.addEventListener('client-left', this._clientLeftHandler);
   }
 
   disconnectedCallback() {
@@ -319,6 +326,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.removeEventListener('mode-changed', this._modeChangedHandler);
     window.removeEventListener('review-started', this._reviewStartedHandler);
     window.removeEventListener('review-ended', this._reviewEndedHandler);
+    window.removeEventListener('client-joined', this._clientJoinedHandler);
+    window.removeEventListener('client-left', this._clientLeftHandler);
   }
 
   onRpcReady() {
@@ -340,6 +349,36 @@ export class AcDialog extends RpcMixin(LitElement) {
       const review = await this.rpcExtract('LLMService.get_review_state');
       if (review) this._reviewActive = review.active || false;
     } catch (_) {}
+
+    // Sync mode with server state and restore from localStorage if needed
+    if (!this._modeSwitchInFlight) {
+      await this._refreshMode();
+    }
+  }
+
+  async _refreshMode() {
+    if (this._modeSwitchInFlight) return;
+    try {
+      const modeData = await this.rpcExtract('LLMService.get_mode');
+      if (!modeData) return;
+      if (this._modeSwitchInFlight) return;  // Re-check after await
+
+      const serverMode = modeData.mode || 'code';
+      this._mode = serverMode;
+      this._crossRefEnabled = modeData.cross_ref_enabled || false;
+
+      // Sync localStorage to server's authoritative mode
+      localStorage.setItem('ac-dc-mode', serverMode);
+
+      // For localhost clients: auto-switch to saved preference if it differs
+      if (this._isLocalhost && !this._modeSwitchInFlight) {
+        const savedMode = localStorage.getItem('ac-dc-mode');
+        if (savedMode && savedMode !== serverMode) {
+          // Don't auto-switch — just sync localStorage to server
+          // The server is authoritative after restart
+        }
+      }
+    } catch (_) {}
   }
 
   async _checkDocConvert() {
@@ -348,6 +387,15 @@ export class AcDialog extends RpcMixin(LitElement) {
       this._docConvertAvailable = result?.available || false;
     } catch (_) {
       this._docConvertAvailable = false;
+    }
+  }
+
+  async _updateClientCount() {
+    try {
+      const clients = await this.rpcExtract('Collab.get_connected_clients');
+      this._connectedClients = Array.isArray(clients) ? clients.length : 0;
+    } catch (_) {
+      this._connectedClients = 0;
     }
   }
 
@@ -541,13 +589,19 @@ export class AcDialog extends RpcMixin(LitElement) {
   // ── Mode toggle ──────────────────────────────────────────────
 
   async _toggleMode() {
+    if (this._modeSwitchInFlight) return;
     const newMode = this._mode === 'code' ? 'doc' : 'code';
+    this._modeSwitchInFlight = true;
     try {
       await this.rpcExtract('LLMService.switch_mode', newMode);
       this._mode = newMode;
       this._crossRefEnabled = false;
+      // Persist mode preference
+      localStorage.setItem('ac-dc-mode', newMode);
     } catch (e) {
       console.warn('Mode switch failed:', e);
+    } finally {
+      this._modeSwitchInFlight = false;
     }
   }
 
@@ -588,6 +642,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     if (state?.mode) this._mode = state.mode;
     if (state?.cross_ref_enabled !== undefined) this._crossRefEnabled = state.cross_ref_enabled;
     if (state?._isLocalhost !== undefined) this._isLocalhost = state._isLocalhost;
+    // Sync mode to localStorage
+    if (state?.mode) localStorage.setItem('ac-dc-mode', state.mode);
+    // Update connected client count
+    this._updateClientCount();
   }
 
   _onStreamComplete(e) {
@@ -678,6 +736,12 @@ export class AcDialog extends RpcMixin(LitElement) {
                     @click=${(e) => { e.stopPropagation(); this._toggleMinimize(); }}>
               ${this._minimized ? '▲' : '▼'}
             </button>
+            ${this._connectedClients > 1 ? html`
+              <span style="font-size:0.72rem;color:var(--text-muted);margin-left:2px"
+                    title="${this._connectedClients} connected clients">
+                👥 ${this._connectedClients}
+              </span>
+            ` : ''}
           </div>
         </div>
 

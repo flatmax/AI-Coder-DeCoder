@@ -383,8 +383,28 @@ class ContextManager:
         # ── Active files (uncached) ───────────────────────────────
         active = tiered_content.get("active", {})
         active_files = active.get("files", "")
-        if not active_files:
-            # Fall back to file context
+        if not active_files and tiered_content:
+            # Build active files excluding graduated ones (files in cached tiers)
+            graduated_paths = set()
+            for tn in ("L0", "L1", "L2", "L3"):
+                tier_data = tiered_content.get(tn, {})
+                tier_files_text = tier_data.get("files", "")
+                if tier_files_text:
+                    # Extract paths from fenced code blocks: "path\n```\ncontent\n```"
+                    for block in tier_files_text.split("\n```\n\n"):
+                        line = block.strip().split("\n")[0] if block.strip() else ""
+                        if line and not line.startswith("#") and not line.startswith("---"):
+                            graduated_paths.add(line)
+            # Format only non-graduated files
+            blocks = []
+            for path in sorted(self.file_context._files.keys()):
+                if path in graduated_paths:
+                    continue
+                content = self.file_context._files[path]
+                blocks.append(f"{path}\n```\n{content}\n```")
+            active_files = "\n\n".join(blocks)
+        elif not active_files:
+            # No tiered content — use full file context
             active_files = self.file_context.format_for_prompt()
         if active_files:
             messages.append({"role": "user", "content": FILES_ACTIVE_HEADER + active_files})

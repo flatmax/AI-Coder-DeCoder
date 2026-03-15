@@ -123,7 +123,12 @@ class LLMService:
     # ── Deferred Initialization ───────────────────────────────────
 
     def complete_deferred_init(self, symbol_index=None):
-        """Complete initialization after startup (wires symbol index)."""
+        """Complete initialization after startup (wires symbol index).
+
+        Note: _try_initialize_stability() is called separately from main.py
+        after this method, with progress reporting. This method only wires
+        the symbol index and marks init as complete.
+        """
         if symbol_index:
             self._symbol_index = symbol_index
         self._init_complete = True
@@ -405,6 +410,16 @@ class LLMService:
                     )
                 except Exception as e:
                     logger.debug(f"Symbol re-index failed: {e}")
+
+            # Re-extract doc file structures if doc mode (mtime-based, instant)
+            if self._mode == Mode.DOC and self._doc_index:
+                try:
+                    repo_files = set(self._repo.get_flat_file_list().splitlines())
+                    await loop.run_in_executor(
+                        None, self._doc_index.index_repo, repo_files,
+                    )
+                except Exception as e:
+                    logger.debug(f"Doc re-extraction failed: {e}")
 
             # Detect and fetch URLs (up to 3)
             url_context = await self._fetch_urls_from_message(request_id, message)
@@ -1270,10 +1285,21 @@ class LLMService:
 
         from ac_dc.context.stability_tracker import TIER_CONFIG
 
+        # Pre-compute system+legend tokens for L0 overhead
+        if self._mode == Mode.DOC:
+            sys_tokens = tc.count(self._config.get_doc_system_prompt())
+        else:
+            sys_tokens = tc.count(self._config.get_system_prompt())
+        legend_tokens = 0
+        if self._mode == Mode.CODE and self._symbol_index:
+            legend_tokens = tc.count(self._symbol_index.get_legend())
+        elif self._mode == Mode.DOC and self._doc_index:
+            legend_tokens = tc.count(self._doc_index.get_legend())
+
         blocks = []
         for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
             tier_items = tracker.get_tier_items(tier)
-            if not tier_items and tier != Tier.ACTIVE:
+            if not tier_items and tier != Tier.ACTIVE and tier != Tier.L0:
                 continue
 
             contents = []
@@ -1295,6 +1321,19 @@ class LLMService:
                     entry["threshold"] = promo_n
                 tier_tokens += item.tokens
                 contents.append(entry)
+
+            # L0 always includes system prompt + legend as fixed overhead
+            if tier == Tier.L0:
+                l0_overhead = sys_tokens + legend_tokens
+                tier_tokens += l0_overhead
+                contents.insert(0, {
+                    "type": "legend", "name": "Legend",
+                    "tokens": legend_tokens,
+                })
+                contents.insert(0, {
+                    "type": "system", "name": "System Prompt",
+                    "tokens": sys_tokens,
+                })
 
             blocks.append({
                 "name": tier.value,
@@ -1466,6 +1505,26 @@ class LLMService:
                     "hash": h,
                     "tokens": tc.count(msg),
                 }
+
+        # Cross-reference index entries for selected files (when cross-ref enabled)
+        if self._cross_ref_enabled:
+            cross_prefix = "doc:" if self._mode == Mode.CODE else "sym:"
+            cross_idx = self._doc_index if self._mode == Mode.CODE else self._symbol_index
+            if cross_idx:
+                cross_block_method = (
+                    cross_idx.get_file_doc_block if self._mode == Mode.CODE
+                    else cross_idx.get_file_symbol_block
+                )
+                for path in self._selected_files:
+                    if path in self._excluded_index_files:
+                        continue
+                    block = cross_block_method(path)
+                    if block:
+                        bh = hashlib.sha256(block.encode()).hexdigest()[:16]
+                        active_items[f"{cross_prefix}{path}"] = {
+                            "hash": bh,
+                            "tokens": tc.count(block),
+                        }
 
         # Fetched URL content
         if self._url_service:
