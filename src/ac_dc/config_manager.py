@@ -270,7 +270,11 @@ class ConfigManager:
         return config
 
     def _load_app_config(self) -> dict:
-        """Load app config with defaults."""
+        """Load app config with defaults.
+
+        Deep-merges loaded config over defaults so missing keys
+        get default values rather than being silently absent.
+        """
         text = self._read_config_file("app.json")
         if not text:
             return self._default_app_config()
@@ -279,7 +283,18 @@ class ConfigManager:
         except json.JSONDecodeError:
             logger.warning("Invalid app.json, using defaults")
             return self._default_app_config()
-        return config
+        return self._deep_merge(self._default_app_config(), config)
+
+    @staticmethod
+    def _deep_merge(defaults: dict, overrides: dict) -> dict:
+        """Recursively merge overrides into defaults."""
+        result = dict(defaults)
+        for key, value in overrides.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = ConfigManager._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
 
     def _default_llm_config(self) -> dict:
         return {

@@ -1,5 +1,1 @@
-{
-  "history_compaction": {
-    "enabled": false
-  }
-}
+{"history_compaction": {"enabled": false}}

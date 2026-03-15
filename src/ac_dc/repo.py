@@ -248,20 +248,18 @@ class Repo:
         }
 
         for rel_path in sorted(all_files):
-            # Skip excluded directories
+            # Skip files under excluded or hidden directories
             parts = rel_path.split("/")
-            if any(p in EXCLUDED_DIRS or p.startswith(".") for p in parts[:-1]):
-                # Allow dotfiles at root level, exclude hidden directories
-                skip = False
-                for part in parts[:-1]:
-                    if part in EXCLUDED_DIRS:
-                        skip = True
-                        break
-                    if part.startswith(".") and part != ".github":
-                        skip = True
-                        break
-                if skip:
-                    continue
+            skip = False
+            for part in parts[:-1]:
+                if part in EXCLUDED_DIRS:
+                    skip = True
+                    break
+                if part.startswith(".") and part != ".github":
+                    skip = True
+                    break
+            if skip:
+                continue
 
             self._insert_into_tree(root_node, rel_path, repo_name)
 
@@ -702,7 +700,7 @@ class Repo:
                         "name": name,
                         "sha": parts[1].strip(),
                         "is_current": parts[2].strip() == "1",
-                        "is_remote": name.startswith("remotes/") or "/" in name,
+                        "is_remote": name.startswith("remotes/"),
                     })
 
         return {"commits": commits, "branches": branches, "has_more": has_more}

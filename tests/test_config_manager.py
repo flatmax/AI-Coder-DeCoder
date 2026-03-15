@@ -71,21 +71,22 @@ class TestLLMConfig:
         config_mgr.reload_llm_config()
         assert config_mgr.smaller_model == "test/small"
 
-    def test_env_vars_applied(self, config_mgr):
+    def test_env_vars_applied(self, tmp_git_repo):
         """Env vars from llm.json are set in os.environ."""
         new_config = {
-            "env": {"AC_DC_TEST_VAR": "test_value_12345"},
+            "env": {"AC_DC_TEST_VAR_2": "applied_value"},
             "model": "test/model",
             "cache_min_tokens": 1024,
             "cache_buffer_multiplier": 1.1,
         }
-        config_mgr.save_config_content(
+        mgr = ConfigManager(tmp_git_repo)
+        mgr.save_config_content(
             "litellm", json.dumps(new_config, indent=2)
         )
-        config_mgr.reload_llm_config()
-        assert os.environ.get("AC_DC_TEST_VAR") == "test_value_12345"
+        mgr.reload_llm_config()
+        assert os.environ.get("AC_DC_TEST_VAR_2") == "applied_value"
         # Cleanup
-        del os.environ["AC_DC_TEST_VAR"]
+        del os.environ["AC_DC_TEST_VAR_2"]
 
 
 class TestAppConfig:
@@ -102,6 +103,23 @@ class TestAppConfig:
         )
         config_mgr.reload_app_config()
         assert config_mgr.history_compaction_config.get("enabled") is False
+
+    def test_partial_app_config_merges_defaults(self, config_mgr):
+        """A partial app.json still has all default keys via deep merge."""
+        partial = {"history_compaction": {"enabled": False}}
+        config_mgr.save_config_content("app", json.dumps(partial))
+        config_mgr.reload_app_config()
+        # doc_index should still have defaults
+        di = config_mgr.doc_index_config
+        assert "keywords_enabled" in di
+        assert di["keywords_enabled"] is True
+        # doc_convert should still have defaults
+        dc = config_mgr.doc_convert_config
+        assert "extensions" in dc
+        # history_compaction override should be applied
+        assert config_mgr.history_compaction_config["enabled"] is False
+        # but other history_compaction defaults should survive
+        assert "compaction_trigger_tokens" in config_mgr.history_compaction_config
 
 
 class TestCacheTargetTokens:

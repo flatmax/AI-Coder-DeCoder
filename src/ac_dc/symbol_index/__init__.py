@@ -1,0 +1,1 @@
+"""Symbol index — tree-sitter code analysis engine."""

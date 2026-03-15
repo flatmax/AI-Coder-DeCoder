@@ -66,8 +66,23 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [ ] `src/ac_dc/main.py` — CLI argument parsing, service construction stub
 
 ## Phase 2: Code Analysis
-- [ ] Symbol Index (tree-sitter parser, extractors, cache, formatter, reference index)
-- [ ] Document Index (markdown/SVG extractors, cache, formatter, keyword enricher)
+- [x] Symbol Index (tree-sitter parser, extractors, cache, formatter, reference index)
+  - [x] `src/ac_dc/base_cache.py` — BaseCache (mtime-based, in-memory)
+  - [x] `src/ac_dc/base_formatter.py` — BaseFormatter (path aliasing, legend)
+  - [x] `src/ac_dc/symbol_index/parser.py` — TreeSitterParser singleton
+  - [x] `src/ac_dc/symbol_index/extractors/` — Python, JS, C, MATLAB extractors
+  - [x] `src/ac_dc/symbol_index/cache.py` — SymbolCache(BaseCache) with signature hash
+  - [x] `src/ac_dc/symbol_index/import_resolver.py` — Python/JS/C import resolution
+  - [x] `src/ac_dc/symbol_index/reference_index.py` — Cross-file reference tracking
+  - [x] `src/ac_dc/symbol_index/compact_format.py` — CompactFormatter(BaseFormatter)
+  - [x] `src/ac_dc/symbol_index/index.py` — SymbolIndex orchestrator
+- [x] Document Index (markdown/SVG extractors, cache, formatter, keyword enricher)
+  - [x] `src/ac_dc/doc_index/extractors/` — Markdown and SVG extractors
+  - [x] `src/ac_dc/doc_index/cache.py` — DocCache(BaseCache) with disk persistence
+  - [x] `src/ac_dc/doc_index/formatter.py` — DocFormatter(BaseFormatter)
+  - [x] `src/ac_dc/doc_index/keyword_enricher.py` — KeyBERT integration (graceful degradation)
+  - [x] `src/ac_dc/doc_index/reference_index.py` — DocReferenceIndex (section-level links)
+  - [x] `src/ac_dc/doc_index/index.py` — DocIndex orchestrator
 
 ## Phase 3: LLM Engine
 - [ ] Context Engine (context manager, file context, token counter, history, compaction, prompt assembly)

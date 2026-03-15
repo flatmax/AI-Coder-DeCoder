@@ -1,0 +1,1 @@
+"""Document index — structural outline extraction for documentation files."""
