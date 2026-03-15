@@ -195,8 +195,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [x] Files Tab stub (ac-files-tab.js) — split layout with picker/chat placeholder
 - [x] Tab stubs (search, context, cache, settings) — lazy-loaded placeholders
 - [x] File Picker (ac-file-picker.js) — tree view, checkboxes, git status, context menu, @-filter
-- [ ] Chat Panel (ac-chat-panel.js) — messages, streaming, markdown, edit blocks, input, snippets
-- [ ] Chat utilities (markdown.js, edit-blocks.js) — marked instances, diff rendering
+- [x] Chat Panel (ac-chat-panel.js) — messages, streaming, markdown, edit blocks, input, snippets
+- [x] Chat utilities (markdown.js, edit-blocks.js) — marked instances, diff rendering
 - [ ] Diff Viewer (ac-diff-viewer.js) — Monaco editor, save, LSP, markdown preview
 - [ ] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
 - [ ] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay

@@ -8,6 +8,7 @@
 import { LitElement, html, css } from 'lit';
 import { RpcMixin } from '../utils/rpc-mixin.js';
 import './ac-file-picker.js';
+import './ac-chat-panel.js';
 
 export class AcFilesTab extends RpcMixin(LitElement) {
   static properties = {
@@ -70,16 +71,6 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       flex-direction: column;
       min-width: 0;
     }
-
-    /* Placeholder content */
-    .placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex: 1;
-      color: var(--text-muted);
-      font-size: 0.9rem;
-    }
   `;
 
   constructor() {
@@ -128,7 +119,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (state?.messages) {
       this._messages = [...state.messages];
     }
-    // Sync picker after tree loads
+    // Sync picker and chat panel after tree loads
     requestAnimationFrame(() => {
       const picker = this.shadowRoot?.querySelector('ac-file-picker');
       if (picker) {
@@ -136,17 +127,29 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         picker.excludedFiles = this._excludedSet;
         picker.requestUpdate();
       }
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.selectedFiles = this._selectedFiles;
+        chatPanel.messages = this._messages;
+        chatPanel.requestUpdate();
+      }
     });
   }
 
   _onFilesChanged(e) {
     if (e.detail?.selectedFiles) {
+      this._syncMessagesFromChat();
       this._selectedFiles = [...e.detail.selectedFiles];
       this._updateSelectedSet();
       const picker = this.shadowRoot?.querySelector('ac-file-picker');
       if (picker) {
         picker.selectedFiles = this._selectedSet;
         picker.requestUpdate();
+      }
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.selectedFiles = this._selectedFiles;
+        chatPanel.requestUpdate();
       }
     }
   }
@@ -175,8 +178,17 @@ export class AcFilesTab extends RpcMixin(LitElement) {
 
   async _onSelectionChanged(e) {
     const files = e.detail?.files || [];
+    this._syncMessagesFromChat();
     this._selectedFiles = files;
     this._updateSelectedSet();
+
+    // Direct-update chat panel
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.selectedFiles = files;
+      chatPanel.requestUpdate();
+    }
+
     // Notify server
     try {
       await this.rpcExtract('LLMService.set_selected_files', files);
@@ -206,9 +218,70 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }));
   }
 
+  // ── File mention from chat ───────────────────────────────────
+
+  _onFileMentionClick(e) {
+    const { path, navigate } = e.detail || {};
+    if (!path) return;
+
+    // Sync messages from chat to prevent stale overwrites
+    this._syncMessagesFromChat();
+
+    const newSelected = [...this._selectedFiles];
+    const idx = newSelected.indexOf(path);
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+
+    if (idx >= 0) {
+      // Already selected — remove
+      newSelected.splice(idx, 1);
+    } else {
+      // Not selected — add
+      newSelected.push(path);
+      // Accumulate in chat input
+      if (chatPanel?.accumulateFileInInput) {
+        chatPanel.accumulateFileInInput(path);
+      }
+    }
+
+    this._selectedFiles = newSelected;
+    this._updateSelectedSet();
+
+    // Direct-update pattern: update children directly
+    if (picker) {
+      picker.selectedFiles = this._selectedSet;
+      picker.requestUpdate();
+    }
+    if (chatPanel) {
+      chatPanel.selectedFiles = newSelected;
+      chatPanel.requestUpdate();
+    }
+
+    // Notify server
+    this.rpcExtract('LLMService.set_selected_files', newSelected).catch(() => {});
+
+    // Navigate if requested (inline text mentions, not summary chips)
+    if (navigate) {
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+      }));
+    }
+  }
+
+  _syncMessagesFromChat() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      this._messages = [...chatPanel.messages];
+    }
+  }
+
   _onInsertPath(e) {
-    // Relay to chat panel for middle-click path insertion
-    // (Will be wired to chat panel in the next phase)
+    const { path } = e.detail || {};
+    if (!path) return;
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) {
+      chatPanel.insertPathAtCursor(path);
+    }
   }
 
   // ── Picker panel resize ──────────────────────────────────────
@@ -266,7 +339,12 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       </div>
 
       <div class="chat-panel">
-        <div class="placeholder">💬 Chat Panel (coming soon)</div>
+        <ac-chat-panel
+          .messages=${this._messages}
+          .selectedFiles=${this._selectedFiles}
+          .streamingActive=${false}
+          @file-mention-click=${this._onFileMentionClick}
+        ></ac-chat-panel>
       </div>
     `;
   }
