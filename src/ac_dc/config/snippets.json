@@ -1,0 +1,25 @@
+{
+    "code": [
+        {"icon": "✂️", "tooltip": "Continue truncated edit", "message": "Your last edit was truncated, please continue from where you left off."},
+        {"icon": "🔍", "tooltip": "Check context", "message": "Please check the files in context and verify your understanding is correct."},
+        {"icon": "✏️", "tooltip": "Fix malformed edits", "message": "Your last edit block was malformed. Please retry with correct formatting."},
+        {"icon": "⏸️", "tooltip": "Pause before implementing", "message": "Before implementing, explain your plan and wait for approval."},
+        {"icon": "✅", "tooltip": "Verify tests", "message": "Please verify that the existing tests still pass with your changes."},
+        {"icon": "📦", "tooltip": "Pre-commit checklist", "message": "Run through a pre-commit checklist: are all files saved, tests passing, no debug code left?"},
+        {"icon": "🏁", "tooltip": "Pre-commit with plan", "message": "Review the plan, check all items are complete, then run the pre-commit checklist."}
+    ],
+    "review": [
+        {"icon": "🔍", "tooltip": "Full review", "message": "Give me a full review of all the changes in this PR."},
+        {"icon": "🔒", "tooltip": "Security review", "message": "Review these changes specifically for security issues."},
+        {"icon": "🚶", "tooltip": "Commit walkthrough", "message": "Walk through each commit in order, explaining the changes."}
+    ],
+    "doc": [
+        {"icon": "📄", "tooltip": "Summarise", "message": "Summarise this document in 3-5 bullet points."},
+        {"icon": "🔗", "tooltip": "Cross-refs", "message": "Check all cross-references in this document and flag any broken links."},
+        {"icon": "🏗️", "tooltip": "Restructure", "message": "Suggest a better structure for this document."},
+        {"icon": "📋", "tooltip": "Executive summary", "message": "Write an executive summary of this document."},
+        {"icon": "📑", "tooltip": "TOC", "message": "Generate a table of contents for this document."},
+        {"icon": "🔍", "tooltip": "Consistency", "message": "Check this document for terminology inconsistencies."},
+        {"icon": "✏️", "tooltip": "Simplify", "message": "Rewrite this section in simpler language."}
+    ]
+}

@@ -1,0 +1,8 @@
+{
+  "env": {
+    "AC_DC_TEST_VAR": "test_value_12345"
+  },
+  "model": "test/model",
+  "cache_min_tokens": 1024,
+  "cache_buffer_multiplier": 1.1
+}

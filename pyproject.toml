@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ac-dc"
+version = "0.1.0"
+description = "AI-assisted code editing tool"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.0.0",
+    "tiktoken>=0.5.0",
+]
+
+[project.optional-dependencies]
+docs = [
+    "keybert>=0.8.0",
+    "markitdown[all]>=0.1.0",
+    "odfpy>=1.4.0",
+    "python-pptx>=0.6.0",
+    "pymupdf>=1.23.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+ac-dc = "ac_dc.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ac_dc"]
