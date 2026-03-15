@@ -216,10 +216,10 @@ class LLMService:
         # Reset cross-reference
         if self._cross_ref_enabled:
             self._cross_ref_enabled = False
-            tracker = self._get_active_tracker()
-            if tracker:
+            old_tracker = self._code_tracker if old_mode == Mode.CODE else self._doc_tracker
+            if old_tracker:
                 prefix = "doc:" if old_mode == Mode.CODE else "sym:"
-                tracker.remove_items_by_prefix(prefix)
+                old_tracker.remove_items_by_prefix(prefix)
 
         # Clear file context
         self._selected_files = []
@@ -230,6 +230,18 @@ class LLMService:
             self._context.set_system_prompt(self._config.get_doc_system_prompt())
         else:
             self._context.set_system_prompt(self._config.get_system_prompt())
+
+        # Initialize doc tracker lazily on first switch to doc mode
+        if new_mode == Mode.DOC and self._doc_tracker is None and self._doc_index:
+            self._init_doc_tracker()
+
+        # Re-extract doc structures on switch to doc mode (mtime-based, instant)
+        if new_mode == Mode.DOC and self._doc_index:
+            try:
+                repo_files = set(self._repo.get_flat_file_list().splitlines())
+                self._doc_index.index_repo(repo_files)
+            except Exception as e:
+                logger.debug(f"Doc re-extraction on mode switch failed: {e}")
 
         # Update stability with current context
         tracker = self._get_active_tracker()
@@ -415,6 +427,23 @@ class LLMService:
                     if item.tier != Tier.ACTIVE:
                         if key.startswith(("sym:", "doc:", "file:")):
                             symbol_map_exclude.add(key.split(":", 1)[1])
+
+            # Compute graduated URL hashes (in any cached tier)
+            graduated_url_hashes = set()
+            if tracker:
+                for key, item in tracker.get_all_items().items():
+                    if key.startswith("url:") and item.tier != Tier.ACTIVE:
+                        graduated_url_hashes.add(key.split(":", 1)[1])
+
+            # Update URL context excluding graduated URLs
+            if graduated_url_hashes and self._url_service:
+                from ac_dc.url_service.models import url_hash as compute_url_hash
+                graduated_urls = set()
+                for uc in self._url_service.get_fetched_urls():
+                    if compute_url_hash(uc.url) in graduated_url_hashes:
+                        graduated_urls.add(uc.url)
+                url_ctx = self._url_service.format_url_context(excluded=graduated_urls)
+                self._context.set_url_context(url_ctx)
 
             # Get appropriate index map and legend
             symbol_map, symbol_legend, doc_legend = self._get_maps_and_legends(
@@ -1296,6 +1325,35 @@ class LLMService:
         except Exception as e:
             logger.warning(f"Stability initialization failed: {e}")
 
+    def _init_doc_tracker(self):
+        """Initialize the document mode stability tracker from the doc reference graph."""
+        try:
+            if not self._doc_index:
+                return
+            ref_index = self._doc_index.ref_index
+            all_files = list(self._doc_index._all_outlines.keys())
+
+            self._doc_tracker = StabilityTracker(
+                cache_target_tokens=self._config.get_cache_target_tokens(
+                    self._config.model
+                ),
+            )
+            self._doc_tracker.initialize_from_reference_graph(
+                file_ref_counts={
+                    f: ref_index.file_ref_count(f) for f in all_files
+                },
+                connected_components=ref_index.connected_components(),
+                all_files=all_files,
+                key_prefix="doc:",
+            )
+
+            # Measure real tokens
+            self._measure_tracker_tokens(self._doc_tracker)
+
+            logger.info(f"Doc tracker initialized with {len(all_files)} files")
+        except Exception as e:
+            logger.warning(f"Doc tracker initialization failed: {e}")
+
     def _measure_tracker_tokens(self, tracker: StabilityTracker):
         """Replace placeholder tokens with real measurements."""
         tc = self._context.token_counter
@@ -1814,10 +1872,8 @@ class LLMService:
 
             if result.case != "none":
                 self._context.set_history(result.messages)
-                self._context.reregister_history_items()
                 tracker = self._get_active_tracker()
-                if tracker:
-                    tracker.purge_history()
+                self._context.reregister_history_items(tracker)
 
             if self._event_callback:
                 await self._event_callback("compactionEvent", request_id, {

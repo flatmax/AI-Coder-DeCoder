@@ -154,6 +154,20 @@ class Collab:
 
         asyncio.ensure_future(_timeout())
 
+        # Monitor pending client's WebSocket for early disconnect
+        async def _monitor_disconnect():
+            try:
+                async for _ in websocket:
+                    pass  # Consume messages until close
+            except Exception:
+                pass
+            # Client disconnected while pending — clean up
+            if client_id in self._pending:
+                self._resolve_pending(client_id, admitted=False,
+                                      reason="Client disconnected", replaced=False)
+
+        asyncio.ensure_future(_monitor_disconnect())
+
         return future
 
     def _resolve_pending(self, client_id: str, admitted: bool,

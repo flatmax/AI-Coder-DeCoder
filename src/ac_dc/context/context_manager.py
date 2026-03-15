@@ -25,7 +25,7 @@ DOC_MAP_HEADER = (
     "documentation structure and find relevant content.\n\n"
 )
 
-FILE_TREE_HEADER = "# File Tree\n\n"
+FILE_TREE_HEADER = "# File Tree"
 
 URL_CONTEXT_HEADER = "# URL Context\n\n"
 
@@ -90,15 +90,14 @@ class ContextManager:
         """Empty the history list."""
         self._history.clear()
 
-    def reregister_history_items(self):
+    def reregister_history_items(self, stability_tracker=None):
         """Purge history entries from stability tracker without clearing history.
 
         Called after compaction to force re-registration of compacted messages
         as new active items on the next request.
         """
-        # Stability tracker integration will be wired in Phase 3 (Cache & Assembly).
-        # For now this is a no-op placeholder that the compaction flow can call.
-        pass
+        if stability_tracker is not None:
+            stability_tracker.purge_history()
 
     def history_token_count(self) -> int:
         """Token count of current history."""
@@ -227,7 +226,9 @@ class ContextManager:
 
         # File tree
         if file_tree:
-            messages.append({"role": "user", "content": FILE_TREE_HEADER + file_tree})
+            file_count = len(file_tree.strip().splitlines()) if file_tree.strip() else 0
+            tree_header = f"{FILE_TREE_HEADER} ({file_count} files)\n\n"
+            messages.append({"role": "user", "content": tree_header + file_tree})
             messages.append({"role": "assistant", "content": "Ok."})
 
         # URL context
@@ -330,7 +331,9 @@ class ContextManager:
 
         # ── File tree (uncached) ──────────────────────────────────
         if file_tree:
-            messages.append({"role": "user", "content": FILE_TREE_HEADER + file_tree})
+            file_count = len(file_tree.strip().splitlines()) if file_tree.strip() else 0
+            tree_header = f"{FILE_TREE_HEADER} ({file_count} files)\n\n"
+            messages.append({"role": "user", "content": tree_header + file_tree})
             messages.append({"role": "assistant", "content": "Ok."})
 
         # ── URL context (uncached) ────────────────────────────────

@@ -352,6 +352,20 @@ export class AcApp extends JRPCClient {
     return true;
   }
 
+  modeChanged(data) {
+    window.dispatchEvent(new CustomEvent('mode-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  sessionChanged(data) {
+    window.dispatchEvent(new CustomEvent('session-loaded', {
+      detail: { sessionId: data?.session_id, messages: data?.messages || [] },
+    }));
+    return true;
+  }
+
   docConvertProgress(data) {
     window.dispatchEvent(new CustomEvent('doc-convert-progress', {
       detail: data,

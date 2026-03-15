@@ -1586,9 +1586,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     const goto = e.target.closest('.edit-goto');
     if (goto) {
       const path = goto.dataset.file;
+      const searchText = goto.dataset.searchText || '';
       if (path) {
         window.dispatchEvent(new CustomEvent('navigate-file', {
-          detail: { path },
+          detail: { path, searchText: searchText || undefined },
         }));
       }
     }
@@ -1857,11 +1858,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       diffHtml += this._renderDiffLineHtml(line);
     }
 
+    // Build searchText from the first few old or new lines for scroll-to-edit
+    const searchLines = (seg.oldLines?.length ? seg.oldLines : seg.newLines) || [];
+    const searchText = searchLines.slice(0, 5).join('\n');
+
     return `
       <div class="edit-block">
         <div class="edit-header">
           <span class="edit-file-path" data-file="${this._escAttr(seg.filePath)}">${this._escHtml(seg.filePath)}</span>
-          <span class="edit-goto" data-file="${this._escAttr(seg.filePath)}" title="Open in viewer">↗</span>
+          <span class="edit-goto" data-file="${this._escAttr(seg.filePath)}" data-search-text="${this._escAttr(searchText)}" title="Open in viewer">↗</span>
           ${statusLabel ? `<span class="edit-status ${statusClass}">${statusLabel}</span>` : ''}
         </div>
         ${errorMsg ? `<div class="edit-error">${this._escHtml(errorMsg)}</div>` : ''}
