@@ -108,6 +108,25 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `src/ac_dc/context/stability_tracker.py` — StabilityTracker with N values, tier graduation, ripple promotion cascade, initialization from reference graph, stale removal, history purge
   - [x] `tests/test_stability_tracker.py` — N values, graduation, demotion, cascade, initialization, stale removal, deselected cleanup, multi-request lifecycle
 
+## Phase 3.5: LLM Service (Central Orchestrator)
+- [x] `src/ac_dc/llm_service.py` — LLMService class
+  - [x] State queries: get_current_state, get_mode
+  - [x] File selection: set_selected_files, get_selected_files, set_excluded_index_files
+  - [x] Mode switching: switch_mode, set_cross_reference
+  - [x] Streaming chat: chat_streaming, cancel_streaming, _stream_chat
+  - [x] Session management: new_session, load_session_into_context, _restore_last_session
+  - [x] History: history_search, history_get_session, history_list_sessions, get_history_status
+  - [x] Context breakdown: get_context_breakdown
+  - [x] Snippets: get_snippets (mode-aware)
+  - [x] Commit: commit_all, generate_commit_message
+  - [x] Review mode: start_review, end_review, get_review_state, check_review_ready
+  - [x] URL handling: detect_urls, fetch_url, detect_and_fetch, get_url_content, invalidate/remove/clear
+  - [x] LSP delegation: lsp_get_hover, lsp_get_definition, lsp_get_references, lsp_get_completions
+  - [x] File navigation: navigate_file
+  - [x] Stability tracker integration: _try_initialize_stability, _update_stability, _build_tiered_content
+  - [x] Deferred initialization, collaboration localhost checks
+- [x] `tests/test_llm_service.py` — State, selection, mode, review, streaming guards, context breakdown, snippets, history, URLs
+
 ## Phase 4: Features
 - [x] URL Handling
   - [x] `src/ac_dc/url_service/__init__.py` — Package init
@@ -117,8 +136,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `src/ac_dc/url_service/fetcher.py` — Per-type fetch handlers (GitHub repo/file, web page), HTML extraction (trafilatura + fallback)
   - [x] `src/ac_dc/url_service/service.py` — URLService orchestrator (detect, fetch, cache, summarize, format context)
   - [x] `tests/test_url_service.py` — Cache CRUD/TTL, detection/classification, display names, summary selection, URLContent serialization, service integration
-- [ ] Image Persistence
-- [ ] Code Review
+- [x] Image Persistence (already implemented in history_store.py — save_images, reconstruct_images, image_refs)
+- [ ] Code Review (review mode orchestration implemented in LLMService; frontend pending)
 - [ ] Document Convert
 - [ ] Collaboration
 
