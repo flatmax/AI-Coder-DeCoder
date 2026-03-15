@@ -201,10 +201,10 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [ ] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
 - [ ] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay
 - [ ] Token HUD (ac-token-hud.js) — floating overlay after each response
-- [ ] Context Tab (ac-context-tab.js) — budget breakdown, session totals
-- [ ] Cache Tab (ac-cache-tab.js) — tier viewer, stability bars, fuzzy search
-- [ ] Search Tab (ac-search-tab.js) — git grep integration, result navigation
-- [ ] Settings Tab (ac-settings-tab.js) — config cards, inline editor, reload
+- [x] Context Tab (ac-context-tab.js) — budget breakdown, session totals
+- [x] Cache Tab (ac-cache-tab.js) — tier viewer, stability bars, fuzzy search
+- [x] Search Tab (ac-search-tab.js) — git grep integration, result navigation
+- [x] Settings Tab (ac-settings-tab.js) — config cards, inline editor, reload
 
 ## Phase 6: Deployment
 - [ ] Build pipeline, PyInstaller, Vite, startup sequence

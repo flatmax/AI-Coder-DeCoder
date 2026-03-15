@@ -131,6 +131,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       if (chatPanel) {
         chatPanel.selectedFiles = this._selectedFiles;
         chatPanel.messages = this._messages;
+        if (state?.streaming_active) {
+          chatPanel.streamingActive = true;
+        }
         chatPanel.requestUpdate();
       }
     });

@@ -228,6 +228,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('state-loaded', this._stateLoadedHandler);
     this._streamCompleteHandler = this._onStreamComplete.bind(this);
     window.addEventListener('stream-complete', this._streamCompleteHandler);
+    this._compactionHandler = this._onCompactionEvent.bind(this);
+    window.addEventListener('compaction-event', this._compactionHandler);
   }
 
   disconnectedCallback() {
@@ -235,6 +237,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     document.removeEventListener('keydown', this._keyHandler);
     window.removeEventListener('state-loaded', this._stateLoadedHandler);
     window.removeEventListener('stream-complete', this._streamCompleteHandler);
+    window.removeEventListener('compaction-event', this._compactionHandler);
   }
 
   onRpcReady() {
@@ -439,6 +442,13 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   _onStreamComplete(e) {
     this._refreshHistoryBar();
+  }
+
+  _onCompactionEvent(e) {
+    const stage = e.detail?.event?.stage;
+    if (stage === 'compaction_complete') {
+      this._refreshHistoryBar();
+    }
   }
 
   // ── Render ───────────────────────────────────────────────────

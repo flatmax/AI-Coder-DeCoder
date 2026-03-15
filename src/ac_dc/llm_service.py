@@ -1393,6 +1393,7 @@ class LLMService:
         if not tracker:
             return {}
 
+        self._url_hash_lookup = None  # Reset per-call URL hash cache
         tiered = {}
         for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
             tier_items = tracker.get_tier_items(tier)
@@ -1419,15 +1420,20 @@ class LLMService:
                     if content:
                         files_text += f"{path}\n```\n{content}\n```\n\n"
                 elif key.startswith("url:"):
-                    url_hash = key.split(":", 1)[1]
+                    uh = key.split(":", 1)[1]
                     url_svc = self._get_url_service()
-                    for uc in url_svc.get_fetched_urls():
+                    # Build hash→content lookup on first url item
+                    if not hasattr(self, '_url_hash_lookup') or self._url_hash_lookup is None:
                         from ac_dc.url_service.models import url_hash as compute_hash
-                        if compute_hash(uc.url) == url_hash:
-                            formatted = uc.format_for_prompt()
-                            if formatted:
-                                files_text += "\n---\n" + formatted + "\n"
-                            break
+                        self._url_hash_lookup = {
+                            compute_hash(uc.url): uc
+                            for uc in url_svc.get_fetched_urls()
+                        }
+                    uc = self._url_hash_lookup.get(uh)
+                    if uc:
+                        formatted = uc.format_for_prompt()
+                        if formatted:
+                            files_text += "\n---\n" + formatted + "\n"
                 elif key.startswith("history:"):
                     idx_str = key.split(":", 1)[1]
                     try:

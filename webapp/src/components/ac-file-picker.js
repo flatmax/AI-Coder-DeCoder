@@ -338,7 +338,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     e.stopPropagation();
 
     if (e.shiftKey) {
-      // Shift+click: toggle exclusion
+      // Shift+click: toggle exclusion — preventDefault suppresses
+      // native checkbox toggle that would fire before Lit re-renders
       e.preventDefault();
       this._toggleExclusion(relP, node);
       return;

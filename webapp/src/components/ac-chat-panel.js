@@ -1116,7 +1116,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           <div class="message-card assistant force-visible">
             <div class="message-role assistant">Assistant</div>
             <div class="md-content" @click=${this._onContentClick}>
-              ${unsafeHTML(this._renderAssistantContent(this._streamingContent, null, false))}
+              ${unsafeHTML(renderMarkdown(this._streamingContent))}
               <span class="streaming-indicator"></span>
             </div>
           </div>
