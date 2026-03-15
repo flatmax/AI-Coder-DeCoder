@@ -17,6 +17,8 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 import './components/ac-dialog.js';
 import './components/ac-files-tab.js';
 import './components/ac-diff-viewer.js';
+import './components/ac-svg-viewer.js';
+import './components/ac-file-nav.js';
 import './components/ac-token-hud.js';
 
 const SERVER_PORT = getServerPort();
@@ -31,6 +33,7 @@ export class AcApp extends JRPCClient {
     _wasConnected: { type: Boolean, state: true },
     _reconnectAttempt: { type: Number, state: true },
     _toasts: { type: Array, state: true },
+    _activeViewer: { type: String, state: true },
   };
 
   static styles = css`
@@ -145,6 +148,7 @@ export class AcApp extends JRPCClient {
     this._pendingReopen = false;
     this._admissionPending = false;
     this._rawWsListener = null;
+    this._activeViewer = 'diff';
   }
 
   connectedCallback() {
@@ -158,6 +162,7 @@ export class AcApp extends JRPCClient {
 
     // Window-level event listeners
     window.addEventListener('navigate-file', this._onNavigateFile.bind(this));
+    window.addEventListener('active-file-changed', this._onActiveFileChanged.bind(this));
     window.addEventListener('file-save', this._onFileSave.bind(this));
     window.addEventListener('files-modified', this._onFilesModified.bind(this));
     window.addEventListener('ac-toast', this._onGlobalToast.bind(this));
@@ -264,10 +269,12 @@ export class AcApp extends JRPCClient {
     window.dispatchEvent(new CustomEvent('stream-complete', {
       detail: { requestId, result },
     }));
-    // Refresh open files in diff viewer if files were modified
+    // Refresh open files in both viewers if files were modified
     if (result?.files_modified?.length) {
       const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
       if (viewer) viewer.refreshOpenFiles();
+      const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (svgViewer) svgViewer.refreshOpenFiles();
     }
     return true;
   }
@@ -454,6 +461,24 @@ export class AcApp extends JRPCClient {
     }, delay);
   }
 
+  // ── Viewer switching ─────────────────────────────────────────
+
+  _setActiveViewer(type) {
+    if (this._activeViewer === type) return;
+    this._activeViewer = type;
+    // CSS classes toggle visibility with opacity transition
+    const diffViewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffViewer) {
+      diffViewer.style.opacity = type === 'diff' ? '1' : '0';
+      diffViewer.style.pointerEvents = type === 'diff' ? 'auto' : 'none';
+    }
+    if (svgViewer) {
+      svgViewer.style.opacity = type === 'svg' ? '1' : '0';
+      svgViewer.style.pointerEvents = type === 'svg' ? 'auto' : 'none';
+    }
+  }
+
   // ── Event handlers ───────────────────────────────────────────
 
   _onNavigateFile(e) {
@@ -469,16 +494,27 @@ export class AcApp extends JRPCClient {
       return;
     }
 
-    // Route to diff viewer (SVG viewer will be added later)
+    // Register with file navigation grid (unless this came from the grid itself)
+    const fileNav = this.shadowRoot?.querySelector('ac-file-nav');
+    if (fileNav && !e.detail?._fromNav) {
+      fileNav.openFile(path);
+    }
+
+    // Route based on file extension
     const ext = path.substring(path.lastIndexOf('.')).toLowerCase();
     if (ext === '.svg') {
-      // SVG viewer — TODO: Phase 5 continued
+      const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (svgViewer) {
+        svgViewer.openFile({ path });
+        this._setActiveViewer('svg');
+      }
       return;
     }
 
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (viewer) {
       viewer.openFile({ path, line, searchText });
+      this._setActiveViewer('diff');
     }
   }
 
@@ -513,10 +549,21 @@ export class AcApp extends JRPCClient {
     window.dispatchEvent(new CustomEvent('save-viewport'));
   }
 
+  _onActiveFileChanged(e) {
+    const path = e.detail?.path || '';
+    if (!path) return;
+    const ext = path.substring(path.lastIndexOf('.')).toLowerCase();
+    this._setActiveViewer(ext === '.svg' ? 'svg' : 'diff');
+  }
+
   _onFilesModified() {
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (viewer && viewer._files?.length) {
       viewer.refreshOpenFiles();
+    }
+    const svgViewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (svgViewer && svgViewer._files?.length) {
+      svgViewer.refreshOpenFiles();
     }
   }
 
@@ -545,11 +592,15 @@ export class AcApp extends JRPCClient {
     return html`
       <!-- Background viewer layer -->
       <div class="viewer-background">
-        <ac-diff-viewer></ac-diff-viewer>
+        <ac-diff-viewer style="position:absolute;inset:0;transition:opacity 0.15s"></ac-diff-viewer>
+        <ac-svg-viewer style="position:absolute;inset:0;opacity:0;pointer-events:none;transition:opacity 0.15s"></ac-svg-viewer>
       </div>
 
       <!-- Token HUD (floating overlay on viewer) -->
       <ac-token-hud></ac-token-hud>
+
+      <!-- File navigation grid (HUD overlay) -->
+      <ac-file-nav></ac-file-nav>
 
       <!-- Dialog (foreground) -->
       <ac-dialog></ac-dialog>

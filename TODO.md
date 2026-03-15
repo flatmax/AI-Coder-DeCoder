@@ -199,8 +199,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [x] Chat utilities (markdown.js, edit-blocks.js) — marked instances, diff rendering
 - [x] Diff Viewer (ac-diff-viewer.js) — Monaco editor, save, LSP, status LED, file management
 - [x] Diff Viewer markdown preview — split editor+preview for .md files with bidirectional scroll sync, image resolution, live update
-- [ ] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
-- [ ] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay
+- [x] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
+- [x] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay
 - [x] Token HUD (ac-token-hud.js) — floating overlay after each response
 - [x] Context Tab (ac-context-tab.js) — budget breakdown, session totals
 - [x] Cache Tab (ac-cache-tab.js) — tier viewer, stability bars, fuzzy search
