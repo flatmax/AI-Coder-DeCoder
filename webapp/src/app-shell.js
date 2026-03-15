@@ -1,0 +1,521 @@
+/**
+ * AcApp — root application shell.
+ *
+ * Extends JRPCClient (from jrpc-oo) to hold the WebSocket connection.
+ * Routes events between dialog, diff viewer, and SVG viewer.
+ * Publishes SharedRpc on connection for child components.
+ */
+
+import { html, css } from 'lit';
+import { SharedRpc } from './utils/shared-rpc.js';
+import { getServerPort, getServerURI } from './utils/helpers.js';
+
+// jrpc-oo client — loaded from node_modules
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
+
+// Eagerly import the files tab (default tab, always rendered)
+import './components/ac-dialog.js';
+import './components/ac-files-tab.js';
+
+const SERVER_PORT = getServerPort();
+
+export class AcApp extends JRPCClient {
+  static properties = {
+    serverURI: { type: String },
+    _connected: { type: Boolean, state: true },
+    _startupVisible: { type: Boolean, state: true },
+    _startupMessage: { type: String, state: true },
+    _startupPercent: { type: Number, state: true },
+    _wasConnected: { type: Boolean, state: true },
+    _reconnectAttempt: { type: Number, state: true },
+    _toasts: { type: Array, state: true },
+  };
+
+  static styles = css`
+    :host {
+      display: block;
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    .viewer-background {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background: var(--bg-primary);
+    }
+
+    /* Startup overlay */
+    .startup-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      background: var(--bg-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      transition: opacity 0.4s ease;
+    }
+    .startup-overlay.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .startup-brand {
+      font-size: 3rem;
+      margin-bottom: 1.5rem;
+      color: var(--accent-primary);
+    }
+    .startup-status {
+      color: var(--text-secondary);
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    .startup-bar-track {
+      width: 300px;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .startup-bar-fill {
+      height: 100%;
+      background: var(--accent-primary);
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    /* Reconnect banner */
+    .reconnect-banner {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 9999;
+      background: var(--accent-orange);
+      color: #000;
+      text-align: center;
+      padding: 6px 12px;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+
+    /* Global toasts */
+    .toast-container {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 10001;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      transition: opacity 0.3s ease;
+    }
+    .toast.fade-out { opacity: 0; }
+    .toast.error { border-color: var(--accent-red); }
+    .toast.success { border-color: var(--accent-green); }
+  `;
+
+  constructor() {
+    super();
+    this.remoteTimeout = 120;
+
+    this._connected = false;
+    this._startupVisible = true;
+    this._startupMessage = 'Connecting...';
+    this._startupPercent = 0;
+    this._wasConnected = false;
+    this._reconnectAttempt = 0;
+    this._toasts = [];
+    this._resizeRAF = null;
+    this._pendingReopen = false;
+    this._admissionPending = false;
+    this._rawWsListener = null;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+
+    // Set serverURI to trigger jrpc-oo connection via Lit's updated() → serverChanged()
+    this.serverURI = getServerURI(SERVER_PORT);
+
+    // Register methods the server can call
+    this.addClass(this, 'AcApp');
+
+    // Window-level event listeners
+    window.addEventListener('navigate-file', this._onNavigateFile.bind(this));
+    window.addEventListener('ac-toast', this._onGlobalToast.bind(this));
+    window.addEventListener('resize', this._onWindowResize.bind(this));
+    window.addEventListener('beforeunload', this._onBeforeUnload.bind(this));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._resizeRAF) {
+      cancelAnimationFrame(this._resizeRAF);
+      this._resizeRAF = null;
+    }
+  }
+
+  // ── jrpc-oo lifecycle ────────────────────────────────────────
+
+  /** Called when WebSocket is created — hook for raw message interception. */
+  serverChanged() {
+    super.serverChanged();
+    // Intercept raw WebSocket messages for collaboration admission
+    const ws = this.ws;
+    if (ws && ws.addEventListener) {
+      if (this._rawWsListener) {
+        ws.removeEventListener('message', this._rawWsListener);
+      }
+      this._rawWsListener = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data?.type === 'admission_pending') {
+            this._admissionPending = true;
+            event.stopImmediatePropagation();
+            return;
+          }
+          if (data?.type === 'admission_granted') {
+            this._admissionPending = false;
+            event.stopImmediatePropagation();
+            return;
+          }
+          if (data?.type === 'admission_denied') {
+            this._admissionPending = false;
+            event.stopImmediatePropagation();
+            return;
+          }
+        } catch (_) { /* not JSON — let jrpc-oo handle it */ }
+      };
+      ws.addEventListener('message', this._rawWsListener);
+    }
+  }
+
+  /** Connection confirmed — remote is ready. */
+  remoteIsUp() {
+    this._connected = true;
+    this._reconnectAttempt = 0;
+  }
+
+  /** JRPC setup complete — call proxy populated. */
+  setupDone() {
+    this._connected = true;
+
+    // Publish the call proxy for child components via RpcMixin.
+    // this.call broadcasts to all connected remotes — from the browser
+    // there is only one remote (the server), so the envelope has one key.
+    SharedRpc.set(this.call);
+
+    // Fetch initial state
+    this._loadInitialState();
+
+    // On reconnect (not first connect), show toast instead of startup overlay
+    if (this._wasConnected) {
+      this._startupVisible = false;
+      window.dispatchEvent(new CustomEvent('ac-toast', {
+        detail: { message: 'Reconnected', type: 'success' },
+      }));
+    }
+  }
+
+  /** Connection failed. */
+  setupSkip() {
+    this._connected = false;
+  }
+
+  /** WebSocket closed. */
+  remoteDisconnected() {
+    this._connected = false;
+    SharedRpc.clear();
+
+    if (this._wasConnected) {
+      this._reconnectAttempt++;
+      this._scheduleReconnect();
+    }
+  }
+
+  // ── Server → Client callbacks ────────────────────────────────
+
+  streamChunk(requestId, content) {
+    window.dispatchEvent(new CustomEvent('stream-chunk', {
+      detail: { requestId, content },
+    }));
+    return true;
+  }
+
+  streamComplete(requestId, result) {
+    window.dispatchEvent(new CustomEvent('stream-complete', {
+      detail: { requestId, result },
+    }));
+    return true;
+  }
+
+  compactionEvent(requestId, event) {
+    window.dispatchEvent(new CustomEvent('compaction-event', {
+      detail: { requestId, event },
+    }));
+    return true;
+  }
+
+  filesChanged(selectedFiles) {
+    window.dispatchEvent(new CustomEvent('files-changed', {
+      detail: { selectedFiles },
+    }));
+    return true;
+  }
+
+  startupProgress(stage, message, percent) {
+    this._startupMessage = message;
+    this._startupPercent = percent;
+    if (stage === 'ready') {
+      this._dismissStartup();
+    }
+    return true;
+  }
+
+  commitResult(result) {
+    window.dispatchEvent(new CustomEvent('commit-result', {
+      detail: result,
+    }));
+    return true;
+  }
+
+  userMessage(data) {
+    window.dispatchEvent(new CustomEvent('user-message', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  admissionRequest(data) {
+    window.dispatchEvent(new CustomEvent('admission-request', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  admissionResult(data) {
+    window.dispatchEvent(new CustomEvent('admission-result', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  clientJoined(data) {
+    window.dispatchEvent(new CustomEvent('client-joined', { detail: data }));
+    return true;
+  }
+
+  clientLeft(data) {
+    window.dispatchEvent(new CustomEvent('client-left', { detail: data }));
+    return true;
+  }
+
+  roleChanged(data) {
+    window.dispatchEvent(new CustomEvent('role-changed', { detail: data }));
+    return true;
+  }
+
+  navigateFile(data) {
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path: data.path, _remote: true },
+    }));
+    return true;
+  }
+
+  docConvertProgress(data) {
+    window.dispatchEvent(new CustomEvent('doc-convert-progress', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  // ── State loading ────────────────────────────────────────────
+
+  /**
+   * Extract the actual return value from a jrpc-oo response envelope.
+   * jrpc-oo wraps return values as { method_name: value } or { uuid: value }.
+   */
+  _extract(raw) {
+    if (raw && typeof raw === 'object') {
+      const keys = Object.keys(raw);
+      if (keys.length === 1) return raw[keys[0]];
+    }
+    return raw;
+  }
+
+  async _loadInitialState() {
+    try {
+      const raw = await this.call['LLMService.get_current_state']();
+      const state = this._extract(raw);
+
+      // Set browser tab title
+      if (state?.repo_name) {
+        document.title = state.repo_name;
+      }
+
+      this._wasConnected = true;
+
+      // Dispatch state-loaded event
+      window.dispatchEvent(new CustomEvent('state-loaded', {
+        detail: state,
+      }));
+
+      // If init already complete, dismiss startup and reopen file
+      if (state?.init_complete) {
+        this._dismissStartup();
+      }
+    } catch (e) {
+      console.error('Failed to load initial state:', e);
+    }
+  }
+
+  _dismissStartup() {
+    if (!this._startupVisible) return;
+    // Fade out after brief delay
+    setTimeout(() => {
+      this._startupVisible = false;
+      // Reopen last file if pending
+      if (this._pendingReopen) {
+        this._pendingReopen = false;
+        this._reopenLastFile();
+      }
+    }, 400);
+  }
+
+  _reopenLastFile() {
+    const path = localStorage.getItem('ac-last-open-file');
+    if (path) {
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path },
+      }));
+    }
+  }
+
+  // ── Reconnection ─────────────────────────────────────────────
+
+  _scheduleReconnect() {
+    const delays = [1000, 2000, 4000, 8000, 15000];
+    const delay = delays[Math.min(this._reconnectAttempt - 1, delays.length - 1)];
+    setTimeout(() => {
+      if (!this._connected) {
+        // Trigger reconnection via jrpc-oo's serverChanged() mechanism.
+        // Setting serverURI to the same value won't trigger Lit's updated(),
+        // so we briefly clear it then set it back.
+        const uri = getServerURI(SERVER_PORT);
+        this.serverURI = '';
+        requestAnimationFrame(() => { this.serverURI = uri; });
+      }
+    }, delay);
+  }
+
+  // ── Event handlers ───────────────────────────────────────────
+
+  _onNavigateFile(e) {
+    const { path, _remote } = e.detail || {};
+    if (!path) return;
+
+    // Save last opened file
+    localStorage.setItem('ac-last-open-file', path);
+
+    // If startup overlay still showing, defer
+    if (this._startupVisible) {
+      this._pendingReopen = true;
+      return;
+    }
+
+    // TODO: Route to diff viewer or SVG viewer based on extension
+    // For now, dispatch to viewers (Phase 5 continued)
+  }
+
+  _onGlobalToast(e) {
+    const { message, type } = e.detail || {};
+    if (!message) return;
+    const id = Date.now() + Math.random();
+    this._toasts = [...this._toasts, { id, message, type: type || 'info' }];
+
+    // Auto-dismiss after 3s
+    setTimeout(() => {
+      this._toasts = this._toasts.map(t =>
+        t.id === id ? { ...t, fading: true } : t
+      );
+      setTimeout(() => {
+        this._toasts = this._toasts.filter(t => t.id !== id);
+      }, 300);
+    }, 3000);
+  }
+
+  _onWindowResize() {
+    if (this._resizeRAF) return;
+    this._resizeRAF = requestAnimationFrame(() => {
+      this._resizeRAF = null;
+      // Notify viewers to relayout (Monaco, svg-pan-zoom)
+      window.dispatchEvent(new CustomEvent('viewer-resize'));
+    });
+  }
+
+  _onBeforeUnload() {
+    // Save viewport state for the diff viewer
+    window.dispatchEvent(new CustomEvent('save-viewport'));
+  }
+
+  // ── Render ───────────────────────────────────────────────────
+
+  render() {
+    return html`
+      <!-- Background viewer layer -->
+      <div class="viewer-background">
+        <!-- Diff viewer and SVG viewer will be added here -->
+        <slot name="viewer"></slot>
+      </div>
+
+      <!-- Dialog (foreground) -->
+      <ac-dialog></ac-dialog>
+
+      <!-- Startup overlay -->
+      ${this._startupVisible ? html`
+        <div class="startup-overlay ${this._startupPercent >= 100 ? 'fade-out' : ''}">
+          <div class="startup-brand">AC⚡DC</div>
+          <div class="startup-status">${this._startupMessage}</div>
+          <div class="startup-bar-track">
+            <div class="startup-bar-fill"
+                 style="width: ${this._startupPercent}%"></div>
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Reconnect banner -->
+      ${!this._connected && this._wasConnected ? html`
+        <div class="reconnect-banner">
+          Reconnecting... (attempt ${this._reconnectAttempt})
+        </div>
+      ` : ''}
+
+      <!-- Global toasts -->
+      ${this._toasts.length ? html`
+        <div class="toast-container">
+          ${this._toasts.map(t => html`
+            <div class="toast ${t.type} ${t.fading ? 'fade-out' : ''}">
+              ${t.message}
+            </div>
+          `)}
+        </div>
+      ` : ''}
+    `;
+  }
+}
+
+customElements.define('ac-app', AcApp);

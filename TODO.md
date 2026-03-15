@@ -188,13 +188,23 @@ File path appears on the line before `<<<<<<< SEARCH`.
     - [x] Auto-admit first connection as host
 
 ## Phase 5: Webapp (Frontend)
-- [ ] App Shell & Dialog
-- [ ] File Picker
-- [ ] Chat Interface
-- [ ] Diff Viewer
-- [ ] SVG Viewer
-- [ ] File Navigation
-- [ ] Context/Cache/Search/Settings tabs, Token HUD
+- [x] Project scaffold (package.json, vite.config.js, index.html, CSS variables)
+- [x] Shared utilities (SharedRpc singleton, RpcMixin, helpers)
+- [x] App Shell (ac-app.js) — JRPCClient, WebSocket, server callbacks, startup overlay, reconnection, toasts
+- [x] Dialog (ac-dialog.js) — tabs, lazy loading, drag/resize/minimize, history bar, keyboard shortcuts
+- [x] Files Tab stub (ac-files-tab.js) — split layout with picker/chat placeholder
+- [x] Tab stubs (search, context, cache, settings) — lazy-loaded placeholders
+- [ ] File Picker (ac-file-picker.js) — tree view, checkboxes, git status, context menu, @-filter
+- [ ] Chat Panel (ac-chat-panel.js) — messages, streaming, markdown, edit blocks, input, snippets
+- [ ] Chat utilities (markdown.js, edit-blocks.js) — marked instances, diff rendering
+- [ ] Diff Viewer (ac-diff-viewer.js) — Monaco editor, save, LSP, markdown preview
+- [ ] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
+- [ ] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay
+- [ ] Token HUD (ac-token-hud.js) — floating overlay after each response
+- [ ] Context Tab (ac-context-tab.js) — budget breakdown, session totals
+- [ ] Cache Tab (ac-cache-tab.js) — tier viewer, stability bars, fuzzy search
+- [ ] Search Tab (ac-search-tab.js) — git grep integration, result navigation
+- [ ] Settings Tab (ac-settings-tab.js) — config cards, inline editor, reload
 
 ## Phase 6: Deployment
 - [ ] Build pipeline, PyInstaller, Vite, startup sequence

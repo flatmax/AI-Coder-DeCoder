@@ -145,10 +145,10 @@ def _start_vite(
         logger.warning("webapp/ directory not found for Vite")
         return None
 
-    node_modules = webapp_dir / "node_modules"
+    node_modules = project_dir / "node_modules"
     if not node_modules.exists():
         logger.error(
-            "node_modules/ not found. Run: cd webapp && npm install"
+            "node_modules/ not found. Run: npm install"
         )
         return None
 
@@ -166,7 +166,7 @@ def _start_vite(
         cmd = ["npm", "run", "preview", "--", "--host", host, "--port", str(port)]
 
     proc = subprocess.Popen(
-        cmd, cwd=str(webapp_dir),
+        cmd, cwd=str(project_dir),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     logger.info(f"Vite {mode} server started on {host}:{port} (PID {proc.pid})")

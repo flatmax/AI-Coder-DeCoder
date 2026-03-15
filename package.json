@@ -1,0 +1,27 @@
+{
+  "name": "ac-dc-webapp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite webapp",
+    "build": "vite build webapp",
+    "preview": "vite preview webapp",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@flatmax/jrpc-oo": "^1.2.2",
+    "diff": "^7.0.0",
+    "highlight.js": "^11.11.0",
+    "lit": "^3.2.0",
+    "marked": "^15.0.0",
+    "monaco-editor": "^0.52.0",
+    "svg-pan-zoom": "^3.6.1"
+  },
+  "devDependencies": {
+    "jsdom": "^29.0.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
