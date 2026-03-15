@@ -1,8 +1,7 @@
 {
-  "env": {
-    "AC_DC_TEST_ENV_VAR": "applied_value"
-  },
-  "model": "test/model",
+  "env": {},
+  "model": "anthropic/claude-sonnet-4-20250514",
+  "smaller_model": "anthropic/claude-sonnet-4-20250514",
   "cache_min_tokens": 1024,
   "cache_buffer_multiplier": 1.1
 }
