@@ -3,7 +3,7 @@
  * git status badges, context menu, and fuzzy filtering.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { RpcMixin } from '../utils/rpc-mixin.js';
 import { fuzzyMatch, nodeMatchesFilter, relPath, lineColor, sortChildren } from '../utils/file-picker-utils.js';
 
@@ -711,17 +711,15 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   _renderTree() {
     const repoName = this._tree.name;
     const rows = [];
-    let rowIndex = 0;
 
     // Root row
-    rows.push(this._renderRootRow(rowIndex++));
+    rows.push(this._renderRootRow(rows.length));
 
     // Children
     if (this._tree.children) {
       const sorted = sortChildren(this._tree.children);
       for (const child of sorted) {
-        this._renderNodeRows(child, 1, repoName, rows, rowIndex);
-        rowIndex = rows.length;
+        this._renderNodeRows(child, 1, repoName, rows, rows.length);
       }
     }
 

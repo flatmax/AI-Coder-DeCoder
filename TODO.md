@@ -197,10 +197,11 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [x] File Picker (ac-file-picker.js) — tree view, checkboxes, git status, context menu, @-filter
 - [x] Chat Panel (ac-chat-panel.js) — messages, streaming, markdown, edit blocks, input, snippets
 - [x] Chat utilities (markdown.js, edit-blocks.js) — marked instances, diff rendering
-- [ ] Diff Viewer (ac-diff-viewer.js) — Monaco editor, save, LSP, markdown preview
+- [x] Diff Viewer (ac-diff-viewer.js) — Monaco editor, save, LSP, status LED, file management
+- [ ] Diff Viewer markdown preview — split editor+preview for .md files
 - [ ] SVG Viewer (ac-svg-viewer.js) — svg-pan-zoom, SvgEditor, synchronized panels
 - [ ] File Navigation (ac-file-nav.js) — 2D grid, Alt+Arrow, HUD overlay
-- [ ] Token HUD (ac-token-hud.js) — floating overlay after each response
+- [x] Token HUD (ac-token-hud.js) — floating overlay after each response
 - [x] Context Tab (ac-context-tab.js) — budget breakdown, session totals
 - [x] Cache Tab (ac-cache-tab.js) — tier viewer, stability bars, fuzzy search
 - [x] Search Tab (ac-search-tab.js) — git grep integration, result navigation

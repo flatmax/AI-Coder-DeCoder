@@ -16,6 +16,8 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 // Eagerly import the files tab (default tab, always rendered)
 import './components/ac-dialog.js';
 import './components/ac-files-tab.js';
+import './components/ac-diff-viewer.js';
+import './components/ac-token-hud.js';
 
 const SERVER_PORT = getServerPort();
 
@@ -156,6 +158,8 @@ export class AcApp extends JRPCClient {
 
     // Window-level event listeners
     window.addEventListener('navigate-file', this._onNavigateFile.bind(this));
+    window.addEventListener('file-save', this._onFileSave.bind(this));
+    window.addEventListener('files-modified', this._onFilesModified.bind(this));
     window.addEventListener('ac-toast', this._onGlobalToast.bind(this));
     window.addEventListener('resize', this._onWindowResize.bind(this));
     window.addEventListener('beforeunload', this._onBeforeUnload.bind(this));
@@ -260,6 +264,11 @@ export class AcApp extends JRPCClient {
     window.dispatchEvent(new CustomEvent('stream-complete', {
       detail: { requestId, result },
     }));
+    // Refresh open files in diff viewer if files were modified
+    if (result?.files_modified?.length) {
+      const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (viewer) viewer.refreshOpenFiles();
+    }
     return true;
   }
 
@@ -398,11 +407,34 @@ export class AcApp extends JRPCClient {
 
   _reopenLastFile() {
     const path = localStorage.getItem('ac-last-open-file');
-    if (path) {
-      window.dispatchEvent(new CustomEvent('navigate-file', {
-        detail: { path },
-      }));
-    }
+    if (!path) return;
+
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path },
+    }));
+
+    // Restore viewport state
+    try {
+      const raw = localStorage.getItem('ac-last-viewport');
+      if (raw) {
+        const state = JSON.parse(raw);
+        if (state?.path === path && state?.type === 'diff') {
+          // Wait for file to open then restore viewport
+          const handler = (e) => {
+            if (e.detail?.path === path) {
+              window.removeEventListener('active-file-changed', handler);
+              requestAnimationFrame(() => requestAnimationFrame(() => {
+                const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+                if (viewer) viewer.restoreViewportState(state);
+              }));
+            }
+          };
+          window.addEventListener('active-file-changed', handler);
+          // Safety timeout
+          setTimeout(() => window.removeEventListener('active-file-changed', handler), 10000);
+        }
+      }
+    } catch (_) {}
   }
 
   // ── Reconnection ─────────────────────────────────────────────
@@ -425,7 +457,7 @@ export class AcApp extends JRPCClient {
   // ── Event handlers ───────────────────────────────────────────
 
   _onNavigateFile(e) {
-    const { path, _remote } = e.detail || {};
+    const { path, line, searchText, _remote } = e.detail || {};
     if (!path) return;
 
     // Save last opened file
@@ -437,8 +469,17 @@ export class AcApp extends JRPCClient {
       return;
     }
 
-    // TODO: Route to diff viewer or SVG viewer based on extension
-    // For now, dispatch to viewers (Phase 5 continued)
+    // Route to diff viewer (SVG viewer will be added later)
+    const ext = path.substring(path.lastIndexOf('.')).toLowerCase();
+    if (ext === '.svg') {
+      // SVG viewer — TODO: Phase 5 continued
+      return;
+    }
+
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer) {
+      viewer.openFile({ path, line, searchText });
+    }
   }
 
   _onGlobalToast(e) {
@@ -472,15 +513,43 @@ export class AcApp extends JRPCClient {
     window.dispatchEvent(new CustomEvent('save-viewport'));
   }
 
+  _onFilesModified() {
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (viewer && viewer._files?.length) {
+      viewer.refreshOpenFiles();
+    }
+  }
+
+  async _onFileSave(e) {
+    const { path, content, isConfig, configType } = e.detail || {};
+    if (!path || content == null) return;
+
+    try {
+      if (isConfig && configType) {
+        await this.call['Settings.save_config_content'](configType, content);
+      } else {
+        await this.call['Repo.write_file'](path, content);
+      }
+      // Refresh file tree
+      window.dispatchEvent(new CustomEvent('files-modified', { detail: {} }));
+    } catch (err) {
+      window.dispatchEvent(new CustomEvent('ac-toast', {
+        detail: { message: `Save failed: ${err.message || err}`, type: 'error' },
+      }));
+    }
+  }
+
   // ── Render ───────────────────────────────────────────────────
 
   render() {
     return html`
       <!-- Background viewer layer -->
       <div class="viewer-background">
-        <!-- Diff viewer and SVG viewer will be added here -->
-        <slot name="viewer"></slot>
+        <ac-diff-viewer></ac-diff-viewer>
       </div>
+
+      <!-- Token HUD (floating overlay on viewer) -->
+      <ac-token-hud></ac-token-hud>
 
       <!-- Dialog (foreground) -->
       <ac-dialog></ac-dialog>

@@ -36,8 +36,6 @@ export class AcDialog extends RpcMixin(LitElement) {
     _pos: { type: Object, state: true },
     _visitedTabs: { type: Object, state: true },
     _historyPercent: { type: Number, state: true },
-    _reviewActive: { type: Boolean, state: true },
-    _crossRefEnabled: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -200,8 +198,6 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._pos = null;
     this._visitedTabs = new Set(['files']);
     this._historyPercent = 0;
-    this._reviewActive = false;
-    this._crossRefEnabled = false;
 
     // Restore undocked position
     try {
@@ -395,13 +391,15 @@ export class AcDialog extends RpcMixin(LitElement) {
   // ── History bar ──────────────────────────────────────────────
 
   async _refreshHistoryBar() {
-    if (!this.rpcConnected) return;
+    if (!this.rpcConnected || this._historyBarLoading) return;
+    this._historyBarLoading = true;
     try {
       const raw = await this.rpcExtract('LLMService.get_history_status');
       if (raw && typeof raw.percent === 'number') {
         this._historyPercent = raw.percent;
       }
     } catch (_) {}
+    this._historyBarLoading = false;
   }
 
   _historyBarColor() {
@@ -452,14 +450,6 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   // ── Render ───────────────────────────────────────────────────
-
-  _getHostStyles() {
-    if (this._undocked && this._pos) {
-      return ''; // Applied via _applyPosition
-    }
-    const w = this._width || (window.innerWidth * 0.5);
-    return `left: 0; top: 0; width: ${Math.max(400, w)}px; height: 100vh;`;
-  }
 
   firstUpdated() {
     // Apply initial positioning

@@ -62,10 +62,7 @@ class TestPythonExtractor:
         ext = PythonExtractor()
         return ext.extract(src_bytes, tree, "test.py")
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_class_with_inheritance(self):
         fs = self._parse("class MyClass(Base):\n    pass\n")
         assert len(fs.symbols) == 1
@@ -73,10 +70,7 @@ class TestPythonExtractor:
         assert fs.symbols[0].name == "MyClass"
         assert "Base" in fs.symbols[0].bases
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_method_and_property(self):
         code = '''
 class Foo:
@@ -94,10 +88,7 @@ class Foo:
         assert children["bar"].kind == "property"
         assert children["baz"].kind == "method"
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_async_method(self):
         code = '''
 class Svc:
@@ -108,10 +99,7 @@ class Svc:
         method = fs.symbols[0].children[0]
         assert method.is_async
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_parameters_extracted(self):
         code = "def func(a, b=10, *args, **kwargs):\n    pass\n"
         fs = self._parse(code)
@@ -120,19 +108,13 @@ class Svc:
         assert "a" in param_names
         assert "b" in param_names
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_return_type(self):
         code = "def greet(name: str) -> str:\n    return name\n"
         fs = self._parse(code)
         assert fs.symbols[0].return_type is not None
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_instance_vars(self):
         code = '''
 class Obj:
@@ -145,10 +127,7 @@ class Obj:
         assert "x" in cls.instance_vars
         assert "y" in cls.instance_vars
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_imports(self):
         code = "import os\nfrom pathlib import Path\nfrom . import sibling\n"
         fs = self._parse(code)
@@ -157,10 +136,7 @@ class Obj:
         rel = [i for i in fs.imports if i.level > 0]
         assert len(rel) >= 1
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_top_level_variables(self):
         code = "CONFIG = {}\nMY_VAR = 42\n_private = True\n"
         fs = self._parse(code)
@@ -169,10 +145,7 @@ class Obj:
         assert "MY_VAR" in names
         assert "_private" not in names
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("python"),
-        reason="tree-sitter-python not installed"
-    )
+    @_skip_no_python
     def test_call_sites(self):
         code = "def process():\n    validate()\n    save()\n"
         fs = self._parse(code)
@@ -199,10 +172,7 @@ class TestJavaScriptExtractor:
         ext = JavaScriptExtractor()
         return ext.extract(src_bytes, tree, "test.js")
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("javascript"),
-        reason="tree-sitter-javascript not installed"
-    )
+    @_skip_no_js
     def test_class_with_extends(self):
         code = "class App extends Base {\n  render() { return null; }\n}\n"
         fs = self._parse(code)
@@ -211,20 +181,14 @@ class TestJavaScriptExtractor:
         assert cls.name == "App"
         assert "Base" in cls.bases
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("javascript"),
-        reason="tree-sitter-javascript not installed"
-    )
+    @_skip_no_js
     def test_async_method(self):
         code = "class Svc {\n  async fetch(url) { return null; }\n}\n"
         fs = self._parse(code)
         method = fs.symbols[0].children[0]
         assert method.is_async
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("javascript"),
-        reason="tree-sitter-javascript not installed"
-    )
+    @_skip_no_js
     def test_top_level_function_and_variable(self):
         code = "function helper() {}\nconst MAX = 100;\n"
         fs = self._parse(code)
@@ -232,10 +196,7 @@ class TestJavaScriptExtractor:
         assert "helper" in names
         assert "MAX" in names
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("javascript"),
-        reason="tree-sitter-javascript not installed"
-    )
+    @_skip_no_js
     def test_imports(self):
         code = "import { foo, bar } from './utils';\n"
         fs = self._parse(code)
@@ -259,19 +220,13 @@ class TestCExtractor:
         ext = CExtractor()
         return ext.extract(src_bytes, tree, "test.c")
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("c"),
-        reason="tree-sitter-c not installed"
-    )
+    @_skip_no_c
     def test_struct_as_class(self):
         code = "struct Point {\n    int x;\n    int y;\n};\n"
         fs = self._parse(code)
         assert any(s.kind == "class" and s.name == "Point" for s in fs.symbols)
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("c"),
-        reason="tree-sitter-c not installed"
-    )
+    @_skip_no_c
     def test_function_with_params(self):
         code = "int add(int a, int b) {\n    return a + b;\n}\n"
         fs = self._parse(code)
@@ -279,10 +234,7 @@ class TestCExtractor:
         assert len(func) == 1
         assert len(func[0].parameters) == 2
 
-    @pytest.mark.skipif(
-        not TreeSitterParser().has_language("c"),
-        reason="tree-sitter-c not installed"
-    )
+    @_skip_no_c
     def test_include_as_import(self):
         code = '#include "myheader.h"\n#include <stdio.h>\n'
         fs = self._parse(code)
@@ -648,19 +600,6 @@ class TestCompactFormatter:
 
 
 # ── Integration ───────────────────────────────────────────────────
-
-def _has_python_grammar():
-    TreeSitterParser.reset()
-    result = TreeSitterParser().has_language("python")
-    TreeSitterParser.reset()
-    return result
-
-
-_skip_no_python = pytest.mark.skipif(
-    not _has_python_grammar(),
-    reason="tree-sitter-python not installed",
-)
-
 
 class TestSymbolIndexIntegration:
     @pytest.fixture(autouse=True)

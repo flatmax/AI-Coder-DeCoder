@@ -5,7 +5,7 @@
  * chunk coalescing, manages auto-scrolling, and provides the input area.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { RpcMixin } from '../utils/rpc-mixin.js';
 import { renderMarkdown } from '../utils/markdown.js';
@@ -564,9 +564,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onStreamChunk(e) {
     const { requestId, content } = e.detail || {};
-    if (requestId !== this._currentRequestId) return;
+    // Accept chunks for our active request, or adopt if we're idle (collaborator)
+    if (this._currentRequestId && requestId !== this._currentRequestId) return;
 
     this._pendingChunk = content;
+    if (!this.streamingActive) {
+      this.streamingActive = true;
+      this._currentRequestId = requestId;
+    }
     if (!this._chunkRAF) {
       this._chunkRAF = requestAnimationFrame(() => {
         this._chunkRAF = null;
@@ -585,7 +590,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onStreamComplete(e) {
     const { requestId, result } = e.detail || {};
-    if (requestId !== this._currentRequestId) return;
+    // Accept if this is our active request OR if we're passively streaming (collaborator)
+    if (requestId !== this._currentRequestId && !this._streamingContent) return;
 
     // Apply any pending chunk
     if (this._pendingChunk !== null) {
@@ -757,14 +763,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }));
 
     // Send RPC
-    this.rpcCall('LLMService.chat_streaming', requestId, text,
-      this.selectedFiles?.length ? this.selectedFiles : null,
-      userMsg.images || null,
-    ).catch(err => {
+    try {
+      this.rpcCall('LLMService.chat_streaming', requestId, text,
+        this.selectedFiles?.length ? this.selectedFiles : null,
+        userMsg.images || null,
+      ).catch(err => {
+        console.error('chat_streaming error:', err);
+        this.streamingActive = false;
+        this._currentRequestId = null;
+      });
+    } catch (err) {
       console.error('chat_streaming error:', err);
       this.streamingActive = false;
       this._currentRequestId = null;
-    });
+    }
 
     this.updateComplete.then(() => {
       this._autoResizeInput();
@@ -1218,18 +1230,18 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _renderAssistantContent(content, editResults, isFinal) {
     const segments = segmentResponse(content);
-    let html = '';
+    let out = '';
 
     for (const seg of segments) {
       if (seg.type === 'text') {
-        html += renderMarkdown(seg.content);
+        out += renderMarkdown(seg.content);
       } else if (seg.type === 'edit' || seg.type === 'edit-pending') {
         const result = editResults?.[seg.filePath];
-        html += this._renderEditBlockHtml(seg, result);
+        out += this._renderEditBlockHtml(seg, result);
       }
     }
 
-    return html;
+    return out;
   }
 
   _renderEditBlockHtml(seg, result) {

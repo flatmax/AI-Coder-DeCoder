@@ -439,7 +439,7 @@ class LLMService:
 
             # Run LLM completion in thread pool
             full_content, was_cancelled, token_usage = await loop.run_in_executor(
-                None, self._run_llm_streaming, request_id, msgs, loop,
+                None, self._run_llm_streaming, request_id, msgs, None,
             )
 
             if was_cancelled:
@@ -609,11 +609,9 @@ class LLMService:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if delta and delta.content:
                     full_content += delta.content
-                    # Fire chunk callback (thread-safe via call_soon_threadsafe)
-                    if self._chunk_callback and loop:
-                        loop.call_soon_threadsafe(
-                            self._chunk_callback, request_id, full_content,
-                        )
+                    # Fire chunk callback
+                    if self._chunk_callback:
+                        self._chunk_callback(request_id, full_content)
 
                 # Extract usage from any chunk that has it
                 usage = getattr(chunk, "usage", None)
@@ -685,7 +683,7 @@ class LLMService:
         self._session_id = session_id
         self._history_store.current_session_id = session_id
 
-        # Get messages with images for frontend
+        # Get messages with reconstructed images for frontend
         full_messages = self._history_store.get_session_messages(session_id)
 
         # Broadcast to collaborators
@@ -693,13 +691,13 @@ class LLMService:
             asyncio.ensure_future(
                 self._event_callback("sessionChanged", {
                     "session_id": session_id,
-                    "messages": self._context.get_history(),
+                    "messages": full_messages,
                 })
             )
 
         return {
             "session_id": session_id,
-            "messages": self._context.get_history(),
+            "messages": full_messages,
         }
 
     # ── History ───────────────────────────────────────────────────
@@ -819,13 +817,12 @@ class LLMService:
         blocks = self._build_cache_blocks(tc)
         promotions = []
         demotions = []
-        tracker = self._get_active_tracker()
-        if tracker:
-            for change in tracker.get_changes():
-                if "📈" in change:
-                    promotions.append(change)
-                elif "📉" in change:
-                    demotions.append(change)
+
+        # Compute cache hit rate from session totals
+        cache_hit_rate = 0.0
+        st_total = self._session_totals.get("prompt", 0) + self._session_totals.get("cache_hit", 0)
+        if st_total > 0:
+            cache_hit_rate = self._session_totals.get("cache_hit", 0) / st_total
 
         return {
             "model": self._config.model,
@@ -833,7 +830,7 @@ class LLMService:
             "cross_ref_enabled": self._cross_ref_enabled,
             "total_tokens": total,
             "max_input_tokens": tc.max_input_tokens,
-            "cache_hit_rate": 0.0,
+            "cache_hit_rate": cache_hit_rate,
             "blocks": blocks,
             "promotions": promotions,
             "demotions": demotions,
@@ -1205,6 +1202,8 @@ class LLMService:
         if not tracker:
             return []
 
+        from ac_dc.context.stability_tracker import TIER_CONFIG
+
         blocks = []
         for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
             tier_items = tracker.get_tier_items(tier)
@@ -1223,7 +1222,6 @@ class LLMService:
                     entry["path"] = key.split(":", 1)[1]
                 if item.tier != Tier.ACTIVE:
                     promo_n = None
-                    from ac_dc.context.stability_tracker import TIER_CONFIG
                     cfg = TIER_CONFIG.get(item.tier)
                     if cfg:
                         promo_n = cfg.get("promotion_n")
@@ -1393,7 +1391,7 @@ class LLMService:
         if not tracker:
             return {}
 
-        self._url_hash_lookup = None  # Reset per-call URL hash cache
+        url_hash_lookup = None
         tiered = {}
         for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
             tier_items = tracker.get_tier_items(tier)
@@ -1423,13 +1421,13 @@ class LLMService:
                     uh = key.split(":", 1)[1]
                     url_svc = self._get_url_service()
                     # Build hash→content lookup on first url item
-                    if not hasattr(self, '_url_hash_lookup') or self._url_hash_lookup is None:
+                    if url_hash_lookup is None:
                         from ac_dc.url_service.models import url_hash as compute_hash
-                        self._url_hash_lookup = {
+                        url_hash_lookup = {
                             compute_hash(uc.url): uc
                             for uc in url_svc.get_fetched_urls()
                         }
-                    uc = self._url_hash_lookup.get(uh)
+                    uc = url_hash_lookup.get(uh)
                     if uc:
                         formatted = uc.format_for_prompt()
                         if formatted:
@@ -1732,8 +1730,9 @@ class LLMService:
 
             try:
                 loop = asyncio.get_running_loop()
+                _url = url  # capture current value for executor
                 await loop.run_in_executor(
-                    None, url_svc.fetch_url, url, True, True,
+                    None, lambda u=_url: url_svc.fetch_url(u, use_cache=True, summarize=True),
                 )
                 count += 1
 

@@ -6,6 +6,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { RpcMixin } from '../utils/rpc-mixin.js';
 
 export class AcSearchTab extends RpcMixin(LitElement) {
@@ -405,7 +406,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       <div class="match-row ${isFocused ? 'focused' : ''}"
            @click=${() => this._navigateTo(file, match.line_num)}>
         <span class="line-num">${match.line_num}</span>
-        <span class="match-text">${this._highlightMatch(match.line)}</span>
+        <span class="match-text">${unsafeHTML(this._highlightMatch(match.line))}</span>
       </div>
       ${(match.context_after || []).map(ctx => html`
         <div class="context-line">
@@ -438,12 +439,15 @@ export class AcSearchTab extends RpcMixin(LitElement) {
         parts.push(`<mark>${this._escHtml(match[0])}</mark>`);
         lastIndex = pattern.lastIndex;
         if (!pattern.global) break;
-        if (match[0].length === 0) { pattern.lastIndex++; } // prevent infinite loop on zero-length match
+        if (match[0].length === 0) {
+          pattern.lastIndex++;
+          if (pattern.lastIndex > text.length) break;
+        }
       }
       if (lastIndex < text.length) {
         parts.push(this._escHtml(text.slice(lastIndex)));
       }
-      return html`<span .innerHTML=${parts.join('')}></span>`;
+      return parts.join('');
     } catch (_) {
       return this._escHtml(text);
     }
