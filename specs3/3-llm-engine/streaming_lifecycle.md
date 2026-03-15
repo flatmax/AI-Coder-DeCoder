@@ -73,7 +73,9 @@ The streaming handler uses **tiered assembly** (`assemble_tiered_messages`) for 
 
 ### Deferred Initialization Guard
 
-The LLM service supports a **deferred initialization** mode (`deferred_init=True`) used by the startup sequence. When deferred, the service skips session restoration and stability initialization at construction time. The `_init_complete` flag starts as `False` and gates `chat_streaming` — requests arriving before initialization completes are rejected with `"Server is still initializing — please wait a moment"`. The flag is set to `True` after `complete_deferred_init()` finishes restoring the last session.
+The LLM service supports a **deferred initialization** mode (`deferred_init=True`) used by the startup sequence. When deferred, the service skips stability initialization at construction time. The `_init_complete` flag starts as `False` and gates `chat_streaming` — requests arriving before initialization completes are rejected with `"Server is still initializing — please wait a moment"`. The flag is set to `True` after `complete_deferred_init()` finishes.
+
+**Session restore timing:** The last session is restored **eagerly** via `_restore_last_session()` — called in `main.py` *before* the WebSocket server starts accepting connections (`server.start()`). This ensures `get_current_state()` returns previous session messages as soon as the first browser connects, without waiting for the deferred initialization phase. `complete_deferred_init()` handles only symbol index wiring and does not re-run session restoration.
 
 ### Stability Tracker Initialization
 

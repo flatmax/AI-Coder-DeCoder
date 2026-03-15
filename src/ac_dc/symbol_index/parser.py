@@ -20,6 +20,7 @@ LANGUAGE_MAP = {
     ".cxx": "cpp",
     ".hpp": "cpp",
     ".hxx": "cpp",
+    ".m": "matlab",
 }
 
 

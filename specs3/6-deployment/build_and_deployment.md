@@ -22,15 +22,18 @@ If no bundled webapp is found, the server exits with an error message instructin
 
 ### Static File Server
 
-A minimal `http.server.HTTPServer` runs in a daemon thread, serving files from the webapp dist directory. Features:
+A `http.server.ThreadingHTTPServer` runs in a daemon thread, serving files from the webapp dist directory. The threaded server handles concurrent requests (e.g., multiple browser tabs, parallel asset loads). Features:
 
 - **SPA fallback**: requests for paths without a file extension that don't match a real file are served `index.html` (for client-side routing)
 - **Silent logging**: per-request logs suppressed to avoid noise
 - **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed
+- **Error suppression**: `BrokenPipeError` and `ConnectionResetError` are silently caught in both the request handler (`do_GET`) and the server's `handle_error` override, preventing noisy tracebacks when clients disconnect mid-transfer
 
 ### Vite Base Path
 
 `vite.config.js` sets `base: './'` so all asset references use relative paths. This allows the built webapp to be served from any origin without path rewriting.
+
+**Note:** `vite.config.js` hardcodes `host: '0.0.0.0'` for both `server` and `preview` blocks. This only affects developers running `npm run dev` or `npm run preview` directly (outside the `ac-dc` CLI). When launched via the CLI, `main.py` passes `--host` to the Vite subprocess, which overrides the config file value. The hardcoded `0.0.0.0` is a development convenience and has no security impact on production builds (which use the built-in static server, not Vite).
 
 ### Version Detection
 
@@ -64,21 +67,26 @@ The startup is split into two phases to give the user early feedback. The browse
 6. Register services with JRPCServer and start WebSocket server
 7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
 
-### Phase 2: Deferred (progress reported to browser)
+### Phase 2: Deferred (non-blocking background task with progress)
+
+Phase 2 runs entirely inside `asyncio.ensure_future()` so the event loop stays free to handle WebSocket frames. Each CPU-bound step uses `run_in_executor` to avoid blocking pings/pongs.
 
 8. Wait briefly (500ms) for browser WebSocket connection
-9. Initialize SymbolIndex (tree-sitter parser) — progress: 10%
-10. Complete deferred LLM init (restore last session) — progress: 30%
-11. Index repository (parse all source files, heaviest step, runs in executor) — progress: 50%
-12. Initialize stability tracker (tier assignments, reference graph) — progress: 80%
-13. Signal ready — progress: 100%, browser dismisses startup overlay
-14. Start background doc index build:
+9. Initialize SymbolIndex via `run_in_executor` (tree-sitter parser) — progress: 10%
+10. Complete deferred LLM init via `run_in_executor` (wire symbol index) — progress: 30%
+11. Index repository in batches of 20 files via `run_in_executor`, with `asyncio.sleep(0)` between batches — progress: 50–90%
+12. Build reference index once after all files indexed
+13. Initialize stability tracker via `run_in_executor` (tier assignments, reference graph) — progress: 80%
+14. Signal ready — progress: 100%, browser dismisses startup overlay
+15. Start background doc index build:
     - Structure extraction (<250ms for 50 files) → doc mode toggle enabled immediately
     - Reference index build (<50ms)
     - Queue all files for background keyword enrichment → persistent enrichment toast in chat panel
 15. Serve forever
 
-Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 14 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
+Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 15 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
+
+**File reopen deferral:** The browser delays reopening the last-viewed file until the startup overlay dismisses (i.e., after the `ready` signal). This prevents file-fetch RPC calls from blocking the server's event loop during heavy initialization. On reconnect (when `init_complete` is already true), the file reopens immediately.
 
 ### Startup Overlay (Browser)
 
@@ -89,7 +97,7 @@ The browser shows a full-screen overlay with the AC⚡DC brand, a status message
 | (connected) | `Connected — initializing...` | 5% |
 | `symbol_index` | `Initializing symbol parser...` | 10% |
 | `session_restore` | `Restoring session...` | 30% |
-| `indexing` | `Indexing repository...` | 50% |
+| `indexing` | `Indexing repository... N/M` | 50–90% |
 | `stability` | `Building cache tiers...` | 80% |
 | `ready` | `Ready` | 100% |
 
@@ -125,6 +133,7 @@ Platforms: Linux, Windows, macOS (ARM).
    pyinstaller --onefile --name ac-dc-{platform} \
        --add-data "src/ac_dc/VERSION:ac_dc" \
        --add-data "src/ac_dc/config:ac_dc/config" \
+       --add-data "webapp/dist:ac_dc/webapp_dist" \
        --collect-all=litellm \
        --collect-all=tiktoken --collect-all=tiktoken_ext \
        --collect-all=tree_sitter \
@@ -135,7 +144,7 @@ Platforms: Linux, Windows, macOS (ARM).
        --collect-all=tree_sitter_cpp \
        --collect-all=trafilatura \
        --hidden-import=boto3 --hidden-import=botocore \
-       src/ac_dc/main.py
+       src/ac_dc/__main__.py
    ```
    **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime. The bundled `webapp_dist` is served locally by the built-in static file server — no internet connection required.
 4. Create GitHub Release with all platform binaries attached
@@ -145,13 +154,13 @@ Platforms: Linux, Windows, macOS (ARM).
 The bundled `config/` directory contains sensible defaults:
 - `llm.json` — defaults to `anthropic/claude-sonnet-4-20250514` with empty env (no provider-specific settings)
 - `system.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md` — current prompts
-- `app.json`, `snippets.json`, `review-snippets.json` — default application settings
+- `app.json`, `snippets.json` — default application settings
 
 On first run, all configs are copied to the user config directory. On subsequent releases, managed files (prompts, default settings) are overwritten with backups; user files (`llm.json`, `system_extra.md`) are preserved. See [Configuration — Packaged Builds](../1-foundation/configuration.md#packaged-builds) for details.
 
 ## Python Version
 
-The `pyproject.toml` specifies the minimum Python version via `requires-python`. **Note:** The current `pyproject.toml` states `requires-python = ">=3.14"`, which is likely an error — Python 3.14 is not yet released. The intended minimum is Python 3.10 or newer. This should be corrected to `requires-python = ">=3.10"`.
+The `pyproject.toml` specifies `requires-python = ">=3.10"`. The CI release workflow (`release.yml`) builds with Python 3.14.
 
 ## Security
 

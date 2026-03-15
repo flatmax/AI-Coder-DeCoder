@@ -313,6 +313,47 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       margin: 1.5em 0;
     }
 
+    /* Floating file-name labels for left/right diff panels */
+    .panel-label {
+      position: absolute;
+      top: 8px;
+      z-index: 9;
+      max-width: 45%;
+      padding: 3px 10px;
+      border-radius: 4px;
+      background: rgba(22, 27, 34, 0.78);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border: 1px solid var(--border-primary, #30363d);
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      font-family: var(--font-mono, monospace);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: auto;
+      user-select: none;
+      transition: opacity 0.15s;
+      opacity: 0.85;
+    }
+    .panel-label:hover {
+      opacity: 1;
+      background: rgba(22, 27, 34, 0.92);
+    }
+    .panel-label.left {
+      right: calc(50% + 8px);
+    }
+    .panel-label.right {
+      right: 120px;
+    }
+    /* In inline (non-side-by-side) mode, only show the right label */
+    .panel-label.left.inline-mode {
+      display: none;
+    }
+    .panel-label.right.inline-mode {
+      right: 120px;
+    }
+
     /* Highlight animation for scroll-to-edit */
     .highlight-decoration {
       background: rgba(79, 195, 247, 0.2);
@@ -405,9 +446,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     // Check if already open
     const existingIdx = this._files.findIndex(f => f.path === path);
     if (existingIdx !== -1) {
+      const wasActive = this._activeIndex === existingIdx;
       this._activeIndex = existingIdx;
       await this.updateComplete;
-      this._showEditor();
+      // Only rebuild the editor if switching to a different tab;
+      // if the file is already active, skip _showEditor to avoid
+      // recreating models (which resets scroll and cancels Delayers).
+      if (!wasActive) {
+        this._showEditor();
+      }
       if (line != null) {
         this._scrollToLine(line);
       } else if (searchText) {
@@ -457,10 +504,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     await this.updateComplete;
     this._showEditor();
 
-    if (line != null) {
-      this._scrollToLine(line);
-    } else if (searchText) {
-      this._scrollToSearchText(searchText);
+    // Scroll after diff computation finishes — scrolling immediately gets
+    // overwritten by the async diff layout that resets the viewport.
+    if (line != null || searchText) {
+      await this._waitForDiffReady();
+      if (line != null) {
+        this._scrollToLine(line);
+      } else if (searchText) {
+        this._scrollToSearchText(searchText);
+      }
     }
 
     this._dispatchActiveFileChanged(path);
@@ -541,6 +593,84 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    */
   getDirtyFiles() {
     return [...this._dirtySet];
+  }
+
+  /**
+   * Load content into a specific panel (left or right) of the current diff.
+   * If no file is open, creates a virtual comparison file.
+   * @param {string} content - Text content to load
+   * @param {'left'|'right'} panel - Which panel to update
+   * @param {string} [label] - Source label for display
+   */
+  loadPanel(content, panel, label) {
+    if (!this._editor || this._activeIndex < 0) {
+      // No file open — create a virtual comparison
+      const path = 'virtual://compare';
+      const fileObj = {
+        path,
+        original: panel === 'left' ? content : '',
+        modified: panel === 'right' ? content : '',
+        is_new: false,
+        is_read_only: true,
+        is_config: false,
+        config_type: null,
+        real_path: null,
+        savedContent: panel === 'right' ? content : '',
+      };
+
+      const existingIdx = this._files.findIndex(f => f.path === 'virtual://compare');
+      if (existingIdx !== -1) {
+        const existing = this._files[existingIdx];
+        fileObj.original = panel === 'left' ? content : existing.original;
+        fileObj.modified = panel === 'right' ? content : existing.modified;
+        fileObj.savedContent = fileObj.modified;
+        this._files = this._files.map((f, i) => i === existingIdx ? fileObj : f);
+        this._activeIndex = existingIdx;
+      } else {
+        this._files = [...this._files, fileObj];
+        this._activeIndex = this._files.length - 1;
+      }
+
+      this.updateComplete.then(() => this._showEditor());
+      this._dispatchActiveFileChanged(fileObj.path);
+      return;
+    }
+
+    // File is open — update the appropriate side
+    const file = this._files[this._activeIndex];
+    const model = this._editor.getModel();
+    if (!model) return;
+
+    if (panel === 'left') {
+      const updated = { ...file, original: content };
+      this._files = this._files.map((f, i) => i === this._activeIndex ? updated : f);
+      const lang = detectLanguage(file.path);
+      const oldOriginal = model.original;
+      const newOriginalModel = monaco.editor.createModel(content, lang);
+      this._editor.setModel({
+        original: newOriginalModel,
+        modified: model.modified,
+      });
+      if (oldOriginal) oldOriginal.dispose();
+      this._leftLabel = label ? this._makePanelLabel(label) : null;
+    } else {
+      const updated = { ...file, modified: content, savedContent: content };
+      this._files = this._files.map((f, i) => i === this._activeIndex ? updated : f);
+      const lang = detectLanguage(file.path);
+      const oldModified = model.modified;
+      const newModifiedModel = monaco.editor.createModel(content, lang);
+      this._editor.setModel({
+        original: model.original,
+        modified: newModifiedModel,
+      });
+      if (oldModified) oldModified.dispose();
+      this._rightLabel = label ? this._makePanelLabel(label) : null;
+    }
+
+    const newDirty = new Set(this._dirtySet);
+    newDirty.delete(file.path);
+    this._dirtySet = newDirty;
+    this.requestUpdate();
   }
 
   // === Viewport State (for restore on refresh) ===
@@ -655,6 +785,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const language = detectLanguage(file.path);
 
     const renderSideBySide = !this._previewMode;
+
+    // Update floating panel labels
+    this._updatePanelLabels(file);
 
     if (this._editor) {
       // Capture old models — they must be disposed AFTER setModel() detaches
@@ -772,6 +905,29 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     }
     this._highlightDecorations = [];
+    this._leftLabel = null;
+    this._rightLabel = null;
+  }
+
+  /**
+   * Wait for the diff editor's async diff computation to finish.
+   * Monaco resets scroll/layout when the diff result arrives, so any
+   * scroll positioning must happen after this resolves.
+   */
+  _waitForDiffReady() {
+    return new Promise((resolve) => {
+      if (!this._editor) { resolve(); return; }
+      const disposable = this._editor.onDidUpdateDiff(() => {
+        disposable.dispose();
+        // One extra frame to let Monaco finish its layout pass
+        requestAnimationFrame(() => resolve());
+      });
+      // Safety timeout — if diff never fires (e.g. identical content)
+      setTimeout(() => {
+        try { disposable.dispose(); } catch (_) { /* already disposed */ }
+        resolve();
+      }, 2000);
+    });
   }
 
   _checkDirty() {
@@ -1025,6 +1181,43 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     window.dispatchEvent(new CustomEvent('active-file-changed', {
       detail: { path },
     }));
+  }
+
+  // === Panel Labels ===
+
+  /**
+   * Build a label object from a file path or descriptive string.
+   * @param {string} pathOrLabel
+   * @returns {{name: string, fullPath: string}}
+   */
+  _makePanelLabel(pathOrLabel) {
+    if (!pathOrLabel) return null;
+    const lastSlash = pathOrLabel.lastIndexOf('/');
+    const name = lastSlash >= 0 ? pathOrLabel.slice(lastSlash + 1) : pathOrLabel;
+    return { name, fullPath: pathOrLabel };
+  }
+
+  /**
+   * Update left/right floating labels based on the active file.
+   * For normal diffs (same file, HEAD vs working): show "HEAD" left, file name right.
+   * For virtual compare or loadPanel: labels are set explicitly.
+   */
+  _updatePanelLabels(file) {
+    if (!file) {
+      this._leftLabel = null;
+      this._rightLabel = null;
+      this.requestUpdate();
+      return;
+    }
+    // If this is a virtual compare created by loadPanel, keep existing labels
+    if (file.path === 'virtual://compare') {
+      this.requestUpdate();
+      return;
+    }
+    // Normal file diff (same file, HEAD vs working) — no labels needed
+    this._leftLabel = null;
+    this._rightLabel = null;
+    this.requestUpdate();
   }
 
   // === LSP Providers ===
@@ -1392,6 +1585,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         <div class="split-container">
           <div class="editor-pane">
             ${this._renderOverlayButtons(file, isDirty, false)}
+            ${this._renderPanelLabels(true)}
           </div>
           <div class="preview-pane"
                @scroll=${() => this._scrollEditorToPreviewLine()}>
@@ -1412,12 +1606,31 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return html`
       <div class="editor-container">
         ${this._renderOverlayButtons(file, isDirty, showPreviewBtn)}
+        ${this._renderPanelLabels(false)}
         ${!hasFiles ? html`
           <div class="empty-state">
             <div class="watermark">AC⚡DC</div>
           </div>
         ` : nothing}
       </div>
+    `;
+  }
+
+  _renderPanelLabels(inlineMode) {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return nothing;
+    const inlineCls = inlineMode ? ' inline-mode' : '';
+    return html`
+      ${this._leftLabel ? html`
+        <div class="panel-label left${inlineCls}" title="${this._leftLabel.fullPath}">
+          ${this._leftLabel.name}
+        </div>
+      ` : nothing}
+      ${this._rightLabel ? html`
+        <div class="panel-label right${inlineCls}" title="${this._rightLabel.fullPath}">
+          ${this._rightLabel.name}
+        </div>
+      ` : nothing}
     `;
   }
 

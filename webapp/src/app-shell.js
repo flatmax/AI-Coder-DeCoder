@@ -349,6 +349,7 @@ class AcApp extends JRPCClient {
     this._onGlobalKeyUp = this._onGlobalKeyUp.bind(this);
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
     this._onWindowResize = this._onWindowResize.bind(this);
     this._resizeRAF = null;
@@ -366,6 +367,7 @@ class AcApp extends JRPCClient {
     window.addEventListener('files-modified', this._onFilesModified);
     window.addEventListener('search-navigate', this._onSearchNavigate);
     window.addEventListener('active-file-changed', this._onActiveFileChanged);
+    window.addEventListener('load-diff-panel', this._onLoadDiffPanel);
 
     // Intercept Ctrl+S globally and Alt+Arrow for file navigation
     window.addEventListener('keydown', this._onGlobalKeyDown, true);
@@ -393,6 +395,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('files-modified', this._onFilesModified);
     window.removeEventListener('search-navigate', this._onSearchNavigate);
     window.removeEventListener('active-file-changed', this._onActiveFileChanged);
+    window.removeEventListener('load-diff-panel', this._onLoadDiffPanel);
     window.removeEventListener('keydown', this._onGlobalKeyDown, true);
     window.removeEventListener('keyup', this._onGlobalKeyUp);
     window.removeEventListener('ac-toast', this._onToastEvent);
@@ -528,9 +531,9 @@ class AcApp extends JRPCClient {
       this._reconnectMsg = `Reconnecting (attempt ${this._reconnectAttempt})...`;
       this.requestUpdate();
 
-      // jrpc-oo reconnect: re-open the WebSocket
+      // jrpc-oo reconnect: re-trigger WebSocket connection
       try {
-        this.open(this.serverURI);
+        this.serverChanged();
       } catch (e) {
         console.error('Reconnect failed:', e);
         this._scheduleReconnect();
@@ -660,6 +663,17 @@ class AcApp extends JRPCClient {
   }
 
   /**
+   * Receive document conversion progress from server.
+   * Called via RPC: AcApp.docConvertProgress(data)
+   */
+  docConvertProgress(data) {
+    window.dispatchEvent(new CustomEvent('doc-convert-progress', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
    * Receive admission request notification (another client wants to connect).
    * Called via RPC: AcApp.admissionRequest(data)
    *
@@ -747,6 +761,10 @@ class AcApp extends JRPCClient {
       // Dismiss overlay with a short delay for the animation
       setTimeout(() => {
         this._startupVisible = false;
+        if (this._pendingReopen) {
+          this._pendingReopen = false;
+          this._reopenLastFileNow();
+        }
       }, 400);
     }
 
@@ -778,8 +796,8 @@ class AcApp extends JRPCClient {
       if (role) {
         SharedRpc.setCollabRole(role);
       }
-    } catch (e) {
-      console.warn('Failed to fetch collab role:', e);
+    } catch (_) {
+      // Expected in non-collab mode — Collab class not registered
     }
   }
 
@@ -793,8 +811,8 @@ class AcApp extends JRPCClient {
           detail: { count: this._connectedClients },
         }));
       }
-    } catch (e) {
-      console.warn('Failed to fetch connected clients:', e);
+    } catch (_) {
+      // Expected in non-collab mode — Collab class not registered
     }
   }
 
@@ -821,10 +839,14 @@ class AcApp extends JRPCClient {
       }
 
       // If server already finished initialization (e.g. browser connected
-      // after suspend/resume or slow page load), dismiss the startup overlay.
-      // The startupProgress("ready") RPC may have been sent while disconnected.
+      // after suspend/resume or slow page load), dismiss the startup overlay
+      // and reopen the last file.
       if (state?.init_complete) {
         this._startupVisible = false;
+        if (this._pendingReopen) {
+          this._pendingReopen = false;
+          this._reopenLastFileNow();
+        }
       }
 
       // Broadcast mode from server state
@@ -858,8 +880,21 @@ class AcApp extends JRPCClient {
 
   /**
    * Re-open the last viewed file after a page refresh.
+   * Delayed slightly to avoid blocking the event loop during startup
+   * when heavy init tasks are running server-side.
    */
   _reopenLastFile() {
+    // Wait for startup to finish before reopening files — file fetch
+    // RPCs block the server event loop and can cause disconnects
+    // during heavy initialization.
+    if (this._startupVisible) {
+      this._pendingReopen = true;
+    } else {
+      this._reopenLastFileNow();
+    }
+  }
+
+  _reopenLastFileNow() {
     try {
       const path = localStorage.getItem(_repoKey(STORAGE_KEY_LAST_FILE, this._repoName));
       if (!path) return;
@@ -1143,6 +1178,27 @@ class AcApp extends JRPCClient {
       if (fileNav?.visible) {
         fileNav.hide();
       }
+    }
+  }
+
+  _onLoadDiffPanel(e) {
+    const { content, panel, label } = e.detail || {};
+    if (!content || !panel) return;
+
+    // Ensure diff viewer is visible
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgV = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffV) {
+      diffV.classList.add('viewer-visible');
+      diffV.classList.remove('viewer-hidden');
+    }
+    if (svgV) {
+      svgV.classList.add('viewer-hidden');
+      svgV.classList.remove('viewer-visible');
+    }
+
+    if (diffV) {
+      diffV.loadPanel(content, panel, label);
     }
   }
 

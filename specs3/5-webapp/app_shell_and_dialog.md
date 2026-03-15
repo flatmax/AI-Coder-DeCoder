@@ -240,17 +240,19 @@ The app shell persists the last-opened file and its viewport state to localStora
 
 ### Restore Flow
 
-On startup, after `state-loaded` completes:
+On startup, after `state-loaded` completes, the file reopen is **deferred until the startup overlay dismisses** (i.e., after the server sends `startupProgress("ready")`). This prevents file-fetch RPC calls from blocking the server's event loop during heavy initialization — synchronous `git show` subprocess calls in the RPC handler can starve WebSocket pings and cause disconnections. On reconnect (when `init_complete` is already true in `get_current_state()`), the file reopens immediately.
 
 1. Read `ac-last-open-file` from localStorage
-2. If a path exists, read `ac-last-viewport` and verify the viewport's `path` matches
-3. Dispatch a `navigate-file` event to re-open the file
-4. For diff files with saved viewport state:
+2. If the startup overlay is still visible, set `_pendingReopen = true` and return
+3. When the overlay dismisses (on `startupProgress("ready")` or when `init_complete` is true on reconnect), proceed with the reopen
+4. Read `ac-last-viewport` and verify the viewport's `path` matches
+5. Dispatch a `navigate-file` event to re-open the file
+6. For diff files with saved viewport state:
    - Register a one-shot `active-file-changed` listener filtered to the target path
    - When the file opens, use double-rAF to wait for the editor to be ready
    - Call `restoreViewportState()` which sets cursor position, reveals the line, and restores scroll offsets
-5. `restoreViewportState()` polls up to 20 animation frames for the Monaco editor to be ready (it's created asynchronously after the file content fetch completes)
-6. A 10-second timeout removes the listener if the file never opens (e.g., file was deleted)
+7. `restoreViewportState()` polls up to 20 animation frames for the Monaco editor to be ready (it's created asynchronously after the file content fetch completes)
+8. A 10-second timeout removes the listener if the file never opens (e.g., file was deleted)
 
 ## Local Storage Persistence Pattern
 
@@ -280,7 +282,7 @@ The `content-visibility` optimization described in the chat interface spec relie
 | Git operation fails | Return `{error}` from RPC. Error toast. File tree doesn't update |
 | Commit fails | Error shown in chat. Files remain staged |
 | URL fetch fails | Chip shows error state. Error results not cached. Content not included. User can retry |
-| WebSocket disconnect | Reconnecting banner with attempt count, auto-retry with exponential backoff (1s, 2s, 4s, 8s, max 15s). On disconnect: reset `SharedRpc`, show banner, dispatch error toast. On reconnect: re-publish call proxy, fetch state, rebuild UI, dispatch success toast |
+| WebSocket disconnect | Reconnecting banner with attempt count, auto-retry with exponential backoff (1s, 2s, 4s, 8s, max 15s). On disconnect: reset `SharedRpc`, show banner, dispatch error toast. On reconnect via `serverChanged()`: re-publish call proxy, fetch state, rebuild UI, dispatch success toast |
 | Config file corrupt/missing | Use built-in defaults. Log warning. Settings panel displays the error |
 | Symbol cache corrupt | Clear in-memory cache, rebuild from source |
 | Compaction LLM failure | Safe defaults (no boundary, 0 confidence). History unchanged. Retry next trigger |

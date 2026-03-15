@@ -62,7 +62,7 @@ class Settings:
         return self._config.get_config_info()
 
     def get_snippets(self):
-        """Load prompt snippets (all modes — unified file)."""
+        """Load prompt snippets (code mode — backwards compatible)."""
         return self._config.get_snippets()
 
     def get_review_snippets(self):

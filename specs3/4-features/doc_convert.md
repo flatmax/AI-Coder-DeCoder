@@ -2,6 +2,9 @@
 
 ## Overview
 
+> **Note:** The `DocConvert` class is registered as a **top-level RPC service** via `server.add_class(doc_convert)`, exposing all public methods as `DocConvert.*` RPC endpoints. It receives the shared `_event_callback` for sending `docConvertProgress` events to the browser and the `_collab` reference for localhost-only enforcement on `convert_files`. See [Communication Layer — Server-Side Class Organization](../1-foundation/communication_layer.md#server-side-class-organization) for the full service table.
+
+
 Document convert is a **dialog-driven tool** (not a background auto-convert) for converting non-markdown documents (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`) to markdown files. PDFs and presentations use a hybrid pipeline: text is extracted into markdown paragraphs, and only pages containing images or vector graphics produce companion SVG files. It requires a clean git working tree — the same gate as code review mode — so all converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally.
 
 Converted markdown is strictly superior in a git repo — it's diffable, human-readable, greppable, and editable by the LLM via the standard edit block protocol. Document convert brings this benefit without requiring the user to run external tools manually.
@@ -15,7 +18,7 @@ Converted `.md` files are indexed by the [Document Index](../2-code-analysis/doc
 | `.docx` | Word document | Full content including tables, headings, lists |
 | `.pdf` | PDF document | Text extracted into markdown paragraphs; pages with images/vector graphics also get per-page SVG exports |
 | `.pptx` | PowerPoint | Text extracted into markdown via PyMuPDF; slides with images/diagrams also get SVG exports. Falls back to python-pptx (full SVG per slide) when LibreOffice/PyMuPDF unavailable |
-| `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables |
+| `.xlsx` | Excel spreadsheet | Sheet names as headings, data as markdown tables. Cell background colours preserved via emoji markers with a legend |
 | `.csv` | Comma-separated values | Converted to a markdown table |
 | `.rtf` | Rich text format | Text content with basic formatting |
 | `.odt` | OpenDocument text | Full content similar to `.docx` |
@@ -83,6 +86,20 @@ The extracted text is **also** written to the companion markdown file for search
 - **SVG** — as `<text>` elements for visual fidelity and selectability
 - **Markdown** — for grep, doc index, and LLM edit access
 
+#### SVG Image Externalization
+
+SVG files produced by the PDF→SVG pipeline may contain embedded base64 `<image>` data URIs (raster images within PDF pages). The `_externalize_svg_images()` function extracts these and saves them as separate files:
+
+1. Scan the SVG text for `href="data:image/...;base64,..."` and `xlink:href="data:image/...;base64,..."` patterns (handles both attribute forms)
+2. Strip whitespace and newlines from the base64 payload (PyMuPDF may wrap long payloads)
+3. Decode and save each image to the page's output directory with sequential naming: `{svg_stem}_img{page_index}_{counter}{ext}`
+4. Replace the data URI in the SVG with a relative filename reference
+5. Return the modified SVG text and the list of saved filenames
+
+When a page has both readable text AND externalized raster images, the markdown embeds the individual raster images directly (e.g., `![img_label](stem/img_file.png)`) instead of linking the full-page SVG. This avoids visual duplication — the full-page SVG contains the same text that already appears as markdown paragraphs. Pages without extractable text, or without externalized images, still link the full-page SVG as before.
+
+Externalized image filenames are tracked alongside SVG filenames in the provenance header's `images` field for orphan cleanup on re-conversion.
+
 ### python-pptx (Presentation SVG Export — Fallback)
 
 When LibreOffice and PyMuPDF are unavailable, PowerPoint (`.pptx`) files fall back to **python-pptx** for direct SVG rendering. Each slide is rendered as an SVG file containing:
@@ -111,6 +128,16 @@ When the primary PyMuPDF pipeline is used, text-only slides appear as markdown p
 ### odfpy
 
 **odfpy** is included as an explicit dependency alongside `markitdown[all]` (which also pulls it in transitively). It provides native ODF format parsing for `.odt` files. The explicit dependency ensures `.odt` support is available even if markitdown's dependency groups change in future versions.
+
+### Colour-Aware Excel Extraction
+
+`.xlsx` files use a dedicated **openpyxl-based pipeline** (`_extract_xlsx_with_colors`) instead of markitdown, preserving cell background colours as emoji markers in the markdown output. The pipeline uses a two-pass approach:
+
+1. **Pass 1** — Read all cells across all sheets, collecting text values and raw hex fill colours. Build a set of all unique non-ignorable fills (near-white and near-black fills are ignored)
+2. **Colour mapping** — Well-known hues (red, green, yellow, blue, etc.) are assigned named emoji markers (🔴, 🟢, 🟡, 🔵). Remaining colours are clustered by Euclidean RGB distance (threshold 40) and assigned distinct fallback markers (⬛, ◆, ▲, ●, ■, ★) per cluster. This ensures visually distinct shades — e.g. three shades of brown — each get their own symbol
+3. **Pass 2** — Emit markdown tables using the colour map. Coloured cells get their marker prepended. Empty columns and fully-empty rows are stripped. A legend mapping markers to colour names is appended
+
+If openpyxl is not installed or fails to read the file, the pipeline falls back to markitdown.
 
 ### Installation
 
@@ -187,14 +214,15 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original. Presentation and PDF slides/pages are placed in a subdirectory (only for pages with graphics):
+Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem (for all formats, not just presentations/PDFs):
 
 ```
 docs/
     architecture.docx              ← source
     architecture.md                ← converted output
-    architecture_img1.png          ← extracted raster image
-    architecture_img2.svg          ← extracted vector image
+    architecture/                  ← assets subdirectory
+        architecture_img1.png      ← extracted raster image
+        architecture_img2.svg      ← extracted vector image
     budget.xlsx                    ← source
     budget.md                      ← converted output
     presentation.pptx              ← source
@@ -208,6 +236,8 @@ docs/
         02_page.svg                ← page 2 (had figures)
         05_page.svg                ← page 5 (had charts)
 ```
+
+The assets subdirectory is created for all formats during `_convert_single()`. If no images are extracted (the subdirectory ends up empty), it is automatically removed after conversion. Image filenames in the markdown are prefixed with the subdirectory name (e.g., `architecture/architecture_img1.png`) so relative links resolve correctly.
 
 Text-only pages/slides appear as markdown paragraphs in the `.md` file without companion SVGs. The subdirectory is only created when at least one page has graphical content.
 
@@ -223,6 +253,18 @@ Images embedded in source documents (e.g., figures in `.docx`) are extracted alo
 4. **Save** vector images (SVG) directly with a provenance header injected
 5. **Replace** data URIs in the markdown with relative file paths to the saved images
 6. **Verify** file-referenced images (non-data-URI) that markitdown may have written to disk
+
+### DOCX Image Extraction Pipeline
+
+markitdown's handling of `.docx` embedded images produces **truncated data URIs** — references like `![alt](data:image/png;base64...)` where the base64 payload is replaced with a literal `...` (no actual image data). This is a known markitdown behavior for large embedded images.
+
+The conversion pipeline handles this with a two-step approach:
+
+1. **`_extract_docx_images()`** — Opens the `.docx` as a zip archive, finds all files under `word/media/`, and saves them with sequential names (`{stem}_img{index}{ext}`). This extracts the real image bytes that markitdown failed to inline. JPEG extensions are normalized to `.jpg`. Non-zip files (corrupt docx) are handled gracefully.
+
+2. **`_replace_truncated_uris()`** — Scans the markdown output for truncated data-URI patterns (`data:image/...;base64...` ending with literal `...`) and replaces each one with the next filename from the extracted images list, in order. Real base64 data URIs (with actual payloads) are left unchanged — they are handled by the standard data URI extraction pipeline.
+
+The two steps must run in order: extract real images first, then substitute the truncated references. After this, the standard `_extract_and_save_images()` pipeline handles any remaining real data URIs that markitdown did successfully inline.
 
 ### Design Decisions
 
@@ -292,6 +334,14 @@ Status is determined by:
 6. If match → `current`; if mismatch → `stale`
 
 `current` files are shown but visually muted — they don't need re-conversion. `conflict` files show a warning icon; hovering reveals a tooltip: *"report.md exists and wasn't created by doc convert"*.
+
+### Tooltips
+
+All file paths in the tab show native browser tooltips (via `title` attributes) on hover, since paths are commonly truncated by `text-overflow: ellipsis`:
+
+- **File list rows**: hovering the file path shows `{source_path} → {output_path}` (e.g., `docs/architecture.docx → docs/architecture.md`)
+- **Progress items**: hovering the source path shows the full source and output path; hovering the output path shows the full output path; hovering error text shows the full error message
+- **Over-size warning**: the 📏 icon shows "Exceeds size limit" on hover
 
 ### Conversion Flow
 
@@ -422,14 +472,14 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
-Conversion runs in a background executor and does not block UI interaction. The progress view provides per-file feedback.
+Conversion runs in a dedicated single-thread executor and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted back to the event loop from the worker thread via `call_soon_threadsafe` + `ensure_future`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The progress view provides per-file feedback.
 
 ## RPC Methods
 
 | Method | Description |
 |--------|-------------|
 | `DocConvert.scan_convertible_files()` | Returns list of convertible files with status badges. Includes clean-tree check |
-| `DocConvert.convert_files(paths: list[str])` | Converts selected files. Returns per-file results. Requires clean tree |
+| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree |
 | `DocConvert.is_available()` | Returns dict with availability of markitdown, LibreOffice, PyMuPDF, and combined pdf_pipeline status |
 
 ## Testing
@@ -468,3 +518,21 @@ Conversion runs in a background executor and does not block UI interaction. The 
 - Custom extension list in config is respected
 - Files exceeding `max_source_size_mb` are shown with warning and skipped during conversion
 - Converted `.md` files are indexed normally by doc index (HTML comment invisible to extractor)
+- DOCX truncated data-URI references replaced with extracted image filenames in order
+- DOCX zip image extraction saves all `word/media/` files with sequential names
+- DOCX non-zip files handled gracefully (returns empty list, no crash)
+- SVG image externalization extracts base64 `<image>` data URIs and saves as separate files
+- SVG externalization handles both `href` and `xlink:href` attributes
+- SVG externalization strips whitespace/newlines from base64 payloads before decoding
+- Pages with text + externalized raster images embed raster images directly (not full-page SVG)
+- Assets subdirectory created for all formats; removed if empty after conversion
+- Image filenames prefixed with subdirectory name for correct relative link resolution
+- Colour-aware xlsx extraction preserves cell background colours as emoji markers
+- Named-bucket colours (red, green, yellow, blue, purple) get their standard emoji markers
+- Near-white and near-black fills are ignored (not marked)
+- Unrecognised colours are clustered by RGB distance; visually distinct shades get distinct fallback markers
+- Identical fills across cells receive the same marker
+- A colour legend is appended to the markdown output listing all markers used
+- Empty columns and fully-empty rows are stripped from xlsx output
+- Multiple sheets each get an `## SheetName` heading
+- Falls back to markitdown if openpyxl is unavailable

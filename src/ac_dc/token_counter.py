@@ -73,13 +73,13 @@ class TokenCounter:
         model = self._model_name.lower()
         if "claude" in model:
             if "opus" in model:
-                return 200000
-            return 200000  # Sonnet, Haiku
+                return 1000000
+            return 1000000  # Sonnet, Haiku
         if "gpt-4" in model:
-            return 128000
+            return 1000000
         if "gpt-3.5" in model:
-            return 16385
-        return 200000  # Default
+            return 1000000
+        return 1000000  # Default
 
     @property
     def max_output_tokens(self):

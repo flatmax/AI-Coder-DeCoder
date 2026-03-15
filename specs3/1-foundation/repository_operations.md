@@ -55,6 +55,13 @@ TreeResult:
     diff_stats: map         // path → {additions, deletions}
 ```
 
+### Git Status Parsing
+
+The porcelain status output requires special handling for edge cases:
+
+- **Quoted paths**: Git quotes file paths containing special characters (spaces, non-ASCII). The parser strips surrounding `"` quotes from these paths.
+- **Renames**: Porcelain format reports renames as `R  old -> new`. Both the old and new paths are added to the staged array. Each path segment may be individually quoted — quotes are stripped per-segment.
+
 ### Ignored Files
 
 Built from `git ls-files` (tracked) + `git ls-files --others --exclude-standard` (untracked, non-ignored). Ignored files never appear.

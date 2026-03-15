@@ -509,7 +509,7 @@ def main(args=None):
             from ac_dc.collab import CollabServer, Collab
 
             collab = Collab()
-            server = CollabServer(server_port, collab=collab, remote_timeout=60)
+            server = CollabServer(server_port, collab=collab, remote_timeout=120)
 
             # Attach collab to service instances for RPC restriction checks
             repo._collab = collab
@@ -523,7 +523,7 @@ def main(args=None):
         else:
             # Single-user mode — plain JRPCServer, localhost only.
             collab = None
-            server = JRPCServer(server_port, remote_timeout=60)
+            server = JRPCServer(server_port, remote_timeout=120)
 
             server.add_class(repo)
             server.add_class(settings)
@@ -585,6 +585,7 @@ def main(args=None):
 
         llm_service._chunk_callback = chunk_callback
         llm_service._event_callback = event_callback
+        doc_convert._event_callback = event_callback
 
         # Step 7: Heavy initialization in background with progress reporting
         async def _send_progress(stage, message, percent=None):
@@ -596,52 +597,79 @@ def main(args=None):
             except Exception:
                 pass  # Browser may not be connected yet
 
-        # Give the browser a moment to connect before sending progress
+        # Give the browser a moment to connect before sending progress.
+        # The heavy init task (below) handles all CPU-bound work via
+        # run_in_executor so the event loop stays responsive.
         await asyncio.sleep(0.5)
 
-        # Symbol index (optional — may fail if tree-sitter not available)
-        symbol_index = None
-        try:
-            await _send_progress("symbol_index", "Initializing symbol parser...", 10)
-            from ac_dc.symbol_index.index import SymbolIndex
-            symbol_index = SymbolIndex(repo_path)
-            logger.info("Symbol index initialized")
-        except Exception as e:
-            logger.warning(f"Symbol index unavailable: {e}")
+        # Run all heavy initialization in a single background task so the
+        # event loop stays free to handle WebSocket frames.  Each step
+        # uses run_in_executor to push CPU work off the event loop thread,
+        # with sleeps between to let pings/pongs flow.
+        async def _heavy_init():
+            loop = asyncio.get_event_loop()
 
-        # Complete deferred initialization with symbol index
-        # (session already restored above before server.start — this
-        # wires up the symbol index and remaining heavy init)
-        await _send_progress("session_restore", "Completing initialization...", 30)
-        llm_service.complete_deferred_init(symbol_index)
-
-        # NOTE: doc index build is deferred to after "ready" signal below,
-        # so the startup overlay dismisses before heavy model loading starts.
-
-        # Index repo (the heaviest step — parses all source files)
-        if symbol_index:
-            await _send_progress("indexing", "Indexing repository...", 50)
+            # Symbol index (optional — may fail if tree-sitter not available)
+            symbol_index = None
             try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: symbol_index.index_repo(repo.get_flat_file_list()),
+                await _send_progress("symbol_index", "Initializing symbol parser...", 10)
+                from ac_dc.symbol_index.index import SymbolIndex
+                symbol_index = await loop.run_in_executor(
+                    None, lambda: SymbolIndex(repo_path),
                 )
-                logger.info(f"Repo indexed: {len(symbol_index._all_symbols)} files")
+                logger.info("Symbol index initialized")
             except Exception as e:
-                logger.warning(f"Repo indexing failed: {e}")
+                logger.warning(f"Symbol index unavailable: {e}")
 
-        # Initialize stability tracker (tier assignments, reference graph)
-        await _send_progress("stability", "Building cache tiers...", 80)
-        llm_service._try_initialize_stability()
+            # Complete deferred initialization with symbol index
+            await _send_progress("session_restore", "Completing initialization...", 30)
+            await loop.run_in_executor(
+                None, lambda: llm_service.complete_deferred_init(symbol_index),
+            )
+            await asyncio.sleep(0)
 
-        await _send_progress("ready", "Ready", 100)
-        logger.info("Startup complete — all services initialized")
+            # Index repo in small batches
+            if symbol_index:
+                await _send_progress("indexing", "Indexing repository...", 50)
+                try:
+                    file_list = repo.get_flat_file_list()
+                    total_files = len(file_list)
+                    batch_size = 20
+                    for batch_start in range(0, total_files, batch_size):
+                        batch = file_list[batch_start:batch_start + batch_size]
+                        await loop.run_in_executor(
+                            None,
+                            lambda b=batch: [symbol_index.index_file(f) for f in b],
+                        )
+                        await asyncio.sleep(0)
+                        done = min(batch_start + batch_size, total_files)
+                        pct = 50 + int(40 * done / max(total_files, 1))
+                        await _send_progress(
+                            "indexing",
+                            f"Indexing repository... {done}/{total_files}",
+                            pct,
+                        )
+                    symbol_index._ref_index.build(symbol_index._all_symbols)
+                    logger.info(f"Repo indexed: {len(symbol_index._all_symbols)} files")
+                except Exception as e:
+                    logger.warning(f"Repo indexing failed: {e}")
 
-        # Start background doc index build AFTER "ready" so the startup
-        # overlay dismisses before heavy model loading (KeyBERT/PyTorch)
-        # blocks the GIL and stalls WebSocket delivery.
-        llm_service._start_background_doc_index()
+            # Initialize stability tracker
+            await _send_progress("stability", "Building cache tiers...", 80)
+            await loop.run_in_executor(
+                None, llm_service._try_initialize_stability,
+            )
+            await asyncio.sleep(0)
+
+            await _send_progress("ready", "Ready", 100)
+            logger.info("Startup complete — all services initialized")
+
+            # Start doc index build after startup overlay dismisses
+            llm_service._start_background_doc_index()
+
+        # Fire the heavy init as a non-blocking task — the event loop
+        # continues to serve WebSocket frames while it runs.
+        asyncio.ensure_future(_heavy_init())
 
         # Serve forever
         try:

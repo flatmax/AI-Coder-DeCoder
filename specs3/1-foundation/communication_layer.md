@@ -27,7 +27,7 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 | Webapp bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
-| Remote timeout | 60 seconds |
+| Remote timeout | 120 seconds |
 
 ## jrpc-oo Patterns
 
@@ -76,8 +76,11 @@ Different events pass different argument shapes:
 - `streamComplete(request_id, result)` — 2 args
 - `compactionEvent(request_id, event_dict)` — 2 args
 - `filesChanged(selected_files_list)` — 1 arg (no request_id)
+- `docConvertProgress(data)` — 1 arg (no request_id)
 
 The `*args` splat handles this variance, but callers must match the browser method signatures exactly.
+
+**Event callback sharing:** The `_event_callback` function is wired to both `LLMService` and `DocConvert` in `main.py`. DocConvert uses it to send `docConvertProgress` events to the browser during file conversion. Both services share the same callback mechanism — the callback dispatches to `AcApp.{event_name}(...)` regardless of which service triggered it.
 
 **Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key. In practice, many server→browser calls are fire-and-forget notifications where the browser returns `true` as an acknowledgement and the Python side just awaits without inspecting the result.
 
@@ -284,6 +287,7 @@ Three top-level service classes, registered via `add_class()`:
 | **LLMService** | `LLMService.*` | Chat streaming, context assembly, URL handling, history, symbol index |
 | **Settings** | `Settings.*` | Config read/write/reload |
 | **Collab** | `Collab.*` | Admission, client registry, role queries (only registered when `--collab` is passed) |
+| **DocConvert** | `DocConvert.*` | Document conversion scanning and execution (always registered) |
 
 **Note:** The LLM service class is named `LLMService` in code, so all RPC methods are prefixed `LLMService.*` (e.g., `LLMService.chat_streaming`, `LLMService.get_context_breakdown`). Other specs may refer to these methods with the full prefix or the shorthand `LLM.*` — both refer to the same endpoints.
 
@@ -298,6 +302,7 @@ Three top-level service classes, registered via `add_class()`:
 | `Repo.create_file` | `(path, content) → {status}` | Create new file (error if exists) |
 | `Repo.file_exists` | `(path) → boolean` | Check file existence |
 | `Repo.is_binary_file` | `(path) → boolean` | Binary detection |
+| `Repo.get_file_base64` | `(path) → {data_uri}` | Read file as base64 data URI (for SVG viewer image resolution) |
 | `Repo.stage_files` | `(paths) → {status}` | Git add |
 | `Repo.unstage_files` | `(paths) → {status}` | Git reset |
 | `Repo.discard_changes` | `(paths) → {status}` | Restore or delete |
@@ -381,6 +386,14 @@ Three top-level service classes, registered via `add_class()`:
 | `Settings.get_snippets` | `() → [{icon, tooltip, message}]` | Direct snippet access |
 | `Settings.get_review_snippets` | `() → [{icon, tooltip, message}]` | Direct review snippet access |
 
+### DocConvert Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `DocConvert.scan_convertible_files` | `() → [{path, name, size, status, output_path}]` | Scan for convertible documents |
+| `DocConvert.convert_files` | `(paths) → [{path, status, message?, output_path?}]` | Convert selected files to markdown |
+| `DocConvert.is_available` | `() → boolean` | Check if markitdown is installed |
+
 ### Collaboration Methods
 
 | Method | Signature | Description |
@@ -407,12 +420,14 @@ Three top-level service classes, registered via `add_class()`:
 | `AcApp.clientLeft` | `(data) → true` | Client disconnected |
 | `AcApp.roleChanged` | `(data) → true` | Client's role changed (e.g., promoted to host) |
 | `AcApp.navigateFile` | `(data) → true` | File navigation broadcast (all clients open same file) |
+| `AcApp.docConvertProgress` | `(data) → true` | Document conversion progress update |
 
 ## Error Handling
 
 - RPC errors follow JSON-RPC 2.0 error format
 - Application-level errors return `{error: "message"}` dicts
 - Connection loss triggers reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
+- Reconnection uses `serverChanged()` (jrpc-oo's WebSocket re-establishment method)
 
 ## Server Initialization Pseudocode
 
@@ -425,6 +440,7 @@ The following shows how services are constructed and registered in `main.py`. Th
 config = ConfigManager(repo_root)
 repo = Repo(repo_root)
 settings = Settings(config)
+doc_convert = DocConvert(repo, config)
 
 # 2. Create LLM service with deferred init (no symbol index yet)
 llm_service = LLMService(
@@ -439,15 +455,16 @@ llm_service = LLMService(
 #    Without --collab: plain JRPCServer, binds 127.0.0.1 (localhost only)
 if collab_enabled:
     collab = Collab()
-    server = CollabServer(port, collab=collab, remote_timeout=60)
+    server = CollabServer(port, collab=collab, remote_timeout=120)
     server.add_class(collab)
 else:
-    server = JRPCServer(port, remote_timeout=60)
+    server = JRPCServer(port, remote_timeout=120)
 server.add_class(repo)
 server.add_class(llm_service)
 server.add_class(settings)
+server.add_class(doc_convert)
 
-# 4. Wire up callbacks (chunk_callback, event_callback)
+# 4. Wire up callbacks (chunk_callback, event_callback on LLMService and DocConvert)
 # 5. Start server — WebSocket now accepting connections
 await server.start()
 
@@ -457,31 +474,46 @@ webbrowser.open(url)
 
 ### Phase 2: Deferred Initialization (with Progress)
 
+Phase 2 runs as an `asyncio.ensure_future()` background task so the event loop remains free to handle WebSocket frames (pings, RPC calls) throughout. Each CPU-bound step uses `run_in_executor` to avoid GIL starvation.
+
 ```pseudo
 # 7. Wait briefly for browser to connect
 await asyncio.sleep(0.5)
 
-# 8. Initialize symbol index (optional — may fail if tree-sitter unavailable)
-await send_progress("symbol_index", "Initializing symbol parser...", 10)
-symbol_index = SymbolIndex(repo_root)
+# 8. Fire heavy init as a non-blocking background task
+async def _heavy_init():
+    # 8a. Initialize symbol index via run_in_executor
+    await send_progress("symbol_index", "Initializing symbol parser...", 10)
+    symbol_index = await run_in_executor(SymbolIndex(repo_root))
 
-# 9. Complete deferred init — restore last session
-await send_progress("session_restore", "Restoring session...", 30)
-llm_service.complete_deferred_init(symbol_index)
+    # 8b. Complete deferred init (wires symbol index, no session restore — already done)
+    await send_progress("session_restore", "Completing initialization...", 30)
+    await run_in_executor(llm_service.complete_deferred_init(symbol_index))
 
-# 10. Index repository (heaviest step — parses all source files)
-await send_progress("indexing", "Indexing repository...", 50)
-await run_in_executor(symbol_index.index_repo, file_list)
+    # 8c. Index repository in small batches (20 files per batch)
+    #     with asyncio.sleep(0) between batches to yield to event loop
+    await send_progress("indexing", "Indexing repository...", 50)
+    for batch in batched(file_list, 20):
+        await run_in_executor([symbol_index.index_file(f) for f in batch])
+        await asyncio.sleep(0)  # let WebSocket pings flow
+    symbol_index._ref_index.build(symbol_index._all_symbols)
 
-# 11. Initialize stability tracker (tier assignments, reference graph)
-await send_progress("stability", "Building cache tiers...", 80)
-llm_service._try_initialize_stability()
+    # 8d. Initialize stability tracker (tier assignments, reference graph)
+    await send_progress("stability", "Building cache tiers...", 80)
+    await run_in_executor(llm_service._try_initialize_stability())
 
-# 12. Signal ready — browser dismisses startup overlay
-await send_progress("ready", "Ready", 100)
+    # 8e. Signal ready — browser dismisses startup overlay
+    await send_progress("ready", "Ready", 100)
+
+    # 8f. Start background doc index (after overlay dismissed)
+    llm_service._start_background_doc_index()
+
+asyncio.ensure_future(_heavy_init())
 ```
 
 Progress is sent via `AcApp.startupProgress(stage, message, percent)` — best-effort, since the browser may not be connected yet during early stages. The `_init_complete` flag gates `chat_streaming` so requests are rejected with a user-friendly message until initialization finishes.
+
+**GIL considerations:** `run_in_executor` with the default `ThreadPoolExecutor` does not fully release the GIL during CPU-bound Python work (tree-sitter parsing, string processing). The `asyncio.sleep(0)` between batches gives the event loop a chance to process queued WebSocket frames. The `ensure_future` wrapper ensures the entire init sequence is non-blocking — the event loop returns to serving WebSocket traffic immediately after scheduling the task.
 
 **Event callback variance:** Different events pass different argument shapes:
 - `streamComplete(request_id, result)` — 2 args

@@ -1871,15 +1871,24 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (!text) return;
 
     const textarea = this.shadowRoot?.querySelector('.input-textarea');
-    // Append space-separated
-    if (this._inputValue && !this._inputValue.endsWith(' ')) {
-      this._inputValue += ' ';
-    }
-    this._inputValue += text;
+    const cursorPos = textarea ? textarea.selectionStart : this._inputValue.length;
+    const before = this._inputValue.slice(0, cursorPos);
+    const after = this._inputValue.slice(cursorPos);
+
+    // Add space separator if needed before the inserted text
+    const needsSpaceBefore = before.length > 0 && !before.endsWith(' ') && !before.endsWith('\n');
+    const needsSpaceAfter = after.length > 0 && !after.startsWith(' ') && !after.startsWith('\n');
+    const insert = (needsSpaceBefore ? ' ' : '') + text + (needsSpaceAfter ? ' ' : '');
+
+    this._inputValue = before + insert + after;
 
     if (textarea) {
       textarea.value = this._inputValue;
       this._autoResize(textarea);
+      // Place cursor after inserted text
+      const newPos = cursorPos + insert.length;
+      textarea.setSelectionRange(newPos, newPos);
+      textarea.focus();
     }
 
     // Run URL detection on new text

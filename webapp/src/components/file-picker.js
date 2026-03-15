@@ -161,6 +161,8 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       overflow: hidden;
       text-overflow: ellipsis;
       color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
     }
     .node-name.dir {
       color: var(--text-secondary);
@@ -547,7 +549,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     // Root node (repo name) — show as expandable root directory
     if (node.path === '' && node.type === 'dir') {
       items.push({ node, depth: 0 });
-      if (this._expanded.has('') || this._filter) {
+      if (this._expanded.has('')) {
         const children = this._sortChildren(node.children || []);
         for (const child of children) {
           items.push(...this._flattenTree(child, 1));
@@ -561,7 +563,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
     items.push({ node, depth });
 
-    if (node.type === 'dir' && (this._expanded.has(node.path) || this._filter)) {
+    if (node.type === 'dir' && this._expanded.has(node.path)) {
       const children = this._sortChildren(node.children || []);
       for (const child of children) {
         items.push(...this._flattenTree(child, depth + 1));
@@ -844,6 +846,20 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     } catch (e) { console.error('Discard failed:', e); }
   }
 
+  async _ctxLoadInPanel(node, panel) {
+    this._contextMenu = null;
+    try {
+      const result = await this.rpcExtract('Repo.get_file_content', node.path);
+      const content = typeof result === 'string' ? result : (result?.content ?? '');
+      this.dispatchEvent(new CustomEvent('load-diff-panel', {
+        detail: { content, panel, label: node.path },
+        bubbles: true, composed: true,
+      }));
+    } catch (e) {
+      console.error('Failed to load file for panel:', e);
+    }
+  }
+
   _ctxRename(node) {
     this._contextMenu = null;
     this._contextInput = { type: 'rename', path: node.path, value: node.path };
@@ -990,10 +1006,39 @@ export class AcFilePicker extends RpcMixin(LitElement) {
 
   _onFilterInput(e) {
     this._filter = e.target.value;
+    if (this._filter) this._expandFilteredDirs();
   }
 
   setFilter(text) {
     this._filter = text || '';
+    if (this._filter) this._expandFilteredDirs();
+  }
+
+  /**
+   * Expand all directories that contain filter-matching descendants,
+   * so results are visible immediately. User can still collapse them.
+   */
+  _expandFilteredDirs() {
+    if (!this._tree) return;
+    const next = new Set(this._expanded);
+    this._expandMatchingDirs(this._tree, next);
+    this._expanded = next;
+  }
+
+  _expandMatchingDirs(node, expanded) {
+    if (!node || node.type === 'file') return false;
+    let hasMatch = false;
+    if (node.children) {
+      for (const child of node.children) {
+        if (child.type === 'file') {
+          if (this._matchesFilter(child)) hasMatch = true;
+        } else {
+          if (this._expandMatchingDirs(child, expanded)) hasMatch = true;
+        }
+      }
+    }
+    if (hasMatch) expanded.add(node.path);
+    return hasMatch;
   }
 
   // === Git Status Helpers ===
@@ -1146,6 +1191,9 @@ export class AcFilePicker extends RpcMixin(LitElement) {
           <div class="context-menu-separator" role="separator"></div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxRename(node)}>✏️ Rename</div>
           <div class="context-menu-item" role="menuitem" @click=${() => this._ctxDuplicate(node)}>📄 Duplicate</div>
+          <div class="context-menu-separator" role="separator"></div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxLoadInPanel(node, 'left')}>◧ Load in Left Panel</div>
+          <div class="context-menu-item" role="menuitem" @click=${() => this._ctxLoadInPanel(node, 'right')}>◨ Load in Right Panel</div>
           <div class="context-menu-separator" role="separator"></div>
           ${this.excludedFiles.has(path) ? html`
             <div class="context-menu-item" role="menuitem" @click=${() => { this._contextMenu = null; this._toggleExclude(node); }}>📊 Include in Index</div>

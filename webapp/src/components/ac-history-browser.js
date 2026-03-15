@@ -48,6 +48,7 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
     _loading: { type: Boolean, state: true },
     _loadingMessages: { type: Boolean, state: true },
     _mode: { type: String, state: true }, // 'sessions' | 'search'
+    _contextMenu: { type: Object, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -383,6 +384,39 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
       pointer-events: none;
     }
 
+    /* Context menu */
+    .context-menu {
+      position: fixed;
+      z-index: 10001;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      padding: 4px 0;
+      min-width: 180px;
+    }
+    .context-menu-item {
+      display: block;
+      width: 100%;
+      padding: 6px 14px;
+      border: none;
+      background: none;
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      text-align: left;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .context-menu-item:hover {
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+    }
+    .context-menu-separator {
+      height: 1px;
+      background: var(--border-primary);
+      margin: 4px 0;
+    }
+
     /* Search result highlight */
     .search-highlight {
       background: rgba(79, 195, 247, 0.2);
@@ -405,6 +439,8 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
     this._debounceTimer = null;
     this._toast = null;
     this._toastTimer = null;
+    this._contextMenu = null;
+    this._dismissContextMenu = this._dismissContextMenu.bind(this);
   }
 
   // === Public API ===
@@ -567,16 +603,50 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
     }, 1500);
   }
 
+  // === Context Menu ===
+
+  _onMessageContextMenu(e, msg) {
+    e.preventDefault();
+    e.stopPropagation();
+    this._contextMenu = { x: e.clientX, y: e.clientY, msg };
+    requestAnimationFrame(() => {
+      window.addEventListener('click', this._dismissContextMenu, { once: true });
+    });
+  }
+
+  _dismissContextMenu() {
+    this._contextMenu = null;
+    window.removeEventListener('click', this._dismissContextMenu);
+  }
+
+  _loadInPanel(msg, panel) {
+    const text = msg.content || '';
+    const role = msg.role === 'user' ? 'You' : 'Assistant';
+    const ts = this._formatTimestamp(msg.timestamp);
+    const label = ts ? `${role} · ${ts}` : role;
+    this._dismissContextMenu();
+    this.dispatchEvent(new CustomEvent('load-diff-panel', {
+      detail: { content: text, panel, label },
+      bubbles: true, composed: true,
+    }));
+    this._showToast(`Loaded in ${panel} panel`);
+  }
+
   // === Event Handlers ===
 
   _onOverlayClick(e) {
     if (e.target === e.currentTarget) {
+      this._dismissContextMenu();
       this.hide();
     }
   }
 
   _onKeyDown(e) {
     if (e.key === 'Escape') {
+      if (this._contextMenu) {
+        this._dismissContextMenu();
+        return;
+      }
       this.hide();
     }
   }
@@ -656,7 +726,8 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
     const images = msg.images;
 
     return html`
-      <div class="msg-card ${isUser ? 'user' : 'assistant'}">
+      <div class="msg-card ${isUser ? 'user' : 'assistant'}"
+           @contextmenu=${(e) => this._onMessageContextMenu(e, msg)}>
         <div class="msg-role">${isUser ? 'You' : 'Assistant'}</div>
         <div class="msg-content">
           ${unsafeHTML(renderSimpleMarkdown(content))}
@@ -765,6 +836,22 @@ export class AcHistoryBrowser extends RpcMixin(LitElement) {
             </div>
           </div>
         </div>
+
+        ${this._contextMenu ? html`
+          <div class="context-menu"
+               style="left: ${this._contextMenu.x}px; top: ${this._contextMenu.y}px"
+               @click=${(e) => e.stopPropagation()}>
+            <button class="context-menu-item"
+              @click=${() => this._loadInPanel(this._contextMenu.msg, 'left')}>◧ Load in Left Panel</button>
+            <button class="context-menu-item"
+              @click=${() => this._loadInPanel(this._contextMenu.msg, 'right')}>◨ Load in Right Panel</button>
+            <div class="context-menu-separator"></div>
+            <button class="context-menu-item"
+              @click=${() => { this._copyMessage(this._contextMenu.msg); this._dismissContextMenu(); }}>📋 Copy</button>
+            <button class="context-menu-item"
+              @click=${() => { this._pasteToPrompt(this._contextMenu.msg); this._dismissContextMenu(); }}>↩ Paste to Prompt</button>
+          </div>
+        ` : nothing}
 
         ${this._toast ? html`
           <div class="toast">${this._toast}</div>

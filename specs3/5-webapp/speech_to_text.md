@@ -39,7 +39,9 @@ Stops recognition.
 
 ```
 SpeechToText → transcript event { text }
-    → Append to textarea (space-separated)
+    → Insert at cursor position in textarea
+    → Add space separators if needed (before/after)
+    → Reposition cursor after inserted text
     → Auto-resize
     → Run URL detection
 ```
