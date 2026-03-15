@@ -106,6 +106,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.addEventListener('review-started', this._reviewStartedHandler);
     this._reviewEndedHandler = this._onReviewEnded.bind(this);
     window.addEventListener('review-ended', this._reviewEndedHandler);
+    this._modeChangedHandler = this._onModeChanged.bind(this);
+    window.addEventListener('mode-changed', this._modeChangedHandler);
   }
 
   disconnectedCallback() {
@@ -117,6 +119,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._streamCompleteHandler);
     window.removeEventListener('review-started', this._reviewStartedHandler);
     window.removeEventListener('review-ended', this._reviewEndedHandler);
+    window.removeEventListener('mode-changed', this._modeChangedHandler);
   }
 
   _onStateLoaded(e) {
@@ -176,6 +179,20 @@ export class AcFilesTab extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._loadRepoFiles();
+    this._loadReviewState();
+  }
+
+  async _loadReviewState() {
+    try {
+      const review = await this.rpcExtract('LLMService.get_review_state');
+      if (review?.active) {
+        const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+        if (chatPanel) {
+          chatPanel.reviewState = review;
+          chatPanel.requestUpdate();
+        }
+      }
+    } catch (_) {}
   }
 
   async _loadRepoFiles() {
@@ -204,6 +221,28 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     if (result?.files_modified?.length) {
       this._loadRepoFiles();
     }
+    // Auto-expand picker directories for auto-added files
+    if (result?.files_auto_added?.length) {
+      this._syncMessagesFromChat();
+      this._selectedFiles = [...(this._selectedFiles || [])];
+      // Ensure auto-added files are in our selected list
+      for (const f of result.files_auto_added) {
+        if (!this._selectedFiles.includes(f)) {
+          this._selectedFiles.push(f);
+        }
+      }
+      this._updateSelectedSet();
+      const picker = this.shadowRoot?.querySelector('ac-file-picker');
+      if (picker) {
+        picker.selectedFiles = this._selectedSet;
+        picker.requestUpdate();
+      }
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.selectedFiles = this._selectedFiles;
+        chatPanel.requestUpdate();
+      }
+    }
   }
 
   _onReviewStarted(e) {
@@ -229,6 +268,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
 
     // Notify server of cleared selection
     this.rpcExtract('LLMService.set_selected_files', []).catch(() => {});
+
+    // Refresh snippets — review mode returns review-specific snippets
+    this._refreshChatSnippets();
   }
 
   _onReviewEnded() {
@@ -241,11 +283,26 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       chatPanel.reviewState = null;
       chatPanel.requestUpdate();
     }
+
+    // Refresh snippets — revert to code/doc mode snippets
+    this._refreshChatSnippets();
   }
 
   _onFilterFromChat(e) {
     const picker = this.shadowRoot?.querySelector('ac-file-picker');
     if (picker) picker.setFilter(e.detail?.query || '');
+  }
+
+  _onModeChanged(e) {
+    // Refresh snippets when mode changes (code ↔ doc)
+    this._refreshChatSnippets();
+  }
+
+  _refreshChatSnippets() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel && typeof chatPanel._loadSnippets === 'function') {
+      chatPanel._loadSnippets();
+    }
   }
 
   // ── Cached Set helpers ───────────────────────────────────────
@@ -283,8 +340,17 @@ export class AcFilesTab extends RpcMixin(LitElement) {
 
   async _onExclusionChanged(e) {
     const files = e.detail?.files || [];
+    this._syncMessagesFromChat();
     this._excludedFiles = files;
     this._updateExcludedSet();
+
+    // Direct-update picker
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (picker) {
+      picker.excludedFiles = this._excludedSet;
+      picker.requestUpdate();
+    }
+
     try {
       await this.rpcExtract('LLMService.set_excluded_index_files', files);
     } catch (err) {
