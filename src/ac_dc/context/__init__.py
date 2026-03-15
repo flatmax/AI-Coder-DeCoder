@@ -1,0 +1,1 @@
+"""Context engine — history, file context, token counting, prompt assembly."""

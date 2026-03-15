@@ -87,13 +87,24 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [ ] `src/ac_dc/config/llm.json` — bundled file has test values (`"model": "test/model"`), must be updated to `"anthropic/claude-sonnet-4-20250514"` to match `_default_llm_config()` (causes `test_default_model` failure)
-- [ ] `src/ac_dc/config/app.json` — bundled file is minimal, should contain full defaults to match `_default_app_config()` (deep-merge handles this at runtime but the file on disk should be canonical)
+- [x] `src/ac_dc/config/llm.json` — bundled file has test values (`"model": "test/model"`), must be updated to `"anthropic/claude-sonnet-4-20250514"` to match `_default_llm_config()` (causes `test_default_model` failure)
+- [x] `src/ac_dc/config/app.json` — bundled file is minimal, should contain full defaults to match `_default_app_config()` (deep-merge handles this at runtime but the file on disk should be canonical)
 
 ## Phase 3: LLM Engine
-- [ ] Context Engine (context manager, file context, token counter, history, compaction, prompt assembly)
+- [x] Context Engine
+  - [x] `src/ac_dc/context/__init__.py` — Package init
+  - [x] `src/ac_dc/context/token_counter.py` — Model-aware token counting with tiktoken + fallback
+  - [x] `src/ac_dc/context/file_context.py` — File tracking with path normalization and binary rejection
+  - [x] `src/ac_dc/context/context_manager.py` — Central state: history, budget, prompt assembly (flat + tiered with cache_control)
+  - [x] `src/ac_dc/context/history_store.py` — Append-only JSONL persistence, sessions, search, image persistence
+  - [x] `src/ac_dc/context/topic_detector.py` — LLM-based topic boundary detection with parse fallbacks
+  - [x] `src/ac_dc/context/history_compactor.py` — Topic-aware truncate/summarize compaction
+  - [x] `tests/test_context.py` — Token counter, file context, context manager, prompt assembly (flat + tiered), budget enforcement
+  - [x] `tests/test_history.py` — History store CRUD/search/persistence, topic detector parsing, compactor logic
+- [x] Edit Protocol
+  - [x] `src/ac_dc/edit_parser.py` — Parser (state machine), validator (anchor finding + diagnostics), applier (repo integration), shell command detection
+  - [x] `tests/test_edit_parser.py` — Parsing, validation, application, not-in-context handling, shell commands
 - [ ] Cache & Assembly (stability tracker, tiers, graduation, cascade)
-- [ ] Edit Protocol (parser, validator, applier)
 
 ## Phase 4: Features
 - [ ] URL Handling
