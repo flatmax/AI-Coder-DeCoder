@@ -1,8 +1,9 @@
 {
   "env": {
-    "AC_DC_TEST_VAR_2": "applied_value"
+    "AWS_REGION": "ap-northeast-1"
   },
-  "model": "test/model",
+  "model": "bedrock/global.anthropic.claude-opus-4-6-v1",
+  "smallerModel": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0",
   "cache_min_tokens": 1024,
   "cache_buffer_multiplier": 1.1
 }
