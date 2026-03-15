@@ -31,22 +31,22 @@ path/to/file.ext
 ```
 
 ### Rules:
-1. The lines before ======= REPLACE show what currently exists in the file
-2. The lines after ======= REPLACE show what should replace it
+1. The lines before `======= REPLACE` show what currently exists in the file (the SEARCH section)
+2. The lines after `======= REPLACE` show what should replace it (the REPLACE section)
 3. Leading lines that are identical in both sections form the "anchor" — they locate the edit position
 4. The anchor must match exactly ONE location in the file
 5. Include enough context for a unique match — if the anchor text appears more than once, extend it upward to include a preceding unique line (e.g., a function name, a distinctive comment)
 6. Copy text exactly from the file — whitespace, comments, blank lines all matter. Always copy-paste from the file content in context, never type from memory
 7. Never use placeholders like `...` or `// rest of code`
 8. For adjacent changes, merge into one edit block
-9. For new files, use an empty SEARCH section
-10. For deletions, omit lines from the REPLACE section
+9. For new files, use an empty `<<<<<<< SEARCH` section
+10. For deletions, omit lines from the `======= REPLACE` section
 
 ### Operations:
 - **Modify**: anchor + old → new
-- **Insert after**: anchor line only in SEARCH, anchor + new content in REPLACE
-- **Create file**: empty SEARCH section, content in REPLACE
-- **Delete lines**: include in SEARCH, omit from REPLACE
+- **Insert after**: anchor line only in `<<<<<<< SEARCH`, anchor + new content in `======= REPLACE`
+- **Create file**: empty `<<<<<<< SEARCH` section, content in `======= REPLACE`
+- **Delete lines**: include in `<<<<<<< SEARCH`, omit from `======= REPLACE`
 - **Delete/rename files**: ask user to run `git rm` or `git mv`
 
 ## Workflow

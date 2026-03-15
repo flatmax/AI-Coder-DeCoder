@@ -1102,6 +1102,69 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       },
     });
 
+    // Definition provider (Ctrl+Click / F12)
+    monaco.languages.registerDefinitionProvider('*', {
+      provideDefinition: async (model, position) => {
+        const file = this._files[this._activeIndex];
+        if (!file) return null;
+        try {
+          const result = await this.rpcExtract(
+            'LLMService.lsp_get_definition',
+            file.real_path || file.path,
+            position.lineNumber,
+            position.column,
+          );
+          if (result?.file && result?.range) {
+            // Cross-file navigation: open target file at position
+            if (result.file !== (file.real_path || file.path)) {
+              window.dispatchEvent(new CustomEvent('navigate-file', {
+                detail: { path: result.file, line: result.range.start_line },
+              }));
+              return null;
+            }
+            return {
+              uri: model.uri,
+              range: {
+                startLineNumber: result.range.start_line || 1,
+                startColumn: result.range.start_col || 1,
+                endLineNumber: result.range.end_line || result.range.start_line || 1,
+                endColumn: result.range.end_col || 1,
+              },
+            };
+          }
+        } catch (_) {}
+        return null;
+      },
+    });
+
+    // References provider
+    monaco.languages.registerReferenceProvider('*', {
+      provideReferences: async (model, position, context) => {
+        const file = this._files[this._activeIndex];
+        if (!file) return [];
+        try {
+          const results = await this.rpcExtract(
+            'LLMService.lsp_get_references',
+            file.real_path || file.path,
+            position.lineNumber,
+            position.column,
+          );
+          if (Array.isArray(results)) {
+            return results.map(r => ({
+              uri: monaco.Uri.parse(`file:///${r.file}`),
+              range: {
+                startLineNumber: r.range?.start_line || 1,
+                startColumn: r.range?.start_col || 1,
+                endLineNumber: r.range?.end_line || r.range?.start_line || 1,
+                endColumn: r.range?.end_col || 1,
+              },
+            }));
+          }
+        } catch (_) {}
+        return [];
+      },
+    });
+
     // Completion provider
     monaco.languages.registerCompletionItemProvider('*', {
       provideCompletionItems: async (model, position) => {

@@ -8,7 +8,7 @@ The chat panel renders conversation messages, handles streaming display, and man
 
 Messages render as a scrollable list of cards:
 - **User cards** — with optional image attachments
-- **Assistant cards** — markdown rendering, edit blocks, file mentions
+- **Assistant cards** — markdown rendering, edit blocks, file mentions, and a file summary button set at the bottom for quick file selection
 
 Cards use keyed rendering for DOM reuse.
 

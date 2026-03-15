@@ -16,6 +16,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   static properties = {
     messages: { type: Array },
     selectedFiles: { type: Array },
+    repoFiles: { type: Array },
     streamingActive: { type: Boolean },
     reviewState: { type: Object },
     _streamingContent: { type: String, state: true },
@@ -27,6 +28,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _autoScroll: { type: Boolean, state: true },
     _toast: { type: Object, state: true },
     _committing: { type: Boolean, state: true },
+    _historyOpen: { type: Boolean, state: true },
+    _searchQuery: { type: String, state: true },
+    _searchMatches: { type: Array, state: true },
+    _searchIndex: { type: Number, state: true },
   };
 
   static styles = css`
@@ -59,6 +64,45 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
     .action-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
     .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Chat search */
+    .chat-search {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex: 1;
+      min-width: 0;
+    }
+    .chat-search-input {
+      flex: 1;
+      min-width: 60px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-secondary);
+      border-radius: 4px;
+      color: var(--text-primary);
+      padding: 3px 8px;
+      font-size: 0.78rem;
+      outline: none;
+    }
+    .chat-search-input:focus { border-color: var(--accent-primary); }
+    .chat-search-counter {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      min-width: 36px;
+      text-align: center;
+    }
+    .chat-search-nav {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    .chat-search-nav:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
     .action-spacer { flex: 1; }
 
     /* Message container */
@@ -79,12 +123,22 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       transition: border-color 0.3s, box-shadow 0.3s;
       position: relative;
     }
+    .message-card {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 120px;
+    }
     .message-card.user {
       background: var(--bg-tertiary);
       border-color: var(--border-secondary);
+      contain-intrinsic-size: auto 80px;
     }
     .message-card.assistant {
       background: var(--bg-secondary);
+      contain-intrinsic-size: auto 200px;
+    }
+    .message-card.force-visible {
+      content-visibility: visible;
+      contain: none;
     }
     .message-card.search-highlight {
       border-color: var(--accent-primary);
@@ -202,6 +256,78 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       color: var(--text-secondary);
     }
     .md-content pre.code-block:hover .copy-btn { opacity: 1; }
+
+    /* File mentions */
+    .md-content .file-mention {
+      color: var(--accent-primary);
+      cursor: pointer;
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+    .md-content .file-mention:hover {
+      text-decoration: underline;
+      background: rgba(79, 195, 247, 0.1);
+    }
+    .md-content .file-mention.in-context {
+      color: var(--accent-green);
+    }
+
+    /* File summary section */
+    .file-summary {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      margin-top: 6px;
+      border-radius: 6px;
+      background: var(--bg-tertiary);
+      font-size: 0.78rem;
+    }
+    .file-summary-label {
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-right: 2px;
+    }
+    .file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-secondary);
+      cursor: pointer;
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+    .file-chip:hover {
+      background: var(--bg-primary);
+    }
+    .file-chip.in-context {
+      color: var(--text-muted);
+      border-color: var(--border-primary);
+    }
+    .file-chip.not-in-context {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
+    }
+    .file-chip-add-all {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--accent-primary);
+      background: none;
+      cursor: pointer;
+      font-size: 0.75rem;
+      color: var(--accent-primary);
+      white-space: nowrap;
+      margin-left: auto;
+    }
+    .file-chip-add-all:hover {
+      background: rgba(79, 195, 247, 0.1);
+    }
 
     /* Edit blocks */
     .edit-block {
@@ -431,6 +557,136 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
     .scroll-btn:hover { color: var(--text-primary); background: var(--bg-secondary); }
 
+    /* History browser modal */
+    .history-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .history-modal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      width: 80vw;
+      max-width: 900px;
+      height: 70vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .history-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-primary);
+      flex-shrink: 0;
+    }
+    .history-header h3 {
+      margin: 0;
+      font-size: 0.9rem;
+      flex-shrink: 0;
+    }
+    .history-search-input {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border-secondary);
+      border-radius: 4px;
+      color: var(--text-primary);
+      padding: 4px 8px;
+      font-size: 0.8rem;
+      outline: none;
+    }
+    .history-search-input:focus { border-color: var(--accent-primary); }
+    .history-close {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 2px 6px;
+    }
+    .history-close:hover { color: var(--text-primary); }
+    .history-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    .history-left {
+      width: 280px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border-primary);
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    .history-session-item {
+      padding: 8px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border-secondary);
+      font-size: 0.78rem;
+    }
+    .history-session-item:hover { background: var(--bg-tertiary); }
+    .history-session-item.selected { background: var(--bg-tertiary); border-left: 3px solid var(--accent-primary); }
+    .history-session-preview {
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+    .history-session-meta {
+      display: flex;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      margin-top: 2px;
+    }
+    .history-right {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 12px;
+    }
+    .history-right .message-card {
+      margin-bottom: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      position: relative;
+    }
+    .history-right .message-card.user { background: var(--bg-tertiary); }
+    .history-right .message-card.assistant { background: var(--bg-primary); }
+    .history-msg-actions {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      display: none;
+      gap: 2px;
+    }
+    .history-right .message-card:hover .history-msg-actions { display: flex; }
+    .history-load-btn {
+      background: var(--accent-primary);
+      color: #000;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.8rem;
+      margin-top: 8px;
+    }
+    .history-load-btn:hover { opacity: 0.9; }
+    .history-empty {
+      color: var(--text-muted);
+      text-align: center;
+      padding: 40px 20px;
+      font-size: 0.85rem;
+    }
+
     /* Toast */
     .chat-toast {
       position: fixed;
@@ -455,7 +711,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       display: none;
       gap: 2px;
     }
+    .msg-actions-bottom {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      display: none;
+      gap: 2px;
+    }
     .message-card:hover .msg-actions { display: flex; }
+    .message-card:hover .msg-actions-bottom { display: flex; }
     .msg-action-btn {
       background: var(--bg-tertiary);
       border: 1px solid var(--border-secondary);
@@ -510,6 +774,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     super();
     this.messages = [];
     this.selectedFiles = [];
+    this.repoFiles = [];
     this.streamingActive = false;
     this.reviewState = null;
     this._streamingContent = '';
@@ -521,10 +786,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._autoScroll = true;
     this._toast = null;
     this._committing = false;
+    this._historyOpen = false;
     this._pendingChunk = null;
     this._chunkRAF = null;
     this._lastScrollTop = 0;
     this._suppressNextPaste = false;
+    this._lastMentionedFiles = null;
+    this._searchQuery = '';
+    this._searchMatches = [];
+    this._searchIndex = -1;
+    this._historySessions = [];
+    this._historyMessages = [];
+    this._historySelectedId = null;
+    this._historyQuery = '';
+    this._historySearchResults = null;
   }
 
   connectedCallback() {
@@ -537,6 +812,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('compaction-event', this._compactionHandler);
     this._commitHandler = this._onCommitResult.bind(this);
     window.addEventListener('commit-result', this._commitHandler);
+    this._userMsgHandler = this._onUserMessage.bind(this);
+    window.addEventListener('user-message', this._userMsgHandler);
+    this._sessionLoadedHandler = this._onSessionLoaded.bind(this);
+    window.addEventListener('session-loaded', this._sessionLoadedHandler);
   }
 
   disconnectedCallback() {
@@ -545,6 +824,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._completeHandler);
     window.removeEventListener('compaction-event', this._compactionHandler);
     window.removeEventListener('commit-result', this._commitHandler);
+    window.removeEventListener('user-message', this._userMsgHandler);
+    window.removeEventListener('session-loaded', this._sessionLoadedHandler);
     if (this._chunkRAF) cancelAnimationFrame(this._chunkRAF);
   }
 
@@ -576,11 +857,43 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       this._chunkRAF = requestAnimationFrame(() => {
         this._chunkRAF = null;
         if (this._pendingChunk !== null) {
+          // Snapshot <pre> scroll positions before DOM rebuild
+          const streamCard = this.shadowRoot?.querySelector('.message-card.force-visible .md-content');
+          let preScrolls = null;
+          if (streamCard) {
+            const pres = streamCard.querySelectorAll('pre');
+            if (pres.length) {
+              preScrolls = [];
+              for (const pre of pres) {
+                if (pre.scrollLeft > 0) {
+                  preScrolls.push(pre.scrollLeft);
+                } else {
+                  preScrolls.push(0);
+                }
+              }
+              // Only keep if any were scrolled
+              if (preScrolls.every(v => v === 0)) preScrolls = null;
+            }
+          }
+
           this._streamingContent = this._pendingChunk;
           this._pendingChunk = null;
-          if (this._autoScroll) {
+
+          if (this._autoScroll || preScrolls) {
             this.updateComplete.then(() => {
-              requestAnimationFrame(() => this._scrollToBottom());
+              // Restore <pre> scroll positions after DOM rebuild
+              if (preScrolls) {
+                const newCard = this.shadowRoot?.querySelector('.message-card.force-visible .md-content');
+                if (newCard) {
+                  const newPres = newCard.querySelectorAll('pre');
+                  for (let i = 0; i < Math.min(preScrolls.length, newPres.length); i++) {
+                    if (preScrolls[i] > 0) newPres[i].scrollLeft = preScrolls[i];
+                  }
+                }
+              }
+              if (this._autoScroll) {
+                requestAnimationFrame(() => this._scrollToBottom());
+              }
             });
           }
         }
@@ -732,6 +1045,35 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  _onUserMessage(e) {
+    const { content } = e.detail || {};
+    if (!content) return;
+    // Ignore if we're the sender (we already added the message optimistically in _send)
+    if (this._currentRequestId) return;
+    // Collaborator: add the user message to our display
+    this.messages = [...this.messages, { role: 'user', content }];
+    if (this._autoScroll) {
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => this._scrollToBottom());
+      });
+    }
+  }
+
+  _onSessionLoaded(e) {
+    const { messages } = e.detail || {};
+    // Reset state for session change (local or remote)
+    this._streamingContent = '';
+    this._currentRequestId = null;
+    this.streamingActive = false;
+    this._autoScroll = true;
+    if (Array.isArray(messages)) {
+      this.messages = [...messages];
+    }
+    this.updateComplete.then(() => {
+      requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+    });
+  }
+
   // ── Sending ────────────────────────────────────────────────────
 
   _send() {
@@ -789,6 +1131,81 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.rpcCall('LLMService.cancel_streaming', this._currentRequestId).catch(() => {});
   }
 
+  // ── Chat search ────────────────────────────────────────────────
+
+  _onSearchInput(e) {
+    this._searchQuery = e.target.value;
+    this._runSearch();
+  }
+
+  _onSearchKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) this._searchPrev();
+      else this._searchNext();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this._searchQuery = '';
+      this._searchMatches = [];
+      this._searchIndex = -1;
+      this._clearSearchHighlights();
+      e.target.blur();
+    }
+  }
+
+  _runSearch() {
+    this._clearSearchHighlights();
+    if (!this._searchQuery.trim()) {
+      this._searchMatches = [];
+      this._searchIndex = -1;
+      return;
+    }
+    const q = this._searchQuery.toLowerCase();
+    const matches = [];
+    for (let i = 0; i < this.messages.length; i++) {
+      const content = this.messages[i]?.content || '';
+      if (content.toLowerCase().includes(q)) {
+        matches.push(i);
+      }
+    }
+    this._searchMatches = matches;
+    this._searchIndex = matches.length > 0 ? 0 : -1;
+    if (this._searchIndex >= 0) {
+      this._scrollToSearchMatch(this._searchMatches[this._searchIndex]);
+    }
+  }
+
+  _searchNext() {
+    if (!this._searchMatches.length) return;
+    this._searchIndex = (this._searchIndex + 1) % this._searchMatches.length;
+    this._scrollToSearchMatch(this._searchMatches[this._searchIndex]);
+  }
+
+  _searchPrev() {
+    if (!this._searchMatches.length) return;
+    this._searchIndex = (this._searchIndex - 1 + this._searchMatches.length) % this._searchMatches.length;
+    this._scrollToSearchMatch(this._searchMatches[this._searchIndex]);
+  }
+
+  _scrollToSearchMatch(msgIndex) {
+    this._clearSearchHighlights();
+    const container = this.shadowRoot?.querySelector('.messages');
+    if (!container) return;
+    const card = container.querySelector(`.message-card[data-msg-index="${msgIndex}"]`);
+    if (card) {
+      card.classList.add('search-highlight');
+      card.scrollIntoView({ block: 'center' });
+    }
+  }
+
+  _clearSearchHighlights() {
+    const container = this.shadowRoot?.querySelector('.messages');
+    if (!container) return;
+    for (const el of container.querySelectorAll('.search-highlight')) {
+      el.classList.remove('search-highlight');
+    }
+  }
+
   // ── Actions ────────────────────────────────────────────────────
 
   _newSession() {
@@ -822,6 +1239,90 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }).catch(err => {
       this._showToast(`Reset failed: ${err.message}`, 'error');
     });
+  }
+
+  async _browseHistory() {
+    this._historyOpen = true;
+    this._historyMessages = [];
+    this._historySelectedId = null;
+    this._historySearchResults = null;
+    this._historyQuery = '';
+    try {
+      this._historySessions = await this.rpcExtract('LLMService.history_list_sessions', 50) || [];
+    } catch (_) {
+      this._historySessions = [];
+    }
+  }
+
+  _closeHistory() {
+    this._historyOpen = false;
+  }
+
+  _onHistoryOverlayClick(e) {
+    if (e.target.classList.contains('history-overlay')) {
+      this._closeHistory();
+    }
+  }
+
+  _onHistoryKeyDown(e) {
+    if (e.key === 'Escape') {
+      if (this._historyQuery) {
+        this._historyQuery = '';
+        this._historySearchResults = null;
+      } else {
+        this._closeHistory();
+      }
+    }
+  }
+
+  async _onHistorySearchInput(e) {
+    const query = e.target.value;
+    this._historyQuery = query;
+    clearTimeout(this._historySearchTimer);
+    if (!query.trim()) {
+      this._historySearchResults = null;
+      return;
+    }
+    this._historySearchTimer = setTimeout(async () => {
+      try {
+        this._historySearchResults = await this.rpcExtract('LLMService.history_search', query, null, 50) || [];
+      } catch (_) {
+        this._historySearchResults = [];
+      }
+    }, 300);
+  }
+
+  async _selectHistorySession(sessionId) {
+    this._historySelectedId = sessionId;
+    try {
+      this._historyMessages = await this.rpcExtract('LLMService.history_get_session', sessionId) || [];
+    } catch (_) {
+      this._historyMessages = [];
+    }
+  }
+
+  async _loadHistorySession() {
+    if (!this._historySelectedId) return;
+    try {
+      const result = await this.rpcExtract('LLMService.load_session_into_context', this._historySelectedId);
+      const msgs = result?.messages || [];
+      this.messages = [...msgs];
+      this._historyOpen = false;
+      this._showToast('Session loaded', 'success');
+      window.dispatchEvent(new CustomEvent('session-loaded', {
+        detail: { sessionId: this._historySelectedId, messages: msgs },
+      }));
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => requestAnimationFrame(() => this._scrollToBottom()));
+      });
+    } catch (err) {
+      this._showToast('Failed to load session', 'error');
+    }
+  }
+
+  _historyPasteToPrompt(content) {
+    this._insertToInput(content);
+    this._historyOpen = false;
   }
 
   async _copyDiff() {
@@ -1102,8 +1603,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       <!-- Action bar -->
       <div class="action-bar">
         <button class="action-btn" title="New Session" @click=${this._newSession}>✨</button>
-        <button class="action-btn" title="Browse History">📜</button>
-        <div class="action-spacer"></div>
+        <button class="action-btn" title="Browse History" @click=${this._browseHistory}>📜</button>
+        <div class="chat-search">
+          <input class="chat-search-input"
+                 type="text"
+                 placeholder="Search messages..."
+                 .value=${this._searchQuery}
+                 @input=${this._onSearchInput}
+                 @keydown=${this._onSearchKeyDown}>
+          ${this._searchMatches.length ? html`
+            <span class="chat-search-counter">${this._searchIndex + 1}/${this._searchMatches.length}</span>
+            <button class="chat-search-nav" title="Previous (Shift+Enter)" @click=${this._searchPrev}>▲</button>
+            <button class="chat-search-nav" title="Next (Enter)" @click=${this._searchNext}>▼</button>
+          ` : ''}
+        </div>
         <button class="action-btn" title="Copy Staged Diff" @click=${this._copyDiff}>📋</button>
         <button class="action-btn" title="Commit All"
                 ?disabled=${this._committing || isReview}
@@ -1122,7 +1635,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : ''}
 
-        ${this.messages.map((msg, i) => this._renderMessage(msg, i, true))}
+        ${this.messages.map((msg, i) => this._renderMessage(msg, i, true, i >= this.messages.length - 15))}
 
         ${this._streamingContent ? html`
           <div class="message-card assistant force-visible">
@@ -1189,17 +1702,19 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         </div>
       </div>
 
+      ${this._historyOpen ? this._renderHistoryBrowser() : ''}
+
       ${this._toast ? html`
         <div class="chat-toast">${this._toast.message}</div>
       ` : ''}
     `;
   }
 
-  _renderMessage(msg, index, isFinal) {
+  _renderMessage(msg, index, isFinal, forceVisible = false) {
     const isUser = msg.role === 'user';
 
     return html`
-      <div class="message-card ${msg.role}" data-msg-index=${index}>
+      <div class="message-card ${msg.role} ${forceVisible ? 'force-visible' : ''}" data-msg-index=${index}>
         <div class="message-role ${msg.role}">${isUser ? 'You' : 'Assistant'}</div>
         <div class="md-content" @click=${this._onContentClick}>
           ${isUser
@@ -1216,9 +1731,16 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : ''}
 
+        ${isFinal && !isUser ? this._renderFileSummary() : ''}
         ${isFinal && msg.editResults ? this._renderEditSummary(msg) : ''}
 
         <div class="msg-actions">
+          <button class="msg-action-btn" title="Copy"
+                  @click=${() => this._copyMessage(msg.content)}>📋</button>
+          <button class="msg-action-btn" title="Insert to input"
+                  @click=${() => this._insertToInput(msg.content)}>↩</button>
+        </div>
+        <div class="msg-actions-bottom">
           <button class="msg-action-btn" title="Copy"
                   @click=${() => this._copyMessage(msg.content)}>📋</button>
           <button class="msg-action-btn" title="Insert to input"
@@ -1231,6 +1753,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   _renderAssistantContent(content, editResults, isFinal) {
     const segments = segmentResponse(content);
     let out = '';
+    const editFilePaths = new Set();
 
     for (const seg of segments) {
       if (seg.type === 'text') {
@@ -1238,10 +1761,85 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       } else if (seg.type === 'edit' || seg.type === 'edit-pending') {
         const result = editResults?.[seg.filePath];
         out += this._renderEditBlockHtml(seg, result);
+        if (seg.filePath) editFilePaths.add(seg.filePath);
       }
     }
 
+    // On final render, apply file mention detection and collect mentioned files
+    this._lastMentionedFiles = null;
+    if (isFinal && this.repoFiles?.length) {
+      out = this._applyFileMentions(out, editFilePaths);
+    } else if (isFinal && editFilePaths.size) {
+      // Even without repoFiles, track edit block file paths for the summary
+      this._lastMentionedFiles = editFilePaths;
+    }
+
     return out;
+  }
+
+  /**
+   * Scan rendered HTML for repo file paths and wrap them in clickable spans.
+   * HTML-aware: only replaces in text segments between tags.
+   * Skips matches inside <pre> blocks. Matches inside <code> replaced normally.
+   */
+  _applyFileMentions(htmlStr, editFilePaths) {
+    // Pre-filter: only files whose path appears as substring in the HTML
+    const candidates = this.repoFiles.filter(f => htmlStr.includes(f));
+    if (!candidates.length && !editFilePaths.size) return htmlStr;
+
+    // Sort by path length descending so longer paths match first
+    candidates.sort((a, b) => b.length - a.length);
+
+    const selectedSet = new Set(this.selectedFiles || []);
+    this._lastMentionedFiles = new Set(editFilePaths);
+
+    if (!candidates.length) return htmlStr;
+
+    // Build combined regex from all candidates (escape regex special chars)
+    const escaped = candidates.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const pattern = new RegExp('(' + escaped.join('|') + ')', 'g');
+
+    // Process HTML: split into tag/text segments, skip <pre> blocks
+    const result = [];
+    let i = 0;
+    let inPre = false;
+
+    while (i < htmlStr.length) {
+      if (htmlStr[i] === '<') {
+        const tagEnd = htmlStr.indexOf('>', i);
+        if (tagEnd === -1) {
+          result.push(htmlStr.substring(i));
+          break;
+        }
+        const tag = htmlStr.substring(i, tagEnd + 1);
+        const tagLower = tag.toLowerCase();
+
+        if (tagLower.startsWith('<pre')) inPre = true;
+        else if (tagLower.startsWith('</pre')) inPre = false;
+
+        result.push(tag);
+        i = tagEnd + 1;
+      } else {
+        // Text segment — find next tag
+        const nextTag = htmlStr.indexOf('<', i);
+        const text = nextTag === -1 ? htmlStr.substring(i) : htmlStr.substring(i, nextTag);
+
+        if (inPre || !text) {
+          result.push(text);
+        } else {
+          const replaced = text.replace(pattern, (match) => {
+            this._lastMentionedFiles.add(match);
+            const cls = selectedSet.has(match) ? 'file-mention in-context' : 'file-mention';
+            return `<span class="${cls}" data-file="${this._escAttr(match)}">${this._escHtml(match)}</span>`;
+          });
+          result.push(replaced);
+        }
+
+        i = nextTag === -1 ? htmlStr.length : nextTag;
+      }
+    }
+
+    return result.join('');
   }
 
   _renderEditBlockHtml(seg, result) {
@@ -1336,6 +1934,57 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
+  _renderFileSummary() {
+    const mentioned = this._lastMentionedFiles;
+    if (!mentioned || mentioned.size === 0) return '';
+
+    const selectedSet = new Set(this.selectedFiles || []);
+    const files = [...mentioned].sort();
+    const unselected = files.filter(f => !selectedSet.has(f));
+
+    return html`
+      <div class="file-summary">
+        <span class="file-summary-label">📁 Files Referenced</span>
+        ${files.map(f => {
+          const inCtx = selectedSet.has(f);
+          const basename = f.includes('/') ? f.split('/').pop() : f;
+          return html`
+            <span class="file-chip ${inCtx ? 'in-context' : 'not-in-context'}"
+                  data-file=${f}
+                  @click=${(e) => this._onFileSummaryChipClick(e, f)}>
+              ${inCtx ? '✓' : '+'} ${basename}
+            </span>
+          `;
+        })}
+        ${unselected.length >= 2 ? html`
+          <button class="file-chip-add-all"
+                  data-files=${JSON.stringify(unselected)}
+                  @click=${(e) => this._onAddAllClick(e, unselected)}>
+            + Add All (${unselected.length})
+          </button>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  _onFileSummaryChipClick(e, path) {
+    e.stopPropagation();
+    this.dispatchEvent(new CustomEvent('file-mention-click', {
+      detail: { path, navigate: false },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  _onAddAllClick(e, files) {
+    e.stopPropagation();
+    for (const f of files) {
+      this.dispatchEvent(new CustomEvent('file-mention-click', {
+        detail: { path: f, navigate: false },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
   _renderReviewBar() {
     const r = this.reviewState;
     if (!r?.active) return '';
@@ -1357,6 +2006,92 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }).catch(err => {
       this._showToast(`Exit review failed: ${err.message}`, 'error');
     });
+  }
+
+  // ── History browser ────────────────────────────────────────────
+
+  _renderHistoryBrowser() {
+    const sessions = this._historySearchResults ?? this._historySessions;
+
+    return html`
+      <div class="history-overlay" @click=${this._onHistoryOverlayClick} @keydown=${this._onHistoryKeyDown}>
+        <div class="history-modal">
+          <div class="history-header">
+            <h3>📜 History</h3>
+            <input class="history-search-input"
+                   placeholder="Search conversations..."
+                   .value=${this._historyQuery}
+                   @input=${this._onHistorySearchInput}>
+            <button class="history-close" @click=${this._closeHistory}>✕</button>
+          </div>
+          <div class="history-body">
+            <div class="history-left">
+              ${sessions.length === 0 ? html`
+                <div class="history-empty">
+                  ${this._historyQuery ? 'No results' : 'No sessions yet'}
+                </div>
+              ` : ''}
+              ${sessions.map(s => html`
+                <div class="history-session-item ${s.session_id === this._historySelectedId ? 'selected' : ''}"
+                     @click=${() => this._selectHistorySession(s.session_id)}>
+                  <div class="history-session-preview">${s.preview || 'Empty session'}</div>
+                  <div class="history-session-meta">
+                    <span>${s.message_count || 0} msgs</span>
+                    <span>${s.timestamp ? this._relativeTime(s.timestamp) : ''}</span>
+                  </div>
+                </div>
+              `)}
+            </div>
+            <div class="history-right">
+              ${this._historyMessages.length === 0 ? html`
+                <div class="history-empty">Select a session to view messages</div>
+              ` : html`
+                ${this._historyMessages.map(msg => html`
+                  <div class="message-card ${msg.role}">
+                    <div class="message-role ${msg.role}">${msg.role === 'user' ? 'You' : 'Assistant'}</div>
+                    <div class="md-content">${unsafeHTML(renderMarkdown(msg.content || ''))}</div>
+                    ${msg.images?.length ? html`
+                      <div class="image-previews">
+                        ${msg.images.map(img => html`
+                          <div class="img-thumb"><img src=${img} alt="Image"></div>
+                        `)}
+                      </div>
+                    ` : ''}
+                    <div class="history-msg-actions">
+                      <button class="msg-action-btn" title="Copy"
+                              @click=${() => this._copyMessage(msg.content)}>📋</button>
+                      <button class="msg-action-btn" title="Paste to prompt"
+                              @click=${() => this._historyPasteToPrompt(msg.content)}>↩</button>
+                    </div>
+                  </div>
+                `)}
+                <button class="history-load-btn" @click=${this._loadHistorySession}>
+                  Load into context
+                </button>
+              `}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _relativeTime(timestamp) {
+    try {
+      const d = new Date(timestamp);
+      const now = Date.now();
+      const diff = now - d.getTime();
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return `${mins}m ago`;
+      const hours = Math.floor(mins / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      if (days < 30) return `${days}d ago`;
+      return d.toLocaleDateString();
+    } catch (_) {
+      return '';
+    }
   }
 
   // ── HTML helpers ───────────────────────────────────────────────

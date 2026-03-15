@@ -15,6 +15,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     _selectedFiles: { type: Array, state: true },
     _excludedFiles: { type: Array, state: true },
     _messages: { type: Array, state: true },
+    _repoFiles: { type: Array, state: true },
     _pickerWidth: { type: Number, state: true },
     _pickerCollapsed: { type: Boolean, state: true },
   };
@@ -78,6 +79,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._selectedFiles = [];
     this._excludedFiles = [];
     this._messages = [];
+    this._repoFiles = [];
     this._pickerWidth = parseInt(localStorage.getItem('ac-dc-picker-width') || '280', 10);
     this._pickerCollapsed = localStorage.getItem('ac-dc-picker-collapsed') === 'true';
     this._resizing = false;
@@ -96,6 +98,8 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.addEventListener('files-modified', this._filesModifiedHandler);
     this._filterFromChatHandler = this._onFilterFromChat.bind(this);
     window.addEventListener('filter-from-chat', this._filterFromChatHandler);
+    this._streamCompleteHandler = this._onStreamComplete.bind(this);
+    window.addEventListener('stream-complete', this._streamCompleteHandler);
   }
 
   disconnectedCallback() {
@@ -104,6 +108,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     window.removeEventListener('files-changed', this._filesChangedHandler);
     window.removeEventListener('files-modified', this._filesModifiedHandler);
     window.removeEventListener('filter-from-chat', this._filterFromChatHandler);
+    window.removeEventListener('stream-complete', this._streamCompleteHandler);
   }
 
   _onStateLoaded(e) {
@@ -157,9 +162,36 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  onRpcReady() {
+    this._loadRepoFiles();
+  }
+
+  async _loadRepoFiles() {
+    try {
+      const raw = await this.rpcExtract('Repo.get_flat_file_list');
+      if (typeof raw === 'string' && raw.trim()) {
+        this._repoFiles = raw.trim().split('\n');
+      } else {
+        this._repoFiles = [];
+      }
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) chatPanel.repoFiles = this._repoFiles;
+    } catch (_) {
+      this._repoFiles = [];
+    }
+  }
+
   _onFilesModified(e) {
     const picker = this.shadowRoot?.querySelector('ac-file-picker');
     if (picker) picker.loadTree();
+    this._loadRepoFiles();
+  }
+
+  _onStreamComplete(e) {
+    const result = e.detail?.result;
+    if (result?.files_modified?.length) {
+      this._loadRepoFiles();
+    }
   }
 
   _onFilterFromChat(e) {
@@ -345,6 +377,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         <ac-chat-panel
           .messages=${this._messages}
           .selectedFiles=${this._selectedFiles}
+          .repoFiles=${this._repoFiles}
           .streamingActive=${false}
           @file-mention-click=${this._onFileMentionClick}
         ></ac-chat-panel>

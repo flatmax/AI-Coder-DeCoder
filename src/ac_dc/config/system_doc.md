@@ -25,7 +25,7 @@ path/to/file.md
 >>>>>>> END
 ```
 
-The same rules apply as for code editing — anchor lines must match exactly one location.
+The markers are `<<<<<<< SEARCH`, `======= REPLACE`, and `>>>>>>> END`. The same rules apply as for code editing — anchor lines must match exactly one location.
 
 ## Workflow
 

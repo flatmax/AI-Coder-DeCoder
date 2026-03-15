@@ -12,6 +12,11 @@ const EDIT_START = '<<<<<<< SEARCH';
 const EDIT_SEPARATOR = '======= REPLACE';
 const EDIT_END = '>>>>>>> END';
 
+// Legacy markers (for backward compatibility with older responses)
+const LEGACY_EDIT_START = '\u00ab\u00ab\u00ab EDIT';
+const LEGACY_EDIT_SEPARATOR = '\u2550\u2550\u2550\u2550\u2550\u2550\u2550 REPL';
+const LEGACY_EDIT_END = '\u00bb\u00bb\u00bb EDIT END';
+
 /**
  * Check if a line looks like a file path.
  */
@@ -68,7 +73,7 @@ export function segmentResponse(text) {
         break;
 
       case 'expect_edit':
-        if (trimmed === EDIT_START) {
+        if (trimmed === EDIT_START || trimmed === LEGACY_EDIT_START) {
           // Strip trailing code fence from text buffer
           while (textBuf.length && textBuf[textBuf.length - 1].trim().startsWith('```')) {
             textBuf.pop();
@@ -91,7 +96,7 @@ export function segmentResponse(text) {
         break;
 
       case 'old':
-        if (trimmed === EDIT_SEPARATOR) {
+        if (trimmed === EDIT_SEPARATOR || trimmed === LEGACY_EDIT_SEPARATOR) {
           state = 'new';
         } else {
           oldLines.push(line);
@@ -99,7 +104,7 @@ export function segmentResponse(text) {
         break;
 
       case 'new':
-        if (trimmed === EDIT_END) {
+        if (trimmed === EDIT_END || trimmed === LEGACY_EDIT_END) {
           // Skip trailing code fence
           if (i + 1 < lines.length && lines[i + 1].trim() === '```') {
             i++; // skip it

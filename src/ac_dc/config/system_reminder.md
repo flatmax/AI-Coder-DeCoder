@@ -1,5 +1,6 @@
 IMPORTANT — Edit block reminders:
-- Close every block with `>>>>>>> END`
+- The markers are `<<<<<<< SEARCH`, `======= REPLACE`, and `>>>>>>> END`
+- Close every block with `>>>>>>> END` — never omit the closing marker
 - Copy text exactly from the file in context — character by character
 - Include enough unique context lines for an unambiguous anchor match
 - Keep blocks small — split large changes into multiple edits
