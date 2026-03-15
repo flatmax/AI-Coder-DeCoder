@@ -100,8 +100,9 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults (model, smaller_model, empty env, cache params) ✅ fixed
-- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()` (url_cache, history_compaction, doc_convert, doc_index) ✅ fixed
+- [x] `src/ac_dc/config/llm.json` — matches `_default_llm_config()` defaults (model, smaller_model, empty env, cache params) ✅ applied
+- [x] `src/ac_dc/config/app.json` — contains full defaults matching `_default_app_config()` (url_cache, history_compaction, doc_convert, doc_index) ✅ applied
+- [x] `src/ac_dc/config/system_extra.md` — empty file (user-managed, not pre-populated) ✅ applied
 
 ## Phase 3: LLM Engine
 - [x] Context Engine
