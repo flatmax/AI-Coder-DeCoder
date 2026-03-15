@@ -138,7 +138,22 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_url_service.py` — Cache CRUD/TTL, detection/classification, display names, summary selection, URLContent serialization, service integration
 - [x] Image Persistence (already implemented in history_store.py — save_images, reconstruct_images, image_refs)
 - [ ] Code Review (review mode orchestration implemented in LLMService; frontend pending)
-- [ ] Document Convert
+- [x] Document Convert
+  - [x] `src/ac_dc/doc_convert.py` — DocConvert class
+    - [x] scan_convertible_files (extension matching, excluded dirs, status badges)
+    - [x] convert_files (clean tree gate, per-file conversion, provenance headers)
+    - [x] is_available (markitdown, LibreOffice, PyMuPDF dependency checks)
+    - [x] markitdown backend (default conversion for docx, rtf, odt, csv, odp)
+    - [x] Colour-aware xlsx extraction (openpyxl, emoji markers, legend)
+    - [x] PDF PyMuPDF pipeline (text extraction, selective SVG export, image detection)
+    - [x] PPTX conversion (LibreOffice→PDF→PyMuPDF primary, python-pptx fallback)
+    - [x] Data URI image extraction (string scanning, file save, markdown rewrite)
+    - [x] DOCX image extraction (zip archive, truncated URI replacement)
+    - [x] SVG image externalization (base64 decode, href/xlink:href, whitespace handling)
+    - [x] Provenance headers (markdown and SVG, parsing and generation)
+    - [x] Orphan image cleanup on re-conversion
+    - [x] Graceful degradation (markitdown, PyMuPDF, LibreOffice, python-pptx, openpyxl)
+  - [x] `tests/test_doc_convert.py` — Provenance, status detection, scanning, conversion, DOCX images, SVG externalization, config, orphan cleanup, degradation
 - [ ] Collaboration
 
 ## Phase 5: Webapp (Frontend)
