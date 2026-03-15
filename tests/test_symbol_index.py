@@ -13,6 +13,32 @@ from ac_dc.symbol_index.compact_format import CompactFormatter
 from ac_dc.symbol_index.import_resolver import ImportResolver
 
 
+def _has_language(lang_name):
+    """Check if a tree-sitter language package is available."""
+    try:
+        TreeSitterParser.reset()
+        p = TreeSitterParser()
+        available = p.has_language(lang_name)
+        TreeSitterParser.reset()
+        return available
+    except Exception:
+        return False
+
+
+_skip_no_python = pytest.mark.skipif(
+    not _has_language("python"),
+    reason="tree-sitter-python not installed",
+)
+_skip_no_js = pytest.mark.skipif(
+    not _has_language("javascript"),
+    reason="tree-sitter-javascript not installed",
+)
+_skip_no_c = pytest.mark.skipif(
+    not _has_language("c"),
+    reason="tree-sitter-c not installed",
+)
+
+
 # ── Parser ────────────────────────────────────────────────────────
 
 class TestParser:

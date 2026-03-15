@@ -7,6 +7,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { RpcMixin } from '../utils/rpc-mixin.js';
 
 // Language detection from extension
@@ -38,6 +39,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     _files: { type: Array, state: true },
     _activeIndex: { type: Number, state: true },
     _dirtySet: { type: Object, state: true },
+    _previewMode: { type: Boolean, state: true },
+    _previewHtml: { type: String, state: true },
   };
 
   static styles = css`
@@ -94,6 +97,145 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.4; }
     }
+
+    /* Preview mode */
+    .preview-btn {
+      position: absolute;
+      top: 12px;
+      right: 32px;
+      z-index: 5;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 3px 8px;
+      font-size: 0.75rem;
+    }
+    .preview-btn:hover { color: var(--text-primary); background: var(--bg-secondary); }
+    .preview-btn.active {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
+      background: rgba(79, 195, 247, 0.08);
+    }
+
+    .preview-split {
+      display: flex;
+      width: 100%;
+      height: 100%;
+    }
+    .preview-split .editor-half {
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    .preview-split .preview-half {
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      overflow-y: auto;
+      padding: 16px 20px;
+      background: var(--bg-primary);
+      border-left: 1px solid var(--border-primary);
+    }
+
+    /* Preview pane markdown styles */
+    .preview-half h1, .preview-half h2, .preview-half h3,
+    .preview-half h4, .preview-half h5, .preview-half h6 {
+      color: var(--accent-primary);
+      margin: 0.8em 0 0.4em;
+    }
+    .preview-half h1 { font-size: 1.4rem; border-bottom: 1px solid var(--border-primary); padding-bottom: 0.3em; }
+    .preview-half h2 { font-size: 1.2rem; border-bottom: 1px solid var(--border-secondary); padding-bottom: 0.2em; }
+    .preview-half h3 { font-size: 1.05rem; }
+    .preview-half p { margin: 0.5em 0; line-height: 1.6; color: var(--text-primary); }
+    .preview-half ul, .preview-half ol { padding-left: 1.5em; margin: 0.4em 0; }
+    .preview-half li { margin: 0.2em 0; line-height: 1.5; }
+    .preview-half blockquote {
+      border-left: 3px solid var(--accent-primary);
+      padding: 0.3em 0 0.3em 12px;
+      margin: 0.5em 0;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border-radius: 0 4px 4px 0;
+    }
+    .preview-half table {
+      border-collapse: collapse;
+      margin: 0.5em 0;
+      font-size: 0.85rem;
+      width: auto;
+    }
+    .preview-half th, .preview-half td {
+      border: 1px solid var(--border-primary);
+      padding: 6px 10px;
+    }
+    .preview-half th { background: var(--bg-tertiary); font-weight: 600; }
+    .preview-half code {
+      background: var(--bg-input);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 0.85rem;
+    }
+    .preview-half pre.code-block {
+      background: var(--bg-input);
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin: 0.5em 0;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+    .preview-half pre.code-block code {
+      background: none;
+      padding: 0;
+      font-size: inherit;
+    }
+    .preview-half a { color: var(--accent-primary); }
+    .preview-half a:hover { text-decoration: underline; }
+    .preview-half img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+      margin: 0.5em 0;
+    }
+    .preview-half hr {
+      border: none;
+      border-top: 1px solid var(--border-primary);
+      margin: 1em 0;
+    }
+
+    /* hljs in preview */
+    .preview-half .hljs { color: var(--text-primary); }
+    .preview-half .hljs-keyword { color: #c678dd; }
+    .preview-half .hljs-string { color: #98c379; }
+    .preview-half .hljs-number { color: #d19a66; }
+    .preview-half .hljs-comment { color: #5c6370; font-style: italic; }
+    .preview-half .hljs-title { color: #61afef; }
+    .preview-half .hljs-type { color: #e5c07b; }
+    .preview-half .hljs-built_in { color: #c678dd; }
+    .preview-half .hljs-variable { color: #e06c75; }
+    .preview-half .hljs-meta { color: #56b6c2; }
+    .preview-half .hljs-addition { color: var(--accent-green); }
+    .preview-half .hljs-deletion { color: var(--accent-red); }
+
+    /* Preview button in preview pane (sticky) */
+    .preview-pane-btn {
+      position: sticky;
+      top: 0;
+      float: right;
+      z-index: 2;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--accent-primary);
+      border-radius: 4px;
+      color: var(--accent-primary);
+      cursor: pointer;
+      padding: 3px 8px;
+      font-size: 0.75rem;
+      margin: 0 0 8px 8px;
+    }
+    .preview-pane-btn:hover { background: rgba(79, 195, 247, 0.12); }
   `;
 
   constructor() {
@@ -107,6 +249,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._virtualContents = new Map();
     this._lspRegistered = false;
     this._contentChangeDisposable = null;
+    this._previewMode = false;
+    this._previewHtml = '';
+    this._scrollLock = null;
+    this._scrollLockTimer = null;
   }
 
   connectedCallback() {
@@ -181,6 +327,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if (existingIdx >= 0) {
       if (this._activeIndex !== existingIdx) {
         this._saveCurrentViewport();
+        // Exit preview mode when switching files
+        if (this._previewMode) {
+          this._previewMode = false;
+          this._previewHtml = '';
+          this._disposeEditor();
+        }
         this._activeIndex = existingIdx;
         this._showFile(existingIdx);
       }
@@ -243,6 +395,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   closeFile(path) {
     const idx = this._files.findIndex(f => f.path === path);
     if (idx < 0) return;
+
+    // Exit preview mode if closing the previewed file
+    if (this._previewMode && idx === this._activeIndex) {
+      this._previewMode = false;
+      this._previewHtml = '';
+    }
 
     this._virtualContents.delete(path);
 
@@ -485,6 +643,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       this._contentChangeDisposable.dispose();
       this._contentChangeDisposable = null;
     }
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
     if (this._editor) {
       const oldModel = this._editor.getModel();
       if (oldModel) {
@@ -519,6 +681,285 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     });
     this._styleObserver.observe(document.head, { childList: true });
+  }
+
+  // ── Preview ──────────────────────────────────────────────────
+
+  _isMarkdown() {
+    const file = this._files[this._activeIndex];
+    if (!file) return false;
+    const ext = file.path.substring(file.path.lastIndexOf('.')).toLowerCase();
+    return ext === '.md' || ext === '.markdown';
+  }
+
+  async _togglePreview() {
+    if (this._activeIndex < 0) return;
+
+    this._previewMode = !this._previewMode;
+
+    if (this._previewMode) {
+      // Switch to inline diff mode for half-width editor
+      await this._recreateEditorForPreview();
+      this._updatePreview();
+    } else {
+      // Switch back to side-by-side diff
+      await this._recreateEditorForDiff();
+    }
+  }
+
+  async _recreateEditorForPreview() {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file || !this._editor) {
+      this._previewMode = false;
+      return;
+    }
+
+    // Save current content
+    const mod = this._editor.getModifiedEditor();
+    if (mod) {
+      file.modified = mod.getValue();
+    }
+
+    this._disposeEditor();
+    await this.updateComplete;
+    await this._ensureMonaco();
+
+    const container = this.shadowRoot?.querySelector('.editor-half');
+    if (!container) return;
+
+    this._injectMonacoStyles();
+    const monaco = this._monaco;
+    const lang = _langFromPath(file.path);
+
+    this._editor = monaco.editor.createDiffEditor(container, {
+      theme: 'ac-dc-dark',
+      automaticLayout: false,
+      renderSideBySide: false, // Inline diff for preview mode
+      readOnly: false,
+      minimap: { enabled: false },
+      fontSize: 13,
+      lineNumbers: 'on',
+      scrollBeyondLastLine: false,
+      wordWrap: 'on', // Word wrap for half-width editing
+      renderWhitespace: 'selection',
+    });
+
+    const origModel = monaco.editor.createModel(file.original, lang);
+    const modModel = monaco.editor.createModel(file.modified, lang);
+    this._editor.updateOptions({ readOnly: file.is_read_only });
+    this._editor.setModel({ original: origModel, modified: modModel });
+
+    // Track dirty + live preview update
+    const trackedFile = file;
+    this._contentChangeDisposable = modModel.onDidChangeContent(() => {
+      const currentIndex = this._files.indexOf(trackedFile);
+      if (currentIndex < 0) return;
+      const currentContent = modModel.getValue();
+      const isDirty = currentContent !== trackedFile.savedContent;
+      const wasDirty = this._dirtySet.has(currentIndex);
+      if (isDirty && !wasDirty) {
+        this._dirtySet = new Set([...this._dirtySet, currentIndex]);
+      } else if (!isDirty && wasDirty) {
+        const next = new Set(this._dirtySet);
+        next.delete(currentIndex);
+        this._dirtySet = next;
+      }
+      // Live preview update
+      this._updatePreview();
+    });
+
+    // Set up scroll sync (editor → preview)
+    const modEditor = this._editor.getModifiedEditor();
+    if (modEditor) {
+      modEditor.onDidScrollChange(() => {
+        if (this._scrollLock === 'preview') return;
+        this._scrollLock = 'editor';
+        clearTimeout(this._scrollLockTimer);
+        this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+        this._syncEditorToPreview();
+      });
+    }
+
+    // Resize observer for preview mode
+    if (this._resizeObserver) this._resizeObserver.disconnect();
+    this._resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => this._editor?.layout());
+    });
+    this._resizeObserver.observe(container);
+  }
+
+  async _recreateEditorForDiff() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+
+    // Save content from inline editor
+    if (this._editor) {
+      const mod = this._editor.getModifiedEditor();
+      if (mod) file.modified = mod.getValue();
+    }
+
+    this._disposeEditor();
+    this._previewHtml = '';
+    await this.updateComplete;
+
+    // Recreate side-by-side editor
+    if (this._activeIndex >= 0) {
+      this._showFile(this._activeIndex);
+    }
+  }
+
+  _updatePreview() {
+    if (!this._previewMode || !this._editor) return;
+    const mod = this._editor.getModifiedEditor();
+    if (!mod) return;
+
+    const source = mod.getValue();
+    import('../utils/markdown.js').then(({ renderMarkdownWithSourceMap }) => {
+      this._previewHtml = renderMarkdownWithSourceMap(source);
+      this.updateComplete.then(() => this._resolvePreviewImages());
+    });
+  }
+
+  _syncEditorToPreview() {
+    if (!this._previewMode || !this._editor) return;
+    const mod = this._editor.getModifiedEditor();
+    if (!mod) return;
+
+    const lineHeight = mod.getOption(this._monaco.editor.EditorOption.lineHeight);
+    const scrollTop = mod.getScrollTop();
+    const topLine = Math.floor(scrollTop / lineHeight) + 1;
+
+    const preview = this.shadowRoot?.querySelector('.preview-half');
+    if (!preview) return;
+
+    // Find the element with the closest data-source-line
+    const anchors = preview.querySelectorAll('[data-source-line]');
+    let bestEl = null;
+    let bestLine = -1;
+    for (const el of anchors) {
+      const line = parseInt(el.dataset.sourceLine, 10);
+      if (isNaN(line)) continue;
+      if (line <= topLine && line > bestLine) {
+        bestLine = line;
+        bestEl = el;
+      }
+    }
+
+    if (bestEl) {
+      const elTop = bestEl.offsetTop;
+      // Interpolate between this anchor and the next
+      let nextEl = null;
+      let nextLine = Infinity;
+      for (const el of anchors) {
+        const line = parseInt(el.dataset.sourceLine, 10);
+        if (line > bestLine && line < nextLine) {
+          nextLine = line;
+          nextEl = el;
+        }
+      }
+
+      let targetScroll = elTop;
+      if (nextEl && nextLine !== Infinity) {
+        const fraction = (topLine - bestLine) / (nextLine - bestLine);
+        const nextTop = nextEl.offsetTop;
+        targetScroll = elTop + fraction * (nextTop - elTop);
+      }
+
+      preview.scrollTop = Math.max(0, targetScroll - 20);
+    }
+  }
+
+  _onPreviewScroll(e) {
+    if (this._scrollLock === 'editor') return;
+    this._scrollLock = 'preview';
+    clearTimeout(this._scrollLockTimer);
+    this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
+
+    if (!this._editor) return;
+    const mod = this._editor.getModifiedEditor();
+    if (!mod) return;
+
+    const preview = e.target;
+    const scrollTop = preview.scrollTop;
+
+    // Find the anchor at or just before the scroll position
+    const anchors = preview.querySelectorAll('[data-source-line]');
+    let bestEl = null;
+    let bestLine = -1;
+    for (const el of anchors) {
+      const line = parseInt(el.dataset.sourceLine, 10);
+      if (isNaN(line)) continue;
+      if (el.offsetTop <= scrollTop + 30 && line > bestLine) {
+        bestLine = line;
+        bestEl = el;
+      }
+    }
+
+    if (bestLine >= 0) {
+      const lineHeight = mod.getOption(this._monaco.editor.EditorOption.lineHeight);
+      mod.setScrollTop((bestLine - 1) * lineHeight);
+    }
+  }
+
+  async _resolvePreviewImages() {
+    const preview = this.shadowRoot?.querySelector('.preview-half');
+    if (!preview) return;
+
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+
+    const fileDir = file.path.includes('/')
+      ? file.path.substring(0, file.path.lastIndexOf('/'))
+      : '';
+
+    const images = preview.querySelectorAll('img');
+    for (const img of images) {
+      let src = img.getAttribute('src') || '';
+      // Skip data URIs and absolute URLs
+      if (src.startsWith('data:') || src.startsWith('blob:') ||
+          src.startsWith('http://') || src.startsWith('https://')) continue;
+
+      // Decode percent-encoding
+      try { src = decodeURIComponent(src); } catch (_) {}
+
+      // Resolve relative path
+      const resolved = this._normalizePath(fileDir, src);
+
+      // Fetch from repo
+      try {
+        if (src.endsWith('.svg')) {
+          const content = await this.rpcExtract('Repo.get_file_content', resolved);
+          if (typeof content === 'string') {
+            const encoded = encodeURIComponent(content);
+            img.src = `data:image/svg+xml;charset=utf-8,${encoded}`;
+          }
+        } else {
+          const result = await this.rpcExtract('Repo.get_file_base64', resolved);
+          if (result?.data_uri) {
+            img.src = result.data_uri;
+          } else {
+            img.alt = `[Failed: ${src}]`;
+            img.style.opacity = '0.4';
+          }
+        }
+      } catch (_) {
+        img.alt = `[Failed: ${src}]`;
+        img.style.opacity = '0.4';
+      }
+    }
+  }
+
+  _normalizePath(base, relative) {
+    if (!relative) return relative;
+    const parts = (base ? base + '/' + relative : relative).split('/');
+    const normalized = [];
+    for (const part of parts) {
+      if (part === '.' || part === '') continue;
+      if (part === '..') { normalized.pop(); continue; }
+      normalized.push(part);
+    }
+    return normalized.join('/');
   }
 
   // ── Save ─────────────────────────────────────────────────────
@@ -557,6 +998,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   _nextFile() {
     if (this._files.length <= 1) return;
     this._saveCurrentViewport();
+    if (this._previewMode) {
+      this._previewMode = false;
+      this._previewHtml = '';
+      this._disposeEditor();
+    }
     this._activeIndex = (this._activeIndex + 1) % this._files.length;
     this._showFile(this._activeIndex);
     this._dispatchActiveFile(this._files[this._activeIndex].path);
@@ -565,6 +1011,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   _prevFile() {
     if (this._files.length <= 1) return;
     this._saveCurrentViewport();
+    if (this._previewMode) {
+      this._previewMode = false;
+      this._previewHtml = '';
+      this._disposeEditor();
+    }
     this._activeIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
     this._showFile(this._activeIndex);
     this._dispatchActiveFile(this._files[this._activeIndex].path);
@@ -693,12 +1144,36 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const hasFiles = this._files.length > 0;
     const file = hasFiles ? this._files[this._activeIndex] : null;
     const isDirty = this._activeIndex >= 0 && this._dirtySet.has(this._activeIndex);
+    const showPreviewBtn = file && this._isMarkdown() && !file.is_read_only;
+
+    if (this._previewMode && file) {
+      // Preview split layout
+      return html`
+        <div class="preview-split">
+          <div class="editor-half"></div>
+          <div class="preview-half" @scroll=${this._onPreviewScroll}>
+            <button class="preview-pane-btn" @click=${this._togglePreview}>Preview ✕</button>
+            ${this._previewHtml ? unsafeHTML(this._previewHtml) : html`<p style="color:var(--text-muted)">Preview will appear here...</p>`}
+          </div>
+        </div>
+
+        ${file ? html`
+          <div class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
+               title="${file.path}${isDirty ? ' — click to save' : ''}"
+               @click=${() => isDirty ? this._saveActive() : null}></div>
+        ` : ''}
+      `;
+    }
 
     return html`
       ${!hasFiles ? html`<div class="watermark">AC⚡DC</div>` : ''}
 
       <div class="editor-container"
            style="${hasFiles ? '' : 'visibility:hidden'}"></div>
+
+      ${showPreviewBtn ? html`
+        <button class="preview-btn" @click=${this._togglePreview}>Preview</button>
+      ` : ''}
 
       ${file ? html`
         <div class="status-led ${isDirty ? 'dirty' : file.is_new ? 'new-file' : 'clean'}"
