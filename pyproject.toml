@@ -11,6 +11,13 @@ dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     "litellm>=1.0.0",
     "tiktoken>=0.5.0",
+    "boto3",
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-c>=0.21.0",
+    "tree-sitter-cpp>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -24,12 +31,6 @@ docs = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
-    "tree-sitter>=0.21.0",
-    "tree-sitter-python>=0.21.0",
-    "tree-sitter-javascript>=0.21.0",
-    "tree-sitter-typescript>=0.21.0",
-    "tree-sitter-c>=0.21.0",
-    "tree-sitter-cpp>=0.21.0",
 ]
 
 [project.scripts]
