@@ -19,6 +19,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   static properties = {
     selectedFiles: { type: Object },      // Set<string> — relative paths
     excludedFiles: { type: Object },      // Set<string> — excluded from index
+    isLocalhost: { type: Boolean },       // false = participant, hide checkboxes & git context items
     _tree: { type: Object, state: true },
     _modified: { type: Array, state: true },
     _staged: { type: Array, state: true },
@@ -209,6 +210,7 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     super();
     this.selectedFiles = new Set();
     this.excludedFiles = new Set();
+    this.isLocalhost = true;
     this._tree = null;
     this._modified = [];
     this._staged = [];
@@ -761,11 +763,13 @@ export class AcFilePicker extends RpcMixin(LitElement) {
              @click=${(e) => this._onRowClick(rp, node, e)}
              @auxclick=${(e) => this._onMiddleClick(rp, e)}
              @contextmenu=${(e) => this._onContextMenu(rp, node, e)}>
-          <input type="checkbox"
-                 .checked=${checkState === 'checked'}
-                 .indeterminate=${checkState === 'indeterminate'}
-                 title="Click to select · Shift+click to exclude from index"
-                 @click=${(e) => this._onCheckboxChange(rp, node, e)}>
+          ${this.isLocalhost ? html`
+            <input type="checkbox"
+                   .checked=${checkState === 'checked'}
+                   .indeterminate=${checkState === 'indeterminate'}
+                   title="Click to select · Shift+click to exclude from index"
+                   @click=${(e) => this._onCheckboxChange(rp, node, e)}>
+          ` : ''}
           <span class="toggle">${expanded ? '▼' : '▶'}</span>
           <span class="name dir ${isExcluded ? 'excluded' : ''}">${node.name}</span>
         </div>
@@ -814,11 +818,13 @@ export class AcFilePicker extends RpcMixin(LitElement) {
              @click=${(e) => this._onRowClick(rp, node, e)}
              @auxclick=${(e) => this._onMiddleClick(rp, e)}
              @contextmenu=${(e) => this._onContextMenu(rp, node, e)}>
-          <input type="checkbox"
-                 .checked=${isSelected}
-                 style="${isExcluded ? 'opacity:0.5' : ''}"
-                 title="Click to select · Shift+click to exclude from index"
-                 @click=${(e) => this._onCheckboxChange(rp, node, e)}>
+          ${this.isLocalhost ? html`
+            <input type="checkbox"
+                   .checked=${isSelected}
+                   style="${isExcluded ? 'opacity:0.5' : ''}"
+                   title="Click to select · Shift+click to exclude from index"
+                   @click=${(e) => this._onCheckboxChange(rp, node, e)}>
+          ` : ''}
           <span class="name ${isExcluded ? 'excluded' : ''}">${node.name}</span>
           <div class="badges">
             ${isExcluded ? html`<span class="excluded-badge" title="Excluded from index">✕</span>` : ''}
@@ -846,27 +852,32 @@ export class AcFilePicker extends RpcMixin(LitElement) {
     const { x, y, path: relP, node } = this._contextMenu;
     const isExcluded = this.excludedFiles.has(relP);
     const items = [];
+    const canMutate = this.isLocalhost;
 
     if (node.type === 'dir') {
-      items.push({ label: 'Stage All', action: 'stage-all' });
-      items.push({ label: 'Unstage All', action: 'unstage-all' });
-      items.push({ sep: true });
-      items.push({ label: 'New File...', action: 'new-file' });
-      items.push({ label: 'New Directory...', action: 'new-dir' });
-      items.push({ label: 'Rename...', action: 'rename' });
-      items.push({ sep: true });
+      if (canMutate) {
+        items.push({ label: 'Stage All', action: 'stage-all' });
+        items.push({ label: 'Unstage All', action: 'unstage-all' });
+        items.push({ sep: true });
+        items.push({ label: 'New File...', action: 'new-file' });
+        items.push({ label: 'New Directory...', action: 'new-dir' });
+        items.push({ label: 'Rename...', action: 'rename' });
+        items.push({ sep: true });
+      }
       items.push({
         label: isExcluded ? 'Include in Index' : 'Exclude from Index',
         action: 'exclude',
       });
     } else {
-      items.push({ label: 'Stage', action: 'stage' });
-      items.push({ label: 'Unstage', action: 'unstage' });
-      items.push({ label: 'Discard Changes', action: 'discard' });
-      items.push({ sep: true });
-      items.push({ label: 'Rename...', action: 'rename' });
-      items.push({ label: 'Delete', action: 'delete' });
-      items.push({ sep: true });
+      if (canMutate) {
+        items.push({ label: 'Stage', action: 'stage' });
+        items.push({ label: 'Unstage', action: 'unstage' });
+        items.push({ label: 'Discard Changes', action: 'discard' });
+        items.push({ sep: true });
+        items.push({ label: 'Rename...', action: 'rename' });
+        items.push({ label: 'Delete', action: 'delete' });
+        items.push({ sep: true });
+      }
       items.push({
         label: isExcluded ? 'Include in Index' : 'Exclude from Index',
         action: 'exclude',

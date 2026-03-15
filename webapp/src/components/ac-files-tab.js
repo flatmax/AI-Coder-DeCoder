@@ -144,6 +144,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
       if (picker) {
         picker.selectedFiles = this._selectedSet;
         picker.excludedFiles = this._excludedSet;
+        picker.isLocalhost = this._isLocalhost;
         picker.requestUpdate();
       }
       const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
@@ -473,6 +474,7 @@ export class AcFilesTab extends RpcMixin(LitElement) {
         <ac-file-picker
           .selectedFiles=${this._selectedSet}
           .excludedFiles=${this._excludedSet}
+          .isLocalhost=${this._isLocalhost}
           @selection-changed=${this._onSelectionChanged}
           @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}

@@ -241,6 +241,24 @@ class MatlabExtractor(BaseExtractor):
                            "end_line": end_line + 1, "end_col": 0},
                 ))
 
+            # Read-only variables: identifiers in body that are not assigned,
+            # not parameters, not outputs, and not builtins/keywords
+            read_pattern = re.compile(r'\b(\w+)\b')
+            all_identifiers = set()
+            for rm in read_pattern.finditer(body_clean):
+                ident = rm.group(1)
+                if ident not in _EXCLUDE and ident != name:
+                    all_identifiers.add(ident)
+            # Subtract: params, outputs, local assignments, call sites
+            call_names = {c.name for c in sym.call_sites}
+            read_vars = all_identifiers - param_names - output_names - locals_set - call_names
+            for vname in sorted(read_vars):
+                sym.children.append(Symbol(
+                    name=vname, kind="variable", file_path=file_path,
+                    range={"start_line": start_line + 1, "start_col": 0,
+                           "end_line": end_line + 1, "end_col": 0},
+                ))
+
             if parent_class:
                 parent_class.children.append(sym)
             functions.append(sym)
