@@ -87,8 +87,8 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_doc_index.py` — Extractors, cache, formatter, reference, integration
 
 ## Known Issues
-- [x] `src/ac_dc/config/llm.json` — bundled file has test values (`"model": "test/model"`), must be updated to `"anthropic/claude-sonnet-4-20250514"` to match `_default_llm_config()` (causes `test_default_model` failure)
-- [x] `src/ac_dc/config/app.json` — bundled file is minimal, should contain full defaults to match `_default_app_config()` (deep-merge handles this at runtime but the file on disk should be canonical)
+- [x] `src/ac_dc/config/llm.json` — updated to match `_default_llm_config()` defaults
+- [x] `src/ac_dc/config/app.json` — updated to contain full defaults matching `_default_app_config()`
 
 ## Phase 3: LLM Engine
 - [x] Context Engine
@@ -109,7 +109,14 @@ File path appears on the line before `<<<<<<< SEARCH`.
   - [x] `tests/test_stability_tracker.py` — N values, graduation, demotion, cascade, initialization, stale removal, deselected cleanup, multi-request lifecycle
 
 ## Phase 4: Features
-- [ ] URL Handling
+- [x] URL Handling
+  - [x] `src/ac_dc/url_service/__init__.py` — Package init
+  - [x] `src/ac_dc/url_service/models.py` — URLContent, URLType, GitHubInfo, url_hash, display_name
+  - [x] `src/ac_dc/url_service/detector.py` — URL detection (regex), classification (GitHub/doc/web), summary type selection
+  - [x] `src/ac_dc/url_service/cache.py` — URLCache (filesystem, TTL, cleanup)
+  - [x] `src/ac_dc/url_service/fetcher.py` — Per-type fetch handlers (GitHub repo/file, web page), HTML extraction (trafilatura + fallback)
+  - [x] `src/ac_dc/url_service/service.py` — URLService orchestrator (detect, fetch, cache, summarize, format context)
+  - [x] `tests/test_url_service.py` — Cache CRUD/TTL, detection/classification, display names, summary selection, URLContent serialization, service integration
 - [ ] Image Persistence
 - [ ] Code Review
 - [ ] Document Convert

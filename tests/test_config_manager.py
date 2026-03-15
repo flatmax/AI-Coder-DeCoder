@@ -74,7 +74,7 @@ class TestLLMConfig:
     def test_env_vars_applied(self, tmp_git_repo):
         """Env vars from llm.json are set in os.environ."""
         new_config = {
-            "env": {"AC_DC_TEST_ENV_VAR": "applied_value"},
+            "env": {"AC_DC_TEST_ENV_VAR_2": "applied_value"},
             "model": "test/model",
             "cache_min_tokens": 1024,
             "cache_buffer_multiplier": 1.1,
@@ -84,9 +84,9 @@ class TestLLMConfig:
             "litellm", json.dumps(new_config, indent=2)
         )
         mgr.reload_llm_config()
-        assert os.environ.get("AC_DC_TEST_ENV_VAR") == "applied_value"
+        assert os.environ.get("AC_DC_TEST_ENV_VAR_2") == "applied_value"
         # Cleanup
-        del os.environ["AC_DC_TEST_ENV_VAR"]
+        os.environ.pop("AC_DC_TEST_ENV_VAR_2", None)
 
 
 class TestAppConfig:
@@ -97,6 +97,9 @@ class TestAppConfig:
         assert "doc_index" in cfg
 
     def test_reload_app_config(self, config_mgr):
+        # Verify default is enabled
+        assert config_mgr.history_compaction_config.get("enabled") is True
+        # Override to disabled
         new_config = {"history_compaction": {"enabled": False}}
         config_mgr.save_config_content(
             "app", json.dumps(new_config, indent=2)

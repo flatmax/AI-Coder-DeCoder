@@ -1,0 +1,1 @@
+"""URL handling — detection, fetching, caching, and summarization."""
