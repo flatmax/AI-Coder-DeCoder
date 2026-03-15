@@ -364,6 +364,8 @@ class StabilityTracker:
         just_placed: set[str] = set()
         # Also skip items already processed (N incremented) in Phase 1
         skip_veterans: set[str] = set(phase1_keys) if phase1_keys else set()
+        # Track tiers whose veterans have been processed (at most once per full cascade)
+        veteran_processed_tiers: set[Tier] = set()
 
         # Place incoming items into L3
         for item in entering_l3:
@@ -401,7 +403,13 @@ class StabilityTracker:
                 if promotion_n is None:
                     continue  # L0 is terminal
 
-                # Process veterans (exclude items placed this cascade or processed in Phase 1)
+                # Determine whether to increment N for veterans.
+                # Veterans are processed (N incremented) at most once per full cascade.
+                should_increment = tier not in veteran_processed_tiers
+                if should_increment:
+                    veteran_processed_tiers.add(tier)
+
+                # Collect veterans (exclude items placed this cascade or processed in Phase 1)
                 veterans = sorted(
                     [i for i in tier_items.values()
                      if i.key not in just_placed and i.key not in skip_veterans],
@@ -418,15 +426,17 @@ class StabilityTracker:
                             setattr(item, '_anchored', True)
                         else:
                             setattr(item, '_anchored', False)
-                            # Increment N (but cap at promotion_n if above is stable)
-                            if above_broken:
-                                item.n += 1
-                            else:
-                                item.n = min(item.n + 1, promotion_n)
+                            if should_increment:
+                                # Increment N (but cap at promotion_n if above is stable)
+                                if above_broken:
+                                    item.n += 1
+                                else:
+                                    item.n = min(item.n + 1, promotion_n)
                 else:
                     for item in veterans:
                         setattr(item, '_anchored', False)
-                        item.n += 1
+                        if should_increment:
+                            item.n += 1
 
                 # Check promotion
                 if above_broken:

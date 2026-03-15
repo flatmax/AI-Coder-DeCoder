@@ -15,7 +15,8 @@ const TABS = [
   { id: 'search', icon: '🔍', label: 'SEARCH', shortcut: 'Alt+2' },
   { id: 'context', icon: '📊', label: 'CONTEXT', shortcut: 'Alt+3' },
   { id: 'cache', icon: '🗄️', label: 'CACHE', shortcut: 'Alt+4' },
-  { id: 'settings', icon: '⚙️', label: 'SETTINGS', shortcut: 'Alt+5' },
+  { id: 'doc-convert', icon: '📄', label: 'CONVERT', shortcut: 'Alt+5' },
+  { id: 'settings', icon: '⚙️', label: 'SETTINGS', shortcut: 'Alt+6' },
 ];
 
 // Lazy imports for non-default tabs.
@@ -24,6 +25,7 @@ const lazyImports = {
   search: () => import('./ac-search-tab.js'),
   context: () => import('./ac-context-tab.js'),
   cache: () => import('./ac-cache-tab.js'),
+  'doc-convert': () => import('./ac-doc-convert-tab.js'),
   settings: () => import('./ac-settings-tab.js'),
 };
 
@@ -36,6 +38,13 @@ export class AcDialog extends RpcMixin(LitElement) {
     _pos: { type: Object, state: true },
     _visitedTabs: { type: Object, state: true },
     _historyPercent: { type: Number, state: true },
+    _mode: { type: String, state: true },
+    _crossRefEnabled: { type: Boolean, state: true },
+    _reviewActive: { type: Boolean, state: true },
+    _docConvertAvailable: { type: Boolean, state: true },
+    _enrichingDocs: { type: Boolean, state: true },
+    _enrichMessage: { type: String, state: true },
+    _enrichPercent: { type: Number, state: true },
   };
 
   static styles = css`
@@ -121,6 +130,64 @@ export class AcDialog extends RpcMixin(LitElement) {
     }
     .minimize-btn:hover { background: var(--bg-primary); color: var(--text-primary); }
 
+    .mode-toggle {
+      background: none;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 0.7rem;
+      white-space: nowrap;
+    }
+    .mode-toggle:hover { color: var(--text-primary); border-color: var(--accent-primary); }
+    .mode-toggle.doc { color: var(--accent-primary); border-color: var(--accent-primary); }
+
+    .crossref-label {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .crossref-label input { width: 12px; height: 12px; margin: 0; }
+
+    .review-toggle {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .review-toggle:hover { color: var(--text-primary); }
+    .review-toggle.review-active { color: var(--accent-primary); }
+
+    /* Enrichment progress bar */
+    .enrich-bar {
+      height: 3px;
+      min-height: 3px;
+      background: var(--bg-primary);
+      position: relative;
+    }
+    .enrich-bar-fill {
+      height: 100%;
+      background: var(--accent-primary);
+      transition: width 0.3s;
+      border-radius: 0 1px 1px 0;
+    }
+    .enrich-label {
+      position: absolute;
+      right: 8px;
+      top: -14px;
+      font-size: 0.6rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
     /* Content area */
     .content {
       flex: 1;
@@ -198,6 +265,13 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._pos = null;
     this._visitedTabs = new Set(['files']);
     this._historyPercent = 0;
+    this._mode = 'code';
+    this._crossRefEnabled = false;
+    this._reviewActive = false;
+    this._docConvertAvailable = false;
+    this._enrichingDocs = false;
+    this._enrichMessage = '';
+    this._enrichPercent = 0;
 
     // Restore undocked position
     try {
@@ -226,6 +300,12 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._streamCompleteHandler);
     this._compactionHandler = this._onCompactionEvent.bind(this);
     window.addEventListener('compaction-event', this._compactionHandler);
+    this._modeChangedHandler = this._onModeChanged.bind(this);
+    window.addEventListener('mode-changed', this._modeChangedHandler);
+    this._reviewStartedHandler = () => { this._reviewActive = true; };
+    window.addEventListener('review-started', this._reviewStartedHandler);
+    this._reviewEndedHandler = () => { this._reviewActive = false; };
+    window.addEventListener('review-ended', this._reviewEndedHandler);
   }
 
   disconnectedCallback() {
@@ -234,6 +314,9 @@ export class AcDialog extends RpcMixin(LitElement) {
     window.removeEventListener('state-loaded', this._stateLoadedHandler);
     window.removeEventListener('stream-complete', this._streamCompleteHandler);
     window.removeEventListener('compaction-event', this._compactionHandler);
+    window.removeEventListener('mode-changed', this._modeChangedHandler);
+    window.removeEventListener('review-started', this._reviewStartedHandler);
+    window.removeEventListener('review-ended', this._reviewEndedHandler);
   }
 
   onRpcReady() {
@@ -243,6 +326,27 @@ export class AcDialog extends RpcMixin(LitElement) {
       this._switchTab(savedTab);
     }
     this._refreshHistoryBar();
+    this._loadModeState();
+    this._checkDocConvert();
+  }
+
+  async _loadModeState() {
+    // Mode and cross-ref are already loaded from state-loaded event
+    // (via _onStateLoaded). Only fetch review state here since it's
+    // not included in get_current_state.
+    try {
+      const review = await this.rpcExtract('LLMService.get_review_state');
+      if (review) this._reviewActive = review.active || false;
+    } catch (_) {}
+  }
+
+  async _checkDocConvert() {
+    try {
+      const result = await this.rpcExtract('DocConvert.is_available');
+      this._docConvertAvailable = result?.available || false;
+    } catch (_) {
+      this._docConvertAvailable = false;
+    }
   }
 
   // ── Tab switching ────────────────────────────────────────────
@@ -432,10 +536,55 @@ export class AcDialog extends RpcMixin(LitElement) {
     }
   }
 
+  // ── Mode toggle ──────────────────────────────────────────────
+
+  async _toggleMode() {
+    const newMode = this._mode === 'code' ? 'doc' : 'code';
+    try {
+      await this.rpcExtract('LLMService.switch_mode', newMode);
+      this._mode = newMode;
+      this._crossRefEnabled = false;
+    } catch (e) {
+      console.warn('Mode switch failed:', e);
+    }
+  }
+
+  async _toggleCrossRef(e) {
+    const enabled = e.target.checked;
+    try {
+      await this.rpcExtract('LLMService.set_cross_reference', enabled);
+      this._crossRefEnabled = enabled;
+    } catch (err) {
+      console.warn('Cross-ref toggle failed:', err);
+      e.target.checked = !enabled;
+    }
+  }
+
+  _onModeChanged(e) {
+    const d = e.detail || {};
+    if (d.mode) this._mode = d.mode;
+    if (d.cross_ref_enabled !== undefined) this._crossRefEnabled = d.cross_ref_enabled;
+  }
+
+  // ── Review toggle ────────────────────────────────────────────
+
+  _onReviewToggle() {
+    if (this._reviewActive) {
+      // Trigger exit review on the files tab
+      window.dispatchEvent(new CustomEvent('review-exit-requested'));
+    } else {
+      this._switchTab('files');
+      window.dispatchEvent(new CustomEvent('review-open-requested'));
+    }
+  }
+
   // ── Event handlers ───────────────────────────────────────────
 
   _onStateLoaded(e) {
     this._refreshHistoryBar();
+    const state = e.detail;
+    if (state?.mode) this._mode = state.mode;
+    if (state?.cross_ref_enabled !== undefined) this._crossRefEnabled = state.cross_ref_enabled;
   }
 
   _onStreamComplete(e) {
@@ -446,6 +595,22 @@ export class AcDialog extends RpcMixin(LitElement) {
     const stage = e.detail?.event?.stage;
     if (stage === 'compaction_complete') {
       this._refreshHistoryBar();
+    } else if (stage === 'doc_enrichment_queued') {
+      this._enrichingDocs = true;
+      this._enrichTotal = (e.detail?.event?.files || []).length;
+      this._enrichDone = 0;
+      this._enrichPercent = 0;
+    } else if (stage === 'doc_enrichment_file_done') {
+      const file = e.detail?.event?.file || '';
+      this._enrichMessage = file.split('/').pop();
+      this._enrichDone = (this._enrichDone || 0) + 1;
+      if (this._enrichTotal > 0) {
+        this._enrichPercent = Math.round((this._enrichDone / this._enrichTotal) * 100);
+      }
+    } else if (stage === 'doc_enrichment_complete') {
+      this._enrichingDocs = false;
+      this._enrichMessage = '';
+      this._enrichPercent = 0;
     }
   }
 
@@ -473,7 +638,7 @@ export class AcDialog extends RpcMixin(LitElement) {
         <div class="header" @pointerdown=${this._onHeaderPointerDown}>
           <span class="header-label">${activeLabel}</span>
           <div class="tab-icons">
-            ${TABS.map(t => html`
+            ${TABS.filter(t => t.id !== 'doc-convert' || this._docConvertAvailable).map(t => html`
               <button class="tab-btn ${t.id === this._activeTab ? 'active' : ''}"
                       title="${t.label} (${t.shortcut})"
                       @click=${(e) => { e.stopPropagation(); this._switchTab(t.id); }}>
@@ -482,6 +647,23 @@ export class AcDialog extends RpcMixin(LitElement) {
             `)}
           </div>
           <div class="header-actions">
+            <button class="mode-toggle ${this._mode === 'doc' ? 'doc' : ''}"
+                    title="Switch mode"
+                    @click=${(e) => { e.stopPropagation(); this._toggleMode(); }}>
+              ${this._mode === 'doc' ? '📝 Doc' : '💻 Code'}
+            </button>
+            <label class="crossref-label"
+                   @click=${(e) => e.stopPropagation()}>
+              <input type="checkbox"
+                     .checked=${this._crossRefEnabled}
+                     @change=${this._toggleCrossRef}>
+              ${this._mode === 'doc' ? '+code' : '+docs'}
+            </label>
+            <button class="review-toggle ${this._reviewActive ? 'review-active' : ''}"
+                    title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+                    @click=${(e) => { e.stopPropagation(); this._onReviewToggle(); }}>
+              👁️
+            </button>
             <button class="minimize-btn"
                     title="Minimize (Alt+M)"
                     @click=${(e) => { e.stopPropagation(); this._toggleMinimize(); }}>
@@ -500,6 +682,15 @@ export class AcDialog extends RpcMixin(LitElement) {
               </div>
             ` : '')}
           </div>
+
+          ${this._enrichingDocs ? html`
+            <div class="enrich-bar">
+              <div class="enrich-bar-fill" style="width: ${this._enrichPercent}%"></div>
+              ${this._enrichMessage ? html`
+                <span class="enrich-label">📝 ${this._enrichMessage}</span>
+              ` : ''}
+            </div>
+          ` : ''}
 
           <!-- History bar -->
           <div class="history-bar">
@@ -531,6 +722,8 @@ export class AcDialog extends RpcMixin(LitElement) {
         return html`<ac-context-tab></ac-context-tab>`;
       case 'cache':
         return html`<ac-cache-tab></ac-cache-tab>`;
+      case 'doc-convert':
+        return html`<ac-doc-convert-tab></ac-doc-convert-tab>`;
       case 'settings':
         return html`<ac-settings-tab></ac-settings-tab>`;
       default:

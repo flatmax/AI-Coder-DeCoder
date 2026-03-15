@@ -66,6 +66,34 @@ class ContextManager:
         self._history: list[dict] = []
         self._url_context: str = ""
         self._system_prompt: str = ""
+        self._compactor = None
+
+    # ── Compactor ─────────────────────────────────────────────────
+
+    def init_compactor(self, detection_model: Optional[str] = None,
+                       skill_prompt: str = ""):
+        """Create the history compactor instance."""
+        from ac_dc.context.history_compactor import HistoryCompactor
+        self._compactor = HistoryCompactor(
+            config=self._compaction_config,
+            detection_model=detection_model,
+            skill_prompt=skill_prompt,
+        )
+
+    def compact_history_if_needed(self, stability_tracker=None):
+        """Run compaction if threshold exceeded.
+
+        Returns CompactionResult or None if below trigger / no compactor.
+        """
+        if not self._compactor:
+            return None
+        if not self.should_compact():
+            return None
+        result = self._compactor.compact(self._history, self.token_counter)
+        if result.case != "none":
+            self.set_history(result.messages)
+            self.reregister_history_items(stability_tracker)
+        return result
 
     # ── History ───────────────────────────────────────────────────
 

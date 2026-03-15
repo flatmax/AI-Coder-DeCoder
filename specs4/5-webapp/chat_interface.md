@@ -117,7 +117,7 @@ During streaming: edit blocks detected mid-stream render as `edit-pending` with 
 
 #### Edit Block Segmentation (`edit-blocks.js`)
 
-`segmentResponse(text)` splits raw LLM text into an array of segments using the same markers as the backend parser (`««« EDIT` / `═══════ REPL` / `»»» EDIT END`):
+`segmentResponse(text)` splits raw LLM text into an array of segments using the same markers as the backend parser (`<<<<<<< SEARCH` / `======= REPLACE` / `>>>>>>> END`):
 
 | Segment Type | Description |
 |-------------|-------------|
@@ -125,11 +125,11 @@ During streaming: edit blocks detected mid-stream render as `edit-pending` with 
 | `edit` | Complete edit block with `filePath`, `oldLines`, `newLines`, `isCreate` |
 | `edit-pending` | Incomplete edit block (stream ended mid-block) |
 
-The file path line preceding `««« EDIT` is stripped from the text segment and attached to the edit segment. Consecutive file-path-like lines are handled by treating only the last one before `««« EDIT` as the actual path.
+The file path line preceding `<<<<<<< SEARCH` is stripped from the text segment and attached to the edit segment. Consecutive file-path-like lines are handled by treating only the last one before `<<<<<<< SEARCH` as the actual path.
 
 **Note:** This is a separate, simplified parser from the backend's `edit_parser.py`. The frontend parser only needs to identify block boundaries for rendering — it does not perform anchor matching or validation. Its file-path heuristic (`_isFilePath`) uses simpler rules than the backend: rejects lines starting with `#`, `/`, `*`, `-`, `>`, or triple backticks; accepts lines containing `/` or `\`, or matching `word.ext` patterns; rejects lines over 200 characters.
 
-**Code fence stripping:** When the LLM wraps an edit block inside a markdown code fence (`` ``` ``), the parser strips the opening fence (if it immediately precedes the file path) and the closing fence (if it immediately follows `»»» EDIT END`). This handles a common LLM formatting quirk without requiring the backend to be aware of it.
+**Code fence stripping:** When the LLM wraps an edit block inside a markdown code fence (`` ``` ``), the parser strips the opening fence (if it immediately precedes the file path) and the closing fence (if it immediately follows `>>>>>>> END`). This handles a common LLM formatting quirk without requiring the backend to be aware of it.
 
 #### State Machine (Frontend)
 
@@ -137,12 +137,12 @@ The file path line preceding `««« EDIT` is stripped from the text segment and
 |-------|---------|--------|
 | `text` | File path pattern | Record path → `expect_edit` |
 | `text` | Other line | Accumulate text |
-| `expect_edit` | `««« EDIT` | Strip any trailing code fence from text buffer, flush text → `old` |
+| `expect_edit` | `<<<<<<< SEARCH` | Strip any trailing code fence from text buffer, flush text → `old` |
 | `expect_edit` | Another file path | Previous path was just text; update path |
 | `expect_edit` | Other line | Push path + line to text buffer → `text` |
-| `old` | `═══════ REPL` | → `new` |
+| `old` | `======= REPLACE` | → `new` |
 | `old` | Other line | Accumulate old lines |
-| `new` | `»»» EDIT END` | Emit `edit` segment, skip trailing code fence → `text` |
+| `new` | `>>>>>>> END` | Emit `edit` segment, skip trailing code fence → `text` |
 | `new` | Other line | Accumulate new lines |
 | End of input in `old`/`new` | — | Emit `edit-pending` segment |
 

@@ -10,21 +10,21 @@ The LLM proposes file changes using a structured edit block format. Each block c
 
 ```
 path/to/file.ext
-««« EDIT
+<<<<<<< SEARCH
 [context lines]
 [old lines to replace]
-═══════ REPL
+======= REPLACE
 [context lines — identical to above]
 [new lines]
-»»» EDIT END
+>>>>>>> END
 ```
 
 ### How It Works
 
-The block has two sections separated by `═══════ REPL`:
+The block has two sections separated by `======= REPLACE`:
 
-1. **EDIT section** (between `««« EDIT` and `═══════ REPL`): Contains the old text as it currently exists in the file
-2. **REPL section** (between `═══════ REPL` and `»»» EDIT END`): Contains the new text to substitute
+1. **EDIT section** (between `<<<<<<< SEARCH` and `======= REPLACE`): Contains the old text as it currently exists in the file
+2. **REPL section** (between `======= REPLACE` and `>>>>>>> END`): Contains the new text to substitute
 
 ### The Common Prefix (Anchor)
 
@@ -34,13 +34,13 @@ Example:
 
 ```
 src/math.py
-««« EDIT
+<<<<<<< SEARCH
 def multiply(a, b):
     return a + b  # BUG
-═══════ REPL
+======= REPLACE
 def multiply(a, b):
     return a * b
-»»» EDIT END
+>>>>>>> END
 ```
 
 Here:
@@ -67,37 +67,37 @@ The anchor must match **exactly one** location in the file. If the file has dupl
 
 ```
 src/utils.py
-««« EDIT
+<<<<<<< SEARCH
 import os
-═══════ REPL
+======= REPLACE
 import os
 import sys
-»»» EDIT END
+>>>>>>> END
 ```
 
 ### Create File Example
 
 ```
 src/new_module.py
-««« EDIT
-═══════ REPL
+<<<<<<< SEARCH
+======= REPLACE
 def hello():
     print("Hello, world!")
-»»» EDIT END
+>>>>>>> END
 ```
 
 ### Delete Lines Example
 
 ```
 src/utils.py
-««« EDIT
+<<<<<<< SEARCH
 import os
 import deprecated_module
 import sys
-═══════ REPL
+======= REPLACE
 import os
 import sys
-»»» EDIT END
+>>>>>>> END
 ```
 
 ## Multiple Edits to the Same File
@@ -110,24 +110,24 @@ Applied **sequentially**, top to bottom. After edit A, edit B's anchor must matc
 # WRONG — second edit fails because first changed the anchor
 
 src/app.py
-««« EDIT
+<<<<<<< SEARCH
 def process():
     step_one()
-═══════ REPL
+======= REPLACE
 def process():
     step_one_updated()
-»»» EDIT END
+>>>>>>> END
 ```
 
 ```
 src/app.py
-««« EDIT
+<<<<<<< SEARCH
     step_one()
     step_two()
-═══════ REPL
+======= REPLACE
     step_one()
     step_two_updated()
-»»» EDIT END
+>>>>>>> END
 ```
 
 The second edit looks for `step_one()` but it was already changed to `step_one_updated()`.
@@ -136,15 +136,15 @@ The second edit looks for `step_one()` but it was already changed to `step_one_u
 # CORRECT — merged into one block
 
 src/app.py
-««« EDIT
+<<<<<<< SEARCH
 def process():
     step_one()
     step_two()
-═══════ REPL
+======= REPLACE
 def process():
     step_one_updated()
     step_two_updated()
-»»» EDIT END
+>>>>>>> END
 ```
 
 ### Merge Rules
@@ -158,20 +158,20 @@ Merge when edits are: overlapping, adjacent (within 3 lines), or have sequential
 | State | Trigger | Action |
 |-------|---------|--------|
 | SCANNING | File path pattern | Record path → EXPECT_EDIT |
-| EXPECT_EDIT | `««« EDIT` | → READING_OLD |
+| EXPECT_EDIT | `<<<<<<< SEARCH` | → READING_OLD |
 | EXPECT_EDIT | Anything else | → SCANNING |
-| READING_OLD | `═══════ REPL` | → READING_NEW |
+| READING_OLD | `======= REPLACE` | → READING_NEW |
 | READING_OLD | Other line | Accumulate old |
-| READING_NEW | `»»» EDIT END` | Emit block → SCANNING |
+| READING_NEW | `>>>>>>> END` | Emit block → SCANNING |
 | READING_NEW | Other line | Accumulate new |
 
 ### File Path Detection
 
-Recognized by: contains `/` or `\`, doesn't start with `#`/`//`/`*`/`-`/`>`, < 200 chars, immediately before `««« EDIT`.
+Recognized by: contains `/` or `\`, doesn't start with `#`/`//`/`*`/`-`/`>`, < 200 chars, immediately before `<<<<<<< SEARCH`.
 
 ### Streaming Considerations
 
-During streaming, partially received blocks are tracked. The parser maintains state across chunks. Only completed blocks (with `»»» EDIT END`) are applied.
+During streaming, partially received blocks are tracked. The parser maintains state across chunks. Only completed blocks (with `>>>>>>> END`) are applied.
 
 ## Validation
 

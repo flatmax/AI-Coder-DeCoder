@@ -94,6 +94,10 @@ class LLMService:
             "cache_write": 0,
         }
 
+        # Last tier changes (preserved for breakdown queries between requests)
+        self._last_promotions: list[str] = []
+        self._last_demotions: list[str] = []
+
         # Review state
         self._review_active = False
         self._review_branch: Optional[str] = None
@@ -550,6 +554,10 @@ class LLMService:
                 self._update_stability(tracker)
                 tier_changes = tracker.get_changes()
 
+            # Store promotions/demotions for breakdown queries
+            self._last_promotions = [c for c in tier_changes if "📈" in c]
+            self._last_demotions = [c for c in tier_changes if "📉" in c]
+
             # Save symbol map
             if self._symbol_index:
                 self._symbol_index.save_symbol_map(self._config.ac_dc_dir)
@@ -844,8 +852,8 @@ class LLMService:
 
         # Build cache blocks from stability tracker
         blocks = self._build_cache_blocks(tc)
-        promotions = []
-        demotions = []
+        promotions = list(self._last_promotions)
+        demotions = list(self._last_demotions)
 
         # Compute cache hit rate from session totals
         cache_hit_rate = 0.0
@@ -1154,6 +1162,36 @@ class LLMService:
             return self._symbol_index.lsp_get_completions(path, line, col, prefix)
         return []
 
+    # ── Map Block Query ───────────────────────────────────────────
+
+    def get_file_map_block(self, key: str) -> dict:
+        """Get the full index block for a file, dispatching by key prefix.
+
+        Used by the cache viewer when clicking an item name.
+        Tries the prefix-appropriate index first, falls back to the other.
+        """
+        if ":" in key:
+            prefix, path = key.split(":", 1)
+        else:
+            prefix = "sym" if self._mode == Mode.CODE else "doc"
+            path = key
+
+        block = None
+        if prefix == "sym" and self._symbol_index:
+            block = self._symbol_index.get_file_symbol_block(path)
+        elif prefix == "doc" and self._doc_index:
+            block = self._doc_index.get_file_doc_block(path)
+
+        # Fallback to the other index
+        if block is None and prefix == "doc" and self._symbol_index:
+            block = self._symbol_index.get_file_symbol_block(path)
+        elif block is None and prefix == "sym" and self._doc_index:
+            block = self._doc_index.get_file_doc_block(path)
+
+        if block:
+            return {"block": block, "path": path, "prefix": prefix}
+        return {"error": f"No map block found for {key}"}
+
     # ── File Navigation ───────────────────────────────────────────
 
     def navigate_file(self, path: str) -> dict:
@@ -1374,6 +1412,9 @@ class LLMService:
                     block = self._doc_index.get_file_doc_block(path)
                     if block:
                         item.tokens = tc.count(block)
+                        item.content_hash = (
+                            self._doc_index.cache.get_content_hash(path) or ""
+                        )
 
     def _update_stability(self, tracker: StabilityTracker):
         """Build active items and run tracker update."""
@@ -1449,6 +1490,17 @@ class LLMService:
         if not tracker:
             return {}
 
+        # Collect all file: paths across all tiers so we can suppress
+        # their index blocks (a file must never appear as both full content
+        # and index block — spec: "A File Never Appears Twice").
+        # Also include selected files — they have full content in the
+        # active "Working Files" section even before graduating.
+        all_file_paths: set[str] = set(self._selected_files)
+        for _tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
+            for key in tracker.get_tier_items(_tier):
+                if key.startswith("file:"):
+                    all_file_paths.add(key.split(":", 1)[1])
+
         url_hash_lookup = None
         tiered = {}
         for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
@@ -1460,12 +1512,18 @@ class LLMService:
             for key, item in tier_items.items():
                 if key.startswith("sym:"):
                     path = key.split(":", 1)[1]
+                    # Skip index block when full file content is present anywhere
+                    if path in all_file_paths:
+                        continue
                     if self._symbol_index:
                         block = self._symbol_index.get_file_symbol_block(path)
                         if block:
                             symbols_text += block + "\n"
                 elif key.startswith("doc:"):
                     path = key.split(":", 1)[1]
+                    # Skip index block when full file content is present anywhere
+                    if path in all_file_paths:
+                        continue
                     if self._doc_index:
                         block = self._doc_index.get_file_doc_block(path)
                         if block:
