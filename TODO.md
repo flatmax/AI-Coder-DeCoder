@@ -104,7 +104,9 @@ File path appears on the line before `<<<<<<< SEARCH`.
 - [x] Edit Protocol
   - [x] `src/ac_dc/edit_parser.py` — Parser (state machine), validator (anchor finding + diagnostics), applier (repo integration), shell command detection
   - [x] `tests/test_edit_parser.py` — Parsing, validation, application, not-in-context handling, shell commands
-- [ ] Cache & Assembly (stability tracker, tiers, graduation, cascade)
+- [x] Cache & Assembly (stability tracker, tiers, graduation, cascade)
+  - [x] `src/ac_dc/context/stability_tracker.py` — StabilityTracker with N values, tier graduation, ripple promotion cascade, initialization from reference graph, stale removal, history purge
+  - [x] `tests/test_stability_tracker.py` — N values, graduation, demotion, cascade, initialization, stale removal, deselected cleanup, multi-request lifecycle
 
 ## Phase 4: Features
 - [ ] URL Handling
