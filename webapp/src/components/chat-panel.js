@@ -2162,6 +2162,17 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
       this._showToast('Reset to HEAD — all changes discarded', 'success');
 
+      // Add message to chat
+      this.messages = [...this.messages, {
+        role: 'assistant',
+        content: '**Reset to HEAD** — all uncommitted changes have been discarded.',
+      }];
+      if (this._autoScroll) {
+        this.updateComplete.then(() => {
+          requestAnimationFrame(() => this._scrollToBottom());
+        });
+      }
+
       // Refresh file tree
       this.dispatchEvent(new CustomEvent('files-modified', {
         detail: { files: [] },
