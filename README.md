@@ -23,6 +23,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Document convert** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown from a dedicated dialog tab. PDFs and presentations extract text into markdown and export pages with images/vector graphics as SVGs. Requires a clean git working tree so all results appear as reviewable diffs. Install `pip install ac-dc[docs]` for conversion support. The full PDF/presentation pipeline also requires [LibreOffice](https://www.libreoffice.org/) (`soffice` on PATH) for format conversion and [PyMuPDF](https://pymupdf.readthedocs.io/) (`pip install pymupdf`) for page extraction — without them, `.pptx` falls back to python-pptx (basic SVG export) and `.pdf` conversion is unavailable.
 - **Collaboration mode** — multiple browsers can connect to one backend over LAN. The host is auto-admitted; subsequent connections require explicit approval via an in-browser toast. Non-localhost participants get a read-only view (browse files, view diffs, watch streaming) while the host retains full control. Enable with `--collab`.
 - **Voice dictation** via Web Speech API.
+- **Math rendering** — LaTeX expressions in LLM responses render as formatted math via KaTeX (`$$...$$` for display blocks, `$...$` for inline).
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
