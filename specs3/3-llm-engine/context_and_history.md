@@ -46,8 +46,8 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 
 | Operation | Description |
 |-----------|-------------|
-| `add_message(role, content)` | Append single message |
-| `add_exchange(user, assistant)` | Append pair atomically |
+| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after) |
+| `add_exchange(user, assistant)` | Append pair atomically (used for session restore; not used during streaming) |
 | `get_history()` | Return a copy |
 | `set_history(messages)` | Replace entirely (after compaction or session load) |
 | `clear_history()` | Empty list + purge history from stability tracker |
@@ -202,7 +202,13 @@ The context retrieval path strips all metadata (`files`, `files_modified`, `edit
 
 ### Message Persistence Ordering
 
-The user message is persisted to the JSONL store **before** the LLM call starts, while the assistant message is persisted **after** the full response completes. If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response. This is by design (the user's intent is worth preserving) but means session message counts may be odd and the last message in a crashed session may be a user message with no reply.
+The user message is persisted to both the JSONL store **and** the in-memory context history **before** the LLM call starts. The assistant message is added to both stores **after** the full response completes.
+
+- **JSONL store**: `history_store.append_message(role="user")` runs before streaming begins
+- **In-memory context**: `context.add_message("user", message)` runs before streaming begins
+- **Assistant message**: `context.add_message("assistant", full_content)` runs after streaming completes, followed by `history_store.append_message(role="assistant")`
+
+If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response, and the in-memory context contains the user message without a paired reply. This is by design — the user's intent is worth preserving and is available for session restore. Session message counts may be odd and the last message in a crashed session may be a user message with no reply.
 
 ### Search Fallback
 
