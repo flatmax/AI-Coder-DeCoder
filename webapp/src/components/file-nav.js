@@ -361,6 +361,8 @@ export class AcFileNav extends LitElement {
 
   /**
    * Called on Alt+Arrow. Returns the file path of the neighbor, or null.
+   * If no neighbor exists in the given direction, wraps to the opposite edge
+   * of the grid along that axis.
    * @param {'left'|'right'|'up'|'down'} dir
    * @returns {string|null}
    */
@@ -370,7 +372,13 @@ export class AcFileNav extends LitElement {
 
     const off = DIR_OFFSET[dir];
     const key = _gridKey(current.gridX + off.dx, current.gridY + off.dy);
-    const neighborId = this._gridIndex.get(key);
+    let neighborId = this._gridIndex.get(key);
+
+    // If no direct neighbor, wrap to the opposite edge
+    if (neighborId == null) {
+      neighborId = this._findWrapTarget(current, dir);
+    }
+
     if (neighborId == null) return null;
 
     const neighbor = this._nodes.get(neighborId);
@@ -383,6 +391,63 @@ export class AcFileNav extends LitElement {
     this._currentNodeId = neighbor.id;
     this._tick();
     return neighbor.path;
+  }
+
+  /**
+   * Find the wrap-around target when navigating off the edge of the grid.
+   * Scans all nodes along the same row/column and returns the node at
+   * the opposite extreme.
+   *
+   * - left  → rightmost node on the same row
+   * - right → leftmost node on the same row
+   * - up    → bottommost node on the same column
+   * - down  → topmost node on the same column
+   *
+   * Returns null if no other node exists on that axis, or if the only
+   * node found is the current one.
+   * @param {object} current - current node
+   * @param {'left'|'right'|'up'|'down'} dir
+   * @returns {number|null} node id or null
+   */
+  _findWrapTarget(current, dir) {
+    const horizontal = (dir === 'left' || dir === 'right');
+    let bestId = null;
+    let bestVal = null;
+
+    // For wrapping, we want the opposite extreme:
+    //   left  → max gridX (rightmost)
+    //   right → min gridX (leftmost)
+    //   up    → max gridY (bottommost)
+    //   down  → min gridY (topmost)
+    const wantMax = (dir === 'left' || dir === 'up');
+
+    for (const node of this._nodes.values()) {
+      if (node.id === current.id) continue;
+
+      if (horizontal) {
+        // Same row
+        if (node.gridY !== current.gridY) continue;
+        const val = node.gridX;
+        if (bestVal == null
+            || (wantMax && val > bestVal)
+            || (!wantMax && val < bestVal)) {
+          bestVal = val;
+          bestId = node.id;
+        }
+      } else {
+        // Same column
+        if (node.gridX !== current.gridX) continue;
+        const val = node.gridY;
+        if (bestVal == null
+            || (wantMax && val > bestVal)
+            || (!wantMax && val < bestVal)) {
+          bestVal = val;
+          bestId = node.id;
+        }
+      }
+    }
+
+    return bestId;
   }
 
   /**

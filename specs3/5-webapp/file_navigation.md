@@ -124,13 +124,29 @@ When a new node's target grid position is occupied by an existing node (this occ
 When an Alt+Arrow key is pressed:
 
 1. Look up the adjacent grid cell in the pressed direction
-2. If no node exists at that cell, do nothing (no-op)
-3. If a node exists, increment the travel count for the current↔neighbor pair
-4. The neighbor becomes the current node
-5. The file at the neighbor node is opened in the appropriate viewer (diff viewer or SVG viewer, based on file extension)
-6. The HUD updates to show the new position
+2. If a node exists, increment the travel count for the current↔neighbor pair
+3. If no node exists at that cell, **wrap** to the opposite edge of the grid along the same axis (see [Edge Wrapping](#edge-wrapping))
+4. If wrapping also finds no node, do nothing (no-op)
+5. The neighbor becomes the current node
+6. The file at the neighbor node is opened in the appropriate viewer (diff viewer or SVG viewer, based on file extension)
+7. The HUD updates to show the new position
 
 These shortcuts are handled at the **app shell level** with a capture-phase listener to intercept before Monaco's word-navigation Alt+Arrow bindings. When the grid has nodes, all Alt+Arrow events are consumed (`preventDefault` + `stopPropagation`) regardless of whether a neighbor exists in the pressed direction — this prevents unintended edits in Monaco while the HUD is visible.
+
+### Edge Wrapping
+
+When Alt+Arrow is pressed and no node exists in the adjacent cell, navigation **wraps** to the opposite edge of the grid along the same row or column:
+
+| Direction | Wrap target |
+|-----------|-------------|
+| Left (no left neighbor) | Rightmost node on the same row |
+| Right (no right neighbor) | Leftmost node on the same row |
+| Up (no upper neighbor) | Bottommost node on the same column |
+| Down (no lower neighbor) | Topmost node on the same column |
+
+The scan considers only nodes sharing the same row (for left/right) or same column (for up/down) as the current node. If no other node exists on that axis, the navigation is a no-op. The wrap target does not need to be directly adjacent — it can be any distance away along the axis.
+
+Travel counts are incremented for the current↔wrap-target pair, the same as for any other traversal.
 
 ### HUD Click Teleport
 
@@ -375,7 +391,12 @@ Pressing Escape while the HUD is visible hides it immediately (no fade) without 
 
 ### Navigation
 - Alt+→ with node at `(currentX+1, currentY)` opens that file
-- Alt+← with empty cell at `(currentX-1, currentY)` is no-op
+- Alt+← with empty cell at `(currentX-1, currentY)` wraps to rightmost node on same row
+- Alt+→ at rightmost node on a row wraps to leftmost node on same row
+- Alt+↑ at topmost node in a column wraps to bottommost node in same column
+- Alt+↓ at bottommost node in a column wraps to topmost node in same column
+- Wrapping on an axis with no other nodes is a no-op
+- Travel counts increment on wrap traversal the same as direct traversal
 - Travel counts increment on each traversal between a pair
 - HUD click teleports without creating new nodes
 - Disconnected nodes reachable via HUD click
