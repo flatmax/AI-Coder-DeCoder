@@ -377,6 +377,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._highlightDecorations = [];
     this._lspRegistered = false;
     this._virtualContents = {};
+    this._viewportStates = new Map();  // path → { scrollTop, scrollLeft, lineNumber, column }
     this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
     this._scrollLockTimer = null;  // Timer to release the lock
     this._editorScrollDisposable = null; // Monaco scroll listener disposable
@@ -451,6 +452,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const existingIdx = this._files.findIndex(f => f.path === path);
     if (existingIdx !== -1) {
       const wasActive = this._activeIndex === existingIdx;
+      // Save viewport of the file we're leaving
+      if (!wasActive) {
+        this._savePerFileViewport();
+      }
       this._activeIndex = existingIdx;
       await this.updateComplete;
       // Only rebuild the editor if switching to a different tab;
@@ -463,6 +468,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         this._scrollToLine(line);
       } else if (searchText) {
         this._scrollToSearchText(searchText);
+      } else if (!wasActive) {
+        // Restore saved viewport when switching back to this file
+        this._restorePerFileViewport(path);
       }
       this._dispatchActiveFileChanged(path);
       return;
@@ -489,6 +497,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       is_new = content.is_new;
       is_read_only = content.is_read_only ?? false;
     }
+
+    // Save viewport of the file we're leaving before adding the new tab
+    this._savePerFileViewport();
 
     const fileObj = {
       path,
@@ -571,6 +582,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    */
   closeFile(path) {
     delete this._virtualContents[path];
+    this._viewportStates.delete(path);
     const idx = this._files.findIndex(f => f.path === path);
     if (idx === -1) return;
 
@@ -723,6 +735,31 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     };
     requestAnimationFrame(() => tryRestore());
+  }
+
+  /**
+   * Save the current file's viewport state to the per-file map.
+   * Called internally before switching away from a tab.
+   */
+  _savePerFileViewport() {
+    if (this._activeIndex < 0 || this._activeIndex >= this._files.length) return;
+    const file = this._files[this._activeIndex];
+    const state = this.getViewportState();
+    if (state) {
+      this._viewportStates.set(file.path, state);
+    }
+  }
+
+  /**
+   * Restore a file's viewport state from the per-file map.
+   * Waits for the diff editor to finish computing before scrolling.
+   */
+  _restorePerFileViewport(path) {
+    const state = this._viewportStates.get(path);
+    if (!state) return;
+    this._waitForDiffReady().then(() => {
+      this.restoreViewportState(state);
+    });
   }
 
   // === File Fetching ===
@@ -1019,18 +1056,24 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageDown') {
       e.preventDefault();
       if (this._files.length > 1) {
-        this._activeIndex = (this._activeIndex + 1) % this._files.length;
+        this._savePerFileViewport();
+        const nextIndex = (this._activeIndex + 1) % this._files.length;
+        this._activeIndex = nextIndex;
         this._showEditor();
-        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+        this._restorePerFileViewport(this._files[nextIndex].path);
+        this._dispatchActiveFileChanged(this._files[nextIndex].path);
       }
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageUp') {
       e.preventDefault();
       if (this._files.length > 1) {
-        this._activeIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
+        this._savePerFileViewport();
+        const prevIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
+        this._activeIndex = prevIndex;
         this._showEditor();
-        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+        this._restorePerFileViewport(this._files[prevIndex].path);
+        this._dispatchActiveFileChanged(this._files[prevIndex].path);
       }
       return;
     }
