@@ -212,6 +212,29 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       border-radius: 2px;
     }
 
+    .visual-btn {
+      position: absolute;
+      top: 6px;
+      right: 64px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border: 1px solid var(--border, #444);
+      border-radius: 4px;
+      background: var(--bg-secondary, #1e1e1e);
+      color: var(--text-muted, #999);
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .visual-btn:hover {
+      background: var(--bg-tertiary, #2a2a2a);
+      color: var(--text-primary, #e0e0e0);
+      border-color: var(--text-muted, #666);
+    }
+
     /* Split layout for preview mode */
     .split-container {
       display: flex;
@@ -499,7 +522,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       is_config: opts.is_config ?? false,
       config_type: opts.config_type ?? null,
       real_path: opts.real_path ?? null,
-      savedContent: modified,
+      savedContent: opts.savedContent ?? modified,
     };
 
     this._files = [...this._files, fileObj];
@@ -1093,6 +1116,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         configType: file.config_type,
       },
     }));
+
   }
 
   /**
@@ -1486,6 +1510,27 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return ext === '.md' || ext === '.markdown';
   }
 
+  _isSvgFile(path) {
+    if (!path) return false;
+    return path.toLowerCase().endsWith('.svg');
+  }
+
+  _switchToVisualMode() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    // Capture latest text content from Monaco
+    const modified = this._editor?.getModifiedEditor()?.getValue() ?? file.modified;
+    window.dispatchEvent(new CustomEvent('toggle-svg-mode', {
+      detail: {
+        path: file.path,
+        target: 'visual',
+        modified,
+        savedContent: file.savedContent,
+      },
+    }));
+  }
+
   _togglePreview() {
     this._previewMode = !this._previewMode;
     if (this._previewMode) {
@@ -1747,7 +1792,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
 
   _renderOverlayButtons(file, isDirty, showPreviewBtn) {
     if (!file) return nothing;
+    const showVisualBtn = this._isSvgFile(file.path);
     return html`
+      ${showVisualBtn ? html`
+        <button
+          class="visual-btn"
+          title="Switch to visual SVG editor"
+          @click=${() => this._switchToVisualMode()}
+        >🎨 Visual</button>
+      ` : nothing}
       ${showPreviewBtn ? html`
         <button
           class="preview-btn ${this._previewMode ? 'active' : ''}"

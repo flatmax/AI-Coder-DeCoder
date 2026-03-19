@@ -128,6 +128,12 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       color: #111;
       border-color: var(--accent-primary, #4fc3f7);
     }
+    .float-btn.code-btn {
+      font-size: 0.65rem;
+      font-family: var(--font-mono, monospace);
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
 
     /* Legacy alias — keep existing references working */
     .fit-btn {
@@ -320,14 +326,12 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
       is_new = content.is_new;
     }
 
-    console.log(`SVG viewer: opening ${path} (original: ${original.length} chars, modified: ${modified.length} chars, new: ${is_new})`);
-
     const fileObj = {
       path,
       original,
       modified,
       is_new,
-      savedContent: modified,
+      savedContent: opts.savedContent ?? modified,
     };
 
     this._files = [...this._files, fileObj];
@@ -462,10 +466,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
   // === SVG Content Fetching ===
 
   async _fetchSvgContent(path) {
-    if (!this.rpcConnected) {
-      console.warn('SVG viewer: RPC not connected, cannot fetch', path);
-      return null;
-    }
+    if (!this.rpcConnected) return null;
     try {
       let original = '';
       let modified = '';
@@ -545,6 +546,22 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     } else {
       this._setMode('present');
     }
+  }
+
+  /**
+   * Switch this SVG file to the text diff viewer for XML editing.
+   */
+  _switchToDiffMode() {
+    const file = this._getActiveFile();
+    if (!file) return;
+    this._captureEditorContent();
+    window.dispatchEvent(new CustomEvent('toggle-svg-mode', {
+      detail: {
+        path: file.path,
+        target: 'diff',
+        savedContent: file.savedContent,
+      },
+    }));
   }
 
   /**
@@ -994,10 +1011,7 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
     // Capture latest from editor
     this._captureEditorContent();
 
-    if (!this.rpcConnected) {
-      console.warn('SVG viewer: RPC not connected, cannot save');
-      return;
-    }
+    if (!this.rpcConnected) return;
 
     try {
       await this.rpcCall('Repo.write_file', file.path, file.modified);
@@ -1393,6 +1407,11 @@ export class AcSvgViewer extends RpcMixin(LitElement) {
             @click=${() => isDirty ? this._save() : null}
           ></button>
           <div class="floating-actions">
+            <button
+              class="float-btn code-btn"
+              @click=${this._switchToDiffMode}
+              title="View as XML text diff"
+            >&lt;/&gt;</button>
             <button
               class="float-btn ${this._mode === 'present' ? 'active' : ''}"
               @click=${this._togglePresent}

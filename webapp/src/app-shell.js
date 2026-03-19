@@ -350,8 +350,10 @@ class AcApp extends JRPCClient {
     this._onToastEvent = this._onToastEvent.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
+    this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
     this._onWindowResize = this._onWindowResize.bind(this);
+    this._svgModeOverride = false;
     this._resizeRAF = null;
   }
 
@@ -368,6 +370,7 @@ class AcApp extends JRPCClient {
     window.addEventListener('search-navigate', this._onSearchNavigate);
     window.addEventListener('active-file-changed', this._onActiveFileChanged);
     window.addEventListener('load-diff-panel', this._onLoadDiffPanel);
+    window.addEventListener('toggle-svg-mode', this._onToggleSvgMode);
 
     // Intercept Ctrl+S globally and Alt+Arrow for file navigation
     window.addEventListener('keydown', this._onGlobalKeyDown, true);
@@ -396,6 +399,7 @@ class AcApp extends JRPCClient {
     window.removeEventListener('search-navigate', this._onSearchNavigate);
     window.removeEventListener('active-file-changed', this._onActiveFileChanged);
     window.removeEventListener('load-diff-panel', this._onLoadDiffPanel);
+    window.removeEventListener('toggle-svg-mode', this._onToggleSvgMode);
     window.removeEventListener('keydown', this._onGlobalKeyDown, true);
     window.removeEventListener('keyup', this._onGlobalKeyUp);
     window.removeEventListener('ac-toast', this._onToastEvent);
@@ -1103,6 +1107,7 @@ class AcApp extends JRPCClient {
    * When either viewer switches active file, activate the correct viewer layer.
    */
   _onActiveFileChanged(e) {
+    if (this._svgModeOverride) return;
     const path = e.detail?.path;
     if (path) {
       const isSvg = path.toLowerCase().endsWith('.svg');
@@ -1199,6 +1204,94 @@ class AcApp extends JRPCClient {
 
     if (diffV) {
       diffV.loadPanel(content, panel, label);
+    }
+  }
+
+  /**
+   * Toggle between SVG visual editor and text diff editor for .svg files.
+   */
+  _onToggleSvgMode(e) {
+    const { path, target, modified: textModified, savedContent: incomingSaved } = e.detail || {};
+    if (!path) return;
+
+    const diffV = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgV = this.shadowRoot?.querySelector('ac-svg-viewer');
+
+    this._svgModeOverride = true;
+
+    if (target === 'diff') {
+      // Capture latest SVG content before switching
+      if (svgV) svgV._captureEditorContent?.();
+      const svgFile = svgV?._files?.find(f => f.path === path);
+      const original = svgFile?.original || '';
+      const modified = svgFile?.modified || '';
+
+      // Flip visibility
+      if (diffV) {
+        diffV.classList.add('viewer-visible');
+        diffV.classList.remove('viewer-hidden');
+      }
+      if (svgV) {
+        svgV.classList.add('viewer-hidden');
+        svgV.classList.remove('viewer-visible');
+      }
+
+      // Close any stale tab then open fresh with SVG content.
+      // Set savedContent to the on-disk original so that visual edits
+      // from the SVG editor appear as dirty (unsaved) in the diff viewer.
+      if (diffV) {
+        diffV.closeFile(path);
+        const effectiveModified = modified || original;
+        diffV.openFile({
+          path,
+          original,
+          modified: effectiveModified,
+          is_new: svgFile?.is_new ?? false,
+          is_read_only: false,
+          savedContent: incomingSaved ?? svgFile?.savedContent ?? original,
+        });
+        requestAnimationFrame(() => {
+          if (diffV._editor) diffV._editor.layout();
+          this._svgModeOverride = false;
+        });
+      } else {
+        this._svgModeOverride = false;
+      }
+
+    } else if (target === 'visual') {
+      // Read SVG file data BEFORE closing (closeFile removes it from _files)
+      const svgFile = svgV?._files?.find(f => f.path === path);
+      const original = svgFile?.original ?? '';
+
+      // Flip visibility
+      if (svgV) {
+        svgV.classList.add('viewer-visible');
+        svgV.classList.remove('viewer-hidden');
+      }
+      if (diffV) {
+        diffV.classList.add('viewer-hidden');
+        diffV.classList.remove('viewer-visible');
+      }
+
+      // Pass text edits back to SVG viewer — close and reopen with
+      // the latest content from the diff editor.  Carry savedContent
+      // through so dirty state is preserved across mode toggles.
+      if (svgV) {
+        const savedContent = incomingSaved ?? svgFile?.savedContent ?? original;
+        svgV.closeFile(path);
+        svgV.openFile({
+          path,
+          original,
+          modified: textModified || original,
+          is_new: svgFile?.is_new ?? false,
+          savedContent,
+        });
+      }
+      if (diffV) diffV.closeFile(path);
+
+      requestAnimationFrame(() => { this._svgModeOverride = false; });
+    } else {
+      this._svgModeOverride = false;
     }
   }
 
