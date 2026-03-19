@@ -76,9 +76,35 @@ images: integer?         # DEPRECATED: kept for backward compat
 
 Old messages with `images: integer` load correctly but won't have displayable images.
 
+## Re-Attaching Previous Images
+
+Images from earlier messages can be re-attached to the current input for re-sending to the LLM. Two interaction paths:
+
+| Method | Location | Gesture |
+|--------|----------|---------|
+| Thumbnail overlay | 📎 button on image thumbnail (top-right, appears on hover) | Click |
+| Lightbox action | "📎 Re-attach to input" button at bottom of lightbox | Click |
+
+### Behavior
+
+- Adds the data URI to the pending `_images` array (same array used by paste)
+- Respects the 5-image limit — shows error toast if already at capacity
+- Duplicate detection — same data URI cannot be attached twice
+- Toast confirms: "Image attached to input" (success), "Max 5 images per message" (error), "Image already attached" (neutral)
+- Image appears in the thumbnail preview strip below the textarea, identical to a freshly pasted image
+- Lightbox button turns green (`.reattached` class) on click for visual confirmation; lightbox stays open
+
+### Scope
+
+Re-attach works on images from:
+- Current session messages (stored as `msg.images` data URI arrays)
+- Loaded history sessions (reconstructed from `image_refs` as multimodal content blocks)
+
+Both rendering paths wrap thumbnails in `.user-image-wrapper` with the 📎 overlay button.
+
 ## What Does NOT Change
 
-- Images are NOT re-sent to the LLM on subsequent messages — display-only after original send
+- Images are NOT automatically re-sent to the LLM on subsequent messages — display-only after original send (but can be manually re-attached)
 - Token counting for images unchanged
 - Image size limits unchanged (5MB per image, 5 per message)
 

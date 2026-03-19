@@ -97,7 +97,7 @@ Assistant messages are rendered via `renderMarkdown()` from `webapp/src/utils/ma
 
 **Chat renderer overrides:** Only the `code()` renderer method is overridden. All other block elements (headings, paragraphs, lists, tables, blockquotes) use marked's built-in defaults. This keeps the chat renderer simple and immune to regressions from preview-specific logic.
 
-**Configuration:** GFM enabled, `breaks: true` (newlines become `<br>`).
+**Configuration:** GFM enabled, `breaks: true` (newlines become `<br>`). A KaTeX math extension handles `$$...$$` (display math) and `$...$` (inline math) — expressions are rendered to MathML/HTML via `katex.renderToString` with `throwOnError: false`, falling back to escaped code on parse failure.
 
 **Syntax highlighting:** The `code()` renderer uses `highlight.js` with explicit language registration. Registered languages: `javascript`/`js`, `python`/`py`, `typescript`/`ts`, `json`, `bash`/`sh`/`shell`, `css`, `html`/`xml`, `yaml`/`yml`, `c`, `cpp`, `diff`, `markdown`/`md`. When a language is specified on a fenced code block and recognized, it is highlighted directly. When no language is specified, `highlightAuto` attempts auto-detection. Unrecognized languages fall back to HTML-escaped plain text.
 
@@ -227,6 +227,7 @@ Only in-context mismatch failures trigger this behavior. Mismatch failures on fi
 | `diff` (npm) | `diffLines`, `diffWords` | `webapp/src/utils/edit-blocks.js` — line-level and word-level Myers diff |
 | `marked` (npm) | `Marked` | `webapp/src/utils/markdown.js` — GFM markdown parsing with `breaks: true` |
 | `highlight.js` (npm) | `hljs` (core + per-language) | `webapp/src/utils/markdown.js` — syntax highlighting in code blocks |
+| `katex` (npm) | `katex` | `webapp/src/utils/markdown.js` — LaTeX math rendering (`$$...$$` display, `$...$` inline) |
 
 ---
 
@@ -343,11 +344,12 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 | Max images per message | 5 |
 | Encoding | Base64 data URI |
 | Display (input) | Thumbnail previews with remove button, below textarea |
-| Display (message) | Thumbnails in user cards, clickable for lightbox overlay |
-| Lightbox | Full-size view with Escape to close. Overlay is focusable (`tabindex="0"`) for keyboard handling but does not implement full focus trapping |
+| Display (message) | Thumbnails in user cards with 📎 re-attach overlay (appears on hover), clickable for lightbox overlay |
+| Lightbox | Full-size view with Escape to close. "📎 Re-attach to input" action button at bottom. Overlay is focusable (`tabindex="0"`) for keyboard handling but does not implement full focus trapping |
+| Re-attach | 📎 button on thumbnails or lightbox adds image to pending input (same as paste). Respects 5-image limit and deduplication. See [Image Persistence — Re-Attaching](../4-features/image_persistence.md#re-attaching-previous-images) |
 | Token counting | Provider's image token formula; fallback: ~1000 tokens per image |
 | Persistence | See [Image Persistence](../4-features/image_persistence.md) |
-| Re-send | NOT re-sent to LLM on subsequent messages — display-only after original send |
+| Re-send | NOT automatically re-sent to LLM on subsequent messages — display-only after original send, but can be manually re-attached |
 
 ---
 

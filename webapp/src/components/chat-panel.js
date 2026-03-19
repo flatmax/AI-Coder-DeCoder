@@ -645,6 +645,37 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       transform: scale(1.03);
     }
 
+    /* Re-attach button on image thumbnails */
+    .user-image-wrapper {
+      position: relative;
+      display: inline-block;
+    }
+    .user-image-reattach {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      background: rgba(0, 0, 0, 0.65);
+      color: white;
+      border: none;
+      font-size: 0.7rem;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 0.15s;
+      z-index: 1;
+    }
+    .user-image-wrapper:hover .user-image-reattach {
+      opacity: 1;
+    }
+    .user-image-reattach:hover {
+      background: rgba(79, 195, 247, 0.8);
+    }
+
     /* Image lightbox */
     .image-lightbox {
       position: fixed;
@@ -662,6 +693,38 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       object-fit: contain;
       border-radius: var(--radius-md);
       box-shadow: var(--shadow-lg);
+    }
+    .lightbox-actions {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      z-index: 10003;
+    }
+    .lightbox-btn {
+      background: rgba(30, 30, 30, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: white;
+      font-size: 0.85rem;
+      padding: 8px 16px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s, border-color 0.15s;
+      backdrop-filter: blur(8px);
+    }
+    .lightbox-btn:hover {
+      background: rgba(79, 195, 247, 0.3);
+      border-color: var(--accent-primary);
+    }
+    .lightbox-btn.reattached {
+      background: rgba(80, 200, 120, 0.3);
+      border-color: var(--accent-green);
+      color: var(--accent-green);
     }
 
     /* Image previews */
@@ -2539,8 +2602,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         parts.push(html`
           <div class="user-images">
             ${imageSrcs.map(src => html`
-              <img class="user-image-thumb" src="${src}" alt="User image"
-                   @click=${() => this._openLightbox(src)}>
+              <div class="user-image-wrapper">
+                <button class="user-image-reattach" title="Re-attach to input"
+                        @click=${(e) => { e.stopPropagation(); this._reattachImage(src); }}>📎</button>
+                <img class="user-image-thumb" src="${src}" alt="User image"
+                     @click=${() => this._openLightbox(src)}>
+              </div>
             `)}
           </div>
         `);
@@ -2560,8 +2627,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         ${textPart}
         <div class="user-images">
           ${msg.images.map(src => html`
-            <img class="user-image-thumb" src="${src}" alt="User image"
-                 @click=${() => this._openLightbox(src)}>
+            <div class="user-image-wrapper">
+              <button class="user-image-reattach" title="Re-attach to input"
+                      @click=${(e) => { e.stopPropagation(); this._reattachImage(src); }}>📎</button>
+              <img class="user-image-thumb" src="${src}" alt="User image"
+                   @click=${() => this._openLightbox(src)}>
+            </div>
           `)}
         </div>
       `;
@@ -2582,6 +2653,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
   _closeLightbox(e) {
     // Close on click anywhere or Escape
     this._lightboxSrc = null;
+  }
+
+  /**
+   * Re-attach an image from a previous message to the current input.
+   * Adds the data URI to the pending _images array (respecting the 5-image limit).
+   */
+  _reattachImage(src) {
+    if (!src) return;
+    if (this._images.length >= 5) {
+      this._showToast('Max 5 images per message', 'error');
+      return;
+    }
+    // Check for duplicate — don't add the same image twice
+    if (this._images.includes(src)) {
+      this._showToast('Image already attached', '');
+      return;
+    }
+    this._images = [...this._images, src];
+    this._showToast('Image attached to input', 'success');
   }
 
   _onLightboxKeyDown(e) {
@@ -2939,6 +3029,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
              tabindex="0">
           <img src="${this._lightboxSrc}" alt="Full size image"
                @click=${(e) => e.stopPropagation()}>
+          <div class="lightbox-actions" @click=${(e) => e.stopPropagation()}>
+            <button class="lightbox-btn"
+                    title="Attach this image to your next message"
+                    @click=${(e) => { this._reattachImage(this._lightboxSrc); e.target.closest('.lightbox-btn').classList.add('reattached'); }}>
+              📎 Re-attach to input
+            </button>
+          </div>
         </div>
       ` : nothing}
     `;

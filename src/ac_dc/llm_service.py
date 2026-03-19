@@ -1643,6 +1643,10 @@ class LLMService:
                 except Exception as e:
                     logger.warning(f"Failed to persist user message: {e}")
 
+            # Add user message to in-memory context immediately so it
+            # survives mid-stream crashes (assistant message added later)
+            self._context.add_message("user", message)
+
             # Broadcast user message to all clients immediately so
             # collaborators see it before the assistant starts streaming
             if self._event_callback:
@@ -1736,8 +1740,8 @@ class LLMService:
                 result["cancelled"] = True
                 full_content = full_content + "\n\n[stopped]" if full_content else "[stopped]"
 
-            # Add exchange to context
-            self._context.add_exchange(message, full_content)
+            # Add assistant response to context (user message already added above)
+            self._context.add_message("assistant", full_content)
 
             # Update session totals
             for key in self._session_totals:

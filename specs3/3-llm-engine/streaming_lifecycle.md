@@ -18,7 +18,6 @@ Server: LLMService.chat_streaming(request_id, message, files, images)
     │
     ├─ Guard: reject if server still initializing (deferred init not complete)
     ├─ Guard: reject if another stream is active
-    ├─ Persist user message to history store
     ├─ Launch background streaming task
     ├─ Return immediately: {status: "started"}
     │
@@ -36,6 +35,9 @@ Background task: _stream_chat
     │       ├─ Fetch, cache, and summarize each URL
     │       ├─ Notify client: compactionEvent with stage "url_ready"
     │       └─ Update URL context on context manager (joined as single string)
+    ├─ Persist user message to JSONL history store
+    ├─ Add user message to in-memory context (survives mid-stream crashes)
+    ├─ Broadcast user message to all clients
     ├─ Build and inject review context (if review mode active)
     ├─ Append system reminder to user prompt (from config `system_reminder.md`)
     ├─ Build tiered_content from stability tracker (→ prompt_assembly.md#tiered-assembly-data-flow)
@@ -45,7 +47,7 @@ Background task: _stream_chat
     │       ├─ streamChunk callbacks → browser
     │       └─ return (full_content, was_cancelled)
     │
-    ├─ Add exchange to context manager
+    ├─ Add assistant response to context (user message already added before streaming)
     ├─ Save symbol map to .ac-dc/
     ├─ Print terminal HUD
     ├─ Parse & apply edit blocks (→ edit_protocol.md; skipped in review mode)
