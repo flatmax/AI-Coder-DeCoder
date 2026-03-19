@@ -257,11 +257,11 @@ class LLMService:
                 return
             for msg in msgs:
                 self._context.add_message(msg["role"], msg["content"])
-            # Start a NEW session for upcoming messages — don't reuse the old
-            # session ID, otherwise new messages get appended to the previous
-            # session and the first chat after restart merges into old history.
-            self._session_id = self._new_session_id()
-            logger.info(f"Restored {len(msgs)} messages from session {session_id}, new session: {self._session_id}")
+            # Reuse the restored session ID so that subsequent messages
+            # (chat, commits, resets) are persisted to the same session.
+            # A new session is only created by explicit new_session() calls.
+            self._session_id = session_id
+            logger.info(f"Restored {len(msgs)} messages from session {session_id}")
         except Exception as e:
             logger.warning(f"Failed to restore last session: {e}")
 
@@ -2402,12 +2402,17 @@ class LLMService:
 
         self._committing = True
 
+        # Capture session ID now (before background task runs) so the
+        # commit event is persisted to the correct session even if the
+        # server restarted and _session_id was replaced by _restore_last_session.
+        session_id = self._session_id
+
         # Launch background task
-        asyncio.ensure_future(self._commit_all_background())
+        asyncio.ensure_future(self._commit_all_background(session_id))
 
         return {"status": "started"}
 
-    async def _commit_all_background(self):
+    async def _commit_all_background(self, session_id):
         """Background task for commit_all — stages, generates message, commits."""
         result = {}
         try:
@@ -2478,7 +2483,7 @@ class LLMService:
             if self._history_store:
                 try:
                     self._history_store.append_message(
-                        session_id=self._session_id,
+                        session_id=session_id,
                         role="user",
                         content=event_text,
                     )
