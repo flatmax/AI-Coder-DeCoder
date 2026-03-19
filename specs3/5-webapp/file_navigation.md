@@ -73,6 +73,12 @@ These do not create nodes:
 
 If the current node already references the same file path as the target, no new node is created. The file is already open.
 
+### Adjacent Same-File Reuse
+
+If an adjacent neighbor of the current node already references the target file path, no new node is created. Instead, the existing neighbor becomes the current node and its travel count is incremented — the same as an Alt+Arrow traversal to that neighbor. The check scans adjacent cells in placement priority order (right → up → down → left) and uses the first match.
+
+This prevents duplicate nodes for the same file accumulating around a hub node when the user repeatedly opens the same file from different navigation paths.
+
 ### Placement Algorithm
 
 When a new node is created from the current node, it is placed in the first available adjacent cell in priority order: **right → up → down → left**.
@@ -360,6 +366,7 @@ Pressing Escape while the HUD is visible hides it immediately (no fade) without 
 - Second file open creates node at `(1, 0)` (right of root)
 - Third from root fills `(0, -1)` (up), then `(0, 1)` (down), then `(-1, 0)` (left)
 - Same-file open from current node is suppressed (no new node)
+- Same-file open when adjacent neighbor has that file reuses the neighbor (no new node, travel count incremented)
 - All 4 neighbors occupied → replaces the least-traveled neighbor
 - Replacement tie-breaking prefers reverse priority order (left first)
 - Grid collision replaces existing node at target position

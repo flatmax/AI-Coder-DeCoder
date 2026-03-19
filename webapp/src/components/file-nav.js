@@ -299,6 +299,24 @@ export class AcFileNav extends LitElement {
       return { path, created: false };
     }
 
+    // If an adjacent neighbor already references this file, navigate to it
+    if (current) {
+      for (const d of PLACEMENT_ORDER) {
+        const off = DIR_OFFSET[d];
+        const key = _gridKey(current.gridX + off.dx, current.gridY + off.dy);
+        const neighborId = this._gridIndex.get(key);
+        if (neighborId == null) continue;
+        const neighbor = this._nodes.get(neighborId);
+        if (neighbor && neighbor.path === path) {
+          const pk = _pairKey(current.id, neighbor.id);
+          this._travelCounts.set(pk, (this._travelCounts.get(pk) || 0) + 1);
+          this._currentNodeId = neighbor.id;
+          this._tick();
+          return { path, created: false };
+        }
+      }
+    }
+
     // First node ever
     if (!current) {
       const node = _createNode(this._nextId++, path, 0, 0);
