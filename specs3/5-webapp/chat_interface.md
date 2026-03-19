@@ -382,7 +382,7 @@ The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)
 
 | Right | 📋 | Copy diff to clipboard |
 | Right | 💾 | Commit all (server-driven — see below) |
-| Right | ⚠️ | Reset to HEAD (with confirmation) |
+| Right | ⚠️ | Reset to HEAD (with confirmation). On success, adds an assistant message to the chat: "**Reset to HEAD** — all uncommitted changes have been discarded." |
 
 ### Review Status Bar
 

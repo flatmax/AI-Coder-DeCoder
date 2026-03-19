@@ -82,7 +82,7 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 | `Repo.get_unstaged_diff()` | `git diff` as text |
 | `Repo.stage_all()` | `git add -A` |
 | `Repo.commit(message)` | Create commit. Handles repos without HEAD |
-| `Repo.reset_hard()` | `git reset --hard HEAD` |
+| `Repo.reset_hard()` | `git reset --hard HEAD`. On success, an assistant message is added to the chat confirming the reset |
 | `Repo.search_commits(query, branch?, limit?)` | Search commits by message/SHA/author via `git log --grep` |
 
 ### Commit Flow (UI-Driven)
