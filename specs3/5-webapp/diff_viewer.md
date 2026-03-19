@@ -97,7 +97,7 @@ The markdown utility module maintains two completely independent `Marked` instan
 | `markedChat` | `renderMarkdown()` | Chat message rendering | `code()` only — language label, copy button, syntax highlighting |
 | `markedSourceMap` | `renderMarkdownWithSourceMap()` | Diff viewer preview | `code()` and `hr()` — with `data-source-line` attributes for scroll sync |
 
-The two instances share no renderer state. This separation prevents preview-specific logic (source-line injection, walkTokens hooks) from affecting chat rendering, and keeps the chat renderer simple by using marked's defaults for all non-code block elements.
+The two instances share no renderer state. This separation prevents preview-specific logic (source-line injection, walkTokens hooks) from affecting chat rendering, and keeps the chat renderer simple by using marked's defaults for all non-code block elements. Both instances register a shared KaTeX math extension for `$$...$$` (display) and `$...$` (inline) math rendering.
 
 Both instances share a common pre-processing step: `_encodeImagePaths()` encodes spaces in image paths as `%20` before passing text to `marked`, since `marked` cannot parse `![alt](path with spaces)`.
 

@@ -377,6 +377,7 @@ npm run build
 | [Monaco Editor](https://microsoft.github.io/monaco-editor/) | Side-by-side diff editor |
 | [Marked](https://marked.js.org/) | Markdown rendering |
 | [highlight.js](https://highlightjs.org/) | Syntax highlighting |
+| [KaTeX](https://katex.org/) | LaTeX math rendering (`$$...$$` display, `$...$` inline) |
 | [diff](https://github.com/kpdecker/jsdiff) | Myers diff algorithm for edit block display |
 
 **System dependencies (optional):**
