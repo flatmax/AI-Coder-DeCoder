@@ -344,11 +344,12 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 | Max images per message | 5 |
 | Encoding | Base64 data URI |
 | Display (input) | Thumbnail previews with remove button, below textarea |
-| Display (message) | Thumbnails in user cards, clickable for lightbox overlay |
-| Lightbox | Full-size view with Escape to close. Overlay is focusable (`tabindex="0"`) for keyboard handling but does not implement full focus trapping |
+| Display (message) | Thumbnails in user cards with 📎 re-attach overlay (appears on hover), clickable for lightbox overlay |
+| Lightbox | Full-size view with Escape to close. "📎 Re-attach to input" action button at bottom. Overlay is focusable (`tabindex="0"`) for keyboard handling but does not implement full focus trapping |
+| Re-attach | 📎 button on thumbnails or lightbox adds image to pending input (same as paste). Respects 5-image limit and deduplication. See [Image Persistence — Re-Attaching](../4-features/image_persistence.md#re-attaching-previous-images) |
 | Token counting | Provider's image token formula; fallback: ~1000 tokens per image |
 | Persistence | See [Image Persistence](../4-features/image_persistence.md) |
-| Re-send | NOT re-sent to LLM on subsequent messages — display-only after original send |
+| Re-send | NOT automatically re-sent to LLM on subsequent messages — display-only after original send, but can be manually re-attached |
 
 ---
 
