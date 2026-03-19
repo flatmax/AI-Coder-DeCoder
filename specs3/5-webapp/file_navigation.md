@@ -39,6 +39,10 @@ The grid is not persisted. On page reload, the grid is empty. The first file ope
 
 Navigating away from a file does not preserve unsaved changes. The editor content is discarded when a different node becomes current. Standard Ctrl+S saving works while a file is active.
 
+### Viewport Restoration
+
+When navigating back to a previously visited file (via Alt+Arrow or HUD click), the diff viewer restores the scroll position and cursor to where the user left off. The viewport state (scroll top/left, line number, column) is saved per-file in a transient `Map` before switching away, and restored after the diff editor finishes computing. This state is not persisted — on page reload, all saved viewports are lost along with the grid.
+
 ## Node Creation
 
 ### Triggers
@@ -269,7 +273,7 @@ The grid component dispatches a `navigate-file` event with the file path. The ap
 
 ### No Content Caching
 
-When navigating away from a node, the editor content is not cached. Navigating back to a node re-fetches the file from disk. Any unsaved changes are lost. This matches the current behavior where files are loaded fresh on each open.
+When navigating away from a node, the editor content is not cached. Navigating back to a node re-fetches the file from disk. Any unsaved changes are lost. This matches the current behavior where files are loaded fresh on each open. However, the diff viewer preserves and restores the **viewport state** (scroll position and cursor) per-file — see [Per-File Viewport State](diff_viewer.md#per-file-viewport-state).
 
 ## Component Architecture
 

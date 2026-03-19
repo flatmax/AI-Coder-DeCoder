@@ -190,6 +190,10 @@ A single `DiffEditor` instance is created and reused for all files. Switching fi
 
 When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
 
+### Per-File Viewport State
+
+The diff viewer maintains a transient `Map<path, ViewportState>` that stores each file's scroll position and cursor location. The viewport state (`scrollTop`, `scrollLeft`, `lineNumber`, `column`) is captured before switching away from a file (via `openFile`, Ctrl+PageDown/PageUp, or file-nav Alt+Arrow) and restored after switching back. Restoration waits for the diff editor's async diff computation to finish — scrolling before the diff result arrives would be overwritten by Monaco's layout pass. The map is not persisted; on page reload all saved viewports are lost. Entries are removed when a file is closed.
+
 ### Post-Edit Refresh
 
 Only reloads already-open files. Re-fetch HEAD and working copy, update models in place, clear dirty state, maintain active tab.
