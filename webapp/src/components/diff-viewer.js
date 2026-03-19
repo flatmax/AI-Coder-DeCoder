@@ -382,16 +382,20 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._editorScrollDisposable = null; // Monaco scroll listener disposable
 
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onMarkdownLinkNav = this._onMarkdownLinkNav.bind(this);
+    this._onPreviewClick = this._onPreviewClick.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('navigate-markdown-link', this._onMarkdownLinkNav);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('navigate-markdown-link', this._onMarkdownLinkNav);
     this._disposeEditor();
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
@@ -834,7 +838,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         wordWrap: this._previewMode ? 'on' : 'off',
         renderWhitespace: 'selection',
         contextmenu: true,
-        links: false,
+        links: true,
         hover: { enabled: true, above: false, sticky: true, delay: 600 },
         scrollbar: {
           verticalScrollbarSize: 8,
@@ -1177,6 +1181,66 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     }, 3000);
   }
 
+  /**
+   * Handle Ctrl+click on a Markdown link in the Monaco editor.
+   * Resolves the relative path against the current file's directory
+   * and opens the target file.
+   */
+  _onMarkdownLinkNav(e) {
+    const relativePath = e.detail?.relativePath;
+    if (!relativePath) return;
+    const resolved = this._resolveRelativePath(relativePath);
+    if (resolved) {
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path: resolved },
+      }));
+    }
+  }
+
+  /**
+   * Handle clicks inside the Markdown preview pane.
+   * Intercepts relative links and opens them in the editor.
+   */
+  _onPreviewClick(e) {
+    const anchor = e.target.closest('a');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (!href) return;
+    // Let absolute URLs open normally
+    if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:')) return;
+    // Skip pure anchor links
+    if (href.startsWith('#')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const filePath = href.split('#')[0];
+    if (!filePath) return;
+
+    const resolved = this._resolveRelativePath(filePath);
+    if (resolved) {
+      window.dispatchEvent(new CustomEvent('navigate-file', {
+        detail: { path: resolved },
+      }));
+    }
+  }
+
+  /**
+   * Resolve a relative path against the current file's directory.
+   * Returns a normalized repo-relative path.
+   */
+  _resolveRelativePath(relativePath) {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return relativePath;
+
+    const filePath = file.path;
+    const lastSlash = filePath.lastIndexOf('/');
+    const fileDir = lastSlash >= 0 ? filePath.slice(0, lastSlash) : '';
+
+    const combined = fileDir ? fileDir + '/' + relativePath : relativePath;
+    return this._normalizePath(combined);
+  }
+
   _dispatchActiveFileChanged(path) {
     window.dispatchEvent(new CustomEvent('active-file-changed', {
       detail: { path },
@@ -1305,6 +1369,52 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
           console.error('[LSP references] error:', e);
         }
         return null;
+      },
+    });
+
+    // Markdown link provider — makes [text](path) Ctrl+clickable
+    monaco.languages.registerLinkProvider('markdown', {
+      provideLinks: (model) => {
+        const links = [];
+        const lineCount = model.getLineCount();
+        // Match [text](relative-path) but not [text](http://...) or [text](https://...)
+        const linkRe = /\[([^\]]*)\]\(([^)]+)\)/g;
+        for (let i = 1; i <= lineCount; i++) {
+          const lineContent = model.getLineContent(i);
+          let match;
+          linkRe.lastIndex = 0;
+          while ((match = linkRe.exec(lineContent)) !== null) {
+            const target = match[2];
+            // Skip absolute URLs and anchors
+            if (target.startsWith('http://') || target.startsWith('https://') || target.startsWith('#')) continue;
+            // Strip any anchor fragment for file resolution
+            const filePath = target.split('#')[0];
+            if (!filePath) continue;
+            const startCol = match.index + match[1].length + 3; // after "[text]("
+            const endCol = startCol + match[2].length;
+            links.push({
+              range: new monaco.Range(i, startCol, i, endCol),
+              url: monaco.Uri.parse(`ac-navigate:///${filePath}`),
+            });
+          }
+        }
+        return { links };
+      },
+    });
+
+    // Intercept ac-navigate: links to open files in the editor
+    monaco.editor.registerLinkOpener({
+      open(resource) {
+        if (resource.scheme === 'ac-navigate') {
+          // Monaco URI parsing varies — extract the path robustly
+          const raw = decodeURIComponent(resource.toString());
+          const relativePath = raw.replace(/^ac-navigate:\/?\/?/, '');
+          window.dispatchEvent(new CustomEvent('navigate-markdown-link', {
+            detail: { relativePath },
+          }));
+          return true; // handled
+        }
+        return false; // let Monaco handle other links
       },
     });
 
@@ -1588,7 +1698,8 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             ${this._renderPanelLabels(true)}
           </div>
           <div class="preview-pane"
-               @scroll=${() => this._scrollEditorToPreviewLine()}>
+               @scroll=${() => this._scrollEditorToPreviewLine()}
+               @click=${this._onPreviewClick}>
             <button
               class="preview-btn active"
               title="Toggle Markdown preview"
