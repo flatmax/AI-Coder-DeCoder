@@ -19,7 +19,7 @@ Operational events (git commit, git reset) are recorded as messages with `role: 
 
 - The **LLM sees them** as part of conversation history (it knows when git was reset or committed)
 - They are **persisted** in the history store and survive page refresh / session reload
-- They render with **distinct styling** — dashed border, centered text, muted color, "System" role label — visually distinct from both user and assistant messages
+- They render with **distinct styling** — dashed border, left-aligned text, muted color, "System" role label — visually distinct from both user and assistant messages
 - The history compactor treats them as regular messages (they count toward token budgets)
 
 Events that produce system event messages:

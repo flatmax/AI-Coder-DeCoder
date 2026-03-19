@@ -341,7 +341,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .message-card.system-event {
       background: transparent;
       border: 1px dashed var(--border-primary);
-      text-align: center;
+      text-align: left;
       padding: 8px 16px;
       font-size: 0.8rem;
       color: var(--text-muted);

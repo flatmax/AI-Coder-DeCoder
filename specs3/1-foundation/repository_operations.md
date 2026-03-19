@@ -87,13 +87,24 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 
 ### Commit Flow (UI-Driven)
 
-1. Stage all changes (`stage_all`)
-2. Get staged diff (`get_staged_diff`)
-3. Send diff to LLM to generate commit message
-4. Commit with generated message (`commit`)
-5. Record system event message in conversation context and persistent history
-6. Broadcast commit result to all clients (displays as system event card)
-7. Refresh file tree
+1. User clicks 💾 in action bar → `LLMService.commit_all()`
+2. Server captures current session ID, returns `{status: "started"}` immediately
+3. Background task: stage all changes (`stage_all`)
+4. Get staged diff (`get_staged_diff`)
+5. Send diff to LLM to generate commit message
+6. Commit with generated message (`commit`)
+7. Record a **system event message** (`role: "user"`, `system_event: true`) in conversation context and persistent history, using the captured session ID
+8. Broadcast `commitResult` to all clients (displays as system event card in chat)
+9. Clients refresh file tree
+
+### Reset Flow (UI-Driven)
+
+1. User clicks ⚠️ in action bar → confirmation dialog
+2. On confirm → `LLMService.reset_to_head()`
+3. Server delegates to `Repo.reset_hard()`
+4. Record a **system event message** (`role: "user"`, `system_event: true`) in conversation context and persistent history
+5. Return result with `system_event_message` field
+6. Client displays system event card and refreshes file tree
 
 ## Search
 

@@ -344,6 +344,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.new_session` | `() → {session_id}` | Start new session |
 | `LLMService.generate_commit_message` | `(diff_text) → string` | Generate commit message |
 | `LLMService.commit_all` | `() → {status: "started"}` | Stage, generate message, commit — result via `commitResult` broadcast |
+| `LLMService.reset_to_head` | `() → {status, system_event_message}` | Reset git to HEAD, record system event in conversation context and history |
 | `LLMService.get_context_breakdown` | `() → {model, total_tokens, blocks, breakdown, ...}` | Token/tier breakdown |
 | `LLMService.check_review_ready` | `() → {clean, message?}` | Check for clean tree |
 | `LLMService.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | Delegates to Repo |

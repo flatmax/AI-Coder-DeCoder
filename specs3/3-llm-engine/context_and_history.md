@@ -139,12 +139,15 @@ HistoryMessage:
     timestamp: ISO 8601 UTC
     role: "user" | "assistant"
     content: string
+    system_event: boolean?   // True for operational events (commit, reset)
     image_refs: string[]?    // Filenames in .ac-dc/images/
     images: integer?         // DEPRECATED — legacy count field
     files: string[]?         // Files in context (user messages)
     files_modified: string[]? // Files changed (assistant messages)
     edit_results: object[]?
 ```
+
+**System event messages** use `role: "user"` with `system_event: true`. They record operational events (git commit, git reset) in the conversation so the LLM is aware of them. They are persisted, included in LLM context, and rendered with distinct styling in the frontend. See [Chat Interface — System Event Messages](../5-webapp/chat_interface.md#system-event-messages).
 
 ### Sessions
 
@@ -420,7 +423,9 @@ On LLM service initialization (before any client connects), the server automatic
 1. Query `list_sessions(limit=1)` for the newest session
 2. Load its messages via `get_session_messages_for_context`
 3. Add each message to the context manager
-4. Set the current session ID to the loaded session's ID
+4. **Reuse the restored session's ID** as the current session ID
+
+Reusing the session ID means subsequent messages (chat, commits, resets) are persisted to the same session the user was in before the restart. A new session is only created by an explicit `new_session()` call. This ensures system event messages (e.g. commit confirmations) appear in the correct session in the history browser.
 
 This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
 
