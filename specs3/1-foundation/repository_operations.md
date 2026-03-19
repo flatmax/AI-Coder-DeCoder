@@ -82,7 +82,7 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 | `Repo.get_unstaged_diff()` | `git diff` as text |
 | `Repo.stage_all()` | `git add -A` |
 | `Repo.commit(message)` | Create commit. Handles repos without HEAD |
-| `Repo.reset_hard()` | `git reset --hard HEAD`. On success, an assistant message is added to the chat confirming the reset |
+| `Repo.reset_hard()` | `git reset --hard HEAD` |
 | `Repo.search_commits(query, branch?, limit?)` | Search commits by message/SHA/author via `git log --grep` |
 
 ### Commit Flow (UI-Driven)
@@ -91,8 +91,9 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 2. Get staged diff (`get_staged_diff`)
 3. Send diff to LLM to generate commit message
 4. Commit with generated message (`commit`)
-5. Display commit message as assistant message in chat
-6. Refresh file tree
+5. Record system event message in conversation context and persistent history
+6. Broadcast commit result to all clients (displays as system event card)
+7. Refresh file tree
 
 ## Search
 

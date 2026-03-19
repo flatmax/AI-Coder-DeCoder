@@ -9,8 +9,28 @@ The chat panel renders conversation messages, handles streaming display, and man
 Messages render as a scrollable list of cards:
 - **User cards** — with optional image attachments
 - **Assistant cards** — markdown rendering, edit blocks, file mentions
+- **System event cards** — operational events (commit, reset) with distinct styling
 
 Cards use keyed rendering for DOM reuse.
+
+### System Event Messages
+
+Operational events (git commit, git reset) are recorded as messages with `role: "user"` and a `system_event: true` flag. This design ensures:
+
+- The **LLM sees them** as part of conversation history (it knows when git was reset or committed)
+- They are **persisted** in the history store and survive page refresh / session reload
+- They render with **distinct styling** — dashed border, centered text, muted color, "System" role label — visually distinct from both user and assistant messages
+- The history compactor treats them as regular messages (they count toward token budgets)
+
+Events that produce system event messages:
+
+| Event | Message Content |
+|-------|----------------|
+| Commit | `**Committed** \`{sha}\`\n\n\`\`\`\n{message}\n\`\`\`` |
+| Reset to HEAD | `**Reset to HEAD** — all uncommitted changes have been discarded.` |
+| Mode switch | `Switched to {mode} mode.` |
+
+Commit and reset events are recorded server-side (via `LLMService.commit_all` and `LLMService.reset_to_head`) so they appear in persistent history and are visible to the LLM. The frontend renders the `system_event` flag from the message dict to apply the distinct card style.
 
 ---
 
@@ -382,7 +402,7 @@ The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)
 
 | Right | 📋 | Copy diff to clipboard |
 | Right | 💾 | Commit all (server-driven — see below) |
-| Right | ⚠️ | Reset to HEAD (with confirmation). On success, adds an assistant message to the chat: "**Reset to HEAD** — all uncommitted changes have been discarded." |
+| Right | ⚠️ | Reset to HEAD (with confirmation). Calls `LLMService.reset_to_head` which resets git and records a system event message in conversation context. On success, adds a system event card to the chat: "**Reset to HEAD** — all uncommitted changes have been discarded." |
 
 ### Review Status Bar
 

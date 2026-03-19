@@ -316,6 +316,10 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       contain-intrinsic-size: auto 80px;
     }
 
+    .message-card.system-event {
+      contain-intrinsic-size: auto 48px;
+    }
+
     .message-card.assistant {
       contain-intrinsic-size: auto 200px;
     }
@@ -334,6 +338,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       background: var(--bg-secondary);
     }
 
+    .message-card.system-event {
+      background: transparent;
+      border: 1px dashed var(--border-primary);
+      text-align: center;
+      padding: 8px 16px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
     .message-card .role-label {
       font-size: 0.7rem;
       font-weight: 600;
@@ -345,6 +358,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     .message-card.user .role-label { color: var(--accent-primary); }
     .message-card.assistant .role-label { color: var(--accent-green); }
+    .message-card.system-event .role-label { color: var(--text-muted); }
 
     .md-content h2, .md-content h3, .md-content h4 {
       margin-top: 0.8em;
@@ -1547,7 +1561,8 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         !(m.role === 'assistant' && m.content?.includes('Staging changes and generating commit message'))
       );
       this.messages = [...filtered, {
-        role: 'assistant',
+        role: 'user',
+        system_event: true,
         content: `**Committed** \`${sha}\`\n\n\`\`\`\n${commitMessage}\n\`\`\``,
       }];
 
@@ -2154,7 +2169,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     if (!this.rpcConnected) return;
 
     try {
-      const result = await this.rpcExtract('Repo.reset_hard');
+      const result = await this.rpcExtract('LLMService.reset_to_head');
       if (result?.error) {
         this._showToast(`Reset failed: ${result.error}`, 'error');
         return;
@@ -2162,10 +2177,11 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
       this._showToast('Reset to HEAD — all changes discarded', 'success');
 
-      // Add message to chat
+      // Add system event message to chat
       this.messages = [...this.messages, {
-        role: 'assistant',
-        content: '**Reset to HEAD** — all uncommitted changes have been discarded.',
+        role: 'user',
+        system_event: true,
+        content: result.system_event_message || '**Reset to HEAD** — all uncommitted changes have been discarded.',
       }];
       if (this._autoScroll) {
         this.updateComplete.then(() => {
@@ -2694,9 +2710,21 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _renderMessage(msg, index) {
     const isUser = msg.role === 'user';
+    const isSystemEvent = msg.system_event === true;
     const content = msg.content || '';
     const forceVisible = this.messages.length - index <= 15;
     const fvClass = forceVisible ? ' force-visible' : '';
+
+    if (isSystemEvent) {
+      return html`
+        <div class="message-card system-event${fvClass}" data-msg-index="${index}">
+          <div class="role-label">System</div>
+          <div class="md-content">
+            ${unsafeHTML(renderMarkdown(content))}
+          </div>
+        </div>
+      `;
+    }
 
     if (isUser) {
       return html`
