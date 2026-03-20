@@ -23,8 +23,8 @@ const TABS = [
   { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
   { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+3' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+4', conditional: true },
-  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+5' },
+  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+4' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {

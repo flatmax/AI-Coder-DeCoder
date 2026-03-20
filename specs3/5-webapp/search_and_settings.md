@@ -115,10 +115,6 @@ The file search functionality is split across three components:
 | `ac-files-tab` | Listens for `file-search-changed` and `file-search-scroll` events, builds pruned tree, intercepts picker clicks during search |
 | `ac-file-picker` | Renders the pruned tree via `setTree()`, normal tree via `loadTree()` |
 
-### Legacy Search Tab
-
-The standalone search tab (`ac-search-tab.js`) has been removed from the dialog's tab list. The file remains on disk but is no longer imported or rendered. All keyboard shortcuts (`Ctrl+Shift+F`) and tab shortcuts (`Alt+N`) have been updated to reflect the reduced tab count.
-
 ---
 
 ## Settings Tab
