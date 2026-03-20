@@ -19,8 +19,7 @@ AppShell (root, extends JRPCClient)
     └── Dialog (foreground, left-docked)
         ├── Header Bar (tabs, actions, minimize)
         ├── Content Area
-        │   ├── Files & Chat tab (default)
-        │   ├── Search tab
+        │   ├── Files & Chat tab (default, includes integrated file search)
         │   ├── Context Budget tab
         │   ├── Cache Tiers tab
         │   └── Settings tab
@@ -89,14 +88,17 @@ Default: fixed left-docked, 50% viewport width (min 400px), full height. Right h
 | Tab | Icon | Shortcut |
 |-----|------|----------|
 | FILES | 📁 | Alt+1 |
-| SEARCH | 🔍 | Alt+2 |
-| CONTEXT | 📊 | Alt+3 |
-| CACHE | 🗄️ | Alt+4 |
-| SETTINGS | ⚙️ | Alt+5 |
+| CONTEXT | 📊 | Alt+2 |
+| CACHE | 🗄️ | Alt+3 |
+| SETTINGS | ⚙️ | Alt+4 |
+
+The Doc Convert tab (📄, Alt+5) appears conditionally when document conversion is available.
+
+File search is integrated into the Files tab's chat panel action bar rather than occupying a separate tab. See [Search and Settings](search_and_settings.md#integrated-file-search).
 
 ### Lazy Loading and DOM Preservation
 
-Non-default tabs are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
+Non-default tabs (context, cache, settings, convert) are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
 
 Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
 
@@ -118,11 +120,11 @@ When a stale tab becomes visible (via `onTabVisible()`), it clears the stale fla
 
 | Shortcut | Action |
 |----------|--------|
-| Alt+1..5 | Switch to tab |
+| Alt+1..4 | Switch to tab (Alt+5 for Doc Convert when available) |
 | Alt+M | Toggle minimize |
-| Ctrl+Shift+F | Open Search tab with current selection or clipboard |
+| Ctrl+Shift+F | Activate file search in Files tab, prefill from selection |
 
-Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change clears it.
+Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change clears it. The dialog switches to the Files tab and calls `chatPanel.activateFileSearch(selection)`. Multi-line selections are ignored.
 
 ### Dragging & Resizing
 
@@ -134,7 +136,7 @@ Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change 
 
 ### Tab Restoration
 
-On RPC ready (not on construction), the dialog restores the last-used tab from localStorage (`ac-dc-active-tab`). This is deferred to `onRpcReady()` rather than `connectedCallback()` so that lazy-loaded tab components can fetch data immediately when activated. The default tab is `files` if no saved preference exists.
+On RPC ready (not on construction), the dialog restores the last-used tab from localStorage (`ac-dc-active-tab`). This is deferred to `onRpcReady()` rather than `connectedCallback()` so that lazy-loaded tab components can fetch data immediately when activated. The default tab is `files` if no saved preference exists. A stale `search` preference (from before search was integrated into the Files tab) is migrated to `files` on load.
 
 ### Position Persistence
 
@@ -269,8 +271,7 @@ Multiple components persist UI preferences to localStorage using a duplicated `_
 | App shell | `ac-last-open-file`, `ac-last-viewport` |
 | Dialog | `ac-dc-dialog-width`, `ac-dc-dialog-pos`, `ac-dc-minimized`, `ac-dc-active-tab` |
 | File picker | `ac-dc-picker-width`, `ac-dc-picker-collapsed` |
-| Search tab | `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |
-| Chat panel | `ac-dc-snippet-drawer` |
+| Chat panel | `ac-dc-snippet-drawer`, `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |
 | Cache tab | `ac-dc-cache-expanded` |
 | Context tab | `ac-dc-context-expanded` |
 | Token HUD | `ac-dc-hud-collapsed` |

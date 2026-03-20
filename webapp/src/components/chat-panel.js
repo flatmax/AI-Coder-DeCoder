@@ -150,6 +150,14 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     _chatSearchMatches: { type: Array, state: true },
     _chatSearchCurrent: { type: Number, state: true },
     _lightboxSrc: { type: String, state: true },
+    _searchMode: { type: String, state: true },
+    _searchIgnoreCase: { type: Boolean, state: true },
+    _searchRegex: { type: Boolean, state: true },
+    _searchWholeWord: { type: Boolean, state: true },
+    _fileSearchResults: { type: Array, state: true },
+    _fileSearchLoading: { type: Boolean, state: true },
+    _fileSearchFlatMatches: { type: Array, state: true },
+    _fileSearchFocusedIndex: { type: Number, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -296,6 +304,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       overflow-y: auto;
       padding: 12px;
       scroll-behavior: smooth;
+      height: 100%;
     }
 
     .message-card {
@@ -1211,6 +1220,167 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       box-shadow: 0 0 0 1px var(--accent-primary), 0 0 12px rgba(79, 195, 247, 0.15);
     }
 
+    /* Search mode toggle */
+    .search-mode-toggle {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .search-mode-toggle:hover {
+      color: var(--text-secondary);
+    }
+    .search-mode-toggle.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      color: var(--bg-primary);
+    }
+
+    .search-toggle-btn {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .search-toggle-btn:hover {
+      color: var(--text-secondary);
+    }
+    .search-toggle-btn.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      color: var(--bg-primary);
+    }
+
+    /* File search results overlay */
+    .file-search-overlay {
+      position: absolute;
+      inset: 0;
+      background: var(--bg-secondary);
+      z-index: 4;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      overscroll-behavior: contain;
+    }
+
+    .file-search-status {
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
+    .file-match-section {
+      border-bottom: 1px solid var(--border-primary);
+    }
+
+    .file-match-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      padding: 6px 12px;
+      background: var(--bg-tertiary);
+      cursor: pointer;
+      user-select: none;
+      gap: 8px;
+      font-size: 0.8rem;
+      border-bottom: 1px solid var(--border-primary);
+    }
+    .file-match-header:hover {
+      background: var(--bg-secondary);
+    }
+
+    .file-match-path {
+      font-family: var(--font-mono);
+      color: var(--accent-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .file-match-count {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
+    .file-match-row {
+      display: flex;
+      padding: 3px 10px 3px 16px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.6;
+      gap: 8px;
+      border-left: 2px solid transparent;
+    }
+    .file-match-row:hover {
+      background: var(--bg-tertiary);
+    }
+    .file-match-row.focused {
+      background: var(--bg-tertiary);
+      border-left-color: var(--accent-primary);
+    }
+
+    .file-match-line-num {
+      color: var(--text-muted);
+      min-width: 4ch;
+      text-align: right;
+      flex-shrink: 0;
+      user-select: none;
+    }
+
+    .file-match-text {
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-match-highlight {
+      background: rgba(255, 200, 50, 0.25);
+      color: var(--text-primary);
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+
+    .file-context-row {
+      display: flex;
+      padding: 1px 10px 1px 16px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      gap: 8px;
+      opacity: 0.5;
+    }
+    .file-context-line-num {
+      color: var(--text-muted);
+      min-width: 4ch;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .file-context-text {
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
   `];
 
   constructor() {
@@ -1238,6 +1408,17 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._chatSearchMatches = [];
     this._chatSearchCurrent = -1;
     this._atFilterActive = false;
+    this._searchMode = 'messages';
+    this._searchIgnoreCase = this._loadBoolPref('ac-dc-search-ignore-case', true);
+    this._searchRegex = this._loadBoolPref('ac-dc-search-regex', false);
+    this._searchWholeWord = this._loadBoolPref('ac-dc-search-whole-word', false);
+    this._fileSearchResults = [];
+    this._fileSearchLoading = false;
+    this._fileSearchFlatMatches = [];
+    this._fileSearchFocusedIndex = -1;
+    this._fileSearchGeneration = 0;
+    this._fileSearchDebounceTimer = null;
+    this._fileSearchScrollPaused = false;
 
     // Bind event handlers
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -1274,6 +1455,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this.removeEventListener('view-url-content', this._onViewUrlContent);
     if (this._rafId) cancelAnimationFrame(this._rafId);
     if (this._observer) this._observer.disconnect();
+    clearTimeout(this._fileSearchDebounceTimer);
   }
 
   firstUpdated() {
@@ -1834,6 +2016,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }
     this.messages = [...this.messages, userMsg];
 
+    // Exit file search mode if active
+    if (this._searchMode === 'files') {
+      this._exitFileSearch();
+      this._chatSearchQuery = '';
+    }
+
     // Clear input
     this._inputValue = '';
     this._images = [];
@@ -2217,21 +2405,68 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
   _onChatSearchInput(e) {
     this._chatSearchQuery = e.target.value;
-    this._updateChatSearchMatches();
+    if (this._searchMode === 'files') {
+      this._debounceFileSearch();
+    } else {
+      this._updateChatSearchMatches();
+    }
   }
 
   _onChatSearchKeyDown(e) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.shiftKey) {
-        this._chatSearchPrev();
+      if (this._searchMode === 'files') {
+        if (e.shiftKey) {
+          this._fileSearchPrev();
+        } else {
+          // Navigate to focused match, or first if none
+          if (this._fileSearchFocusedIndex >= 0) {
+            this._navigateToFileMatch(this._fileSearchFlatMatches[this._fileSearchFocusedIndex]);
+          } else if (this._fileSearchFlatMatches.length > 0) {
+            this._fileSearchFocusedIndex = 0;
+            this._navigateToFileMatch(this._fileSearchFlatMatches[0]);
+          }
+        }
       } else {
-        this._chatSearchNext();
+        if (e.shiftKey) {
+          this._chatSearchPrev();
+        } else {
+          this._chatSearchNext();
+        }
+      }
+    } else if (e.key === 'ArrowDown' && this._searchMode === 'files') {
+      e.preventDefault();
+      if (this._fileSearchFlatMatches.length > 0) {
+        this._fileSearchFocusedIndex = Math.min(this._fileSearchFocusedIndex + 1, this._fileSearchFlatMatches.length - 1);
+        this._scrollToFileMatch();
+      }
+    } else if (e.key === 'ArrowUp' && this._searchMode === 'files') {
+      e.preventDefault();
+      if (this._fileSearchFlatMatches.length > 0) {
+        this._fileSearchFocusedIndex = Math.max(this._fileSearchFocusedIndex - 1, 0);
+        this._scrollToFileMatch();
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      this._clearChatSearch();
-      e.target.blur();
+      if (this._searchMode === 'files') {
+        if (this._chatSearchQuery) {
+          this._chatSearchQuery = '';
+          this._fileSearchResults = [];
+          this._fileSearchFlatMatches = [];
+          this._fileSearchFocusedIndex = -1;
+          this.dispatchEvent(new CustomEvent('file-search-changed', {
+            detail: { active: true, results: [] },
+            bubbles: true, composed: true,
+          }));
+          const input = this.shadowRoot?.querySelector('.chat-search-input');
+          if (input) input.value = '';
+        } else {
+          this._exitFileSearch();
+        }
+      } else {
+        this._clearChatSearch();
+        e.target.blur();
+      }
     }
   }
 
@@ -2295,6 +2530,268 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     this._chatSearchMatches = [];
     this._chatSearchCurrent = -1;
     this._clearSearchHighlights();
+  }
+
+  // === Search Mode Toggle ===
+
+  _toggleSearchMode() {
+    if (this._searchMode === 'messages') {
+      this._searchMode = 'files';
+      // If there's a current query, run file search
+      if (this._chatSearchQuery.trim()) {
+        this._runFileSearch();
+      }
+    } else {
+      this._exitFileSearch();
+    }
+  }
+
+  _toggleSearchIgnoreCase() {
+    this._searchIgnoreCase = !this._searchIgnoreCase;
+    this._saveBoolPref('ac-dc-search-ignore-case', this._searchIgnoreCase);
+    this._rerunCurrentSearch();
+  }
+
+  _toggleSearchRegex() {
+    this._searchRegex = !this._searchRegex;
+    this._saveBoolPref('ac-dc-search-regex', this._searchRegex);
+    this._rerunCurrentSearch();
+  }
+
+  _toggleSearchWholeWord() {
+    this._searchWholeWord = !this._searchWholeWord;
+    this._saveBoolPref('ac-dc-search-whole-word', this._searchWholeWord);
+    this._rerunCurrentSearch();
+  }
+
+  _rerunCurrentSearch() {
+    if (this._searchMode === 'files') {
+      this._runFileSearch();
+    } else {
+      this._updateChatSearchMatches();
+    }
+  }
+
+  _exitFileSearch() {
+    this._searchMode = 'messages';
+    this._fileSearchResults = [];
+    this._fileSearchFlatMatches = [];
+    this._fileSearchFocusedIndex = -1;
+    this._fileSearchLoading = false;
+    // Restore picker tree
+    this.dispatchEvent(new CustomEvent('file-search-changed', {
+      detail: { active: false },
+      bubbles: true, composed: true,
+    }));
+    // Run message search if query remains
+    if (this._chatSearchQuery.trim()) {
+      this._updateChatSearchMatches();
+    }
+  }
+
+  async _runFileSearch() {
+    const query = this._chatSearchQuery.trim();
+    if (!query) {
+      this._fileSearchResults = [];
+      this._fileSearchFlatMatches = [];
+      this._fileSearchFocusedIndex = -1;
+      this.dispatchEvent(new CustomEvent('file-search-changed', {
+        detail: { active: true, results: [] },
+        bubbles: true, composed: true,
+      }));
+      return;
+    }
+    if (!this.rpcConnected) return;
+
+    this._fileSearchLoading = true;
+    const gen = ++this._fileSearchGeneration;
+
+    try {
+      const result = await this.rpcExtract(
+        'Repo.search_files',
+        query,
+        this._searchWholeWord,
+        this._searchRegex,
+        this._searchIgnoreCase,
+        1
+      );
+
+      if (gen !== this._fileSearchGeneration) return;
+
+      if (Array.isArray(result)) {
+        this._fileSearchResults = result;
+      } else if (result?.results && Array.isArray(result.results)) {
+        this._fileSearchResults = result.results;
+      } else {
+        this._fileSearchResults = [];
+      }
+
+      this._buildFileSearchFlatMatches();
+      this._fileSearchFocusedIndex = -1;
+
+      // Notify parent to update picker with pruned tree
+      this.dispatchEvent(new CustomEvent('file-search-changed', {
+        detail: { active: true, results: this._fileSearchResults },
+        bubbles: true, composed: true,
+      }));
+    } catch (e) {
+      if (gen !== this._fileSearchGeneration) return;
+      console.warn('File search failed:', e);
+      this._fileSearchResults = [];
+      this._fileSearchFlatMatches = [];
+    } finally {
+      if (gen === this._fileSearchGeneration) {
+        this._fileSearchLoading = false;
+      }
+    }
+  }
+
+  _debounceFileSearch() {
+    clearTimeout(this._fileSearchDebounceTimer);
+    this._fileSearchDebounceTimer = setTimeout(() => this._runFileSearch(), 300);
+  }
+
+  _buildFileSearchFlatMatches() {
+    const flat = [];
+    for (const fileResult of this._fileSearchResults) {
+      for (const match of (fileResult.matches || [])) {
+        flat.push({ file: fileResult.file, match });
+      }
+    }
+    this._fileSearchFlatMatches = flat;
+  }
+
+  _fileSearchTotalMatches() {
+    let total = 0;
+    for (const r of this._fileSearchResults) {
+      total += (r.matches || []).length;
+    }
+    return total;
+  }
+
+  _onFileMatchClick(file, match) {
+    const idx = this._fileSearchFlatMatches.findIndex(
+      m => m.file === file && m.match.line_num === match.line_num
+    );
+    if (idx >= 0) this._fileSearchFocusedIndex = idx;
+    this._navigateToFileMatch({ file, match });
+  }
+
+  _onFileHeaderClick(filePath) {
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path: filePath },
+      bubbles: true,
+    }));
+  }
+
+  _navigateToFileMatch(item) {
+    if (!item) return;
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path: item.file, line: item.match.line_num },
+      bubbles: true,
+    }));
+  }
+
+  _fileSearchNext() {
+    if (this._fileSearchFlatMatches.length === 0) return;
+    this._fileSearchFocusedIndex = (this._fileSearchFocusedIndex + 1) % this._fileSearchFlatMatches.length;
+    this._scrollToFileMatch();
+  }
+
+  _fileSearchPrev() {
+    if (this._fileSearchFlatMatches.length === 0) return;
+    this._fileSearchFocusedIndex = (this._fileSearchFocusedIndex - 1 + this._fileSearchFlatMatches.length) % this._fileSearchFlatMatches.length;
+    this._scrollToFileMatch();
+  }
+
+  _scrollToFileMatch() {
+    this.updateComplete.then(() => {
+      const el = this.shadowRoot?.querySelector('.file-match-row.focused');
+      if (el) el.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  /**
+   * When the file search overlay scrolls, detect which file section is
+   * at the top of the viewport and notify the parent so the picker can
+   * highlight the corresponding file.
+   */
+  _onFileSearchScroll(e) {
+    if (this._fileSearchScrollPaused) return;
+    const overlay = e.target;
+    const sections = overlay.querySelectorAll('.file-match-section');
+    let topFile = null;
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      const overlayRect = overlay.getBoundingClientRect();
+      if (rect.bottom > overlayRect.top + 10) {
+        topFile = section.dataset.fileSection;
+        break;
+      }
+    }
+    if (topFile) {
+      this.dispatchEvent(new CustomEvent('file-search-scroll', {
+        detail: { filePath: topFile },
+        bubbles: true, composed: true,
+      }));
+    }
+  }
+
+  /**
+   * Scroll the file search overlay to a particular file section.
+   * Called from the parent when the user clicks a file in the picker.
+   */
+  scrollFileSearchToFile(filePath) {
+    const overlay = this.shadowRoot?.querySelector('.file-search-overlay');
+    if (!overlay) return;
+    const section = overlay.querySelector(`[data-file-section="${CSS.escape(filePath)}"]`);
+    if (!section) return;
+    // Pause scroll sync briefly to prevent feedback loop
+    this._fileSearchScrollPaused = true;
+    section.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    setTimeout(() => { this._fileSearchScrollPaused = false; }, 400);
+  }
+
+  _highlightFileMatch(text, query) {
+    if (!query) return escapeHtml(text);
+    try {
+      let patternSrc;
+      if (this._searchRegex) {
+        patternSrc = query;
+      } else {
+        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        patternSrc = this._searchWholeWord ? `\\b${escaped}\\b` : escaped;
+      }
+      const flags = this._searchIgnoreCase ? 'gi' : 'g';
+      const regex = new RegExp(`(${patternSrc})`, flags);
+      const parts = text.split(regex);
+      return parts.map((part, i) =>
+        i % 2 === 1
+          ? `<span class="file-match-highlight">${escapeHtml(part)}</span>`
+          : escapeHtml(part)
+      ).join('');
+    } catch {
+      return escapeHtml(text);
+    }
+  }
+
+  /**
+   * Enter file search mode from an external trigger (e.g. Ctrl+Shift+F).
+   * Optionally prefill the query.
+   */
+  activateFileSearch(prefill) {
+    this._searchMode = 'files';
+    if (prefill) {
+      this._chatSearchQuery = prefill;
+      this._runFileSearch();
+    }
+    this.updateComplete.then(() => {
+      const input = this.shadowRoot?.querySelector('.chat-search-input');
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    });
   }
 
   // === Review Helpers ===
@@ -2859,6 +3356,48 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     }));
   }
 
+  _renderFileSearchSection(fileResult) {
+    const matchCount = (fileResult.matches || []).length;
+    const query = this._chatSearchQuery.trim();
+
+    return html`
+      <div class="file-match-section" data-file-section="${fileResult.file}">
+        <div class="file-match-header" @click=${() => this._onFileHeaderClick(fileResult.file)}>
+          <span class="file-match-path">${fileResult.file}</span>
+          <span class="file-match-count">${matchCount}</span>
+        </div>
+        ${(fileResult.matches || []).map(match => {
+          const flatIdx = this._fileSearchFlatMatches.findIndex(
+            m => m.file === fileResult.file && m.match.line_num === match.line_num
+          );
+          const isFocused = flatIdx === this._fileSearchFocusedIndex;
+
+          return html`
+            ${(match.context_before || []).map(ctx => html`
+              <div class="file-context-row">
+                <span class="file-context-line-num">${ctx.line_num}</span>
+                <span class="file-context-text">${ctx.line}</span>
+              </div>
+            `)}
+            <div
+              class="file-match-row ${isFocused ? 'focused' : ''}"
+              @click=${() => this._onFileMatchClick(fileResult.file, match)}
+            >
+              <span class="file-match-line-num">${match.line_num}</span>
+              <span class="file-match-text">${unsafeHTML(this._highlightFileMatch(match.line, query))}</span>
+            </div>
+            ${(match.context_after || []).map(ctx => html`
+              <div class="file-context-row">
+                <span class="file-context-line-num">${ctx.line_num}</span>
+                <span class="file-context-text">${ctx.line}</span>
+              </div>
+            `)}
+          `;
+        })}
+      </div>
+    `;
+  }
+
   render() {
     const hasMessages = this.messages.length > 0 || this._streamingContent;
 
@@ -2869,17 +3408,49 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ?disabled=${!this._canMutate}>✨</button>
         <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
 
+        <button
+          class="search-toggle-btn ${this._searchIgnoreCase ? 'active' : ''}"
+          @click=${this._toggleSearchIgnoreCase}
+          title="Ignore case"
+          aria-label="Toggle ignore case"
+          aria-pressed="${this._searchIgnoreCase}"
+        >Aa</button>
+        <button
+          class="search-toggle-btn ${this._searchRegex ? 'active' : ''}"
+          @click=${this._toggleSearchRegex}
+          title="Use regex"
+          aria-label="Toggle regex search"
+          aria-pressed="${this._searchRegex}"
+        >.*</button>
+        <button
+          class="search-toggle-btn ${this._searchWholeWord ? 'active' : ''}"
+          @click=${this._toggleSearchWholeWord}
+          title="Whole word"
+          aria-label="Toggle whole word match"
+          aria-pressed="${this._searchWholeWord}"
+        >ab</button>
+
         <div class="chat-search">
+          <button
+            class="search-mode-toggle ${this._searchMode === 'files' ? 'active' : ''}"
+            @click=${this._toggleSearchMode}
+            title="Toggle between message search and file search"
+            aria-label="Toggle search mode"
+          >${this._searchMode === 'files' ? '📁' : '💬'}</button>
           <input
             class="chat-search-input"
             type="text"
-            placeholder="Search messages..."
-            aria-label="Search messages"
+            placeholder="${this._searchMode === 'files' ? 'Search files...' : 'Search messages...'}"
+            aria-label="${this._searchMode === 'files' ? 'Search repository files' : 'Search messages'}"
             .value=${this._chatSearchQuery}
             @input=${this._onChatSearchInput}
             @keydown=${this._onChatSearchKeyDown}
           >
-          ${this._chatSearchMatches.length > 0 ? html`
+          ${this._searchMode === 'files' && this._fileSearchTotalMatches() > 0 ? html`
+            <span class="chat-search-counter" aria-live="polite">${this._fileSearchTotalMatches()} in ${this._fileSearchResults.length}</span>
+            <button class="chat-search-nav" title="Previous (Shift+Enter)" aria-label="Previous file match" @click=${this._fileSearchPrev}>▲</button>
+            <button class="chat-search-nav" title="Next (Enter)" aria-label="Next file match" @click=${this._fileSearchNext}>▼</button>
+          ` : this._searchMode === 'messages' && this._chatSearchMatches.length > 0 ? html`
             <span class="chat-search-counter" aria-live="polite">${this._chatSearchCurrent + 1}/${this._chatSearchMatches.length}</span>
             <button class="chat-search-nav" title="Previous (Shift+Enter)" aria-label="Previous search result" @click=${this._chatSearchPrev}>▲</button>
             <button class="chat-search-nav" title="Next (Enter)" aria-label="Next search result" @click=${this._chatSearchNext}>▼</button>
@@ -2902,8 +3473,25 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         ` : nothing}
       </div>
 
-      <!-- Messages -->
-      <div class="messages" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions">
+      <!-- Messages / File search container -->
+      <div style="flex:1;min-height:0;position:relative;overflow:hidden;">
+        <!-- File search results overlay -->
+        ${this._searchMode === 'files' ? html`
+          <div class="file-search-overlay" role="region" aria-label="File search results"
+            @scroll=${this._onFileSearchScroll}>
+            ${this._fileSearchLoading ? html`
+              <div class="file-search-status">Searching...</div>
+            ` : !this._chatSearchQuery.trim() ? html`
+              <div class="file-search-status">Type to search across files</div>
+            ` : this._fileSearchResults.length === 0 ? html`
+              <div class="file-search-status">No results found</div>
+            ` : this._fileSearchResults.map(r => this._renderFileSearchSection(r))}
+          </div>
+        ` : nothing}
+
+        <!-- Messages -->
+        <div class="messages" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions"
+          style="${this._searchMode === 'files' ? 'display:none' : ''}">
         ${!hasMessages ? html`
           <div class="empty-state">
             <div class="brand">AC⚡DC</div>
@@ -2926,6 +3514,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
         <div class="scroll-sentinel"></div>
       </div>
+      </div><!-- end messages/search container -->
 
       <!-- Scroll to bottom -->
       <button

@@ -385,26 +385,47 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 |------|---------|--------|
 | Left | ✨ | New session (dispatches `session-loaded` to refresh history bar) |
 | Left | 📜 | Browse history |
-| Center | Search input | Case-insensitive substring search (see Chat Search below) |
+| Left | `Aa` `.*` `ab` | Search option toggles (always visible, affect both message and file search) |
+| Center | 💬/📁 toggle | Switch between message search and file search mode |
+| Center | Search input | Searches messages (💬 mode) or repository files (📁 mode) |
+| Center | Result counter + ▲/▼ | Navigate search results in either mode |
 
-### Chat Search
+### Chat Search (Dual Mode)
 
-A compact search input between the session and git buttons with prev/next navigation. The search input fills available space (`flex: 1`, no max-width) to push git buttons to the right edge.
+The action bar contains a unified search area that supports two modes via the 💬/📁 toggle button. Three search option toggles (`Aa` ignore case, `.*` regex, `ab` whole word) are always visible and affect both modes. See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
+
+**Message search (💬 — default):**
 
 - Case-insensitive substring matching against raw message `content` strings (not rendered HTML)
+- `Aa` toggle affects case sensitivity
 - Match counter shows `N/M` (current/total); ▲/▼ buttons for mouse navigation
 - All messages remain visible — matches are highlighted and scrolled into view
 - Current match scrolled to center with accent highlight via `scrollIntoView({ block: 'center' })`
 - Enter for next match (wraps around), Shift+Enter for previous (wraps around), Escape clears query and blurs input
 - Match indices reference message array positions, matched against `data-msg-index` attributes on message cards
 
-#### Highlight Implementation
+**File search (📁):**
+
+- Debounced (300ms) RPC call to `Repo.search_files` with the three toggle states
+- Results appear in an overlay covering the messages area (messages are hidden via `display:none`)
+- The file picker swaps to a pruned tree showing only matching files
+- Bidirectional scroll sync between overlay and picker (see search_and_settings.md)
+- ↑/↓ navigate matches, Enter opens in diff viewer, Escape clears query then exits mode
+- Sending a chat message auto-exits file search mode
+
+#### Highlight Implementation (Message Search)
 
 Message cards have `border: 1px solid transparent` by default with a CSS transition on `border-color` and `box-shadow`. The `.search-highlight` class (applied via `data-msg-index` attribute matching) sets:
 - `border-color: var(--accent-primary)`
 - `box-shadow: 0 0 0 1px var(--accent-primary), 0 0 12px rgba(79, 195, 247, 0.15)`
 
 The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)` clears all previous `.search-highlight` classes, then queries its own shadow DOM for `.message-card[data-msg-index="N"]` and applies the class. `scrollIntoView({ block: 'center' })` brings the match into view. All highlight state (matches array, current index) is managed within the chat panel component.
+
+#### File Search Overlay
+
+When file search mode is active, the messages area is hidden (`display: none`) and a `.file-search-overlay` is shown in its place (both inside a `position: relative` wrapper div with `flex: 1`). The overlay uses `position: absolute; inset: 0` to fill the wrapper. This preserves the chat panel's DOM state (streaming, scroll position, input text) while file search is active.
+
+The overlay renders file match sections with `data-file-section` attributes for scroll sync targeting. Match text is highlighted using `unsafeHTML` with regex-built highlight spans.
 
 | Right | 📋 | Copy diff to clipboard |
 | Right | 💾 | Commit all (server-driven — see below) |

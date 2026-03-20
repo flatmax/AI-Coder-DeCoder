@@ -1,116 +1,123 @@
 # Search and Settings
 
-Two simple tab components. Both are lazily loaded on first visit with DOM preserved across tab switches.
+Search is integrated into the Files tab's chat panel action bar. Settings remains an independent dialog tab.
 
 ---
 
-## Search Tab
+## Integrated File Search
 
-Two-panel layout: file picker (left) and match context (right). Full-text search across the repository.
+File search shares the action bar with chat message search in the Files tab. A mode toggle switches between the two search targets. When file search is active, the right panel shows match results overlaying the chat area, and the file picker shows a pruned tree of matching files.
 
-### Two-Panel Architecture
+### Action Bar Search Controls
+
+The chat panel action bar always shows three search option toggles alongside the search input:
+
+| Element | Behavior |
+|---------|----------|
+| `Aa` toggle | Ignore case (default: on) — affects both search modes |
+| `.*` toggle | Regex mode (default: off) — affects both search modes |
+| `ab` toggle | Whole word (default: off) — affects both search modes |
+| 💬/📁 mode toggle | Switch between message search and file search |
+| Search input | Placeholder changes with mode; debounced (300ms) for file search |
+| Result counter | `N in M` (matches in files) for file search; `X/Y` (current/total) for message search |
+| ▲/▼ navigation | Cycle through matches in either mode |
+
+Toggle states are persisted in `localStorage` with keys `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word`.
+
+### File Search Mode
+
+When the 📁 mode is active:
+
+- The search input calls `Repo.search_files` via RPC (debounced 300ms)
+- The right panel shows a file search overlay covering the chat messages area
+- The file picker swaps to a pruned tree of matching files
+- Sending a chat message auto-exits file search mode
+- The chat input remains visible below the overlay
+
+### RPC Call
 
 ```
-┌───────────────────────────────────────────────────────┐
-│ [search input]                      3 in 2 files      │
-│ [Aa] [.*] [ab]                                        │
-├────────────────────────┬──────────────────────────────┤
-│ <ac-file-picker>       │  ── src/repo.py ──── (12)   │
-│                        │   15 │ import subprocess     │
-│ ▾ src/                 │   16 │ from pathlib…         │
-│   ▾ ac_dc/             │   …                         │
-│     repo.py      [12]  │   42 │ def get_file_tree    │
-│     config.py     [3]  │  ── src/config.py ── (3)   │
-│   main.py         [5]  │   10 │ import argparse      │
-│                        │                              │
-│ (checkboxes, context   │  (click match → open file   │
-│  menus, git status     │   at that line in editor)    │
-│  all work normally)    │                              │
-└────────────────────────┴──────────────────────────────┘
+Repo.search_files(query, whole_word, use_regex, ignore_case, context_lines)
 ```
 
-The left panel reuses `<ac-file-picker>` with a pruned tree of matching files. The right panel shows match context with highlighted results.
+`context_lines` is fixed at 1 (one line before and after each match). A generation counter discards stale responses when new searches are issued before previous ones complete.
 
-### Pruned Search Tree
+### Result Display
 
-After search results arrive, the search tab builds a tree in the same shape as `Repo.get_file_tree` returns:
+Results are grouped by file in the overlay:
+
+- **File header**: sticky, shows path and match count badge. Clicking opens file in diff viewer.
+- **Match rows**: line number + highlighted text. Clicking opens file at that line in the diff viewer.
+- **Context rows** (1 before/after): dimmed, not clickable.
+
+Match text is highlighted using a regex built from the query, respecting the current toggle states (`Aa`, `.*`, `ab`).
+
+### Keyboard Navigation (File Search Mode)
+
+| Key | Action |
+|-----|--------|
+| Enter | Navigate to focused match (open in diff viewer) |
+| Shift+Enter | Previous match |
+| ↑/↓ | Move focus through matches |
+| Escape | Clear query first, then exit file search mode on second press |
+
+The focused match has a left border accent and background highlight.
+
+### Bidirectional Scroll Sync
+
+**Match overlay → Picker**: As the user scrolls through results, the chat panel detects which `[data-file-section]` element is at the top of the visible area and dispatches a `file-search-scroll` event. The files tab receives this and updates `picker._focusedPath`, auto-expands ancestor directories, and scrolls the picker row into view.
+
+**Picker → Match overlay**: Clicking a file in the pruned picker tree during file search mode is intercepted by the files tab (`stopPropagation` on `file-clicked`). Instead of navigating to the diff viewer, it calls `chatPanel.scrollFileSearchToFile(path)` which smooth-scrolls the overlay to the target file section. A 400ms pause (`_fileSearchScrollPaused` flag) prevents feedback loops between the two directions.
+
+### Pruned Tree
+
+After each search, the files tab builds a pruned tree from the results:
 
 1. Split each matching file path on `/`, insert into a nested directory structure
 2. Set each file node's `lines` field to the **match count** (not line count) — the picker renders this badge identically
 3. Call `picker.setTree(prunedTree)` to inject the tree, bypassing the RPC call
-4. All directories are auto-expanded via `picker._expandAll()`
+4. The picker auto-expands all directories via `_expandAll()`
 
-The picker's `setTree(treeData)` method (added for this feature) accepts a pre-built tree object, collects file paths, expands all directories, and triggers re-render.
+When file search exits, the full tree is restored via `picker.loadTree()` and `picker._focusedPath` is cleared.
 
-### Search Options
+### Activation
 
-Three toggles (persisted to local storage):
+File search mode can be activated by:
 
-| Option | Default | Effect |
-|--------|---------|--------|
-| Ignore case | true | Case-insensitive |
-| Regex | false | Extended regex |
-| Whole word | false | Word boundary matching |
+- Clicking the 💬/📁 toggle button in the action bar
+- Pressing **Ctrl+Shift+F** (routed through the dialog → files tab → `chatPanel.activateFileSearch(prefill)`)
+- Calling `activateFileSearch(prefill)` programmatically, which optionally prefills the query from a text selection
 
-Toggling re-runs the current search.
+**Ctrl+Shift+F** captures `window.getSelection()` synchronously before focus changes clear it. Multi-line selections are ignored. The dialog switches to the Files tab and activates file search mode.
 
-### Global Shortcut
+### Empty State
 
-**Ctrl+Shift+F** opens Search tab and pre-fills:
-1. Browser selection (`window.getSelection()`) — captured synchronously before focus change
-2. Clipboard fallback
-3. Just focus if both empty
+When file search is active but the query is empty, the overlay shows "Type to search across files". When no results are found, it shows "No results found".
 
-Multi-line selections ignored.
+### Message Search Mode
 
-### Execution
+When the 💬 mode is active (default), the search input and toggles operate on chat messages:
 
-Debounced at 300ms. Generation counter discards stale responses. Results: `[{file, matches}]`.
+- Case-insensitive substring match on raw message `content` strings (not rendered HTML)
+- `Aa` toggle affects case sensitivity
+- Results highlight matching message cards with an accent border and glow
+- ▲/▼ cycle through matching messages, scrolling each into view (`scrollIntoView({ block: 'center' })`)
+- Enter for next match (wraps around), Shift+Enter for previous (wraps around), Escape clears query and blurs input
+- All messages remain visible — only the current match is highlighted
 
-### Right Panel — Match Context
+### Component Architecture
 
-Per file:
-- **Sticky file header** — filename + match count badge, clickable → dispatches `search-navigate` with `{ path }`
-- **Match rows** — line number + highlighted text, clickable → dispatches `search-navigate` with `{ path, line }`
-- **Context rows** (1 before/after) — dimmed, not clickable
+The file search functionality is split across three components:
 
-### Bidirectional Scroll Sync
+| Component | Responsibility |
+|-----------|---------------|
+| `ac-chat-panel` | Search UI (toggle buttons, input, overlay), file search RPC, match rendering, scroll sync events |
+| `ac-files-tab` | Listens for `file-search-changed` and `file-search-scroll` events, builds pruned tree, intercepts picker clicks during search |
+| `ac-file-picker` | Renders the pruned tree via `setTree()`, normal tree via `loadTree()` |
 
-- **Picker → match panel**: Intercept `file-clicked` from picker (`stopPropagation`). Smooth-scroll the match panel to the `[data-file-section]` element. Pause scroll sync for 400ms to prevent feedback loops. Clear the scroll-expanded directory tracking set (user-initiated navigation keeps dirs open).
-- **Match panel → picker**: On scroll, find which `.match-file-section` is at the top of the visible area. Update the picker's `_activeInViewer` and `_focusedPath` properties. Expand ancestor directories so the file row is visible even if the tree was collapsed. Scroll the picker to the highlighted row.
+### Legacy Search Tab
 
-#### Directory Auto-Collapse on Scroll
-
-The search tab tracks which directories were expanded *by scroll sync* versus those already expanded (e.g. by `_expandAll()` after a search). A `_scrollExpandedDirs` set records only dirs that scroll sync opened. When the match panel scrolls to a different file:
-
-1. Compute the ancestor directory set for the new file
-2. Collapse any dirs in `_scrollExpandedDirs` that are not ancestors of the new file
-3. Expand any new ancestor dirs not already open, adding them to the tracking set
-
-This ensures user-expanded directories are never collapsed, while scroll-sync-expanded directories automatically re-collapse when no longer needed.
-
-### Resizable Divider
-
-4px vertical divider between panels, `cursor: col-resize`. Drag to resize; picker width clamped to `[80px, 70% of body]`. Width persisted to local storage. Default: 45% of body.
-
-### Keyboard
-
-| Key | Action |
-|-----|--------|
-| ↓/↑ | Move through flat match list in right panel |
-| Enter | Select match (or first if none focused) |
-| Escape | Clear query and results, reset picker tree |
-
-### Navigation
-
-Click match row or file header in right panel → dispatch `search-navigate` with file path + line number → dialog re-dispatches as `navigate-file` → diff viewer opens file at line.
-
-Picker's `file-clicked` event is intercepted — it scrolls the match panel instead of opening the file. Picker's `selection-changed` and `exclusion-changed` events bubble normally for context management.
-
-### Edge Cases
-
-- **Empty search / no results**: Two-panel layout hidden; shows placeholder or "No results found" message. Picker is not rendered.
-- **Picker selections**: Checkboxes persist across searches via the picker's internal `_selected` set. Context menus, git status, expand/collapse all work as normal.
+The standalone search tab (`ac-search-tab.js`) has been removed from the dialog's tab list. The file remains on disk but is no longer imported or rendered. All keyboard shortcuts (`Ctrl+Shift+F`) and tab shortcuts (`Alt+N`) have been updated to reflect the reduced tab count.
 
 ---
 

@@ -128,12 +128,15 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._isDragging = false;
     this._reviewState = { active: false };
     this._showReviewSelector = false;
+    this._fileSearchActive = false;
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('state-loaded', (e) => this._onStateLoaded(e));
     window.addEventListener('files-changed', (e) => this._onFilesChanged(e));
+    this.addEventListener('file-search-changed', (e) => this._onFileSearchChanged(e));
+    this.addEventListener('file-search-scroll', (e) => this._onFileSearchScroll(e));
   }
 
   onRpcReady() {
@@ -215,6 +218,77 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  _onFileSearchChanged(e) {
+    const { active, results } = e.detail || {};
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (!picker) return;
+
+    this._fileSearchActive = active;
+
+    if (!active) {
+      // Restore full tree — clear any highlight
+      picker._focusedPath = null;
+      picker.loadTree();
+      return;
+    }
+
+    if (!results || results.length === 0) {
+      picker.setTree({ name: '', type: 'dir', path: '', lines: 0, children: [] });
+      return;
+    }
+
+    // Build pruned tree from search results
+    const root = { name: '', type: 'dir', path: '', lines: 0, children: [] };
+    for (const r of results) {
+      const parts = r.file.split('/');
+      let node = root;
+      for (let i = 0; i < parts.length; i++) {
+        const isFile = (i === parts.length - 1);
+        const name = parts[i];
+        const path = parts.slice(0, i + 1).join('/');
+        if (isFile) {
+          node.children.push({
+            name, type: 'file', path,
+            lines: (r.matches || []).length,
+            mtime: 0, children: [],
+          });
+        } else {
+          let dir = node.children.find(c => c.name === name && c.type === 'dir');
+          if (!dir) {
+            dir = { name, type: 'dir', path, lines: 0, children: [] };
+            node.children.push(dir);
+          }
+          node = dir;
+        }
+      }
+    }
+    picker.setTree(root);
+  }
+
+  /**
+   * When the file search overlay scrolls, highlight the corresponding
+   * file in the picker.
+   */
+  _onFileSearchScroll(e) {
+    const filePath = e.detail?.filePath;
+    if (!filePath || !this._fileSearchActive) return;
+    const picker = this.shadowRoot?.querySelector('ac-file-picker');
+    if (!picker) return;
+    // Highlight the file and expand its ancestors
+    picker._focusedPath = filePath;
+    // Expand ancestor directories so the file row is visible
+    const parts = filePath.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const dirPath = parts.slice(0, i).join('/');
+      picker._expanded.add(dirPath);
+    }
+    picker.requestUpdate();
+    // Scroll the picker to show the highlighted file
+    picker.updateComplete.then(() => {
+      picker._scrollToFocused?.();
+    });
+  }
+
   _onFilesChanged(e) {
     const files = e.detail?.selectedFiles;
     if (Array.isArray(files)) {
@@ -276,12 +350,23 @@ export class AcFilesTab extends RpcMixin(LitElement) {
 
   _onFileClicked(e) {
     const path = e.detail?.path;
-    if (path) {
-      // Dispatch on window so app shell can route to diff viewer
-      window.dispatchEvent(new CustomEvent('navigate-file', {
-        detail: { path },
-      }));
+    if (!path) return;
+
+    // During file search, intercept picker clicks to scroll the match panel
+    // instead of navigating to the file in the diff viewer
+    if (this._fileSearchActive) {
+      e.stopPropagation();
+      const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel) {
+        chatPanel.scrollFileSearchToFile(path);
+      }
+      return;
     }
+
+    // Normal mode: dispatch to diff viewer
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path },
+    }));
   }
 
   /**

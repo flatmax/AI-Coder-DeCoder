@@ -173,6 +173,21 @@ When review mode is active, a banner displays at the top of the file picker show
 
 The review selector (git graph) opens in a separate floating dialog — the file picker remains visible and usable underneath. See [Code Review — Git Graph Selector](../4-features/code_review.md#git-graph-selector).
 
+## File Search Integration
+
+When file search is active in the chat panel, the files tab swaps the picker tree to a pruned view containing only matching files:
+
+| Event | Direction | Purpose |
+|-------|-----------|---------|
+| `file-search-changed` | Chat panel → files tab | `{ active, results }` — triggers pruned tree build or full tree restore |
+| `file-search-scroll` | Chat panel → files tab | `{ filePath }` — sync picker highlight to match panel scroll position |
+
+**Tree swap:** The files tab builds a pruned tree from search results (splitting file paths into nested directory nodes, setting `lines` to match count) and calls `picker.setTree()`. On exit, `picker.loadTree()` restores the full tree and `picker._focusedPath` is cleared.
+
+**Picker click intercept:** During file search, `file-clicked` events from the picker are intercepted (`stopPropagation`). Instead of navigating to the diff viewer, the files tab calls `chatPanel.scrollFileSearchToFile(path)` to scroll the match overlay to the target file section.
+
+**Scroll highlight sync:** When the match overlay scrolls, the files tab receives `file-search-scroll` events and updates `picker._focusedPath`, expands ancestor directories, and scrolls the picker to show the highlighted file row.
+
 ## Data Flow
 
 1. On startup: load file tree from Repo via RPC

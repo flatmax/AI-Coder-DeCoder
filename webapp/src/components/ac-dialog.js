@@ -13,7 +13,6 @@ import './ac-files-tab.js';
 
 // Lazy-loaded tab imports
 const lazyImports = {
-  search: () => import('./ac-search-tab.js'),
   context: () => import('./ac-context-tab.js'),
   cache: () => import('./ac-cache-tab.js'),
   settings: () => import('./ac-settings-tab.js'),
@@ -22,11 +21,10 @@ const lazyImports = {
 
 const TABS = [
   { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
-  { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
-  { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+3' },
-  { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+4' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true },
-  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+6' },
+  { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
+  { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+3' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+4', conditional: true },
+  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+5' },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {
@@ -596,7 +594,9 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._refreshReviewState();
     this._refreshMode();
     // Restore last-used tab now that RPC is connected and tabs can load data
-    const savedTab = this._loadPref('ac-dc-active-tab', 'files');
+    let savedTab = this._loadPref('ac-dc-active-tab', 'files');
+    // Migrate stale 'search' tab preference — search is now integrated into files
+    if (savedTab === 'search') savedTab = 'files';
     if (savedTab !== this.activeTab) {
       this._switchTab(savedTab);
     }
@@ -854,8 +854,8 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
-    // Alt+1..6 tab switching
-    if (e.altKey && e.key >= '1' && e.key <= '6') {
+    // Alt+1..5 tab switching
+    if (e.altKey && e.key >= '1' && e.key <= '5') {
       e.preventDefault();
       const idx = parseInt(e.key) - 1;
       const tab = TABS[idx];
@@ -870,18 +870,21 @@ export class AcDialog extends RpcMixin(LitElement) {
       this._toggleMinimize();
       return;
     }
-    // Ctrl+Shift+F → Search tab with selection/clipboard prefill
+    // Ctrl+Shift+F → Activate file search in files tab
     if (e.ctrlKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       // Capture selection synchronously before focus change clears it
       const sel = window.getSelection()?.toString()?.trim() || '';
-      this._switchTab('search');
-      if (sel && !sel.includes('\n')) {
-        this.updateComplete.then(() => {
-          const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
-          if (searchTab) searchTab.prefill(sel);
-        });
-      }
+      this._switchTab('files');
+      this.updateComplete.then(() => {
+        const filesTab = this.shadowRoot?.querySelector('ac-files-tab');
+        if (filesTab) {
+          const chatPanel = filesTab.shadowRoot?.querySelector('ac-chat-panel');
+          if (chatPanel) {
+            chatPanel.activateFileSearch(sel && !sel.includes('\n') ? sel : '');
+          }
+        }
+      });
       return;
     }
   }
@@ -902,17 +905,6 @@ export class AcDialog extends RpcMixin(LitElement) {
         const child = panel.firstElementChild;
         if (child && typeof child.onTabVisible === 'function') {
           child.onTabVisible();
-        }
-      }
-      if (tabId === 'search') {
-        // Wait for lazy import to complete so the custom element is defined
-        await lazyReady;
-        // Wait one more update cycle for the element to render its shadow DOM
-        await this.updateComplete;
-        const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
-        if (searchTab) {
-          await searchTab.updateComplete;
-          searchTab.focus();
         }
       }
     });
@@ -1324,13 +1316,6 @@ export class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <!-- Lazy-loaded tabs — only render once visited -->
-        ${this._visitedTabs.has('search') ? html`
-          <div class="tab-panel ${this.activeTab === 'search' ? 'active' : ''}"
-               role="tabpanel" id="panel-search" aria-labelledby="tab-search">
-            <ac-search-tab></ac-search-tab>
-          </div>
-        ` : ''}
-
         ${this._visitedTabs.has('context') ? html`
           <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}"
                role="tabpanel" id="panel-context" aria-labelledby="tab-context">
