@@ -96,7 +96,13 @@ export class AcDialog extends RpcMixin(LitElement) {
     .tab-buttons {
       display: flex;
       gap: 2px;
-      flex: 1;
+    }
+    .git-actions {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      margin-left: auto;
+      margin-right: auto;
     }
 
     .tab-btn {
@@ -120,9 +126,10 @@ export class AcDialog extends RpcMixin(LitElement) {
 
     .header-actions {
       display: flex;
-      gap: 4px;
+      gap: 2px;
       margin-left: auto;
       flex-shrink: 0;
+      align-items: center;
     }
 
     .header-action {
@@ -1292,6 +1299,27 @@ export class AcDialog extends RpcMixin(LitElement) {
           `)}
         </div>
 
+        <div class="git-actions">
+          <button class="header-action" title="Copy diff (staged)" aria-label="Copy diff to clipboard"
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onCopyDiff()}
+            ?disabled=${!this.rpcConnected}>📋</button>
+          ${this._canMutate ? html`
+            <button class="header-action ${this._committing ? 'committing' : ''}"
+              title="${this._reviewActive ? 'Commit disabled during review' : 'Stage all & commit'}"
+              aria-label="${this._reviewActive ? 'Commit disabled during review' : 'Stage all and commit'}"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onCommit()}
+              ?disabled=${!this.rpcConnected || this._committing || this._streamingActive || this._reviewActive}>
+              ${this._committing ? '⏳' : '💾'}
+            </button>
+            <button class="header-action danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onConfirmReset()}
+              ?disabled=${!this.rpcConnected || this._streamingActive}>⚠️</button>
+          ` : ''}
+        </div>
+
         ${this._modeSwitching && !this._docIndexReady ? html`
           <div class="header-progress">
             <span class="header-progress-label">${this._modeSwitchMessage || 'Building…'}</span>
@@ -1318,7 +1346,7 @@ export class AcDialog extends RpcMixin(LitElement) {
               @change=${() => this._onCrossRefToggle()}
               style="margin: 0; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'};">
             <span style="color: var(--text-muted); white-space: nowrap;">
-              ${this._mode === 'code' ? '+doc index' : '+code symbols'}
+              ${this._mode === 'code' ? '+doc' : '+code'}
             </span>
           </label>
           <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''} ${this._docIndexBuilding ? 'building' : ''}"
@@ -1334,24 +1362,6 @@ export class AcDialog extends RpcMixin(LitElement) {
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
           </button>
           <div class="header-divider"></div>
-          <button class="header-action" title="Copy diff" aria-label="Copy diff to clipboard"
-            @mousedown=${(e) => e.stopPropagation()}
-            @click=${() => this._onCopyDiff()}
-            ?disabled=${!this.rpcConnected}>📋</button>
-          ${this._canMutate ? html`
-            <button class="header-action ${this._committing ? 'committing' : ''}"
-              title="${this._reviewActive ? 'Commit disabled during review' : 'Stage all & commit'}"
-              aria-label="${this._reviewActive ? 'Commit disabled during review' : 'Stage all and commit'}"
-              @mousedown=${(e) => e.stopPropagation()}
-              @click=${() => this._onCommit()}
-              ?disabled=${!this.rpcConnected || this._committing || this._streamingActive || this._reviewActive}>
-              ${this._committing ? '⏳' : '💾'}
-            </button>
-            <button class="header-action danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
-              @mousedown=${(e) => e.stopPropagation()}
-              @click=${() => this._onConfirmReset()}
-              ?disabled=${!this.rpcConnected || this._streamingActive}>⚠️</button>
-          ` : ''}
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
             aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"

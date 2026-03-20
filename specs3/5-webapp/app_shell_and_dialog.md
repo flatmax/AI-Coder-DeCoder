@@ -166,12 +166,14 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 | Section | Content |
 |---------|---------|
 | Left | Active tab label, collab indicator (👥); click label toggles minimize |
-| Center | Tab icon buttons |
-| Right | Cross-ref toggle, mode toggle, git actions (📋 💾 ⚠️), review toggle (👁️), minimize button |
+| Center | Tab icon buttons — gap — git actions (📋 💾 ⚠️) — gap |
+| Right | Cross-ref toggle, mode toggle, divider, review toggle (👁️), minimize button |
 
 **Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
 
-**Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+**Cross-reference toggle:** A checkbox labeled **+doc** (in code mode) or **+code** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+
+**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
@@ -184,7 +186,7 @@ The dialog tracks review state via `_reviewActive` property, synced from:
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
-**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are in the dialog header's right-side actions area, separated from the mode/review controls by a thin vertical divider (`.header-divider`). The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are placed immediately after the tab buttons in a `.git-actions` group, filling the natural gap between the tabs and the right-side controls. This keeps frequently-used actions near the center of the header where they're easy to reach. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 ### Minimizing
 
