@@ -76,8 +76,18 @@ Per file:
 
 ### Bidirectional Scroll Sync
 
-- **Picker → match panel**: Intercept `file-clicked` from picker (`stopPropagation`). Smooth-scroll the match panel to the `[data-file-section]` element. Pause scroll sync for 400ms to prevent feedback loops.
-- **Match panel → picker**: On scroll, find which `.match-file-section` is at the top of the visible area. Update the picker's `_activeInViewer` and `_focusedPath` properties. Expand ancestor directories via `_expandToPath()` so the file row is visible even if the tree was collapsed. Scroll the picker to the highlighted row.
+- **Picker → match panel**: Intercept `file-clicked` from picker (`stopPropagation`). Smooth-scroll the match panel to the `[data-file-section]` element. Pause scroll sync for 400ms to prevent feedback loops. Clear the scroll-expanded directory tracking set (user-initiated navigation keeps dirs open).
+- **Match panel → picker**: On scroll, find which `.match-file-section` is at the top of the visible area. Update the picker's `_activeInViewer` and `_focusedPath` properties. Expand ancestor directories so the file row is visible even if the tree was collapsed. Scroll the picker to the highlighted row.
+
+#### Directory Auto-Collapse on Scroll
+
+The search tab tracks which directories were expanded *by scroll sync* versus those already expanded (e.g. by `_expandAll()` after a search). A `_scrollExpandedDirs` set records only dirs that scroll sync opened. When the match panel scrolls to a different file:
+
+1. Compute the ancestor directory set for the new file
+2. Collapse any dirs in `_scrollExpandedDirs` that are not ancestors of the new file
+3. Expand any new ancestor dirs not already open, adding them to the tracking set
+
+This ensures user-expanded directories are never collapsed, while scroll-sync-expanded directories automatically re-collapse when no longer needed.
 
 ### Resizable Divider
 

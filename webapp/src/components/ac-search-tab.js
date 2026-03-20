@@ -286,6 +286,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     this._generation = 0;
     this._scrollSyncPaused = false;
     this._isDragging = false;
+    this._scrollExpandedDirs = new Set(); // dirs expanded by scroll sync (not user)
 
     // Load persisted divider width
     try {
@@ -359,6 +360,8 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     const section = panel?.querySelector(`[data-file-section="${CSS.escape(path)}"]`);
     if (section && panel) {
       this._scrollSyncPaused = true;
+      // User-initiated navigation — stop tracking scroll-expanded dirs
+      this._scrollExpandedDirs.clear();
       section.scrollIntoView({ behavior: 'smooth', block: 'start' });
       setTimeout(() => { this._scrollSyncPaused = false; }, 400);
     }
@@ -605,8 +608,42 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     if (!picker) return;
     picker._activeInViewer = filePath || '';
     picker._focusedPath = filePath || '';
-    // Expand ancestor directories so the file row is visible in the tree
-    if (filePath) picker._expandToPath(filePath);
+
+    // Determine which ancestor dirs the new file needs expanded
+    const neededDirs = new Set();
+    if (filePath) {
+      const parts = filePath.split('/');
+      let current = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        current = current ? `${current}/${parts[i]}` : parts[i];
+        neededDirs.add(current);
+      }
+    }
+
+    // Collapse dirs that were expanded by previous scroll sync but aren't needed now
+    let changed = false;
+    for (const dir of this._scrollExpandedDirs) {
+      if (!neededDirs.has(dir)) {
+        picker._expanded.delete(dir);
+        this._scrollExpandedDirs.delete(dir);
+        changed = true;
+      }
+    }
+
+    // Expand ancestor dirs for the new file, tracking which ones we expand
+    if (filePath) {
+      for (const dir of neededDirs) {
+        if (!picker._expanded.has(dir)) {
+          picker._expanded.add(dir);
+          this._scrollExpandedDirs.add(dir);
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      picker._expanded = new Set(picker._expanded);
+    }
     picker.requestUpdate();
     // Scroll the picker to make the highlighted row visible
     requestAnimationFrame(() => {
