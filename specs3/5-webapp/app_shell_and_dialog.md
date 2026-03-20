@@ -165,9 +165,11 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 | Section | Content |
 |---------|---------|
-| Left | Active tab label; click toggles minimize |
+| Left | Active tab label, collab indicator (👥); click label toggles minimize |
 | Center | Tab icon buttons |
 | Right | Cross-ref toggle, mode toggle, git actions (📋 💾 ⚠️), review toggle (👁️), minimize button |
+
+**Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
 
 **Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
 
