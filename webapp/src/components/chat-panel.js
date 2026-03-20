@@ -3433,19 +3433,13 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     return html`
       <!-- Action Bar -->
       <div class="action-bar" role="toolbar" aria-label="Chat actions">
-        <button class="action-btn" title="New session" aria-label="New session" @click=${this._newSession}
-          ?disabled=${!this._canMutate}>✨</button>
-        <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
-
-        <div class="action-divider"></div>
-
         <div class="chat-search">
           <button
             class="search-mode-toggle ${this._searchMode === 'files' ? 'active' : ''}"
             @click=${this._toggleSearchMode}
-            title="Toggle between message search and file search"
+            title="${this._searchMode === 'files' ? 'Switch to message search' : 'Switch to file search'}"
             aria-label="Toggle search mode"
-          >${this._searchMode === 'files' ? '📁' : '💬'}</button>
+          >${this._searchMode === 'files' ? '🔎' : '🗨'}</button>
           <div class="chat-search-box">
             <input
               class="chat-search-input"
@@ -3491,6 +3485,12 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ` : nothing}
         </div>
 
+        ${this._searchMode !== 'files' ? html`
+          <div class="action-divider"></div>
+          <button class="action-btn" title="New session" aria-label="New session" @click=${this._newSession}
+            ?disabled=${!this._canMutate}>✨</button>
+          <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
+        ` : nothing}
       </div>
 
       <!-- Messages / File search container -->

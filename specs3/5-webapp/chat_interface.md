@@ -385,8 +385,8 @@ The action bar is divided into two visual groups by a thin vertical divider (`.a
 
 | Group | Elements | Purpose |
 |-------|----------|---------|
-| Session | ✨ 📜 | New session, browse history |
-| Search | 💬/📁 toggle, search input with inline Aa/.*/ab toggles, result counter + ▲/▼ | Unified search area |
+| Search | 🗨/🔎 toggle, search input with inline Aa/.*/ab toggles, result counter + ▲/▼ | Unified search area |
+| Session | ✨ 📜 | New session, browse history (hidden in file search mode) |
 
 Git actions (📋 💾 ⚠️) are in the dialog header — see [App Shell and Dialog — Header Sections](../5-webapp/app_shell_and_dialog.md#header-sections).
 
@@ -394,7 +394,7 @@ The search input and its inline toggle buttons share a single border (`.chat-sea
 
 ### Chat Search (Dual Mode)
 
-The search area supports two modes via the 💬/📁 toggle button (left of the input). See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
+The search area supports two modes via the 🗨/🔎 toggle button (left of the input). See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
 
 **Message search (💬 — default):**
 
