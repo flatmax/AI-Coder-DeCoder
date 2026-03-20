@@ -88,7 +88,7 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 ### Commit Flow (UI-Driven)
 
 1. User clicks 💾 in action bar → `LLMService.commit_all()`
-2. Server captures current session ID, returns `{status: "started"}` immediately
+2. Server captures current session ID **synchronously before launching the background task**, returns `{status: "started"}` immediately. The session ID is captured early so the commit event is persisted to the correct session even if `_session_id` is replaced by `_restore_last_session()` during a concurrent server restart.
 3. Background task: stage all changes (`stage_all`)
 4. Get staged diff (`get_staged_diff`)
 5. Send diff to LLM to generate commit message

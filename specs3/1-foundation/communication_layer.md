@@ -336,7 +336,7 @@ Three top-level service classes, registered via `add_class()`:
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `LLMService.get_current_state` | `() → {messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, cross_ref_enabled}` | Full state snapshot |
+| `LLMService.get_current_state` | `() → {messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available}` | Full state snapshot |
 | `LLMService.set_selected_files` | `(files) → [string]` | Update file selection |
 | `LLMService.get_selected_files` | `() → [string]` | Current selection |
 | `LLMService.chat_streaming` | `(request_id, message, files?, images?) → {status}` | Start streaming chat |

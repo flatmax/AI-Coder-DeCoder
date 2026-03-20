@@ -152,7 +152,7 @@ MATLAB uses `end` to close `function`, `classdef`, `if`, `for`, `while`, `switch
 
 **Output arguments as return type:** If a function declares output arguments (`function [a, b] = myFunc(...)`), the output names are joined with `, ` and stored as `return_type` on the symbol (e.g., `"a, b"`).
 
-**Comment and string stripping:** Before pattern matching, line comments (`%...`) and string literals (`'...'` and `"..."`) are stripped from a copy of the source text to avoid false positives in call site and variable detection.
+**Comment and string stripping:** Line comments (`%...`) and string literals (`'...'` and `"..."`) are stripped at two levels: (1) a global copy of the source text is preprocessed for top-level pattern matching (`_FUNC_RE`, `_CLASS_RE`, `_VAR_RE`), and (2) each function's body text is independently stripped within `_extract_calls`, `_extract_local_vars`, and `_extract_read_vars` before scanning for identifiers. The per-function-body stripping ensures that comments and strings inside function bodies don't produce false positives even when the body text is sliced from the original (unstripped) source.
 
 **Builtin exclusion:** A large set of common MATLAB builtins (`disp`, `fprintf`, `zeros`, `plot`, etc.) and keywords (`if`, `for`, `end`, etc.) are excluded from read-variable detection to reduce noise in the symbol map.
 

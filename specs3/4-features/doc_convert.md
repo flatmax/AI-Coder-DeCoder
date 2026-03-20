@@ -133,7 +133,7 @@ When the primary PyMuPDF pipeline is used, text-only slides appear as markdown p
 
 `.xlsx` files use a dedicated **openpyxl-based pipeline** (`_extract_xlsx_with_colors`) instead of markitdown, preserving cell background colours as emoji markers in the markdown output. The pipeline uses a two-pass approach:
 
-1. **Pass 1** — Read all cells across all sheets, collecting text values and raw hex fill colours. Build a set of all unique non-ignorable fills (near-white and near-black fills are ignored)
+1. **Pass 1** — Read all cells across all sheets, collecting text values and raw hex fill colours. Cell values of `"nan"` or `"none"` (case-insensitive) are normalized to empty strings to avoid polluting the markdown output with Python/pandas artefacts. Build a set of all unique non-ignorable fills (near-white and near-black fills are ignored)
 2. **Colour mapping** — Well-known hues (red, green, yellow, blue, etc.) are assigned named emoji markers (🔴, 🟢, 🟡, 🔵). Remaining colours are clustered by Euclidean RGB distance (threshold 40) and assigned distinct fallback markers (⬛, ◆, ▲, ●, ■, ★) per cluster. This ensures visually distinct shades — e.g. three shades of brown — each get their own symbol
 3. **Pass 2** — Emit markdown tables using the colour map. Coloured cells get their marker prepended. Empty columns and fully-empty rows are stripped. A legend mapping markers to colour names is appended
 

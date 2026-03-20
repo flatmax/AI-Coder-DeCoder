@@ -192,6 +192,8 @@ L0 is seeded at initialization with the system prompt, index legend (symbol-map 
 
 After `initialize_from_reference_graph` completes, `_measure_tracker_tokens()` iterates all `sym:` and `doc:` items and replaces their placeholder `tokens=0` with real token counts from the formatted symbol/doc blocks. This ensures the cache viewer tab can display per-item token counts and per-tier totals immediately — without waiting for the first chat request to trigger `_update_stability()`. Content hashes are also updated from signature hashes during measurement for accurate stability tracking.
 
+**Prefix-based dispatch:** `_measure_tracker_tokens` only measures items whose key prefix matches the passed index — `doc:` items are measured via `get_file_doc_block()` and `symbol:` items via `get_file_symbol_block()`. Items with a mismatched prefix (e.g., `doc:` items in the code tracker when cross-reference mode adds them later) are skipped with a `continue` — they are measured separately by `_measure_cross_ref_tokens()` when cross-reference mode is enabled.
+
 This measurement runs in both the code path (`_try_initialize_stability` and `complete_deferred_init`) and the document path (`_finalize_doc_mode_switch`).
 
 ### Clustering Algorithm
@@ -255,6 +257,10 @@ The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (
 
 When a file is in active context (selected), its index entry (`sym:` or `doc:`) is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted. This applies independently to both primary and cross-reference index entries.
 
+### Active File Entry Removal
+
+During `_update_stability`, when a file is in the selected files set, **both** `symbol:{path}` and `doc:{path}` entries are removed from the tracker (not just the current mode's prefix). This handles cross-reference mode correctly — if a file is selected in code mode with cross-ref enabled, both its `symbol:` entry (primary) and `doc:` entry (cross-ref) are removed and their affected tiers marked as broken. The removal is logged in the changes list with `reason: "file selected — full content replaces {prefix} entry"`.
+
 ### User-Excluded Files
 
 Users can explicitly exclude files from the index via the file picker's three-state checkbox (see [File Picker — Index Exclusion](../5-webapp/file_picker.md#index-exclusion-three-state-checkbox)). Excluded files are:
@@ -265,6 +271,8 @@ Users can explicitly exclude files from the index via the file picker's three-st
 4. **Excluded from tier recomputation** — the tier exclusion set includes user-excluded files alongside selected files
 
 This is distinct from file deselection (which only removes `file:*` entries and leaves `sym:`/`doc:` entries in their earned tier). Exclusion removes the file from context entirely — no full content, no index block, no tracker item.
+
+**Defensive double-removal:** Excluded files are removed from the tracker at two points: (1) immediately when `set_excluded_index_files()` is called (via `_remove_excluded_from_tracker()`), and (2) defensively at the start of every `_update_stability()` cycle. The second removal is necessary because excluded files still exist on disk, so the stale-item removal pass (`remove_stale`) won't catch them — without the defensive removal, they could re-appear in the tracker if another code path re-created their entries.
 
 **Use case:** Repositories with extensive documentation (e.g., GB of converted docs) where the doc map alone exceeds the context budget. Users exclude directories of less-relevant docs to free token budget.
 

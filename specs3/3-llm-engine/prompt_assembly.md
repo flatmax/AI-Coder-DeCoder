@@ -297,7 +297,7 @@ for tier in [L0, L1, L2, L3]:
 
 ### Step 2: Build Content for Each Tier
 
-For each tier, separate items by type and gather their content:
+For each tier, separate items by type and gather their content. Items whose path is in the user-excluded index files set (`excluded_index_files`) are **skipped** — they should not appear in any tier's content even if they have a tracker entry (the defensive removal in `_update_stability` should have removed them, but `_build_tiered_content` checks again as a belt-and-suspenders measure):
 
 ```pseudo
 tiered_content = {}
@@ -374,6 +374,20 @@ for tier in [L0, L1, L2, L3]:
 for path in selected_files:
     symbol_map_exclude.add(path)  # full content in active, symbol block redundant
 ```
+
+### Tiered Content Dict Structure
+
+Each tier key (`l0`, `l1`, `l2`, `l3`) in the `tiered_content` dict contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `symbols` | `str` | Concatenated symbol/doc index blocks for files in this tier |
+| `files` | `str` | Concatenated fenced code blocks for graduated file contents |
+| `history` | `list[dict]` | History message dicts graduated to this tier |
+| `graduated_files` | `list[str]` | File paths whose full content is in this tier (excluded from active Working Files) |
+| `graduated_history_indices` | `list[int]` | History message indices in this tier (excluded from active history) |
+
+The `graduated_files` and `graduated_history_indices` fields are used by `assemble_tiered_messages` to exclude graduated content from the uncached active sections, ensuring no content appears twice.
 
 ### Step 4: Assemble
 

@@ -30,7 +30,7 @@ Background task: _stream_chat
     ├─ Initialize stability tracker from reference graph (if not already done at startup)
     ├─ Re-extract doc file structures if doc mode (mtime-based, instant; changed files queued for background enrichment)
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
-    │       ├─ Skip already-fetched URLs (check in-memory fetched dict)
+    │       ├─ Skip already-fetched URLs (via `get_url_content` which checks in-memory dict then filesystem cache; only URLs returning the specific error "URL not yet fetched" are fetched)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
     │       ├─ Fetch, cache, and summarize each URL
     │       ├─ Notify client: compactionEvent with stage "url_ready"
@@ -41,7 +41,7 @@ Background task: _stream_chat
     ├─ Build and inject review context (if review mode active)
     ├─ Append system reminder to user prompt (from config `system_reminder.md`)
     ├─ Build tiered_content from stability tracker (→ prompt_assembly.md#tiered-assembly-data-flow)
-    ├─ Recompute symbol map with full tier exclusions (selected files + user-excluded files + all paths in cached tiers) to enforce "A File Never Appears Twice"
+    ├─ Recompute symbol map with full tier exclusions (two-pass — see below)
     ├─ Assemble tiered message array with cache_control markers
     ├─ Run LLM completion (threaded, streaming)
     │       │
@@ -64,7 +64,7 @@ Background task: _stream_chat
 Send streamComplete → browser
     │
     ├─ await sleep(0) — flush WebSocket frame before GIL-heavy work
-    ├─ Launch deferred doc enrichment (KeyBERT, background, non-blocking)
+    ├─ Launch deferred doc enrichment (see below)
     │
     ▼
 Post-response compaction (→ context_and_history.md)
@@ -73,6 +73,15 @@ Post-response compaction (→ context_and_history.md)
 ### Assembly Mode
 
 The streaming handler uses **tiered assembly** (`assemble_tiered_messages`) for LLM requests. This produces a message array with `cache_control` markers at tier boundaries, enabling provider-level prompt caching. The stability tracker's tier assignments drive content placement — see [Prompt Assembly — Tiered Assembly Data Flow](prompt_assembly.md#tiered-assembly-data-flow) for the complete data flow.
+
+### Two-Pass Symbol Map Regeneration
+
+The symbol map is generated twice during `_stream_chat`:
+
+1. **First pass** (before `_build_tiered_content`): excludes `selected_files ∪ excluded_index_files`. This provides the initial symbol map for the uncached context and for tier content assembly.
+2. **Second pass** (after `_build_tiered_content`): adds all paths from cached tiers (L0–L3) to the exclusion set. This enforces "A File Never Appears Twice" — files whose index blocks are already in a cached tier's content are excluded from the main symbol map.
+
+The second pass iterates all tier items from the tracker, collecting `symbol:`, `doc:`, and `file:` paths into `tier_exclude`, then regenerates the map with the full exclusion set. This regenerated map is what gets passed to `assemble_tiered_messages`.
 
 ### Deferred Initialization Guard
 
@@ -286,7 +295,7 @@ When edit blocks modify document files in doc mode, their structures are re-extr
 
 The KeyBERT sentence-transformer model (~80–420 MB) is loaded lazily on first use. Loading holds the GIL for ~10 seconds (PyTorch weight materialization). To prevent this from blocking the mode-switch RPC response, the model is **eagerly pre-initialized** at the end of `_build_doc_index_background_silent` Phase 1, **before** the `doc_index_ready` event is sent to the frontend. This runs unconditionally (not gated on `needs_enrichment`) because even when all files are cached from disk, a future mode switch may discover mtime-changed files and queue them for enrichment. By the time `doc_index_ready` is sent and the user can click the doc mode button, the model is already loaded.
 
-The enrichment queue is stashed in the result dict under `_deferred_enrichment`. This key is stripped via `result.pop` **before** `streamComplete` is sent — the queue contains `DocOutline` objects that aren't JSON-serializable and would silently kill the WebSocket write. After `streamComplete` and an `await asyncio.sleep(0)` to flush the WebSocket frame, the enrichment is launched via `asyncio.ensure_future`. Each file is enriched in the thread pool executor, with per-file progress events sent to the browser. The reference index is rebuilt after all files complete.
+The enrichment queue is stashed in the `streamComplete` result dict under a `_`-prefixed key (`_deferred_enrichment`), which contains the list of `(path, mtime, outline, text)` tuples and the keyword model name. This key is stripped via `result.pop("_deferred_enrichment", None)` **before** `streamComplete` is sent — the queue contains `DocOutline` objects that aren't JSON-serializable and would silently kill the WebSocket write. After `streamComplete` and an `await asyncio.sleep(0)` to flush the WebSocket frame, the enrichment is launched via `asyncio.ensure_future(_enrich_modified_docs_background(...))`. Each file is enriched in the thread pool executor, with per-file progress events sent to the browser. The reference index is rebuilt after all files complete.
 
 ## Token Usage Extraction
 
@@ -349,7 +358,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, streaming_active, session_id, repo_name, cross_ref_enabled
+- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 - set_excluded_index_files stores exclusion set, removes tracker items, broadcasts filesChanged
 - get_current_state includes excluded_index_files field

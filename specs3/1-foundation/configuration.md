@@ -36,6 +36,8 @@ The `min_cacheable_tokens` is model-aware — per Anthropic's prompt caching doc
 - **4096 tokens** for Claude Opus 4.5/4.6, Haiku 4.5
 - **1024 tokens** for Claude Sonnet and other Claude models
 
+The version matching uses string-contains checks on the lowercased model name, matching both dash-separated and dot-separated version patterns (e.g., `"4-5"` and `"4.5"` both match). Non-Claude models default to 1024.
+
 The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
 
 A fallback `cache_target_tokens` property (without model reference) computes `cache_min_tokens × cache_buffer_multiplier` (default: 1126) for callers that don't have a model reference.

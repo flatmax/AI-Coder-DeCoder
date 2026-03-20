@@ -85,6 +85,8 @@ Pending connections are tracked separately:
 
 Pending requests that are not acted on within **120 seconds** are auto-denied and the WebSocket is closed. This prevents abandoned connections from accumulating.
 
+**Implementation:** The admission wait uses `asyncio.wait()` with `return_when=FIRST_COMPLETED` to race the admit/deny future against `websocket.wait_closed()`, with a 120-second timeout. If the pending client disconnects (closes their tab) before a decision is made, the `wait_closed` future resolves first and the request is cleaned up automatically — an `admissionResult` broadcast removes the toast from all admitted clients. Both futures are cancelled in a `finally` block to prevent resource leaks.
+
 If a new connection arrives from the same IP while a previous request is still pending (e.g., the user refreshed their browser), the old pending request is auto-denied and its toast is removed before the new request is created. The cancelled request's `admissionResult` includes `"replaced": true` so frontends can distinguish this from an explicit deny.
 
 The server also monitors the pending client's WebSocket for closure. If the pending client disconnects before a decision is made (e.g., closes the tab), the request is cleaned up and an `admissionResult` broadcast removes the toast from all admitted clients.

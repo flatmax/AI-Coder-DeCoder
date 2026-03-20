@@ -115,7 +115,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. Called before message assembly in the streaming handler as a safety net.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method exists on `ContextManager` as `emergency_truncate()` but is **not currently called** by `_stream_chat`. The streaming handler only calls `shed_files_if_needed()` (Layer 3). Emergency truncation is available as a manual safety net for future use or external callers but is not part of the current streaming pipeline.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
@@ -245,6 +245,10 @@ Compaction runs after a 500ms pause following `streamComplete`. Frontend notific
 | `verbatim_window_tokens` | 4000 | Recent tokens kept unchanged |
 | `summary_budget_tokens` | 500 | Max tokens for summary |
 | `min_verbatim_exchanges` | 2 | Minimum recent exchanges always kept |
+
+### Live Config Reloading
+
+`HistoryCompactor` accepts an optional `config_manager` parameter at construction. When provided, all property accessors (`enabled`, `trigger_tokens`, `verbatim_window_tokens`, etc.) read from `config_manager.compaction_config` rather than the snapshot dict captured at construction time. This means hot-reloaded `app.json` values take effect on the next compaction check without restarting the server. When `config_manager` is not provided (e.g., in tests), the compactor falls back to the snapshot dict passed as the `config` parameter.
 
 ### Two-Threshold Design
 
