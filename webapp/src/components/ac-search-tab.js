@@ -1,18 +1,24 @@
 /**
- * Search tab — full-text search across the repository.
+ * Search tab — two-panel layout with file picker (left) and match context (right).
  *
- * Features: debounced search, result grouping by file, keyboard navigation,
- * three toggles (ignore case, regex, whole word), Ctrl+Shift+F shortcut.
+ * Features: debounced search, file picker showing matching files with match counts,
+ * match context panel with highlighted results, bidirectional scroll sync,
+ * resizable divider, three toggles (ignore case, regex, whole word).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
+import './file-picker.js';
 
 const STORAGE_KEY_IGNORE_CASE = 'ac-dc-search-ignore-case';
 const STORAGE_KEY_REGEX = 'ac-dc-search-regex';
 const STORAGE_KEY_WHOLE_WORD = 'ac-dc-search-whole-word';
+const STORAGE_KEY_DIVIDER = 'ac-dc-search-divider';
+
+const MIN_PICKER_WIDTH = 80;
+const DEFAULT_PICKER_PERCENT = 45;
 
 function escapeHtml(text) {
   return text
@@ -29,9 +35,10 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     _wholeWord: { type: Boolean, state: true },
     _results: { type: Array, state: true },
     _loading: { type: Boolean, state: true },
-    _expandedFiles: { type: Object, state: true },
     _focusedIndex: { type: Number, state: true },
     _flatMatches: { type: Array, state: true },
+    _activeFile: { type: String, state: true },
+    _pickerWidth: { type: Number, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -50,6 +57,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       gap: 6px;
+      flex-shrink: 0;
     }
 
     .search-input-row {
@@ -68,9 +76,6 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       font-size: 0.85rem;
       padding: 6px 10px;
       outline: none;
-    }
-    .search-input:focus {
-      border-color: var(--accent-primary);
     }
     .search-input:focus {
       border-color: var(--accent-primary);
@@ -112,49 +117,63 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       white-space: nowrap;
     }
 
-    /* Results */
-    .results {
+    /* Two-panel body */
+    .search-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .search-picker {
+      overflow-y: auto;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border-primary);
+    }
+
+    .panel-divider {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .panel-divider:hover,
+    .panel-divider.dragging {
+      background: var(--accent-primary);
+      opacity: 0.3;
+    }
+
+    .match-panel {
       flex: 1;
       overflow-y: auto;
-      padding: 4px 0;
+      min-width: 0;
     }
 
-    .no-results {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: var(--text-muted);
-      font-size: 0.85rem;
-    }
-
-    /* File group */
-    .file-group {
+    /* Match file sections */
+    .match-file-section {
       border-bottom: 1px solid var(--border-primary);
     }
 
-    .file-header {
+    .match-file-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
       display: flex;
       align-items: center;
       padding: 6px 12px;
+      background: var(--bg-tertiary);
       cursor: pointer;
       user-select: none;
-      gap: 6px;
-      background: var(--bg-tertiary);
+      gap: 8px;
       font-size: 0.8rem;
+      border-bottom: 1px solid var(--border-primary);
     }
-    .file-header:hover {
+    .match-file-header:hover {
       background: var(--bg-secondary);
     }
 
-    .file-toggle {
-      font-size: 0.6rem;
-      color: var(--text-muted);
-      width: 12px;
-      flex-shrink: 0;
-    }
-
-    .file-path {
+    .match-file-path {
       font-family: var(--font-mono);
       color: var(--accent-primary);
       overflow: hidden;
@@ -163,23 +182,16 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       flex: 1;
     }
 
-    .match-count {
+    .match-file-count {
       font-size: 0.7rem;
       color: var(--text-muted);
       flex-shrink: 0;
     }
 
     /* Match rows */
-    .match-list {
-      display: none;
-    }
-    .match-list.expanded {
-      display: block;
-    }
-
     .match-row {
       display: flex;
-      padding: 3px 12px 3px 30px;
+      padding: 3px 10px 3px 16px;
       cursor: pointer;
       font-family: var(--font-mono);
       font-size: 0.78rem;
@@ -220,7 +232,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     /* Context lines */
     .context-row {
       display: flex;
-      padding: 1px 12px 1px 30px;
+      padding: 1px 10px 1px 16px;
       font-family: var(--font-mono);
       font-size: 0.75rem;
       gap: 8px;
@@ -239,7 +251,16 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       white-space: nowrap;
     }
 
-    /* Loading */
+    /* Status messages */
+    .no-results {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
     .loading {
       display: flex;
       align-items: center;
@@ -258,11 +279,23 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     this._wholeWord = this._loadBool(STORAGE_KEY_WHOLE_WORD, false);
     this._results = [];
     this._loading = false;
-    this._expandedFiles = new Set();
     this._focusedIndex = -1;
     this._flatMatches = [];
+    this._activeFile = '';
     this._debounceTimer = null;
     this._generation = 0;
+    this._scrollSyncPaused = false;
+    this._isDragging = false;
+
+    // Load persisted divider width
+    try {
+      const saved = parseInt(localStorage.getItem(STORAGE_KEY_DIVIDER));
+      this._pickerWidth = (saved && saved >= MIN_PICKER_WIDTH) ? saved : 0;
+    } catch {
+      this._pickerWidth = 0; // 0 means use percentage default
+    }
+
+    this._onFileClicked = this._onFileClicked.bind(this);
   }
 
   _loadBool(key, defaultVal) {
@@ -275,6 +308,20 @@ export class AcSearchTab extends RpcMixin(LitElement) {
 
   _saveBool(key, val) {
     try { localStorage.setItem(key, String(val)); } catch {}
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+  }
+
+  firstUpdated() {
+    // Intercept file-clicked from the embedded picker
+    this.shadowRoot.addEventListener('file-clicked', this._onFileClicked);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.shadowRoot.removeEventListener('file-clicked', this._onFileClicked);
   }
 
   // === Public API (called from dialog) ===
@@ -297,6 +344,26 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     }
   }
 
+  // === Picker event handling ===
+
+  _onFileClicked(e) {
+    // Intercept file-clicked from picker: scroll match panel instead of opening file
+    e.stopPropagation();
+    const path = e.detail?.path;
+    if (!path) return;
+    this._scrollMatchPanelToFile(path);
+  }
+
+  _scrollMatchPanelToFile(path) {
+    const panel = this.shadowRoot?.querySelector('.match-panel');
+    const section = panel?.querySelector(`[data-file-section="${CSS.escape(path)}"]`);
+    if (section && panel) {
+      this._scrollSyncPaused = true;
+      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => { this._scrollSyncPaused = false; }, 400);
+    }
+  }
+
   // === Search ===
 
   _onInput(e) {
@@ -315,6 +382,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
       this._results = [];
       this._flatMatches = [];
       this._focusedIndex = -1;
+      this._activeFile = '';
       return;
     }
     if (!this.rpcConnected) return;
@@ -343,10 +411,20 @@ export class AcSearchTab extends RpcMixin(LitElement) {
         this._results = [];
       }
 
-      // Auto-expand all files
-      this._expandedFiles = new Set(this._results.map(r => r.file));
       this._buildFlatMatches();
       this._focusedIndex = -1;
+
+      // Set first file as active
+      this._activeFile = this._results.length > 0 ? this._results[0].file : '';
+
+      // Update picker with pruned search tree
+      await this.updateComplete;
+      this._updatePickerTree();
+
+      // Highlight first file in picker
+      if (this._activeFile) {
+        this._syncPickerHighlight(this._activeFile);
+      }
     } catch (e) {
       if (gen !== this._generation) return;
       console.warn('Search failed:', e);
@@ -362,12 +440,55 @@ export class AcSearchTab extends RpcMixin(LitElement) {
   _buildFlatMatches() {
     const flat = [];
     for (const fileResult of this._results) {
-      if (!this._expandedFiles.has(fileResult.file)) continue;
       for (const match of (fileResult.matches || [])) {
         flat.push({ file: fileResult.file, match });
       }
     }
     this._flatMatches = flat;
+  }
+
+  // === Tree building for picker ===
+
+  _buildSearchTree(results) {
+    const root = { name: '', type: 'dir', path: '', lines: 0, children: [] };
+    for (const r of results) {
+      const parts = r.file.split('/');
+      let node = root;
+      for (let i = 0; i < parts.length; i++) {
+        const isFile = (i === parts.length - 1);
+        const name = parts[i];
+        const path = parts.slice(0, i + 1).join('/');
+        if (isFile) {
+          node.children.push({
+            name,
+            type: 'file',
+            path,
+            lines: (r.matches || []).length,
+            mtime: 0,
+            children: [],
+          });
+        } else {
+          let dir = node.children.find(c => c.name === name && c.type === 'dir');
+          if (!dir) {
+            dir = { name, type: 'dir', path, lines: 0, children: [] };
+            node.children.push(dir);
+          }
+          node = dir;
+        }
+      }
+    }
+    return root;
+  }
+
+  _updatePickerTree() {
+    const picker = this.shadowRoot?.querySelector('.search-picker');
+    if (!picker) return;
+    if (this._results.length > 0) {
+      const tree = this._buildSearchTree(this._results);
+      picker.setTree(tree);
+    } else {
+      picker.setTree({ name: '', type: 'dir', path: '', lines: 0, children: [] });
+    }
   }
 
   // === Toggles ===
@@ -390,20 +511,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     this._runSearch();
   }
 
-  // === File expand/collapse ===
-
-  _toggleFile(filePath) {
-    const next = new Set(this._expandedFiles);
-    if (next.has(filePath)) {
-      next.delete(filePath);
-    } else {
-      next.add(filePath);
-    }
-    this._expandedFiles = next;
-    this._buildFlatMatches();
-  }
-
-  // === Navigation ===
+  // === Keyboard Navigation ===
 
   _onKeyDown(e) {
     if (e.key === 'ArrowDown') {
@@ -432,8 +540,10 @@ export class AcSearchTab extends RpcMixin(LitElement) {
         this._results = [];
         this._flatMatches = [];
         this._focusedIndex = -1;
+        this._activeFile = '';
         const input = this.shadowRoot?.querySelector('.search-input');
         if (input) input.value = '';
+        this._updatePickerTree();
       }
     }
   }
@@ -456,17 +566,89 @@ export class AcSearchTab extends RpcMixin(LitElement) {
   }
 
   _onMatchClick(file, match) {
-    // Update focused index
     const idx = this._flatMatches.findIndex(
       m => m.file === file && m.match.line_num === match.line_num
     );
     if (idx >= 0) this._focusedIndex = idx;
-
     this._navigateToMatch({ file, match });
   }
 
   _onFileHeaderClick(filePath) {
-    this._toggleFile(filePath);
+    this.dispatchEvent(new CustomEvent('search-navigate', {
+      detail: { path: filePath },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  // === Match panel scroll sync ===
+
+  _onMatchPanelScroll() {
+    if (this._scrollSyncPaused) return;
+    const panel = this.shadowRoot?.querySelector('.match-panel');
+    if (!panel) return;
+    const sections = panel.querySelectorAll('.match-file-section');
+    const panelTop = panel.scrollTop;
+    let activeFile = '';
+    for (const section of sections) {
+      if (section.offsetTop <= panelTop + 10) {
+        activeFile = section.dataset.fileSection || '';
+      }
+    }
+    if (activeFile && activeFile !== this._activeFile) {
+      this._activeFile = activeFile;
+      this._syncPickerHighlight(activeFile);
+    }
+  }
+
+  _syncPickerHighlight(filePath) {
+    const picker = this.shadowRoot?.querySelector('.search-picker');
+    if (!picker) return;
+    picker._activeInViewer = filePath || '';
+    picker._focusedPath = filePath || '';
+    // Expand ancestor directories so the file row is visible in the tree
+    if (filePath) picker._expandToPath(filePath);
+    picker.requestUpdate();
+    // Scroll the picker to make the highlighted row visible
+    requestAnimationFrame(() => {
+      const row = picker.shadowRoot?.querySelector('.tree-row.active-in-viewer');
+      if (row) row.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  // === Resizable divider ===
+
+  _onDividerMouseDown(e) {
+    e.preventDefault();
+    this._isDragging = true;
+    const startX = e.clientX;
+    const startWidth = this._pickerWidth || this._getDefaultPickerWidth();
+
+    const onMove = (moveEvent) => {
+      const body = this.shadowRoot?.querySelector('.search-body');
+      const maxWidth = body ? body.clientWidth * 0.7 : 500;
+      const dx = moveEvent.clientX - startX;
+      this._pickerWidth = Math.max(MIN_PICKER_WIDTH, Math.min(maxWidth, startWidth + dx));
+    };
+
+    const onUp = () => {
+      this._isDragging = false;
+      try { localStorage.setItem(STORAGE_KEY_DIVIDER, String(Math.round(this._pickerWidth))); } catch {}
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  _getDefaultPickerWidth() {
+    const body = this.shadowRoot?.querySelector('.search-body');
+    return body ? body.clientWidth * DEFAULT_PICKER_PERCENT / 100 : 200;
+  }
+
+  _getPickerWidthStyle() {
+    if (this._pickerWidth > 0) return `${this._pickerWidth}px`;
+    return `${DEFAULT_PICKER_PERCENT}%`;
   }
 
   // === Highlight ===
@@ -481,10 +663,8 @@ export class AcSearchTab extends RpcMixin(LitElement) {
         const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         patternSrc = this._wholeWord ? `\\b${escaped}\\b` : escaped;
       }
-      // Apply pattern to the raw text first, then escape for HTML
       const flags = this._ignoreCase ? 'gi' : 'g';
       const regex = new RegExp(`(${patternSrc})`, flags);
-      // Split text on matches, escape each part, wrap matches
       const parts = text.split(regex);
       return parts.map((part, i) =>
         i % 2 === 1
@@ -518,37 +698,33 @@ export class AcSearchTab extends RpcMixin(LitElement) {
     `);
   }
 
-  _renderFileGroup(fileResult) {
-    const expanded = this._expandedFiles.has(fileResult.file);
+  _renderFileSection(fileResult) {
     const matchCount = (fileResult.matches || []).length;
 
     return html`
-      <div class="file-group">
-        <div class="file-header" @click=${() => this._onFileHeaderClick(fileResult.file)}>
-          <span class="file-toggle">${expanded ? '▼' : '▶'}</span>
-          <span class="file-path">${fileResult.file}</span>
-          <span class="match-count">${matchCount}</span>
+      <div class="match-file-section" data-file-section="${fileResult.file}">
+        <div class="match-file-header" @click=${() => this._onFileHeaderClick(fileResult.file)}>
+          <span class="match-file-path">${fileResult.file}</span>
+          <span class="match-file-count">${matchCount}</span>
         </div>
-        <div class="match-list ${expanded ? 'expanded' : ''}">
-          ${(fileResult.matches || []).map(match => {
-            const flatIdx = this._flatMatches.findIndex(
-              m => m.file === fileResult.file && m.match.line_num === match.line_num
-            );
-            const isFocused = flatIdx === this._focusedIndex;
+        ${(fileResult.matches || []).map(match => {
+          const flatIdx = this._flatMatches.findIndex(
+            m => m.file === fileResult.file && m.match.line_num === match.line_num
+          );
+          const isFocused = flatIdx === this._focusedIndex;
 
-            return html`
-              ${this._renderContextLines(match.context_before)}
-              <div
-                class="match-row ${isFocused ? 'focused' : ''}"
-                @click=${() => this._onMatchClick(fileResult.file, match)}
-              >
-                <span class="match-line-num">${match.line_num}</span>
-                <span class="match-text">${unsafeHTML(this._highlightMatch(match.line, this._query.trim()))}</span>
-              </div>
-              ${this._renderContextLines(match.context_after)}
-            `;
-          })}
-        </div>
+          return html`
+            ${this._renderContextLines(match.context_before)}
+            <div
+              class="match-row ${isFocused ? 'focused' : ''}"
+              @click=${() => this._onMatchClick(fileResult.file, match)}
+            >
+              <span class="match-line-num">${match.line_num}</span>
+              <span class="match-text">${unsafeHTML(this._highlightMatch(match.line, this._query.trim()))}</span>
+            </div>
+            ${this._renderContextLines(match.context_after)}
+          `;
+        })}
       </div>
     `;
   }
@@ -556,6 +732,7 @@ export class AcSearchTab extends RpcMixin(LitElement) {
   render() {
     const totalMatches = this._totalMatches();
     const totalFiles = this._results.length;
+    const hasResults = this._results.length > 0;
 
     return html`
       <div class="search-header">
@@ -598,19 +775,34 @@ export class AcSearchTab extends RpcMixin(LitElement) {
         </div>
       </div>
 
-      <div class="results" role="region" aria-label="Search results" @keydown=${this._onKeyDown} tabindex="-1">
-        ${this._loading ? html`
-          <div class="loading">Searching...</div>
-        ` : this._results.length === 0 ? html`
-          ${this._query.trim() ? html`
-            <div class="no-results">No results found</div>
-          ` : html`
-            <div class="no-results">Type to search across files</div>
-          `}
-        ` : html`
-          ${this._results.map(r => this._renderFileGroup(r))}
-        `}
-      </div>
+      ${this._loading ? html`
+        <div class="loading">Searching...</div>
+      ` : !hasResults ? html`
+        <div class="no-results">
+          ${this._query.trim() ? 'No results found' : 'Type to search across files'}
+        </div>
+      ` : html`
+        <div class="search-body">
+          <ac-file-picker
+            class="search-picker"
+            style="width: ${this._getPickerWidthStyle()}"
+          ></ac-file-picker>
+          <div
+            class="panel-divider ${this._isDragging ? 'dragging' : ''}"
+            @mousedown=${this._onDividerMouseDown}
+          ></div>
+          <div
+            class="match-panel"
+            role="region"
+            aria-label="Search results"
+            @keydown=${this._onKeyDown}
+            @scroll=${this._onMatchPanelScroll}
+            tabindex="-1"
+          >
+            ${this._results.map(r => this._renderFileSection(r))}
+          </div>
+        </div>
+      `}
     `;
   }
 }
