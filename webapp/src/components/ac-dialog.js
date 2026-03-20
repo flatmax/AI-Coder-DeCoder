@@ -20,7 +20,7 @@ const lazyImports = {
 };
 
 const TABS = [
-  { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
+  { id: 'files', icon: '🗨', label: 'Chat', shortcut: 'Alt+1' },
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
   { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+3' },
   { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+4' },
