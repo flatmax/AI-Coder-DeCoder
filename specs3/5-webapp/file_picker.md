@@ -182,7 +182,9 @@ When file search is active in the chat panel, the files tab swaps the picker tre
 | `file-search-changed` | Chat panel → files tab | `{ active, results }` — triggers pruned tree build or full tree restore |
 | `file-search-scroll` | Chat panel → files tab | `{ filePath }` — sync picker highlight to match panel scroll position |
 
-**Tree swap:** The files tab builds a pruned tree from search results (splitting file paths into nested directory nodes, setting `lines` to match count) and calls `picker.setTree()`. On exit, `picker.loadTree()` restores the full tree and `picker._focusedPath` is cleared.
+**Tree swap:** The files tab builds a pruned tree from search results (splitting file paths into nested directory nodes, setting `lines` to match count) and calls `picker.setTree()`. On exit, `picker.restoreExpandedState()` is called before `picker.loadTree()` to restore the full tree with the user's previous expand/collapse state, and `picker._focusedPath` is cleared.
+
+**Expand state preservation:** `setTree()` lazily snapshots the current `_expanded` set on the first call (so repeated search refinements don't re-snapshot). `restoreExpandedState()` replaces `_expanded` with the saved snapshot before the full tree reload. Since `loadTree()` does not reset `_expanded`, the restored state is used for rendering.
 
 **Picker click intercept:** During file search, `file-clicked` events from the picker are intercepted (`stopPropagation`). Instead of navigating to the diff viewer, the files tab calls `chatPanel.scrollFileSearchToFile(path)` to scroll the match overlay to the target file section.
 

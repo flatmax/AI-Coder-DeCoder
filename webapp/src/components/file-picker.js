@@ -447,11 +447,22 @@ export class AcFilePicker extends RpcMixin(LitElement) {
    * Used by the search tab to inject a pruned tree of matching files.
    */
   setTree(treeData) {
+    // Save normal expanded state before replacing with search tree
+    if (!this._savedExpanded) {
+      this._savedExpanded = new Set(this._expanded);
+    }
     this._tree = treeData;
     this._allFilePaths = [];
     this._collectPaths(treeData, this._allFilePaths);
     this._expandAll(treeData);
     this.requestUpdate();
+  }
+
+  restoreExpandedState() {
+    if (this._savedExpanded) {
+      this._expanded = this._savedExpanded;
+      this._savedExpanded = null;
+    }
   }
 
   _expandAll(node) {

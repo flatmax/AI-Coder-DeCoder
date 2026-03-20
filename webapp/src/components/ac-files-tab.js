@@ -226,8 +226,9 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     this._fileSearchActive = active;
 
     if (!active) {
-      // Restore full tree — clear any highlight
+      // Restore full tree and previously expanded dirs — clear any highlight
       picker._focusedPath = null;
+      picker.restoreExpandedState();
       picker.loadTree();
       return;
     }
