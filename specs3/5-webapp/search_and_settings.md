@@ -10,19 +10,19 @@ File search shares the action bar with chat message search in the Files tab. A m
 
 ### Action Bar Search Controls
 
-The chat panel action bar always shows three search option toggles alongside the search input:
+The search area is visually separated from adjacent button groups by thin dividers. The search input contains inline toggle buttons on the right side (inside the input border), following the VS Code pattern:
 
 | Element | Behavior |
 |---------|----------|
-| `Aa` toggle | Ignore case (default: on) — affects both search modes |
-| `.*` toggle | Regex mode (default: off) — affects both search modes |
-| `ab` toggle | Whole word (default: off) — affects both search modes |
-| 💬/📁 mode toggle | Switch between message search and file search |
+| 💬/📁 mode toggle | Switch between message search and file search (left of input) |
 | Search input | Placeholder changes with mode; debounced (300ms) for file search |
+| `Aa` inline toggle | Ignore case (default: on) — inside input, right side |
+| `.*` inline toggle | Regex mode (default: off) — inside input, right side |
+| `ab` inline toggle | Whole word (default: off) — inside input, right side |
 | Result counter | `N in M` (matches in files) for file search; `X/Y` (current/total) for message search |
 | ▲/▼ navigation | Cycle through matches in either mode |
 
-Toggle states are persisted in `localStorage` with keys `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word`.
+The input and its inline toggles share a single border (`.chat-search-box` wrapper). Focus-within highlights the border. Toggle states are persisted in `localStorage` with keys `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word`.
 
 ### File Search Mode
 

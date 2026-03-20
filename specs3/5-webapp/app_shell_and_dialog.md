@@ -167,7 +167,7 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 |---------|---------|
 | Left | Active tab label; click toggles minimize |
 | Center | Tab icon buttons |
-| Right | Cross-ref toggle, review toggle (👁️), minimize button |
+| Right | Cross-ref toggle, mode toggle, git actions (📋 💾 ⚠️), review toggle (👁️), minimize button |
 
 **Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
 
@@ -182,7 +182,7 @@ The dialog tracks review state via `_reviewActive` property, synced from:
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
-**Note:** Git action buttons (clipboard, commit, reset) and session buttons (new session, history browser) are in the chat panel's action bar, not the dialog header. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are in the dialog header's right-side actions area, separated from the mode/review controls by a thin vertical divider (`.header-divider`). The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 ### Minimizing
 

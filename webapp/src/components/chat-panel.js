@@ -214,6 +214,15 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     .action-spacer { flex: 1; }
 
+    .action-divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border-primary);
+      margin: 0 2px;
+      flex-shrink: 0;
+      opacity: 0.6;
+    }
+
     /* Confirm dialog overlay */
     .confirm-overlay {
       position: fixed;
@@ -1147,11 +1156,23 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       flex: 1;
       min-width: 0;
     }
-    .chat-search-input {
+    .chat-search-box {
+      display: flex;
+      align-items: center;
       flex: 1;
+      min-width: 0;
       background: var(--bg-primary);
       border: 1px solid var(--border-primary);
       border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+    .chat-search-box:focus-within {
+      border-color: var(--accent-primary);
+    }
+    .chat-search-input {
+      flex: 1;
+      background: none;
+      border: none;
       color: var(--text-primary);
       font-family: var(--font-sans);
       font-size: 0.8rem;
@@ -1159,16 +1180,43 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       outline: none;
       min-width: 60px;
     }
-    .chat-search-input:focus {
-      border-color: var(--accent-primary);
-    }
     .chat-search-input::placeholder {
       color: var(--text-muted);
+    }
+    .search-inline-toggles {
+      display: flex;
+      align-items: center;
+      gap: 1px;
+      padding: 0 3px;
+      flex-shrink: 0;
+    }
+    .search-inline-btn {
+      background: none;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      font-size: 0.65rem;
+      font-family: var(--font-mono);
+      padding: 1px 4px;
+      border-radius: 3px;
+      cursor: pointer;
+      user-select: none;
+      line-height: 1.2;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .search-inline-btn:hover {
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+    }
+    .search-inline-btn.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      color: var(--bg-primary);
     }
     .chat-search-counter {
       font-size: 0.7rem;
       color: var(--text-muted);
       white-space: nowrap;
+      flex-shrink: 0;
     }
     .chat-search-nav {
       background: none;
@@ -1178,6 +1226,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
       padding: 2px 4px;
       cursor: pointer;
       border-radius: var(--radius-sm);
+      flex-shrink: 0;
     }
     .chat-search-nav:hover {
       color: var(--text-primary);
@@ -1222,43 +1271,23 @@ export class AcChatPanel extends RpcMixin(LitElement) {
 
     /* Search mode toggle */
     .search-mode-toggle {
-      background: var(--bg-primary);
+      background: none;
       border: 1px solid var(--border-primary);
       color: var(--text-muted);
-      font-size: 0.7rem;
-      font-family: var(--font-mono);
-      padding: 2px 8px;
+      font-size: 0.8rem;
+      padding: 3px 6px;
       border-radius: var(--radius-sm);
       cursor: pointer;
       user-select: none;
       white-space: nowrap;
       transition: background 0.15s, color 0.15s, border-color 0.15s;
+      flex-shrink: 0;
     }
     .search-mode-toggle:hover {
       color: var(--text-secondary);
+      background: var(--bg-secondary);
     }
     .search-mode-toggle.active {
-      background: var(--accent-primary);
-      border-color: var(--accent-primary);
-      color: var(--bg-primary);
-    }
-
-    .search-toggle-btn {
-      background: var(--bg-primary);
-      border: 1px solid var(--border-primary);
-      color: var(--text-muted);
-      font-size: 0.7rem;
-      font-family: var(--font-mono);
-      padding: 2px 6px;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      user-select: none;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
-    }
-    .search-toggle-btn:hover {
-      color: var(--text-secondary);
-    }
-    .search-toggle-btn.active {
       background: var(--accent-primary);
       border-color: var(--accent-primary);
       color: var(--bg-primary);
@@ -3408,27 +3437,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ?disabled=${!this._canMutate}>✨</button>
         <button class="action-btn" title="Browse history" aria-label="Browse history" @click=${this._openHistoryBrowser}>📜</button>
 
-        <button
-          class="search-toggle-btn ${this._searchIgnoreCase ? 'active' : ''}"
-          @click=${this._toggleSearchIgnoreCase}
-          title="Ignore case"
-          aria-label="Toggle ignore case"
-          aria-pressed="${this._searchIgnoreCase}"
-        >Aa</button>
-        <button
-          class="search-toggle-btn ${this._searchRegex ? 'active' : ''}"
-          @click=${this._toggleSearchRegex}
-          title="Use regex"
-          aria-label="Toggle regex search"
-          aria-pressed="${this._searchRegex}"
-        >.*</button>
-        <button
-          class="search-toggle-btn ${this._searchWholeWord ? 'active' : ''}"
-          @click=${this._toggleSearchWholeWord}
-          title="Whole word"
-          aria-label="Toggle whole word match"
-          aria-pressed="${this._searchWholeWord}"
-        >ab</button>
+        <div class="action-divider"></div>
 
         <div class="chat-search">
           <button
@@ -3437,15 +3446,40 @@ export class AcChatPanel extends RpcMixin(LitElement) {
             title="Toggle between message search and file search"
             aria-label="Toggle search mode"
           >${this._searchMode === 'files' ? '📁' : '💬'}</button>
-          <input
-            class="chat-search-input"
-            type="text"
-            placeholder="${this._searchMode === 'files' ? 'Search files...' : 'Search messages...'}"
-            aria-label="${this._searchMode === 'files' ? 'Search repository files' : 'Search messages'}"
-            .value=${this._chatSearchQuery}
-            @input=${this._onChatSearchInput}
-            @keydown=${this._onChatSearchKeyDown}
-          >
+          <div class="chat-search-box">
+            <input
+              class="chat-search-input"
+              type="text"
+              placeholder="${this._searchMode === 'files' ? 'Search files...' : 'Search messages...'}"
+              aria-label="${this._searchMode === 'files' ? 'Search repository files' : 'Search messages'}"
+              .value=${this._chatSearchQuery}
+              @input=${this._onChatSearchInput}
+              @keydown=${this._onChatSearchKeyDown}
+            >
+            <div class="search-inline-toggles">
+              <button
+                class="search-inline-btn ${this._searchIgnoreCase ? 'active' : ''}"
+                @click=${this._toggleSearchIgnoreCase}
+                title="Ignore case"
+                aria-label="Toggle ignore case"
+                aria-pressed="${this._searchIgnoreCase}"
+              >Aa</button>
+              <button
+                class="search-inline-btn ${this._searchRegex ? 'active' : ''}"
+                @click=${this._toggleSearchRegex}
+                title="Use regex"
+                aria-label="Toggle regex search"
+                aria-pressed="${this._searchRegex}"
+              >.*</button>
+              <button
+                class="search-inline-btn ${this._searchWholeWord ? 'active' : ''}"
+                @click=${this._toggleSearchWholeWord}
+                title="Whole word"
+                aria-label="Toggle whole word match"
+                aria-pressed="${this._searchWholeWord}"
+              >ab</button>
+            </div>
+          </div>
           ${this._searchMode === 'files' && this._fileSearchTotalMatches() > 0 ? html`
             <span class="chat-search-counter" aria-live="polite">${this._fileSearchTotalMatches()} in ${this._fileSearchResults.length}</span>
             <button class="chat-search-nav" title="Previous (Shift+Enter)" aria-label="Previous file match" @click=${this._fileSearchPrev}>▲</button>
@@ -3457,20 +3491,6 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           ` : nothing}
         </div>
 
-        <button class="action-btn" title="Copy diff" aria-label="Copy diff to clipboard" @click=${this._copyDiff}
-          ?disabled=${!this.rpcConnected}>📋</button>
-        ${this._canMutate ? html`
-          <button class="action-btn ${this._committing ? 'committing' : ''}"
-            title="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all & commit'}"
-            aria-label="${this.reviewState?.active ? 'Commit disabled during review' : 'Stage all and commit'}"
-            @click=${this._commitWithMessage}
-            ?disabled=${!this.rpcConnected || this._committing || this.streamingActive || this.reviewState?.active}>
-            ${this._committing ? '⏳' : '💾'}
-          </button>
-          <button class="action-btn danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
-            @click=${this._confirmReset}
-            ?disabled=${!this.rpcConnected || this.streamingActive}>⚠️</button>
-        ` : nothing}
       </div>
 
       <!-- Messages / File search container -->

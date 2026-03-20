@@ -381,18 +381,20 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 
 ## Action Bar
 
-| Side | Element | Action |
-|------|---------|--------|
-| Left | ✨ | New session (dispatches `session-loaded` to refresh history bar) |
-| Left | 📜 | Browse history |
-| Left | `Aa` `.*` `ab` | Search option toggles (always visible, affect both message and file search) |
-| Center | 💬/📁 toggle | Switch between message search and file search mode |
-| Center | Search input | Searches messages (💬 mode) or repository files (📁 mode) |
-| Center | Result counter + ▲/▼ | Navigate search results in either mode |
+The action bar is divided into two visual groups by a thin vertical divider (`.action-divider`):
+
+| Group | Elements | Purpose |
+|-------|----------|---------|
+| Session | ✨ 📜 | New session, browse history |
+| Search | 💬/📁 toggle, search input with inline Aa/.*/ab toggles, result counter + ▲/▼ | Unified search area |
+
+Git actions (📋 💾 ⚠️) are in the dialog header — see [App Shell and Dialog — Header Sections](../5-webapp/app_shell_and_dialog.md#header-sections).
+
+The search input and its inline toggle buttons share a single border (`.chat-search-box` wrapper). The three toggles (`Aa` ignore case, `.*` regex, `ab` whole word) sit inside the input's right edge, following the VS Code pattern. Focus-within highlights the shared border.
 
 ### Chat Search (Dual Mode)
 
-The action bar contains a unified search area that supports two modes via the 💬/📁 toggle button. Three search option toggles (`Aa` ignore case, `.*` regex, `ab` whole word) are always visible and affect both modes. See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
+The search area supports two modes via the 💬/📁 toggle button (left of the input). See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
 
 **Message search (💬 — default):**
 
@@ -426,10 +428,6 @@ The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)
 When file search mode is active, the messages area is hidden (`display: none`) and a `.file-search-overlay` is shown in its place (both inside a `position: relative` wrapper div with `flex: 1`). The overlay uses `position: absolute; inset: 0` to fill the wrapper. This preserves the chat panel's DOM state (streaming, scroll position, input text) while file search is active.
 
 The overlay renders file match sections with `data-file-section` attributes for scroll sync targeting. Match text is highlighted using `unsafeHTML` with regex-built highlight spans.
-
-| Right | 📋 | Copy diff to clipboard |
-| Right | 💾 | Commit all (server-driven — see below) |
-| Right | ⚠️ | Reset to HEAD (with confirmation). Calls `LLMService.reset_to_head` which resets git and records a system event message in conversation context. On success, adds a system event card to the chat: "**Reset to HEAD** — all uncommitted changes have been discarded." |
 
 ### Review Status Bar
 

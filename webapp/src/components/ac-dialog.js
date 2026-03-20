@@ -50,6 +50,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     _shareUrl: { type: String, state: true },
     _shareCopied: { type: Boolean, state: true },
     _collabDisabled: { type: Boolean, state: true },
+    _committing: { type: Boolean, state: true },
+    _streamingActive: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -144,8 +146,26 @@ export class AcDialog extends RpcMixin(LitElement) {
       animation: pulse-building 1.5s ease-in-out infinite;
       cursor: wait;
     }
+    .header-action.committing {
+      color: var(--accent-primary);
+      animation: spin 1s linear infinite;
+    }
+    .header-action.danger:hover {
+      color: var(--accent-red);
+    }
     .header-action:disabled {
       pointer-events: none;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .header-divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border-primary);
+      opacity: 0.6;
+      flex-shrink: 0;
     }
     @keyframes pulse-building {
       0%, 100% { opacity: 0.4; }
@@ -611,6 +631,9 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('session-loaded', () => this._refreshHistoryBar());
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
+      window.addEventListener('stream-chunk', () => { this._streamingActive = true; });
+      window.addEventListener('stream-complete', () => { this._streamingActive = false; this._committing = false; });
+      window.addEventListener('commit-result', () => { this._committing = false; });
       window.addEventListener('mode-switch-progress', (e) => {
         if (this._docIndexReady) return;
         const { message, percent } = e.detail || {};
@@ -689,6 +712,25 @@ export class AcDialog extends RpcMixin(LitElement) {
     } catch (e) {
       // Ignore — RPC may not be ready
     }
+  }
+
+  // === Git action delegates ===
+
+  _getFilesTab() {
+    return this.shadowRoot?.querySelector('ac-files-tab');
+  }
+
+  _onCopyDiff() {
+    this._getFilesTab()?.copyDiff();
+  }
+
+  _onCommit() {
+    this._committing = true;
+    this._getFilesTab()?.commitAll();
+  }
+
+  _onConfirmReset() {
+    this._getFilesTab()?.confirmReset();
   }
 
   _onReviewClick() {
@@ -1290,6 +1332,25 @@ export class AcDialog extends RpcMixin(LitElement) {
             @click=${() => this._onModeToggle()}>
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
           </button>
+          <div class="header-divider"></div>
+          <button class="header-action" title="Copy diff" aria-label="Copy diff to clipboard"
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onCopyDiff()}
+            ?disabled=${!this.rpcConnected}>📋</button>
+          ${this._canMutate ? html`
+            <button class="header-action ${this._committing ? 'committing' : ''}"
+              title="${this._reviewActive ? 'Commit disabled during review' : 'Stage all & commit'}"
+              aria-label="${this._reviewActive ? 'Commit disabled during review' : 'Stage all and commit'}"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onCommit()}
+              ?disabled=${!this.rpcConnected || this._committing || this._streamingActive || this._reviewActive}>
+              ${this._committing ? '⏳' : '💾'}
+            </button>
+            <button class="header-action danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onConfirmReset()}
+              ?disabled=${!this.rpcConnected || this._streamingActive}>⚠️</button>
+          ` : ''}
           <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
             title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
             aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"

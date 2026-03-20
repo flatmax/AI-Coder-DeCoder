@@ -479,6 +479,32 @@ export class AcFilesTab extends RpcMixin(LitElement) {
     }));
   }
 
+  // === Git action delegates (called from dialog header) ===
+
+  copyDiff() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) chatPanel._copyDiff();
+  }
+
+  commitAll() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) chatPanel._commitWithMessage();
+  }
+
+  confirmReset() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    if (chatPanel) chatPanel._confirmReset();
+  }
+
+  get isCommitting() {
+    const chatPanel = this.shadowRoot?.querySelector('ac-chat-panel');
+    return chatPanel?._committing || false;
+  }
+
+  get isStreaming() {
+    return this._streamingActive;
+  }
+
   _onStateLoaded(e) {
     const state = e.detail;
     if (state) {
