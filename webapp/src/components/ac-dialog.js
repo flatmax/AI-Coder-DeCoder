@@ -587,6 +587,62 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._collabPopoverOpen = false;
   }
 
+  _renderCollabPopover() {
+    return html`
+      <div class="collab-popover">
+        ${this._collabDisabled ? html`
+          <div class="collab-popover-title">Collaboration Disabled</div>
+          <div style="color: var(--text-secondary); padding: 4px 0; line-height: 1.5;">
+            Collaboration mode is not enabled. The server is listening on localhost only.
+          </div>
+          <div style="color: var(--text-muted); padding: 6px 0 2px; font-size: 0.78rem; line-height: 1.5;">
+            To allow others on your network to connect, restart with:
+          </div>
+          <div style="background: var(--bg-primary); padding: 6px 10px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-green); margin-top: 4px;">
+            ac-dc --collab
+          </div>
+        ` : html`
+          <div class="collab-popover-title">Connected Clients</div>
+          ${this._collabClients.length > 0 ? html`
+            <ul class="collab-client-list">
+              ${this._collabClients.map(c => html`
+                <li class="collab-client-item">
+                  <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
+                  <span class="collab-client-ip">${c.ip}</span>
+                  ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
+                </li>
+              `)}
+            </ul>
+          ` : html`
+            <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
+          `}
+          <hr class="collab-divider">
+          <div class="collab-share-section">
+            <div class="collab-share-label">Share Link</div>
+            ${this._shareUrl ? html`
+              <div class="collab-share-url">
+                <input type="text" readonly .value=${this._shareUrl}
+                  @click=${(e) => e.target.select()}>
+                <button class="${this._shareCopied ? 'copied' : ''}"
+                  @click=${() => this._copyShareUrl()}>
+                  ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
+                </button>
+              </div>
+              <div class="collab-share-hint">
+                Share this link with others on your network to collaborate.
+              </div>
+            ` : html`
+              <div class="collab-share-hint">
+                No routable network address detected.<br>
+                Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
+              </div>
+            `}
+          </div>
+        `}
+      </div>
+    `;
+  }
+
   async _copyShareUrl() {
     if (!this._shareUrl) return;
     try {
@@ -1221,69 +1277,6 @@ export class AcDialog extends RpcMixin(LitElement) {
       <div class="header" @mousedown=${this._onHeaderMouseDown}>
         <span class="header-label">${currentTab?.label || 'Files'}</span>
 
-        <div class="collab-anchor" style="margin-right: 4px;">
-          <button class="header-action" style="font-size: 0.8rem;"
-            title="Collaboration — ${this._connectedClients} connected"
-            @mousedown=${(e) => e.stopPropagation()}
-            @click=${() => this._toggleCollabPopover()}>
-            👥${this._connectedClients > 1 ? html` ${this._connectedClients}` : ''}
-          </button>
-          ${this._collabPopoverOpen ? html`
-            <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
-            <div class="collab-popover">
-              ${this._collabDisabled ? html`
-                <div class="collab-popover-title">Collaboration Disabled</div>
-                <div style="color: var(--text-secondary); padding: 4px 0; line-height: 1.5;">
-                  Collaboration mode is not enabled. The server is listening on localhost only.
-                </div>
-                <div style="color: var(--text-muted); padding: 6px 0 2px; font-size: 0.78rem; line-height: 1.5;">
-                  To allow others on your network to connect, restart with:
-                </div>
-                <div style="background: var(--bg-primary); padding: 6px 10px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-green); margin-top: 4px;">
-                  ac-dc --collab
-                </div>
-              ` : html`
-                <div class="collab-popover-title">Connected Clients</div>
-                ${this._collabClients.length > 0 ? html`
-                  <ul class="collab-client-list">
-                    ${this._collabClients.map(c => html`
-                      <li class="collab-client-item">
-                        <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
-                        <span class="collab-client-ip">${c.ip}</span>
-                        ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
-                      </li>
-                    `)}
-                  </ul>
-                ` : html`
-                  <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
-                `}
-                <hr class="collab-divider">
-                <div class="collab-share-section">
-                  <div class="collab-share-label">Share Link</div>
-                  ${this._shareUrl ? html`
-                    <div class="collab-share-url">
-                      <input type="text" readonly .value=${this._shareUrl}
-                        @click=${(e) => e.target.select()}>
-                      <button class="${this._shareCopied ? 'copied' : ''}"
-                        @click=${() => this._copyShareUrl()}>
-                        ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
-                      </button>
-                    </div>
-                    <div class="collab-share-hint">
-                      Share this link with others on your network to collaborate.
-                    </div>
-                  ` : html`
-                    <div class="collab-share-hint">
-                      No routable network address detected.<br>
-                      Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
-                    </div>
-                  `}
-                </div>
-              `}
-            </div>
-          ` : ''}
-        </div>
-
         <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
           ${TABS.filter(tab => !tab.conditional || this._docConvertAvailable).map(tab => html`
             <button
@@ -1300,6 +1293,19 @@ export class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <div class="git-actions">
+          <div class="collab-anchor">
+            <button class="header-action" style="font-size: 0.8rem;"
+              title="Collaboration — ${this._connectedClients} connected"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._toggleCollabPopover()}>
+              👥${this._connectedClients > 1 ? html` ${this._connectedClients}` : ''}
+            </button>
+            ${this._collabPopoverOpen ? html`
+              <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
+              ${this._renderCollabPopover()}
+            ` : ''}
+          </div>
+          <div class="header-divider"></div>
           <button class="header-action" title="Copy diff (staged)" aria-label="Copy diff to clipboard"
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onCopyDiff()}
@@ -1318,6 +1324,15 @@ export class AcDialog extends RpcMixin(LitElement) {
               @click=${() => this._onConfirmReset()}
               ?disabled=${!this.rpcConnected || this._streamingActive}>⚠️</button>
           ` : ''}
+          <div class="header-divider"></div>
+          <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
+            title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+            aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
+            ?disabled=${!this._canMutate}
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onReviewClick()}>
+            👁️
+          </button>
         </div>
 
         ${this._modeSwitching && !this._docIndexReady ? html`
@@ -1360,15 +1375,6 @@ export class AcDialog extends RpcMixin(LitElement) {
             @mousedown=${(e) => e.stopPropagation()}
             @click=${() => this._onModeToggle()}>
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
-          </button>
-          <div class="header-divider"></div>
-          <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
-            title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
-            aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
-            ?disabled=${!this._canMutate}
-            @mousedown=${(e) => e.stopPropagation()}
-            @click=${() => this._onReviewClick()}>
-            👁️
           </button>
           <button class="header-action" title="Minimize (Alt+M)"
             aria-label="${this.minimized ? 'Expand panel' : 'Minimize panel'}"

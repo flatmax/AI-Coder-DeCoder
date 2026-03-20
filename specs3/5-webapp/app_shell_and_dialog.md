@@ -165,9 +165,9 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 | Section | Content |
 |---------|---------|
-| Left | Active tab label, collab indicator (👥); click label toggles minimize |
-| Center | Tab icon buttons — gap — git actions (📋 💾 ⚠️) — gap |
-| Right | Cross-ref toggle, mode toggle, divider, review toggle (👁️), minimize button |
+| Left | Active tab label; click toggles minimize |
+| Center | Tab icon buttons — gap — [👥 | 📋💾⚠️ | 👁️] — gap |
+| Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), minimize (▼) |
 
 **Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
 
@@ -179,14 +179,12 @@ The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
 - `mode-changed` event: resets `_crossRefEnabled = false`
 
-The review toggle button (👁️) appears in the header actions area on all tabs. When review mode is inactive, clicking it switches to the Files tab and opens the review selector. When review mode is active, the button is visually highlighted (`review-active` class) and clicking it calls `_exitReview()` on the files tab. This provides quick access to review without navigating to the Files tab first.
-
 The dialog tracks review state via `_reviewActive` property, synced from:
 - `onRpcReady`: fetches `LLMService.get_review_state()`
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
-**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are placed immediately after the tab buttons in a `.git-actions` group, filling the natural gap between the tabs and the right-side controls. This keeps frequently-used actions near the center of the header where they're easy to reach. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 ### Minimizing
 
