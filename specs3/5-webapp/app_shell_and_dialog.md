@@ -213,7 +213,13 @@ See [Diff Viewer](diff_viewer.md) for the Monaco editor and [SVG Viewer](svg_vie
 
 ## Window Resize Handling
 
-Window resize events (display change, maximize, laptop lid reopen) trigger Monaco `layout()` to recalculate the editor dimensions. This is **throttled to one layout per animation frame** via `requestAnimationFrame` to prevent jank:
+Window resize events (display change, maximize, laptop lid reopen) trigger two actions:
+
+1. **Proportional dialog scaling** — the dialog container's width and height are scaled proportionally to maintain the dialog/editor split ratio across viewport size changes. The previous viewport dimensions (`_lastViewportWidth`, `_lastViewportHeight`) are tracked and the ratio is applied to the new dimensions. The new width is persisted to localStorage.
+
+2. **Monaco layout** — `layout()` is called to recalculate the editor dimensions.
+
+Both are **throttled to one call per animation frame** via `requestAnimationFrame` to prevent jank:
 
 - A pending RAF handle (`_resizeRAF`) gates the handler — subsequent resize events within the same frame are dropped
 - The RAF callback clears the handle before calling `layout()`, re-arming for the next frame

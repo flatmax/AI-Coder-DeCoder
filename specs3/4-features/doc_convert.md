@@ -214,7 +214,7 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem (for all formats, not just presentations/PDFs):
+Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem. This subdirectory is created for **all formats** (`.docx`, `.xlsx`, `.csv`, etc. — not just presentations/PDFs) during `_convert_single()`. If no images are extracted and the subdirectory ends up empty, it is automatically removed after conversion:
 
 ```
 docs/

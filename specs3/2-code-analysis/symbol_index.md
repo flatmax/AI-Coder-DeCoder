@@ -132,10 +132,14 @@ The MATLAB extractor (`MatlabExtractor`) uses **regex-based parsing** — no tre
 
 **Function body analysis:**
 
-For each function, the extractor also scans the body text to extract:
+Before pattern matching, a copy of the source text is preprocessed to strip line comments (`%...`) and string literals (`'...'` and `"..."`) to avoid false positives in call site and variable detection.
+
+For each function, the extractor scans the preprocessed body text to extract:
 - **Call sites** — identifiers followed by `(`, excluding MATLAB keywords. Produced as `CallSite` objects for the reference index
 - **Local variables** — LHS identifiers in assignments (`x = ...` or `[a, b] = ...`), excluding parameters, output args, and keywords. Attached as `variable`-kind children of the function symbol
 - **Read variables** — identifiers that appear in the body but are never assigned locally and are not parameters, outputs, or MATLAB builtins. Also attached as `variable`-kind children
+
+**Builtin exclusion:** A large set of common MATLAB builtins (`disp`, `fprintf`, `zeros`, `ones`, `plot`, `figure`, `fopen`, `exist`, `isa`, `class`, `double`, etc. — approximately 80 entries) and keywords (`if`, `for`, `end`, etc.) are excluded from both call site detection and read-variable detection to reduce noise in the symbol map.
 
 **Nesting and `end` tracking:**
 

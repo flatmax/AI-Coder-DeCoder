@@ -403,6 +403,7 @@ Three top-level service classes, registered via `add_class()`:
 | `Collab.deny_client` | `(client_id) → {ok, client_id}` | Deny and disconnect a pending connection |
 | `Collab.get_connected_clients` | `() → [{client_id, ip, role, is_localhost}]` | List all connected clients |
 | `Collab.get_collab_role` | `() → {role, is_localhost, client_id}` | Calling client's own role |
+| `Collab.get_share_info` | `() → {ips: [string], port: int}` | Routable LAN IPs and WebSocket port for share URL construction |
 
 ### Browser Methods (Server → Client)
 

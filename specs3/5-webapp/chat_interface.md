@@ -93,11 +93,17 @@ This direct-update pattern (rather than relying on reactive property propagation
 
 ### Input Accumulation (on add)
 
-When a file is added via mention click:
+When a file is added via mention click, the chat input text is accumulated using specific patterns:
 
-- Empty input: `The file helpers.js added. Do you want to see more files before you continue?`
-- Existing pattern: appends filename to list
-- Unrelated text: appends `(added helpers.js)`
+| Current input state | Result |
+|---|---|
+| Empty | `The file {basename} added. Do you want to see more files before you continue?` |
+| Matches `The file X added. Do you want to see more files...` | Replaced with `The files X, {basename} added. Do you want to see more files before you continue?` |
+| Matches `The files X, Y added. Do you want to see more files...` | Updated to `The files X, Y, {basename} added. Do you want to see more files before you continue?` |
+| Ends with `(added X)` | Appends ` (added {basename})` |
+| Any other text | Appends ` (added {basename})` |
+
+Only the basename (filename without directory path) is used in the accumulated text.
 
 ---
 
@@ -436,7 +442,9 @@ When a `session-loaded` CustomEvent fires on `window` (dispatched by the app she
 - **New session**: another localhost client called `new_session` → messages array is empty, chat clears
 - **Loaded session**: another localhost client called `load_session_into_context` → messages array contains the loaded conversation
 
-The handler resets streaming state (`_streamingContent`, `_currentRequestId`, `streamingActive`), enables auto-scroll, and seeds input history from user messages in the loaded session. The same `session-loaded` event is also fired by the local history browser path, so both local and remote session loads converge on the same handler.
+The handler resets streaming state (`_streamingContent`, `_currentRequestId`, `streamingActive`), enables auto-scroll, and seeds input history from user messages in the loaded session via `_seedInputHistory()`. This method iterates all user messages, extracts text content (joining text blocks from multimodal messages), and calls `addEntry()` on the input history component for each non-empty message. This ensures up-arrow recall works for messages from the loaded conversation, not just messages typed since the page loaded.
+
+The same `session-loaded` event is also fired by the local history browser path, so both local and remote session loads converge on the same handler.
 
 ---
 
@@ -477,6 +485,7 @@ Modal overlay (`<ac-history-browser>`) for browsing past conversations. Hosted i
 - **Search**: Debounced (300ms) full-text via `LLMService.history_search`. Switches left panel to search results mode. Escape in search input: clears query (if non-empty) or closes browser (if empty)
 - **Session selection**: Click loads messages via `LLMService.history_get_session`. Preserves selection on close/reopen
 - **Message actions**: Hover reveals copy (📋) and paste-to-prompt (↩) buttons. Copy writes raw content to clipboard. Paste-to-prompt dispatches `paste-to-prompt` event and closes the browser
+- **Context menu**: Right-click on a message shows a context menu with: "◧ Load in Left Panel", "◨ Load in Right Panel", "📋 Copy", "↩ Paste to Prompt". The load-in-panel actions dispatch `load-diff-panel` events with the message content for ad-hoc comparison in the diff viewer
 - **Load session**: "Load into context" button calls `LLMService.load_session_into_context`, dispatches `session-loaded` event (with sessionId and messages), and closes the browser
 - **Close**: Click backdrop, click ✕, or press Escape
 

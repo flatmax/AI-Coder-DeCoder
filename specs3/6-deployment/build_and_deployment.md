@@ -63,9 +63,10 @@ The startup is split into two phases to give the user early feedback. The browse
 2. Find available ports
 3. Initialize lightweight services: ConfigManager, Repo, Settings
 4. Start webapp server: bundled static server (default), Vite dev (`--dev`), or Vite preview (`--preview`)
-5. Create LLMService with `deferred_init=True` (no symbol index, no session restore)
-6. Register services with JRPCServer and start WebSocket server
-7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
+5. Create LLMService with `deferred_init=True` (no symbol index, no stability init)
+6. **Restore last session** — call `_restore_last_session()` *before* starting the WebSocket server, so `get_current_state()` returns previous messages as soon as the first browser connects
+7. Register services with JRPCServer and start WebSocket server
+8. Open browser (unless `--no-browser`) — user sees startup overlay immediately
 
 ### Phase 2: Deferred (non-blocking background task with progress)
 

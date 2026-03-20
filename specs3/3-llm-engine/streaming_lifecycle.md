@@ -41,6 +41,7 @@ Background task: _stream_chat
     ├─ Build and inject review context (if review mode active)
     ├─ Append system reminder to user prompt (from config `system_reminder.md`)
     ├─ Build tiered_content from stability tracker (→ prompt_assembly.md#tiered-assembly-data-flow)
+    ├─ Recompute symbol map with full tier exclusions (selected files + user-excluded files + all paths in cached tiers) to enforce "A File Never Appears Twice"
     ├─ Assemble tiered message array with cache_control markers
     ├─ Run LLM completion (threaded, streaming)
     │       │
@@ -131,6 +132,20 @@ Coalesced per animation frame:
 1. Store pending chunk
 2. On next frame: create assistant card (first chunk) or update content
 3. Trigger scroll-to-bottom (respecting user scroll override)
+
+### Passive Stream Adoption (Collaborator)
+
+When a chunk arrives with a `requestId` that the client did not initiate (i.e., `_currentRequestId` is null or different), the client **adopts** the stream as a "passive stream":
+
+1. Sets `_currentRequestId` to the incoming `requestId`
+2. Sets `_isPassiveStream = true` to distinguish from self-initiated streams
+3. Processes subsequent chunks normally
+
+On `streamComplete` for a passive stream:
+- If `result.user_message` is present, the user message is prepended before the assistant response (since the passive client didn't add it optimistically)
+- `_isPassiveStream` is cleared
+
+This handles the case where a collaborator joins while streaming is in progress, or where the localhost client sends a prompt and the collaborator sees the response arrive without having initiated it.
 
 ## Cancellation
 

@@ -96,6 +96,8 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 
 Anchoring state is tracked per-item during each cascade pass via a dynamically-set `_anchored` attribute on `TrackedItem` objects (not a declared dataclass field). The attribute is set to `True` or `False` during veteran processing and read via `getattr(item, '_anchored', False)` during promotion checks. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
 
+**Anchoring activation condition:** Anchoring only applies when the tier's total token count exceeds `cache_target_tokens` (`do_anchoring = total_tier_tokens > cache_target_tokens`). If a tier has fewer tokens than the cache target, no items are anchored and all veterans are eligible for promotion. This prevents small tiers from anchoring their only items and blocking promotion indefinitely.
+
 ## Demotion
 
 Items demote to active (N = 0) when: content hash changes, or file appears in modified-files list.
@@ -152,11 +154,16 @@ No `cross_ref_ready` gating is needed — the toggle appears unconditionally aft
 
 | Prefix | Index | Provider |
 |---|---|---|
-| `sym:` | Symbol index | `symbol_index.get_file_symbol_block()` |
+| `symbol:` | Symbol index | `symbol_index.get_file_symbol_block()` |
 | `doc:` | Doc index | `doc_index.get_file_doc_block()` |
 | `url:` | URL service | `url_service.get_url_content(url).format_for_prompt()` |
+| `file:` | File content | `file_context.get_content(path)` |
+| `history:` | History | `context.get_history()[N]` |
+| `system:` | System prompt | System prompt + legend text |
 
 Content dispatch is prefix-based, not mode-based. This allows both indexes and URL content to coexist in the tracker without collisions. The `url:` prefix uses a 16-char SHA256 hash of the URL string as the key suffix (same hash function as `url_cache.url_hash()`).
+
+**Note:** The code uses the full word `symbol:` (not the abbreviated `sym:` used elsewhere in this spec for brevity). When reading code or logs, tracker keys appear as `symbol:src/main.py`, not `sym:src/main.py`. This spec uses `sym:` as shorthand in prose but the actual key prefix is `symbol:`.
 
 ## The Active Items List
 

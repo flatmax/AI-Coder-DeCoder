@@ -424,13 +424,30 @@ Clicking **Admit** calls `Collab.admit_client(client_id)`. Clicking **Deny** cal
 
 When `admissionResult` is received, the matching request is removed from `_admissionRequests`, dismissing its toast. If someone else already acted on it, the toast is also dismissed.
 
-### Connected Users Indicator
+### Connected Users Indicator and Collab Popover
 
 A small indicator in the dialog header shows the count of connected clients:
 
-`👥 2` — visible when more than one client is connected. Hidden in single-user mode to avoid clutter.
+`👥 2` — visible always (shows `👥` even with one client).
 
-Clicking it could show a popover with the client list and a **Kick** button (future enhancement — not in phase 1).
+Clicking the indicator opens a **collab popover** with:
+
+**When collaboration is enabled (`--collab`):**
+- **Connected clients list** — each client shows role badge (host/participant, color-coded), IP address, and "local" label for localhost clients
+- **Share link section** — a copyable URL constructed from the server's LAN IP and WebSocket port. The URL uses the current page's URL structure with the hostname replaced by the LAN IP. A "📋 Copy" button writes to clipboard (shows "✓ Copied" for 2 seconds)
+- **Share hint** — instructional text for collaborators
+
+**When collaboration is disabled (no `--collab`):**
+- A message explaining that collaboration mode is not enabled
+- Instructions showing the `ac-dc --collab` command to enable it
+
+The popover dismisses when clicking outside (via a backdrop element).
+
+### Collab RPC: `get_share_info`
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Collab.get_share_info` | `() → {ips: [string], port: int}` | Returns routable LAN IP addresses and WebSocket port for building share URLs. Filters out loopback (`127.*`), `::1`, `localhost`, and link-local IPv6 (`fe80:`) addresses |
 
 ## Integration with Existing Systems
 
