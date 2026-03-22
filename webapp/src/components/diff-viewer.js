@@ -20,6 +20,105 @@ import { RpcMixin } from '../rpc-mixin.js';
 import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
 import * as monaco from 'monaco-editor';
 
+// === Register MATLAB language with Monarch tokenizer ===
+monaco.languages.register({ id: 'matlab' });
+monaco.languages.setMonarchTokensProvider('matlab', {
+  defaultToken: '',
+  tokenPostfix: '.matlab',
+
+  keywords: [
+    'break', 'case', 'catch', 'classdef', 'continue', 'else', 'elseif',
+    'end', 'enumeration', 'events', 'for', 'function', 'global', 'if',
+    'methods', 'otherwise', 'parfor', 'persistent', 'properties',
+    'return', 'spmd', 'switch', 'try', 'while',
+  ],
+
+  builtins: [
+    'abs', 'all', 'any', 'ceil', 'cell', 'char', 'class', 'clear',
+    'close', 'deal', 'diag', 'disp', 'double', 'eig', 'eps', 'error',
+    'eval', 'exist', 'eye', 'false', 'fclose', 'feval', 'fft', 'figure',
+    'find', 'floor', 'fopen', 'fprintf', 'getfield', 'hold', 'ifft',
+    'imag', 'inf', 'int32', 'inv', 'ischar', 'isempty', 'isequal',
+    'isfield', 'isnan', 'isnumeric', 'length', 'linspace', 'logical',
+    'max', 'mean', 'min', 'mod', 'nan', 'nargin', 'nargout', 'norm',
+    'numel', 'ones', 'pi', 'plot', 'rand', 'randn', 'real', 'regexp',
+    'repmat', 'reshape', 'round', 'set', 'setfield', 'single', 'size',
+    'sort', 'sparse', 'sprintf', 'sqrt', 'squeeze', 'strcmp', 'struct',
+    'subplot', 'sum', 'title', 'true', 'uint8', 'uint32', 'varargin',
+    'varargout', 'warning', 'xlabel', 'ylabel', 'zeros',
+  ],
+
+  operators: [
+    '=', '>', '<', '~', '==', '<=', '>=', '~=',
+    '&', '|', '&&', '||',
+    '+', '-', '*', '/', '\\', '^',
+    '.*', './', '.\\', '.^', '.\'',
+  ],
+
+  symbols: /[=><!~?:&|+\-*\/\\^.]+/,
+
+  escapes: /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{1,4}|u[0-9A-Fa-f]{4})/,
+
+  tokenizer: {
+    root: [
+      // Comments — line comment starts with %
+      [/%\{/, 'comment', '@blockComment'],
+      [/%.*$/, 'comment'],
+
+      // Strings — single-quoted
+      [/'(?:[^'\\]|\\.)*'/, 'string'],
+
+      // Strings — double-quoted
+      [/"(?:[^"\\]|\\.)*"/, 'string'],
+
+      // Numbers
+      [/\d+\.?\d*(?:[eE][+-]?\d+)?[ij]?/, 'number'],
+      [/\.\d+(?:[eE][+-]?\d+)?[ij]?/, 'number'],
+
+      // Command-style function call (e.g. "cd dir")
+      [/^(\s*)((?:[a-zA-Z_]\w*))\b/, {
+        cases: {
+          '$2@keywords': ['white', 'keyword'],
+          '$2@builtins': ['white', 'type.identifier'],
+          '@default': ['white', 'identifier'],
+        },
+      }],
+
+      // Identifiers and keywords
+      [/[a-zA-Z_]\w*/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@builtins': 'type.identifier',
+          '@default': 'identifier',
+        },
+      }],
+
+      // Transpose operator (after closing paren/bracket/identifier)
+      [/'/, 'operator'],
+
+      // Operators
+      [/@symbols/, {
+        cases: {
+          '@operators': 'operator',
+          '@default': '',
+        },
+      }],
+
+      // Delimiters and brackets
+      [/[{}()\[\]]/, '@brackets'],
+      [/[;,]/, 'delimiter'],
+
+      // Whitespace
+      [/\s+/, 'white'],
+    ],
+
+    blockComment: [
+      [/%\}/, 'comment', '@pop'],
+      [/./, 'comment'],
+    ],
+  },
+});
+
 // Configure Monaco workers — use editor worker for diff computation,
 // no-op workers for language services to avoid $loadForeignModule crashes.
 self.MonacoEnvironment = {
@@ -54,6 +153,7 @@ const LANG_MAP = {
   '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hxx': 'cpp',
   '.sh': 'shell', '.bash': 'shell',
   '.xml': 'xml', '.svg': 'xml',
+  '.m': 'matlab',
   '.java': 'java',
   '.rs': 'rust',
   '.go': 'go',
