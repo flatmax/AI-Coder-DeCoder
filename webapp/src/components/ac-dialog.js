@@ -82,15 +82,6 @@ export class AcDialog extends RpcMixin(LitElement) {
       cursor: grabbing;
     }
 
-    .header-label {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--text-secondary);
-      margin-right: 12px;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-
     .tab-buttons {
       display: flex;
       gap: 2px;
@@ -1275,8 +1266,6 @@ export class AcDialog extends RpcMixin(LitElement) {
 
     return html`
       <div class="header" @mousedown=${this._onHeaderMouseDown}>
-        <span class="header-label">${currentTab?.label || 'Files'}</span>
-
         <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
           ${TABS.filter(tab => !tab.hidden && (!tab.conditional || this._docConvertAvailable)).map(tab => html`
             <button

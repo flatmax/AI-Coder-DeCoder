@@ -84,11 +84,11 @@ Default: fixed left-docked, 50% viewport width (min 400px), full height. Right h
 
 ### Tabs
 
-| Tab | Icon | Shortcut |
-|-----|------|----------|
-| FILES | 📁 | Alt+1 |
-| CONTEXT | 📊 | Alt+2 |
-| SETTINGS | ⚙️ | Alt+3 |
+| Tab | Icon | Label | Shortcut |
+|-----|------|-------|----------|
+| files | 🗨 | Chat | Alt+1 |
+| context | 📊 | Context | Alt+2 |
+| settings | ⚙️ | Settings | Alt+3 |
 
 The Context tab has a **Budget / Cache** pill toggle at the top. The Budget sub-view shows token allocation breakdown (system prompt, symbol map, files, URLs, history). The Cache sub-view shows cache tier blocks, stability bars, and recent changes — delegating rendering to an embedded `<ac-cache-tab>` component. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same RPC data source (`LLMService.get_context_breakdown`) and the same stale-detection / refresh-on-visible behavior. When switching to the Cache sub-view, the embedded cache tab receives an `onTabVisible()` call to ensure fresh data.
 
@@ -165,15 +165,15 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 | Section | Content |
 |---------|---------|
-| Left | Active tab label; click toggles minimize |
-| Center | Tab icon buttons — gap — [👥 | 📋💾⚠️ | 👁️] — gap |
+| Left | Tab icon buttons |
+| Center | [👥 | 📋💾⚠️ | 👁️] |
 | Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), doc convert (📄, conditional), minimize (▼) |
 
 **Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
 
 **Cross-reference toggle:** A checkbox labeled **+doc** (in code mode) or **+code** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
 
-**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) and the **review toggle** (👁️) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. The review toggle highlights with `accent-primary` when review is active; clicking it opens the review selector or exits review mode. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
