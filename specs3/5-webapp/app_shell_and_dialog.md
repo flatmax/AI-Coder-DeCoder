@@ -20,8 +20,7 @@ AppShell (root, extends JRPCClient)
         ├── Header Bar (tabs, actions, minimize)
         ├── Content Area
         │   ├── Files & Chat tab (default, includes integrated file search)
-        │   ├── Context Budget tab
-        │   ├── Cache Tiers tab
+        │   ├── Context tab (Budget / Cache sub-views)
         │   └── Settings tab
         └── History Bar (token usage indicator)
 ```
@@ -89,10 +88,11 @@ Default: fixed left-docked, 50% viewport width (min 400px), full height. Right h
 |-----|------|----------|
 | FILES | 📁 | Alt+1 |
 | CONTEXT | 📊 | Alt+2 |
-| CACHE | 🗄️ | Alt+3 |
-| SETTINGS | ⚙️ | Alt+4 |
+| SETTINGS | ⚙️ | Alt+3 |
 
-The Doc Convert tab (📄, Alt+5) does not appear in the tab bar. Instead, when document conversion is available, a 📄 button appears in the right-side header actions area next to the doc/code mode toggle. Clicking it switches to the convert tab. The button highlights when the convert tab is active. Alt+5 remains the keyboard shortcut.
+The Context tab has a **Budget / Cache** pill toggle at the top. The Budget sub-view shows token allocation breakdown (system prompt, symbol map, files, URLs, history). The Cache sub-view shows cache tier blocks, stability bars, and recent changes — delegating rendering to an embedded `<ac-cache-tab>` component. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same RPC data source (`LLMService.get_context_breakdown`) and the same stale-detection / refresh-on-visible behavior. When switching to the Cache sub-view, the embedded cache tab receives an `onTabVisible()` call to ensure fresh data.
+
+The Doc Convert tab (📄, Alt+4) does not appear in the tab bar. Instead, when document conversion is available, a 📄 button appears in the right-side header actions area next to the doc/code mode toggle. Clicking it switches to the convert tab. The button highlights when the convert tab is active. Alt+4 remains the keyboard shortcut.
 
 File search is integrated into the Files tab's chat panel action bar rather than occupying a separate tab. See [Search and Settings](search_and_settings.md#integrated-file-search).
 
@@ -120,7 +120,7 @@ When a stale tab becomes visible (via `onTabVisible()`), it clears the stale fla
 
 | Shortcut | Action |
 |----------|--------|
-| Alt+1..4 | Switch to tab (Alt+5 for Doc Convert when available) |
+| Alt+1..3 | Switch to tab (Alt+4 for Doc Convert when available) |
 | Alt+M | Toggle minimize |
 | Ctrl+Shift+F | Activate file search in Files tab, prefill from selection |
 
@@ -274,8 +274,8 @@ Multiple components persist UI preferences to localStorage using a duplicated `_
 | Dialog | `ac-dc-dialog-width`, `ac-dc-dialog-pos`, `ac-dc-minimized`, `ac-dc-active-tab` |
 | File picker | `ac-dc-picker-width`, `ac-dc-picker-collapsed` |
 | Chat panel | `ac-dc-snippet-drawer`, `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |
-| Cache tab | `ac-dc-cache-expanded` |
-| Context tab | `ac-dc-context-expanded` |
+| Context tab | `ac-dc-context-expanded`, `ac-dc-context-subview` |
+| Cache tab (embedded) | `ac-dc-cache-expanded`, `ac-dc-cache-sort` |
 | Token HUD | `ac-dc-hud-collapsed` |
 
 ## Content-Visibility Detail

@@ -14,7 +14,6 @@ import './ac-files-tab.js';
 // Lazy-loaded tab imports
 const lazyImports = {
   context: () => import('./ac-context-tab.js'),
-  cache: () => import('./ac-cache-tab.js'),
   settings: () => import('./ac-settings-tab.js'),
   convert: () => import('./ac-doc-convert-tab.js'),
 };
@@ -22,9 +21,8 @@ const lazyImports = {
 const TABS = [
   { id: 'files', icon: '🗨', label: 'Chat', shortcut: 'Alt+1' },
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
-  { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+3' },
-  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+4' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true, hidden: true },
+  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+3' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+4', conditional: true, hidden: true },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {
@@ -678,8 +676,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._refreshMode();
     // Restore last-used tab now that RPC is connected and tabs can load data
     let savedTab = this._loadPref('ac-dc-active-tab', 'files');
-    // Migrate stale 'search' tab preference — search is now integrated into files
+    // Migrate stale tab preferences — search is now integrated into files,
+    // cache is now a sub-view of context
     if (savedTab === 'search') savedTab = 'files';
+    if (savedTab === 'cache') savedTab = 'context';
     if (savedTab !== this.activeTab) {
       this._switchTab(savedTab);
     }
@@ -959,8 +959,8 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
-    // Alt+1..5 tab switching
-    if (e.altKey && e.key >= '1' && e.key <= '5') {
+    // Alt+1..4 tab switching
+    if (e.altKey && e.key >= '1' && e.key <= '4') {
       e.preventDefault();
       const idx = parseInt(e.key) - 1;
       const tab = TABS[idx];
@@ -1378,7 +1378,7 @@ export class AcDialog extends RpcMixin(LitElement) {
           </button>
           ${this._docConvertAvailable ? html`
             <button class="header-action ${this.activeTab === 'convert' ? 'review-active' : ''}"
-              title="Doc Convert (Alt+5)"
+              title="Doc Convert (Alt+4)"
               aria-label="Document conversion"
               @mousedown=${(e) => e.stopPropagation()}
               @click=${() => this._switchTab('convert')}>
@@ -1407,13 +1407,6 @@ export class AcDialog extends RpcMixin(LitElement) {
           <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}"
                role="tabpanel" id="panel-context" aria-labelledby="tab-context">
             <ac-context-tab></ac-context-tab>
-          </div>
-        ` : ''}
-
-        ${this._visitedTabs.has('cache') ? html`
-          <div class="tab-panel ${this.activeTab === 'cache' ? 'active' : ''}"
-               role="tabpanel" id="panel-cache" aria-labelledby="tab-cache">
-            <ac-cache-tab></ac-cache-tab>
           </div>
         ` : ''}
 
