@@ -92,7 +92,7 @@ Default: fixed left-docked, 50% viewport width (min 400px), full height. Right h
 | CACHE | 🗄️ | Alt+3 |
 | SETTINGS | ⚙️ | Alt+4 |
 
-The Doc Convert tab (📄, Alt+5) appears conditionally when document conversion is available.
+The Doc Convert tab (📄, Alt+5) does not appear in the tab bar. Instead, when document conversion is available, a 📄 button appears in the right-side header actions area next to the doc/code mode toggle. Clicking it switches to the convert tab. The button highlights when the convert tab is active. Alt+5 remains the keyboard shortcut.
 
 File search is integrated into the Files tab's chat panel action bar rather than occupying a separate tab. See [Search and Settings](search_and_settings.md#integrated-file-search).
 
@@ -167,7 +167,7 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 |---------|---------|
 | Left | Active tab label; click toggles minimize |
 | Center | Tab icon buttons — gap — [👥 | 📋💾⚠️ | 👁️] — gap |
-| Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), minimize (▼) |
+| Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), doc convert (📄, conditional), minimize (▼) |
 
 **Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
 
