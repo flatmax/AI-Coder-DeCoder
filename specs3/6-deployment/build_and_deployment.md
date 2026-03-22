@@ -63,9 +63,10 @@ The startup is split into two phases to give the user early feedback. The browse
 2. Find available ports
 3. Initialize lightweight services: ConfigManager, Repo, Settings
 4. Start webapp server: bundled static server (default), Vite dev (`--dev`), or Vite preview (`--preview`)
-5. Create LLMService with `deferred_init=True` (no symbol index, no session restore)
-6. Register services with JRPCServer and start WebSocket server
-7. Open browser (unless `--no-browser`) — user sees startup overlay immediately
+5. Create LLMService with `deferred_init=True` (no symbol index, no stability init)
+6. **Restore last session** — call `_restore_last_session()` *before* starting the WebSocket server, so `get_current_state()` returns previous messages as soon as the first browser connects
+7. Register services with JRPCServer and start WebSocket server
+8. Open browser (unless `--no-browser`) — user sees startup overlay immediately
 
 ### Phase 2: Deferred (non-blocking background task with progress)
 
@@ -85,6 +86,8 @@ Phase 2 runs entirely inside `asyncio.ensure_future()` so the event loop stays f
 15. Serve forever
 
 Progress is sent via `AcApp.startupProgress(stage, message, percent)` RPC calls. Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped. The `_init_complete` flag on LLMService prevents chat requests from being processed until Phase 2 completes. Document keyword enrichment runs asynchronously after step 15 and never blocks any user operation — see [Document Mode — Progress Reporting](../2-code-analysis/document_mode.md#progress-reporting).
+
+**`doc_index` stage filtering:** The browser's `startupProgress` handler explicitly intercepts `stage === 'doc_index'` and routes it to the dialog header progress bar (via a `mode-switch-progress` DOM event) instead of the startup overlay. Only in-progress updates (`percent < 100`) are forwarded; the completion signal arrives via the `doc_index_ready` compaction event. This prevents the background doc index build from stalling or re-showing the startup overlay.
 
 **File reopen deferral:** The browser delays reopening the last-viewed file until the startup overlay dismisses (i.e., after the `ready` signal). This prevents file-fetch RPC calls from blocking the server's event loop during heavy initialization. On reconnect (when `init_complete` is already true), the file reopens immediately.
 

@@ -442,6 +442,39 @@ export class AcFilePicker extends RpcMixin(LitElement) {
   /**
    * Expand all ancestor directories so the given file path is visible in the tree.
    */
+  /**
+   * Accept a pre-built tree object and render it, bypassing the RPC call.
+   * Used by the search tab to inject a pruned tree of matching files.
+   */
+  setTree(treeData) {
+    // Save normal expanded state before replacing with search tree
+    if (!this._savedExpanded) {
+      this._savedExpanded = new Set(this._expanded);
+    }
+    this._tree = treeData;
+    this._allFilePaths = [];
+    this._collectPaths(treeData, this._allFilePaths);
+    this._expandAll(treeData);
+    this.requestUpdate();
+  }
+
+  restoreExpandedState() {
+    if (this._savedExpanded) {
+      this._expanded = this._savedExpanded;
+      this._savedExpanded = null;
+    }
+  }
+
+  _expandAll(node) {
+    if (!node) return;
+    if (node.type === 'dir' || node.children) {
+      this._expanded.add(node.path !== undefined ? node.path : node.name);
+      for (const child of (node.children || [])) {
+        this._expandAll(child);
+      }
+    }
+  }
+
   _expandToPath(filePath) {
     const parts = filePath.split('/');
     if (parts.length <= 1) return; // top-level file, root is always expanded

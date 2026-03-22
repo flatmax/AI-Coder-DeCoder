@@ -96,6 +96,8 @@ The cascade processes tiers bottom-up (L3 → L2 → L1 → L0), repeating until
 
 Anchoring state is tracked per-item during each cascade pass via a dynamically-set `_anchored` attribute on `TrackedItem` objects (not a declared dataclass field). The attribute is set to `True` or `False` during veteran processing and read via `getattr(item, '_anchored', False)` during promotion checks. The cascade re-evaluates anchoring from scratch on each cycle — previous anchoring state does not carry over between requests.
 
+**Anchoring activation condition:** Anchoring only applies when the tier's total token count exceeds `cache_target_tokens` (`do_anchoring = total_tier_tokens > cache_target_tokens`). If a tier has fewer tokens than the cache target, no items are anchored and all veterans are eligible for promotion. This prevents small tiers from anchoring their only items and blocking promotion indefinitely.
+
 ## Demotion
 
 Items demote to active (N = 0) when: content hash changes, or file appears in modified-files list.
@@ -152,11 +154,16 @@ No `cross_ref_ready` gating is needed — the toggle appears unconditionally aft
 
 | Prefix | Index | Provider |
 |---|---|---|
-| `sym:` | Symbol index | `symbol_index.get_file_symbol_block()` |
+| `symbol:` | Symbol index | `symbol_index.get_file_symbol_block()` |
 | `doc:` | Doc index | `doc_index.get_file_doc_block()` |
 | `url:` | URL service | `url_service.get_url_content(url).format_for_prompt()` |
+| `file:` | File content | `file_context.get_content(path)` |
+| `history:` | History | `context.get_history()[N]` |
+| `system:` | System prompt | System prompt + legend text |
 
 Content dispatch is prefix-based, not mode-based. This allows both indexes and URL content to coexist in the tracker without collisions. The `url:` prefix uses a 16-char SHA256 hash of the URL string as the key suffix (same hash function as `url_cache.url_hash()`).
+
+**Note:** The code uses the full word `symbol:` (not the abbreviated `sym:` used elsewhere in this spec for brevity). When reading code or logs, tracker keys appear as `symbol:src/main.py`, not `sym:src/main.py`. This spec uses `sym:` as shorthand in prose but the actual key prefix is `symbol:`.
 
 ## The Active Items List
 
@@ -184,6 +191,8 @@ L0 is seeded at initialization with the system prompt, index legend (symbol-map 
 ### Post-Initialization Token Measurement
 
 After `initialize_from_reference_graph` completes, `_measure_tracker_tokens()` iterates all `sym:` and `doc:` items and replaces their placeholder `tokens=0` with real token counts from the formatted symbol/doc blocks. This ensures the cache viewer tab can display per-item token counts and per-tier totals immediately — without waiting for the first chat request to trigger `_update_stability()`. Content hashes are also updated from signature hashes during measurement for accurate stability tracking.
+
+**Prefix-based dispatch:** `_measure_tracker_tokens` only measures items whose key prefix matches the passed index — `doc:` items are measured via `get_file_doc_block()` and `symbol:` items via `get_file_symbol_block()`. Items with a mismatched prefix (e.g., `doc:` items in the code tracker when cross-reference mode adds them later) are skipped with a `continue` — they are measured separately by `_measure_cross_ref_tokens()` when cross-reference mode is enabled.
 
 This measurement runs in both the code path (`_try_initialize_stability` and `complete_deferred_init`) and the document path (`_finalize_doc_mode_switch`).
 
@@ -248,6 +257,10 @@ The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (
 
 When a file is in active context (selected), its index entry (`sym:` or `doc:`) is **excluded** from all tiers to avoid redundancy. When a file graduates to a cached tier, the exclusion is lifted. This applies independently to both primary and cross-reference index entries.
 
+### Active File Entry Removal
+
+During `_update_stability`, when a file is in the selected files set, **both** `symbol:{path}` and `doc:{path}` entries are removed from the tracker (not just the current mode's prefix). This handles cross-reference mode correctly — if a file is selected in code mode with cross-ref enabled, both its `symbol:` entry (primary) and `doc:` entry (cross-ref) are removed and their affected tiers marked as broken. The removal is logged in the changes list with `reason: "file selected — full content replaces {prefix} entry"`.
+
 ### User-Excluded Files
 
 Users can explicitly exclude files from the index via the file picker's three-state checkbox (see [File Picker — Index Exclusion](../5-webapp/file_picker.md#index-exclusion-three-state-checkbox)). Excluded files are:
@@ -258,6 +271,8 @@ Users can explicitly exclude files from the index via the file picker's three-st
 4. **Excluded from tier recomputation** — the tier exclusion set includes user-excluded files alongside selected files
 
 This is distinct from file deselection (which only removes `file:*` entries and leaves `sym:`/`doc:` entries in their earned tier). Exclusion removes the file from context entirely — no full content, no index block, no tracker item.
+
+**Defensive double-removal:** Excluded files are removed from the tracker at two points: (1) immediately when `set_excluded_index_files()` is called (via `_remove_excluded_from_tracker()`), and (2) defensively at the start of every `_update_stability()` cycle. The second removal is necessary because excluded files still exist on disk, so the stale-item removal pass (`remove_stale`) won't catch them — without the defensive removal, they could re-appear in the tracker if another code path re-created their entries.
 
 **Use case:** Repositories with extensive documentation (e.g., GB of converted docs) where the doc map alone exceeds the context budget. Users exclude directories of less-relevant docs to free token budget.
 

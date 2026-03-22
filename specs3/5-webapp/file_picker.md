@@ -27,6 +27,18 @@ The badge truncates long branch names with ellipsis (max 140px) and shows a tool
 **Tooltip**: Every row (file or directory) displays a native browser tooltip on hover showing the full path and the node name, formatted as `full/path — name`. For the root node, falls back to the repository name for both parts.
 
 
+### Sorting
+
+Three sort modes are available via buttons in the filter bar:
+
+| Mode | Button | Behavior |
+|------|--------|----------|
+| Name | `A` | Alphabetical by filename (default) |
+| Mtime | `🕐` | Most recently modified first |
+| Size | `#` | Largest line count first |
+
+Clicking the active sort button toggles ascending/descending order. Directories always sort alphabetically regardless of sort mode. Sort mode and direction are persisted to localStorage (`ac-dc-sort-mode`, `ac-dc-sort-asc`).
+
 ### Filtering
 
 Text filter narrows visible nodes using **fuzzy matching** against the full path — all characters in the query must appear in the path in order, but not necessarily consecutively. For example, `edt` matches `edit_parser.py` and `sii` matches `symbol_index/index.py`. Matching is case-insensitive. Directories auto-expand when filtered, and a directory remains visible if any descendant matches.
@@ -52,10 +64,18 @@ Arrow keys move focus. Space/Enter toggles selection. Auto-scroll to focused ite
 ## Context Menu
 
 ### File Items
-Stage, unstage, discard (confirm), rename (prompt), delete (confirm).
+Stage, unstage, discard (confirm), rename (prompt), duplicate (prompt — pre-filled with current path), load in left panel, load in right panel, exclude from index / include in index, delete (confirm).
 
 ### Directory Items
-Stage all, unstage all, rename (prompt), new file (prompt), new directory (prompt).
+Stage all, unstage all, rename (prompt), new file (prompt), new directory (prompt), exclude from index / include in index.
+
+### Load in Panel
+
+File context menu includes "◧ Load in Left Panel" and "◨ Load in Right Panel" items. Clicking either fetches the file content via `Repo.get_file_content` and dispatches a `load-diff-panel` event so the diff viewer opens the content in the specified panel. This enables ad-hoc comparisons between arbitrary files.
+
+### Duplicate
+
+File context menu includes "📄 Duplicate" which opens an inline input pre-filled with the current file path. On submit, the source file's content is read via RPC and a new file is created at the user-specified path via `Repo.create_file`.
 
 ### Operation Flow
 1. Close menu → confirm/prompt if needed → execute RPC → refresh tree
@@ -118,10 +138,11 @@ Both file and directory context menus include "Exclude from Index" / "Include in
 ### Backend State
 
 The excluded files set is stored server-side via `LLMService.set_excluded_index_files(files)` and persisted in session state (returned by `get_current_state()`). Excluded files are:
-- Removed from the stability tracker (all `symbol:` and `doc:` entries)
+- Removed from the stability tracker (all `symbol:`, `doc:`, and `file:` entries for the path)
 - Excluded from `get_symbol_map()` / `get_doc_map()` calls
 - Excluded from `get_context_breakdown()` calculations
 - Skipped in `_update_stability()` active items loop
+- Excluded from tier content assembly in `_build_tiered_content()`
 
 ### Use Case
 
@@ -151,6 +172,23 @@ A vertical resizer separates the file picker from the chat panel:
 When review mode is active, a banner displays at the top of the file picker showing the branch name, commit range, file/line stats, and an exit button. The banner is synchronized with review state from `get_review_state()`. See [Code Review — UI Components](../4-features/code_review.md#review-mode-banner).
 
 The review selector (git graph) opens in a separate floating dialog — the file picker remains visible and usable underneath. See [Code Review — Git Graph Selector](../4-features/code_review.md#git-graph-selector).
+
+## File Search Integration
+
+When file search is active in the chat panel, the files tab swaps the picker tree to a pruned view containing only matching files:
+
+| Event | Direction | Purpose |
+|-------|-----------|---------|
+| `file-search-changed` | Chat panel → files tab | `{ active, results }` — triggers pruned tree build or full tree restore |
+| `file-search-scroll` | Chat panel → files tab | `{ filePath }` — sync picker highlight to match panel scroll position |
+
+**Tree swap:** The files tab builds a pruned tree from search results (splitting file paths into nested directory nodes, setting `lines` to match count) and calls `picker.setTree()`. On exit, `picker.restoreExpandedState()` is called before `picker.loadTree()` to restore the full tree with the user's previous expand/collapse state, and `picker._focusedPath` is cleared.
+
+**Expand state preservation:** `setTree()` lazily snapshots the current `_expanded` set on the first call (so repeated search refinements don't re-snapshot). `restoreExpandedState()` replaces `_expanded` with the saved snapshot before the full tree reload. Since `loadTree()` does not reset `_expanded`, the restored state is used for rendering.
+
+**Picker click intercept:** During file search, `file-clicked` events from the picker are intercepted (`stopPropagation`). Instead of navigating to the diff viewer, the files tab calls `chatPanel.scrollFileSearchToFile(path)` to scroll the match overlay to the target file section.
+
+**Scroll highlight sync:** When the match overlay scrolls, the files tab receives `file-search-scroll` events and updates `picker._focusedPath`, expands ancestor directories, and scrolls the picker to show the highlighted file row.
 
 ## Data Flow
 

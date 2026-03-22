@@ -85,6 +85,8 @@ Pending connections are tracked separately:
 
 Pending requests that are not acted on within **120 seconds** are auto-denied and the WebSocket is closed. This prevents abandoned connections from accumulating.
 
+**Implementation:** The admission wait uses `asyncio.wait()` with `return_when=FIRST_COMPLETED` to race the admit/deny future against `websocket.wait_closed()`, with a 120-second timeout. If the pending client disconnects (closes their tab) before a decision is made, the `wait_closed` future resolves first and the request is cleaned up automatically — an `admissionResult` broadcast removes the toast from all admitted clients. Both futures are cancelled in a `finally` block to prevent resource leaks.
+
 If a new connection arrives from the same IP while a previous request is still pending (e.g., the user refreshed their browser), the old pending request is auto-denied and its toast is removed before the new request is created. The cancelled request's `admissionResult` includes `"replaced": true` so frontends can distinguish this from an explicit deny.
 
 The server also monitors the pending client's WebSocket for closure. If the pending client disconnects before a decision is made (e.g., closes the tab), the request is cleaned up and an `admissionResult` broadcast removes the toast from all admitted clients.
@@ -424,13 +426,30 @@ Clicking **Admit** calls `Collab.admit_client(client_id)`. Clicking **Deny** cal
 
 When `admissionResult` is received, the matching request is removed from `_admissionRequests`, dismissing its toast. If someone else already acted on it, the toast is also dismissed.
 
-### Connected Users Indicator
+### Connected Users Indicator and Collab Popover
 
 A small indicator in the dialog header shows the count of connected clients:
 
-`👥 2` — visible when more than one client is connected. Hidden in single-user mode to avoid clutter.
+`👥 2` — visible always (shows `👥` even with one client).
 
-Clicking it could show a popover with the client list and a **Kick** button (future enhancement — not in phase 1).
+Clicking the indicator opens a **collab popover** with:
+
+**When collaboration is enabled (`--collab`):**
+- **Connected clients list** — each client shows role badge (host/participant, color-coded), IP address, and "local" label for localhost clients
+- **Share link section** — a copyable URL constructed from the server's LAN IP and WebSocket port. The URL uses the current page's URL structure with the hostname replaced by the LAN IP. A "📋 Copy" button writes to clipboard (shows "✓ Copied" for 2 seconds)
+- **Share hint** — instructional text for collaborators
+
+**When collaboration is disabled (no `--collab`):**
+- A message explaining that collaboration mode is not enabled
+- Instructions showing the `ac-dc --collab` command to enable it
+
+The popover dismisses when clicking outside (via a backdrop element).
+
+### Collab RPC: `get_share_info`
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Collab.get_share_info` | `() → {ips: [string], port: int}` | Returns routable LAN IP addresses and WebSocket port for building share URLs. Filters out loopback (`127.*`), `::1`, `localhost`, and link-local IPv6 (`fe80:`) addresses |
 
 ## Integration with Existing Systems
 

@@ -20,6 +20,105 @@ import { RpcMixin } from '../rpc-mixin.js';
 import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
 import * as monaco from 'monaco-editor';
 
+// === Register MATLAB language with Monarch tokenizer ===
+monaco.languages.register({ id: 'matlab' });
+monaco.languages.setMonarchTokensProvider('matlab', {
+  defaultToken: '',
+  tokenPostfix: '.matlab',
+
+  keywords: [
+    'break', 'case', 'catch', 'classdef', 'continue', 'else', 'elseif',
+    'end', 'enumeration', 'events', 'for', 'function', 'global', 'if',
+    'methods', 'otherwise', 'parfor', 'persistent', 'properties',
+    'return', 'spmd', 'switch', 'try', 'while',
+  ],
+
+  builtins: [
+    'abs', 'all', 'any', 'ceil', 'cell', 'char', 'class', 'clear',
+    'close', 'deal', 'diag', 'disp', 'double', 'eig', 'eps', 'error',
+    'eval', 'exist', 'eye', 'false', 'fclose', 'feval', 'fft', 'figure',
+    'find', 'floor', 'fopen', 'fprintf', 'getfield', 'hold', 'ifft',
+    'imag', 'inf', 'int32', 'inv', 'ischar', 'isempty', 'isequal',
+    'isfield', 'isnan', 'isnumeric', 'length', 'linspace', 'logical',
+    'max', 'mean', 'min', 'mod', 'nan', 'nargin', 'nargout', 'norm',
+    'numel', 'ones', 'pi', 'plot', 'rand', 'randn', 'real', 'regexp',
+    'repmat', 'reshape', 'round', 'set', 'setfield', 'single', 'size',
+    'sort', 'sparse', 'sprintf', 'sqrt', 'squeeze', 'strcmp', 'struct',
+    'subplot', 'sum', 'title', 'true', 'uint8', 'uint32', 'varargin',
+    'varargout', 'warning', 'xlabel', 'ylabel', 'zeros',
+  ],
+
+  operators: [
+    '=', '>', '<', '~', '==', '<=', '>=', '~=',
+    '&', '|', '&&', '||',
+    '+', '-', '*', '/', '\\', '^',
+    '.*', './', '.\\', '.^', '.\'',
+  ],
+
+  symbols: /[=><!~?:&|+\-*\/\\^.]+/,
+
+  escapes: /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{1,4}|u[0-9A-Fa-f]{4})/,
+
+  tokenizer: {
+    root: [
+      // Comments — line comment starts with %
+      [/%\{/, 'comment', '@blockComment'],
+      [/%.*$/, 'comment'],
+
+      // Strings — single-quoted
+      [/'(?:[^'\\]|\\.)*'/, 'string'],
+
+      // Strings — double-quoted
+      [/"(?:[^"\\]|\\.)*"/, 'string'],
+
+      // Numbers
+      [/\d+\.?\d*(?:[eE][+-]?\d+)?[ij]?/, 'number'],
+      [/\.\d+(?:[eE][+-]?\d+)?[ij]?/, 'number'],
+
+      // Command-style function call (e.g. "cd dir")
+      [/^(\s*)((?:[a-zA-Z_]\w*))\b/, {
+        cases: {
+          '$2@keywords': ['white', 'keyword'],
+          '$2@builtins': ['white', 'type.identifier'],
+          '@default': ['white', 'identifier'],
+        },
+      }],
+
+      // Identifiers and keywords
+      [/[a-zA-Z_]\w*/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@builtins': 'type.identifier',
+          '@default': 'identifier',
+        },
+      }],
+
+      // Transpose operator (after closing paren/bracket/identifier)
+      [/'/, 'operator'],
+
+      // Operators
+      [/@symbols/, {
+        cases: {
+          '@operators': 'operator',
+          '@default': '',
+        },
+      }],
+
+      // Delimiters and brackets
+      [/[{}()\[\]]/, '@brackets'],
+      [/[;,]/, 'delimiter'],
+
+      // Whitespace
+      [/\s+/, 'white'],
+    ],
+
+    blockComment: [
+      [/%\}/, 'comment', '@pop'],
+      [/./, 'comment'],
+    ],
+  },
+});
+
 // Configure Monaco workers — use editor worker for diff computation,
 // no-op workers for language services to avoid $loadForeignModule crashes.
 self.MonacoEnvironment = {
@@ -54,6 +153,7 @@ const LANG_MAP = {
   '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hxx': 'cpp',
   '.sh': 'shell', '.bash': 'shell',
   '.xml': 'xml', '.svg': 'xml',
+  '.m': 'matlab',
   '.java': 'java',
   '.rs': 'rust',
   '.go': 'go',
@@ -400,6 +500,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._highlightDecorations = [];
     this._lspRegistered = false;
     this._virtualContents = {};
+    this._viewportStates = new Map();  // path → { scrollTop, scrollLeft, lineNumber, column }
     this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
     this._scrollLockTimer = null;  // Timer to release the lock
     this._editorScrollDisposable = null; // Monaco scroll listener disposable
@@ -474,6 +575,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const existingIdx = this._files.findIndex(f => f.path === path);
     if (existingIdx !== -1) {
       const wasActive = this._activeIndex === existingIdx;
+      // Save viewport of the file we're leaving
+      if (!wasActive) {
+        this._savePerFileViewport();
+      }
       this._activeIndex = existingIdx;
       await this.updateComplete;
       // Only rebuild the editor if switching to a different tab;
@@ -486,6 +591,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         this._scrollToLine(line);
       } else if (searchText) {
         this._scrollToSearchText(searchText);
+      } else if (!wasActive) {
+        // Restore saved viewport when switching back to this file
+        this._restorePerFileViewport(path);
       }
       this._dispatchActiveFileChanged(path);
       return;
@@ -512,6 +620,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       is_new = content.is_new;
       is_read_only = content.is_read_only ?? false;
     }
+
+    // Save viewport of the file we're leaving before adding the new tab
+    this._savePerFileViewport();
 
     const fileObj = {
       path,
@@ -594,6 +705,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    */
   closeFile(path) {
     delete this._virtualContents[path];
+    this._viewportStates.delete(path);
     const idx = this._files.findIndex(f => f.path === path);
     if (idx === -1) return;
 
@@ -746,6 +858,31 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       }
     };
     requestAnimationFrame(() => tryRestore());
+  }
+
+  /**
+   * Save the current file's viewport state to the per-file map.
+   * Called internally before switching away from a tab.
+   */
+  _savePerFileViewport() {
+    if (this._activeIndex < 0 || this._activeIndex >= this._files.length) return;
+    const file = this._files[this._activeIndex];
+    const state = this.getViewportState();
+    if (state) {
+      this._viewportStates.set(file.path, state);
+    }
+  }
+
+  /**
+   * Restore a file's viewport state from the per-file map.
+   * Waits for the diff editor to finish computing before scrolling.
+   */
+  _restorePerFileViewport(path) {
+    const state = this._viewportStates.get(path);
+    if (!state) return;
+    this._waitForDiffReady().then(() => {
+      this.restoreViewportState(state);
+    });
   }
 
   // === File Fetching ===
@@ -1042,18 +1179,24 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageDown') {
       e.preventDefault();
       if (this._files.length > 1) {
-        this._activeIndex = (this._activeIndex + 1) % this._files.length;
+        this._savePerFileViewport();
+        const nextIndex = (this._activeIndex + 1) % this._files.length;
+        this._activeIndex = nextIndex;
         this._showEditor();
-        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+        this._restorePerFileViewport(this._files[nextIndex].path);
+        this._dispatchActiveFileChanged(this._files[nextIndex].path);
       }
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'PageUp') {
       e.preventDefault();
       if (this._files.length > 1) {
-        this._activeIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
+        this._savePerFileViewport();
+        const prevIndex = (this._activeIndex - 1 + this._files.length) % this._files.length;
+        this._activeIndex = prevIndex;
         this._showEditor();
-        this._dispatchActiveFileChanged(this._files[this._activeIndex].path);
+        this._restorePerFileViewport(this._files[prevIndex].path);
+        this._dispatchActiveFileChanged(this._files[prevIndex].path);
       }
       return;
     }

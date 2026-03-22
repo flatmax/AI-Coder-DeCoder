@@ -46,8 +46,8 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 
 | Operation | Description |
 |-----------|-------------|
-| `add_message(role, content)` | Append single message |
-| `add_exchange(user, assistant)` | Append pair atomically |
+| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after) |
+| `add_exchange(user, assistant)` | Append pair atomically (used for session restore; not used during streaming) |
 | `get_history()` | Return a copy |
 | `set_history(messages)` | Replace entirely (after compaction or session load) |
 | `clear_history()` | Empty list + purge history from stability tracker |
@@ -115,7 +115,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. Called before message assembly in the streaming handler as a safety net.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method exists on `ContextManager` as `emergency_truncate()` but is **not currently called** by `_stream_chat`. The streaming handler only calls `shed_files_if_needed()` (Layer 3). Emergency truncation is available as a manual safety net for future use or external callers but is not part of the current streaming pipeline.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
@@ -139,12 +139,15 @@ HistoryMessage:
     timestamp: ISO 8601 UTC
     role: "user" | "assistant"
     content: string
+    system_event: boolean?   // True for operational events (commit, reset)
     image_refs: string[]?    // Filenames in .ac-dc/images/
     images: integer?         // DEPRECATED — legacy count field
     files: string[]?         // Files in context (user messages)
     files_modified: string[]? // Files changed (assistant messages)
     edit_results: object[]?
 ```
+
+**System event messages** use `role: "user"` with `system_event: true`. They record operational events (git commit, git reset) in the conversation so the LLM is aware of them. They are persisted, included in LLM context, and rendered with distinct styling in the frontend. See [Chat Interface — System Event Messages](../5-webapp/chat_interface.md#system-event-messages).
 
 ### Sessions
 
@@ -202,7 +205,13 @@ The context retrieval path strips all metadata (`files`, `files_modified`, `edit
 
 ### Message Persistence Ordering
 
-The user message is persisted to the JSONL store **before** the LLM call starts, while the assistant message is persisted **after** the full response completes. If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response. This is by design (the user's intent is worth preserving) but means session message counts may be odd and the last message in a crashed session may be a user message with no reply.
+The user message is persisted to both the JSONL store **and** the in-memory context history **before** the LLM call starts. The assistant message is added to both stores **after** the full response completes.
+
+- **JSONL store**: `history_store.append_message(role="user")` runs before streaming begins
+- **In-memory context**: `context.add_message("user", message)` runs before streaming begins
+- **Assistant message**: `context.add_message("assistant", full_content)` runs after streaming completes, followed by `history_store.append_message(role="assistant")`
+
+If the LLM call fails, is cancelled, or the server crashes mid-stream, the JSONL contains an orphaned user message with no corresponding assistant response, and the in-memory context contains the user message without a paired reply. This is by design — the user's intent is worth preserving and is available for session restore. Session message counts may be odd and the last message in a crashed session may be a user message with no reply.
 
 ### Search Fallback
 
@@ -236,6 +245,10 @@ Compaction runs after a 500ms pause following `streamComplete`. Frontend notific
 | `verbatim_window_tokens` | 4000 | Recent tokens kept unchanged |
 | `summary_budget_tokens` | 500 | Max tokens for summary |
 | `min_verbatim_exchanges` | 2 | Minimum recent exchanges always kept |
+
+### Live Config Reloading
+
+`HistoryCompactor` accepts an optional `config_manager` parameter at construction. When provided, all property accessors (`enabled`, `trigger_tokens`, `verbatim_window_tokens`, etc.) read from `config_manager.compaction_config` rather than the snapshot dict captured at construction time. This means hot-reloaded `app.json` values take effect on the next compaction check without restarting the server. When `config_manager` is not provided (e.g., in tests), the compactor falls back to the snapshot dict passed as the `config` parameter.
 
 ### Two-Threshold Design
 
@@ -414,7 +427,9 @@ On LLM service initialization (before any client connects), the server automatic
 1. Query `list_sessions(limit=1)` for the newest session
 2. Load its messages via `get_session_messages_for_context`
 3. Add each message to the context manager
-4. Set the current session ID to the loaded session's ID
+4. **Reuse the restored session's ID** as the current session ID
+
+Reusing the session ID means subsequent messages (chat, commits, resets) are persisted to the same session the user was in before the restart. A new session is only created by an explicit `new_session()` call. This ensures system event messages (e.g. commit confirmations) appear in the correct session in the history browser.
 
 This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
 

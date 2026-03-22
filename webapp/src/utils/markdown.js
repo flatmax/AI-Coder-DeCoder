@@ -3,6 +3,7 @@
  * Wraps 'marked' with highlight.js for code blocks.
  */
 import { Marked } from 'marked';
+import katex from 'katex';
 import hljs from 'highlight.js/lib/core';
 
 // Register commonly needed languages
@@ -40,6 +41,51 @@ hljs.registerLanguage('diff', diff);
 hljs.registerLanguage('markdown', markdown);
 hljs.registerLanguage('md', markdown);
 
+// ---------------------------------------------------------------------------
+// KaTeX math extension for marked
+// Handles $$...$$ (display) and $...$ (inline) math expressions.
+// ---------------------------------------------------------------------------
+const mathExtension = {
+  extensions: [
+    {
+      name: 'mathBlock',
+      level: 'block',
+      start(src) { return src.indexOf('$$'); },
+      tokenizer(src) {
+        const match = src.match(/^\$\$([\s\S]+?)\$\$/);
+        if (match) {
+          return { type: 'mathBlock', raw: match[0], text: match[1].trim() };
+        }
+      },
+      renderer(token) {
+        try {
+          return `<div class="math-block">${katex.renderToString(token.text, { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-block"><code>${escapeHtml(token.text)}</code></div>`;
+        }
+      },
+    },
+    {
+      name: 'mathInline',
+      level: 'inline',
+      start(src) { return src.indexOf('$'); },
+      tokenizer(src) {
+        const match = src.match(/^\$([^\s$](?:[^$]*[^\s$])?)\$/);
+        if (match) {
+          return { type: 'mathInline', raw: match[0], text: match[1] };
+        }
+      },
+      renderer(token) {
+        try {
+          return katex.renderToString(token.text, { displayMode: false, throwOnError: false });
+        } catch (_) {
+          return `<code>${escapeHtml(token.text)}</code>`;
+        }
+      },
+    },
+  ],
+};
+
 function escapeHtml(str) {
   return str
     .replace(/&/g, '&amp;')
@@ -51,6 +97,7 @@ function escapeHtml(str) {
 const marked = new Marked({
   gfm: true,
   breaks: true,
+  extensions: mathExtension.extensions,
   renderer: {
     code(token) {
       // marked v12: token may be a string or an object with {text, lang}
@@ -158,6 +205,7 @@ function _tokenKey(tok) {
 const markedSourceMap = new Marked({
   gfm: true,
   breaks: true,
+  extensions: mathExtension.extensions,
   renderer: {
     code(token) {
       let text, lang;
