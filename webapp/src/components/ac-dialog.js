@@ -24,7 +24,7 @@ const TABS = [
   { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
   { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+3' },
   { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+4' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true, hidden: true },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {
@@ -1278,7 +1278,7 @@ export class AcDialog extends RpcMixin(LitElement) {
         <span class="header-label">${currentTab?.label || 'Files'}</span>
 
         <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
-          ${TABS.filter(tab => !tab.conditional || this._docConvertAvailable).map(tab => html`
+          ${TABS.filter(tab => !tab.hidden && (!tab.conditional || this._docConvertAvailable)).map(tab => html`
             <button
               class="tab-btn ${tab.id === this.activeTab ? 'active' : ''}"
               role="tab"
@@ -1376,6 +1376,15 @@ export class AcDialog extends RpcMixin(LitElement) {
             @click=${() => this._onModeToggle()}>
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
           </button>
+          ${this._docConvertAvailable ? html`
+            <button class="header-action ${this.activeTab === 'convert' ? 'review-active' : ''}"
+              title="Doc Convert (Alt+5)"
+              aria-label="Document conversion"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._switchTab('convert')}>
+              📄
+            </button>
+          ` : ''}
           <button class="header-action" title="Minimize (Alt+M)"
             aria-label="${this.minimized ? 'Expand panel' : 'Minimize panel'}"
             aria-expanded="${!this.minimized}"

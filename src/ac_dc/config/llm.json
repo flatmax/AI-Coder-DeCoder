@@ -1,10 +1,6 @@
 {
   "env": {
-<<<<<<< HEAD
     "AWS_REGION": "ap-northeast-3"
-=======
-    "AWS_REGION": "eu-west-1"
->>>>>>> ccde21dab9d2273008db49c973c11daaf18a62ad
   },
   "model": "bedrock/global.anthropic.claude-opus-4-6-v1",
   "smallerModel": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
