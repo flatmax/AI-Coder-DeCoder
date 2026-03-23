@@ -2,6 +2,8 @@
  
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
 
+<img width="2868" height="1601" alt="AC⚡DC screenshot" src="https://github.com/user-attachments/assets/87cd02ef-64e6-4f68-9abb-9a140e804178" />
+
 </details>
 
 ## Features
