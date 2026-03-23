@@ -960,7 +960,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       const oldModel = this._editor.getModel();
 
       // Switch between side-by-side and inline mode
-      this._editor.updateOptions({ renderSideBySide });
+      this._editor.updateOptions({
+        renderSideBySide,
+        enableSplitViewResizing: renderSideBySide,
+        readOnly: false,
+      });
 
       // Create new models and set them — this detaches the old models
       const originalModel = monaco.editor.createModel(file.original, language);
@@ -977,9 +981,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         if (oldModel.modified) oldModel.modified.dispose();
       }
 
-      // Set read-only state on modified side
+      // Set read-only state on modified side — must come after setModel
+      // so that inline diff mode doesn't override it
       this._editor.getModifiedEditor().updateOptions({
         readOnly: file.is_read_only,
+        domReadOnly: false,
       });
     } else {
       // Create new diff editor
