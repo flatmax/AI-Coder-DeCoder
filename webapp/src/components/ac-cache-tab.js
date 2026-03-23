@@ -405,10 +405,20 @@ export class AcCacheTab extends RpcMixin(LitElement) {
   }
 
   _isTabActive() {
-    // Check if our parent tab-panel has the 'active' class
-    const panel = this.parentElement;
-    if (panel && panel.classList.contains('tab-panel')) {
-      return panel.classList.contains('active');
+    // When embedded inside ac-context-tab, walk up to find the tab-panel
+    let el = this.parentElement;
+    while (el) {
+      if (el.classList?.contains('tab-panel')) {
+        return el.classList.contains('active');
+      }
+      // Cross shadow DOM boundary if needed
+      if (el.parentElement) {
+        el = el.parentElement;
+      } else if (el.getRootNode()?.host) {
+        el = el.getRootNode().host;
+      } else {
+        break;
+      }
     }
     return this.offsetParent !== null;
   }

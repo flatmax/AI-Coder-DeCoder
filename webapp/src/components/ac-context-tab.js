@@ -2,15 +2,18 @@
  * Context Viewer tab — token budget bar, stacked category bar,
  * expandable per-item details, session totals.
  *
- * Shows: system prompt, symbol map (per-chunk), files (per-file),
- * URLs (per-URL), history token usage.
- * Calls LLM.get_context_breakdown for data.
+ * Has two sub-views toggled by a pill switch:
+ *   Budget — token allocation breakdown (system, symbols, files, URLs, history)
+ *   Cache  — tier blocks, stability bars, recent changes (delegates to <ac-cache-tab>)
+ *
+ * Calls LLM.get_context_breakdown for data (shared by both views).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import './url-content-dialog.js';
+import './ac-cache-tab.js';
 
 function formatTokens(n) {
   if (n == null) return '—';
@@ -35,6 +38,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     _loading: { type: Boolean, state: true },
     _expandedSections: { type: Object, state: true },
     _stale: { type: Boolean, state: true },
+    _subView: { type: String, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -367,6 +371,48 @@ export class AcContextTab extends RpcMixin(LitElement) {
       color: var(--accent-orange);
       margin-left: 4px;
     }
+
+    /* Sub-view toggle pill */
+    .subview-toggle {
+      display: inline-flex;
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .subview-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      padding: 2px 12px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .subview-btn:first-child {
+      border-right: 1px solid var(--border-primary);
+    }
+    .subview-btn:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    .subview-btn.active {
+      background: var(--bg-primary);
+      color: var(--accent-primary);
+      font-weight: 600;
+    }
+
+    /* Embedded cache tab fills remaining space */
+    .cache-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .cache-container ac-cache-tab {
+      flex: 1;
+      min-height: 0;
+    }
   `];
 
   constructor() {
@@ -375,6 +421,7 @@ export class AcContextTab extends RpcMixin(LitElement) {
     this._loading = false;
     this._expandedSections = this._loadExpandedSections();
     this._stale = false;
+    this._subView = this._loadSubView();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -438,6 +485,13 @@ export class AcContextTab extends RpcMixin(LitElement) {
       this._stale = false;
       this._refresh();
     }
+    // Forward visibility to embedded cache tab
+    if (this._subView === 'cache') {
+      const cacheTab = this.shadowRoot?.querySelector('ac-cache-tab');
+      if (cacheTab && typeof cacheTab.onTabVisible === 'function') {
+        cacheTab.onTabVisible();
+      }
+    }
   }
 
   async _refresh() {
@@ -492,6 +546,28 @@ export class AcContextTab extends RpcMixin(LitElement) {
       if (v) return new Set(JSON.parse(v));
     } catch {}
     return new Set();
+  }
+
+  _switchSubView(view) {
+    this._subView = view;
+    try { localStorage.setItem('ac-dc-context-subview', view); } catch {}
+    // If switching to cache sub-view, forward refresh to the embedded cache tab
+    if (view === 'cache') {
+      this.updateComplete.then(() => {
+        const cacheTab = this.shadowRoot?.querySelector('ac-cache-tab');
+        if (cacheTab && typeof cacheTab.onTabVisible === 'function') {
+          cacheTab.onTabVisible();
+        }
+      });
+    }
+  }
+
+  _loadSubView() {
+    try {
+      const v = localStorage.getItem('ac-dc-context-subview');
+      if (v === 'cache' || v === 'budget') return v;
+    } catch {}
+    return 'budget';
   }
 
   /** Build category data from breakdown */
@@ -712,36 +788,51 @@ export class AcContextTab extends RpcMixin(LitElement) {
   }
 
   render() {
+    const isBudget = this._subView === 'budget';
+
     return html`
       <div class="toolbar">
-        <span style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">
-          Context Budget
-          ${this._stale ? html`<span class="stale-badge">● stale</span>` : nothing}
-        </span>
-        <button class="refresh-btn" @click=${() => this._refresh()}
-          ?disabled=${this._loading}
-          aria-label="Refresh context breakdown">↻ Refresh</button>
+        <div class="subview-toggle" role="tablist" aria-label="Context sub-view">
+          <button class="subview-btn ${isBudget ? 'active' : ''}"
+            role="tab" aria-selected="${isBudget}"
+            @click=${() => this._switchSubView('budget')}>Budget</button>
+          <button class="subview-btn ${!isBudget ? 'active' : ''}"
+            role="tab" aria-selected="${!isBudget}"
+            @click=${() => this._switchSubView('cache')}>Cache</button>
+        </div>
+        ${this._stale ? html`<span class="stale-badge">● stale</span>` : nothing}
+        ${isBudget ? html`
+          <button class="refresh-btn" @click=${() => this._refresh()}
+            ?disabled=${this._loading}
+            aria-label="Refresh context breakdown">↻ Refresh</button>
+        ` : nothing}
       </div>
 
-      ${this._renderSessionTotals()}
+      ${isBudget ? html`
+        ${this._renderSessionTotals()}
 
-      ${this._loading && !this._data ? html`
-        <div class="loading-indicator">Loading context breakdown...</div>
+        ${this._loading && !this._data ? html`
+          <div class="loading-indicator">Loading context breakdown...</div>
+        ` : html`
+          ${this._renderBudget()}
+          ${this._data ? html`
+            <div class="model-info">
+              <span>Model: ${this._data.model || '—'}${this._data.mode === 'doc' ? ' · 📝 Doc Mode' : ''}${this._data.cross_ref_enabled ? ' · +cross-ref' : ''}</span>
+              ${(() => {
+                const rate = this._data.provider_cache_rate ?? this._data.cache_hit_rate;
+                return rate != null ? html`
+                  <span>Cache: ${Math.min(100, Math.max(0, rate * 100)).toFixed(0)}% hit</span>
+                ` : nothing;
+              })()}
+            </div>
+          ` : nothing}
+          ${this._renderStackedBar()}
+          ${this._renderCategories()}
+        `}
       ` : html`
-        ${this._renderBudget()}
-        ${this._data ? html`
-          <div class="model-info">
-            <span>Model: ${this._data.model || '—'}${this._data.mode === 'doc' ? ' · 📝 Doc Mode' : ''}${this._data.cross_ref_enabled ? ' · +cross-ref' : ''}</span>
-            ${(() => {
-              const rate = this._data.provider_cache_rate ?? this._data.cache_hit_rate;
-              return rate != null ? html`
-                <span>Cache: ${Math.min(100, Math.max(0, rate * 100)).toFixed(0)}% hit</span>
-              ` : nothing;
-            })()}
-          </div>
-        ` : nothing}
-        ${this._renderStackedBar()}
-        ${this._renderCategories()}
+        <div class="cache-container">
+          <ac-cache-tab></ac-cache-tab>
+        </div>
       `}
 
       <ac-url-content-dialog></ac-url-content-dialog>
