@@ -19,10 +19,8 @@ AppShell (root, extends JRPCClient)
     └── Dialog (foreground, left-docked)
         ├── Header Bar (tabs, actions, minimize)
         ├── Content Area
-        │   ├── Files & Chat tab (default)
-        │   ├── Search tab
-        │   ├── Context Budget tab
-        │   ├── Cache Tiers tab
+        │   ├── Files & Chat tab (default, includes integrated file search)
+        │   ├── Context tab (Budget / Cache sub-views)
         │   └── Settings tab
         └── History Bar (token usage indicator)
 ```
@@ -86,17 +84,21 @@ Default: fixed left-docked, 50% viewport width (min 400px), full height. Right h
 
 ### Tabs
 
-| Tab | Icon | Shortcut |
-|-----|------|----------|
-| FILES | 📁 | Alt+1 |
-| SEARCH | 🔍 | Alt+2 |
-| CONTEXT | 📊 | Alt+3 |
-| CACHE | 🗄️ | Alt+4 |
-| SETTINGS | ⚙️ | Alt+5 |
+| Tab | Icon | Label | Shortcut |
+|-----|------|-------|----------|
+| files | 🗨 | Chat | Alt+1 |
+| context | 📊 | Context | Alt+2 |
+| settings | ⚙️ | Settings | Alt+3 |
+
+The Context tab has a **Budget / Cache** pill toggle at the top. The Budget sub-view shows token allocation breakdown (system prompt, symbol map, files, URLs, history). The Cache sub-view shows cache tier blocks, stability bars, and recent changes — delegating rendering to an embedded `<ac-cache-tab>` component. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same RPC data source (`LLMService.get_context_breakdown`) and the same stale-detection / refresh-on-visible behavior. When switching to the Cache sub-view, the embedded cache tab receives an `onTabVisible()` call to ensure fresh data.
+
+The Doc Convert tab (📄, Alt+4) does not appear in the tab bar. Instead, when document conversion is available, a 📄 button appears in the right-side header actions area next to the doc/code mode toggle. Clicking it switches to the convert tab. The button highlights when the convert tab is active. Alt+4 remains the keyboard shortcut.
+
+File search is integrated into the Files tab's chat panel action bar rather than occupying a separate tab. See [Search and Settings](search_and_settings.md#integrated-file-search).
 
 ### Lazy Loading and DOM Preservation
 
-Non-default tabs are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
+Non-default tabs (context, cache, settings, convert) are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
 
 Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
 
@@ -118,11 +120,11 @@ When a stale tab becomes visible (via `onTabVisible()`), it clears the stale fla
 
 | Shortcut | Action |
 |----------|--------|
-| Alt+1..5 | Switch to tab |
+| Alt+1..3 | Switch to tab (Alt+4 for Doc Convert when available) |
 | Alt+M | Toggle minimize |
-| Ctrl+Shift+F | Open Search tab with current selection or clipboard |
+| Ctrl+Shift+F | Activate file search in Files tab, prefill from selection |
 
-Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change clears it.
+Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change clears it. The dialog switches to the Files tab and calls `chatPanel.activateFileSearch(selection)`. Multi-line selections are ignored.
 
 ### Dragging & Resizing
 
@@ -134,7 +136,7 @@ Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change 
 
 ### Tab Restoration
 
-On RPC ready (not on construction), the dialog restores the last-used tab from localStorage (`ac-dc-active-tab`). This is deferred to `onRpcReady()` rather than `connectedCallback()` so that lazy-loaded tab components can fetch data immediately when activated. The default tab is `files` if no saved preference exists.
+On RPC ready (not on construction), the dialog restores the last-used tab from localStorage (`ac-dc-active-tab`). This is deferred to `onRpcReady()` rather than `connectedCallback()` so that lazy-loaded tab components can fetch data immediately when activated. The default tab is `files` if no saved preference exists. A stale `search` preference (from before search was integrated into the Files tab) is migrated to `files` on load.
 
 ### Position Persistence
 
@@ -163,24 +165,26 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 | Section | Content |
 |---------|---------|
-| Left | Active tab label; click toggles minimize |
-| Center | Tab icon buttons |
-| Right | Cross-ref toggle, review toggle (👁️), minimize button |
+| Left | Tab icon buttons |
+| Center | [👥 | 📋💾⚠️ | 👁️] |
+| Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), doc convert (📄, conditional), minimize (▼) |
 
-**Cross-reference toggle:** A checkbox labeled **+doc index** (in code mode) or **+code symbols** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+**Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
+
+**Cross-reference toggle:** A checkbox labeled **+doc** (in code mode) or **+code** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
+
+**Git action buttons** (📋 copy diff, 💾 commit, ⚠️ reset) and the **review toggle** (👁️) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. The review toggle highlights with `accent-primary` when review is active; clicking it opens the review selector or exits review mode. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
 - `mode-changed` event: resets `_crossRefEnabled = false`
-
-The review toggle button (👁️) appears in the header actions area on all tabs. When review mode is inactive, clicking it switches to the Files tab and opens the review selector. When review mode is active, the button is visually highlighted (`review-active` class) and clicking it calls `_exitReview()` on the files tab. This provides quick access to review without navigating to the Files tab first.
 
 The dialog tracks review state via `_reviewActive` property, synced from:
 - `onRpcReady`: fetches `LLMService.get_review_state()`
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
-**Note:** Git action buttons (clipboard, commit, reset) and session buttons (new session, history browser) are in the chat panel's action bar, not the dialog header. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 ### Minimizing
 
@@ -213,7 +217,13 @@ See [Diff Viewer](diff_viewer.md) for the Monaco editor and [SVG Viewer](svg_vie
 
 ## Window Resize Handling
 
-Window resize events (display change, maximize, laptop lid reopen) trigger Monaco `layout()` to recalculate the editor dimensions. This is **throttled to one layout per animation frame** via `requestAnimationFrame` to prevent jank:
+Window resize events (display change, maximize, laptop lid reopen) trigger two actions:
+
+1. **Proportional dialog scaling** — the dialog container's width and height are scaled proportionally to maintain the dialog/editor split ratio across viewport size changes. The previous viewport dimensions (`_lastViewportWidth`, `_lastViewportHeight`) are tracked and the ratio is applied to the new dimensions. The new width is persisted to localStorage.
+
+2. **Monaco layout** — `layout()` is called to recalculate the editor dimensions.
+
+Both are **throttled to one call per animation frame** via `requestAnimationFrame` to prevent jank:
 
 - A pending RAF handle (`_resizeRAF`) gates the handler — subsequent resize events within the same frame are dropped
 - The RAF callback clears the handle before calling `layout()`, re-arming for the next frame
@@ -263,10 +273,9 @@ Multiple components persist UI preferences to localStorage using a duplicated `_
 | App shell | `ac-last-open-file`, `ac-last-viewport` |
 | Dialog | `ac-dc-dialog-width`, `ac-dc-dialog-pos`, `ac-dc-minimized`, `ac-dc-active-tab` |
 | File picker | `ac-dc-picker-width`, `ac-dc-picker-collapsed` |
-| Search tab | `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |
-| Chat panel | `ac-dc-snippet-drawer` |
-| Cache tab | `ac-dc-cache-expanded` |
-| Context tab | `ac-dc-context-expanded` |
+| Chat panel | `ac-dc-snippet-drawer`, `ac-dc-search-ignore-case`, `ac-dc-search-regex`, `ac-dc-search-whole-word` |
+| Context tab | `ac-dc-context-expanded`, `ac-dc-context-subview` |
+| Cache tab (embedded) | `ac-dc-cache-expanded`, `ac-dc-cache-sort` |
 | Token HUD | `ac-dc-hud-collapsed` |
 
 ## Content-Visibility Detail

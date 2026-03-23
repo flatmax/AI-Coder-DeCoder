@@ -2,7 +2,7 @@
 
 ## Overview
 
-Three components that consume the same backend data (`LLM.get_context_breakdown`) to show different perspectives on token usage and cache state.
+Two components that consume the same backend data (`LLM.get_context_breakdown`) to show different perspectives on token usage and cache state: the **Context tab** (with Budget and Cache sub-views) and the **Token HUD** (floating overlay).
 
 ## Shared Backend
 
@@ -88,9 +88,13 @@ Cache hit rate is computed locally as `cached_tokens / total_tokens` from tier d
 
 ---
 
-## Context Viewer Tab
+## Context Tab
 
-### Layout
+The Context tab contains two sub-views selectable via a **Budget / Cache** pill toggle in the toolbar. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same stale-detection and refresh-on-visible behavior.
+
+### Budget Sub-View
+
+#### Layout
 
 ```
 Context Budget                              [↻ Refresh]
@@ -111,15 +115,15 @@ Session Totals
   Total          195.2K    Cache Hit         48.1K
 ```
 
-### Budget Bar Colors
+#### Budget Bar Colors
 
 ≤ 75% Green, 75–90% Yellow, > 90% Red.
 
-### Model Info
+#### Model Info
 
 Below the budget bar: model name, cache hit rate percentage, and mode indicator. In document mode, ` · 📝 Doc Mode` is appended to the model name. Displayed as a compact info row.
 
-### Categories
+#### Categories
 
 Each category shows a name, proportional bar, and token count. Expandable categories (with ▶/▼ toggle) show per-item details when clicked:
 
@@ -133,15 +137,17 @@ Each category shows a name, proportional bar, and token count. Expandable catego
 
 Categories with zero tokens or no detail items show no toggle.
 
-### Session Totals
+#### Session Totals
 
 Fixed footer below categories: grid showing cumulative session totals (total, prompt in, completion out, cache read, cache write). Cache read highlighted green when non-zero; cache write highlighted yellow when non-zero.
 
 ---
 
-## Cache Viewer Tab
+### Cache Sub-View
 
-### Layout
+Rendered by an embedded `<ac-cache-tab>` component inside the Context tab. When the user switches to the Cache sub-view, the context tab forwards `onTabVisible()` to the embedded cache tab to trigger a data refresh. The cache tab walks up through shadow DOM boundaries to find its parent `tab-panel` for active-state detection.
+
+#### Layout
 
 ```
 Cache Performance                     23% hit rate
@@ -167,7 +173,7 @@ RECENT CHANGES
 Model: provider/model    Total: 38.7K
 ```
 
-### Content Groups
+#### Content Groups
 
 | Type | Icon | Detail |
 |------|------|--------|
@@ -180,27 +186,27 @@ Model: provider/model    Total: 38.7K
 
 **Mode-aware labels:** When `mode === "doc"`, the cache viewer shows "pre-indexed documents" instead of "pre-indexed symbols" for unmeasured tier items, and uses the 📝 icon for symbol-type entries. The context viewer shows "Doc Map" instead of "Symbol Map" for the symbol_map category, and the stacked bar legend label adapts similarly. When cross-reference mode is active, both `sym:` and `doc:` items appear in the cache viewer — `sym:` items use the 📦 icon and `doc:` items use the 📝 icon, regardless of the current mode.
 
-### Stability Bars
+#### Stability Bars
 
 Per-item: numeric `N/threshold` label displayed inline, plus a proportional fill bar with tier color. Tooltip shows `N={n}/{threshold}`. Only shown for items that have an N value (symbols, files). The numeric value gives precise progress toward promotion; the bar gives a visual summary.
 
-### Item Click → View Map Block
+#### Item Click → View Map Block
 
 Clicking an item name opens a modal showing the full index block for that file. The backend (`get_file_map_block`) dispatches to the appropriate index based on the item's key prefix, not the current mode — so `doc:` items in code mode's cross-reference view correctly show the document outline, and `symbol:` items in doc mode show the symbol block. If the primary index for the current mode has no data for the path, the other index is tried before returning an error.
 
-### Fuzzy Search
+#### Fuzzy Search
 
 Character-by-character matching against item names. Hides non-matching items and tiers with no matching items.
 
-### Defaults
+#### Defaults
 
 L0 and active tiers expanded by default; L1/L2/L3 collapsed.
 
-### Stale Indicator
+#### Stale Indicator
 
 When the tab is hidden during a stream-complete or files-changed event, a `● stale` badge appears. Auto-refreshes when the tab becomes visible.
 
-### Color Palette
+#### Color Palette
 
 Tiers use a warm-to-cool spectrum:
 - L0: Green `#50c878` (most stable)
@@ -211,17 +217,17 @@ Tiers use a warm-to-cool spectrum:
 
 Token values in monospace green. Cache writes in yellow. Errors in red.
 
-### Footer
+#### Footer
 
 Compact footer showing model name and total token count.
 
-### Relationship to Tabs
+### Relationship to Token HUD
 
 | Component | Location | Trigger | Persistence |
 |-----------|----------|---------|-------------|
 | Token HUD | Diff viewer background | Each `streamComplete` | Transient (~8s) |
-| Context Viewer | Dialog tab | Tab switch / file change | Persistent while visible |
-| Cache Viewer | Dialog tab | Tab switch / file change | Persistent while visible |
+| Context tab (Budget) | Dialog Context tab | Tab switch / file change | Persistent while visible |
+| Context tab (Cache) | Dialog Context tab | Tab switch / file change | Persistent while visible |
 
 ---
 

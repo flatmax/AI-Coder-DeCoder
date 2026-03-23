@@ -75,6 +75,16 @@ Line and column numbers are passed as **1-indexed** values (matching Monaco's co
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
 
+### Markdown Link Navigation
+
+For `.md` files, markdown links (`[text](relative-path)`) are Ctrl+clickable in the Monaco editor. This is implemented via:
+
+1. **LinkProvider** — registered for the `markdown` language, matches `[text](relative-path)` patterns (skipping absolute URLs and `#` anchors) and maps them to a custom `ac-navigate:///` URI scheme
+2. **LinkOpener** — intercepts `ac-navigate:` URIs and dispatches a `navigate-markdown-link` event
+3. **Event handler** — resolves the relative path against the current file's directory and dispatches `navigate-file` to open the target
+
+The preview pane also intercepts clicks on `<a>` elements with relative `href` attributes, resolving them the same way. Absolute URLs (`http://`, `https://`, `mailto:`) are left to the browser's default handling.
+
 ## Markdown Preview
 
 For `.md` and `.markdown` files, a **Preview** button appears in the top-right corner (next to the status LED). Toggling it switches from the standard side-by-side diff layout to a split editor+preview layout. In preview mode, the Preview button moves to the top-right of the **preview pane** (right panel) so the user can exit preview from the same panel they're reading. The button uses `position: sticky` to remain visible while scrolling.
@@ -172,7 +182,11 @@ When clicking an edit block's goto icon (↗): open file, search for progressive
 
 ### Virtual Files
 
-Files with a `virtual://` prefix are not fetched from the repository. Their content is passed directly via the `virtualContent` option and stored in an in-memory map (`_virtualContents`). Virtual files are always read-only with an empty original side. This is used for displaying fetched URL content in the diff viewer without creating actual files. On `closeFile`, the virtual content entry is removed from the map.
+Files with a `virtual://` prefix are not fetched from the repository. Their content is passed directly via the `virtualContent` option and stored in an in-memory map (`_virtualContents`). Virtual files are always read-only with an empty original side. On `closeFile`, the virtual content entry is removed from the map.
+
+Virtual files are used in two ways:
+- **URL content viewing** — fetched URL content displayed without creating actual files
+- **Ad-hoc comparison** — `loadPanel()` creates `virtual://compare` entries for comparing arbitrary content. When loading into a panel of an existing `virtual://compare` file, the other side's content is preserved so both sides accumulate independently
 
 ### HEAD vs Working Copy
 
@@ -189,6 +203,10 @@ The diff viewer normalizes responses from `Repo.get_file_content` which may retu
 A single `DiffEditor` instance is created and reused for all files. Switching files disposes old models and creates new ones on the existing editor — this prevents memory leaks and avoids the cost of recreating the editor on every tab switch. The editor is only fully disposed when the last file is closed.
 
 When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
+
+### Per-File Viewport State
+
+The diff viewer maintains a transient `Map<path, ViewportState>` that stores each file's scroll position and cursor location. The viewport state (`scrollTop`, `scrollLeft`, `lineNumber`, `column`) is captured before switching away from a file (via `openFile`, Ctrl+PageDown/PageUp, or file-nav Alt+Arrow) and restored after switching back. Restoration waits for the diff editor's async diff computation to finish — scrolling before the diff result arrives would be overwritten by Monaco's layout pass. The map is not persisted; on page reload all saved viewports are lost. Entries are removed when a file is closed.
 
 ### Post-Edit Refresh
 

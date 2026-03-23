@@ -9,8 +9,28 @@ The chat panel renders conversation messages, handles streaming display, and man
 Messages render as a scrollable list of cards:
 - **User cards** — with optional image attachments
 - **Assistant cards** — markdown rendering, edit blocks, file mentions
+- **System event cards** — operational events (commit, reset) with distinct styling
 
 Cards use keyed rendering for DOM reuse.
+
+### System Event Messages
+
+Operational events (git commit, git reset) are recorded as messages with `role: "user"` and a `system_event: true` flag. This design ensures:
+
+- The **LLM sees them** as part of conversation history (it knows when git was reset or committed)
+- They are **persisted** in the history store and survive page refresh / session reload
+- They render with **distinct styling** — dashed border, left-aligned text, muted color, "System" role label — visually distinct from both user and assistant messages
+- The history compactor treats them as regular messages (they count toward token budgets)
+
+Events that produce system event messages:
+
+| Event | Message Content |
+|-------|----------------|
+| Commit | `**Committed** \`{sha}\`\n\n\`\`\`\n{message}\n\`\`\`` |
+| Reset to HEAD | `**Reset to HEAD** — all uncommitted changes have been discarded.` |
+| Mode switch | `Switched to {mode} mode.` |
+
+Commit and reset events are recorded server-side (via `LLMService.commit_all` and `LLMService.reset_to_head`) so they appear in persistent history and are visible to the LLM. The frontend renders the `system_event` flag from the message dict to apply the distinct card style.
 
 ---
 
@@ -73,11 +93,17 @@ This direct-update pattern (rather than relying on reactive property propagation
 
 ### Input Accumulation (on add)
 
-When a file is added via mention click:
+When a file is added via mention click, the chat input text is accumulated using specific patterns:
 
-- Empty input: `The file helpers.js added. Do you want to see more files before you continue?`
-- Existing pattern: appends filename to list
-- Unrelated text: appends `(added helpers.js)`
+| Current input state | Result |
+|---|---|
+| Empty | `The file {basename} added. Do you want to see more files before you continue?` |
+| Matches `The file X added. Do you want to see more files...` | Replaced with `The files X, {basename} added. Do you want to see more files before you continue?` |
+| Matches `The files X, Y added. Do you want to see more files...` | Updated to `The files X, Y, {basename} added. Do you want to see more files before you continue?` |
+| Ends with `(added X)` | Appends ` (added {basename})` |
+| Any other text | Appends ` (added {basename})` |
+
+Only the basename (filename without directory path) is used in the accumulated text.
 
 ---
 
@@ -355,24 +381,41 @@ Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer ope
 
 ## Action Bar
 
-| Side | Element | Action |
-|------|---------|--------|
-| Left | ✨ | New session (dispatches `session-loaded` to refresh history bar) |
-| Left | 📜 | Browse history |
-| Center | Search input | Case-insensitive substring search (see Chat Search below) |
+The action bar is divided into two visual groups by a thin vertical divider (`.action-divider`):
 
-### Chat Search
+| Group | Elements | Purpose |
+|-------|----------|---------|
+| Search | 🗨/🔎 toggle, search input with inline Aa/.*/ab toggles, result counter + ▲/▼ | Unified search area |
+| Session | ✨ 📜 | New session, browse history (hidden in file search mode) |
 
-A compact search input between the session and git buttons with prev/next navigation. The search input fills available space (`flex: 1`, no max-width) to push git buttons to the right edge.
+Git actions (📋 💾 ⚠️) are in the dialog header — see [App Shell and Dialog — Header Sections](../5-webapp/app_shell_and_dialog.md#header-sections).
+
+The search input and its inline toggle buttons share a single border (`.chat-search-box` wrapper). The three toggles (`Aa` ignore case, `.*` regex, `ab` whole word) sit inside the input's right edge, following the VS Code pattern. Focus-within highlights the shared border.
+
+### Chat Search (Dual Mode)
+
+The search area supports two modes via the 🗨/🔎 toggle button (left of the input). See [Search and Settings — Integrated File Search](search_and_settings.md#integrated-file-search) for the full file search specification.
+
+**Message search (💬 — default):**
 
 - Case-insensitive substring matching against raw message `content` strings (not rendered HTML)
+- `Aa` toggle affects case sensitivity
 - Match counter shows `N/M` (current/total); ▲/▼ buttons for mouse navigation
 - All messages remain visible — matches are highlighted and scrolled into view
 - Current match scrolled to center with accent highlight via `scrollIntoView({ block: 'center' })`
 - Enter for next match (wraps around), Shift+Enter for previous (wraps around), Escape clears query and blurs input
 - Match indices reference message array positions, matched against `data-msg-index` attributes on message cards
 
-#### Highlight Implementation
+**File search (📁):**
+
+- Debounced (300ms) RPC call to `Repo.search_files` with the three toggle states
+- Results appear in an overlay covering the messages area (messages are hidden via `display:none`)
+- The file picker swaps to a pruned tree showing only matching files
+- Bidirectional scroll sync between overlay and picker (see search_and_settings.md)
+- ↑/↓ navigate matches, Enter opens in diff viewer, Escape clears query then exits mode
+- Sending a chat message auto-exits file search mode
+
+#### Highlight Implementation (Message Search)
 
 Message cards have `border: 1px solid transparent` by default with a CSS transition on `border-color` and `box-shadow`. The `.search-highlight` class (applied via `data-msg-index` attribute matching) sets:
 - `border-color: var(--accent-primary)`
@@ -380,9 +423,11 @@ Message cards have `border: 1px solid transparent` by default with a CSS transit
 
 The chat panel manages highlights internally — `_scrollToSearchMatch(msgIndex)` clears all previous `.search-highlight` classes, then queries its own shadow DOM for `.message-card[data-msg-index="N"]` and applies the class. `scrollIntoView({ block: 'center' })` brings the match into view. All highlight state (matches array, current index) is managed within the chat panel component.
 
-| Right | 📋 | Copy diff to clipboard |
-| Right | 💾 | Commit all (server-driven — see below) |
-| Right | ⚠️ | Reset to HEAD (with confirmation) |
+#### File Search Overlay
+
+When file search mode is active, the messages area is hidden (`display: none`) and a `.file-search-overlay` is shown in its place (both inside a `position: relative` wrapper div with `flex: 1`). The overlay uses `position: absolute; inset: 0` to fill the wrapper. This preserves the chat panel's DOM state (streaming, scroll position, input text) while file search is active.
+
+The overlay renders file match sections with `data-file-section` attributes for scroll sync targeting. Match text is highlighted using `unsafeHTML` with regex-built highlight spans.
 
 ### Review Status Bar
 
@@ -416,7 +461,9 @@ When a `session-loaded` CustomEvent fires on `window` (dispatched by the app she
 - **New session**: another localhost client called `new_session` → messages array is empty, chat clears
 - **Loaded session**: another localhost client called `load_session_into_context` → messages array contains the loaded conversation
 
-The handler resets streaming state (`_streamingContent`, `_currentRequestId`, `streamingActive`), enables auto-scroll, and seeds input history from user messages in the loaded session. The same `session-loaded` event is also fired by the local history browser path, so both local and remote session loads converge on the same handler.
+The handler resets streaming state (`_streamingContent`, `_currentRequestId`, `streamingActive`), enables auto-scroll, and seeds input history from user messages in the loaded session via `_seedInputHistory()`. This method iterates all user messages, extracts text content (joining text blocks from multimodal messages), and calls `addEntry()` on the input history component for each non-empty message. This ensures up-arrow recall works for messages from the loaded conversation, not just messages typed since the page loaded.
+
+The same `session-loaded` event is also fired by the local history browser path, so both local and remote session loads converge on the same handler.
 
 ---
 
@@ -457,6 +504,7 @@ Modal overlay (`<ac-history-browser>`) for browsing past conversations. Hosted i
 - **Search**: Debounced (300ms) full-text via `LLMService.history_search`. Switches left panel to search results mode. Escape in search input: clears query (if non-empty) or closes browser (if empty)
 - **Session selection**: Click loads messages via `LLMService.history_get_session`. Preserves selection on close/reopen
 - **Message actions**: Hover reveals copy (📋) and paste-to-prompt (↩) buttons. Copy writes raw content to clipboard. Paste-to-prompt dispatches `paste-to-prompt` event and closes the browser
+- **Context menu**: Right-click on a message shows a context menu with: "◧ Load in Left Panel", "◨ Load in Right Panel", "📋 Copy", "↩ Paste to Prompt". The load-in-panel actions dispatch `load-diff-panel` events with the message content for ad-hoc comparison in the diff viewer
 - **Load session**: "Load into context" button calls `LLMService.load_session_into_context`, dispatches `session-loaded` event (with sessionId and messages), and closes the browser
 - **Close**: Click backdrop, click ✕, or press Escape
 

@@ -2,12 +2,6 @@
  
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
 
-https://github.com/user-attachments/assets/ece86b13-1d6f-4b1e-a029-f358c50ff858
-
-<details><summary>Slow version</summary>
-
-https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
-
 </details>
 
 ## Features
@@ -25,7 +19,7 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 - **Voice dictation** via Web Speech API.
 - **Math rendering** — LaTeX expressions in LLM responses render as formatted math via KaTeX (`$$...$$` for display blocks, `$...$` for inline).
 - **Configurable prompt snippets** for common actions.
-- **Full-text search** across the repo with regex, whole-word, and case-insensitive modes.
+- **Full-text search** with a two-panel layout — file picker (left) showing matching files with match counts, and a match context panel (right) with highlighted results and bidirectional scroll sync. Supports regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
 - **2D file navigation grid** — open files arrange spatially in a grid overlay. Navigate with `Alt+Arrow` keys for fast directional switching between files without reaching for tabs.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
@@ -58,14 +52,6 @@ https://github.com/user-attachments/assets/63e442cf-6d3a-4cbc-a96d-20fe8c4964c8
 6. **Iterate** — File context and cache tiers evolve as you work.
 
 ### Code Review
-
-https://github.com/user-attachments/assets/0e853df6-2d84-4c58-8ea8-95251c4e6822
-
-<details><summary>Slow version</summary>
-
-https://github.com/user-attachments/assets/d923e278-b3ef-46a4-b19e-0d54099bf3a7
-
-</details>
 
 1. Click the review button in the header bar.
 2. Select a commit in the git graph to set the review base.

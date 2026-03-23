@@ -518,6 +518,7 @@ KeyBERT depends on `sentence-transformers` which downloads the configured model 
 - `KeyBERT` is imported inside `__init__` or on first call
 - If `keybert` is not installed, a warning is logged and headings are emitted without keywords
 - The model is initialized once and reused across all files in an indexing run
+- Before loading the model, the enricher probes the Hugging Face local cache via `huggingface_hub.try_to_load_from_cache()` to determine whether the sentence-transformer model needs downloading. If the probe returns `None` (model not cached), a "Downloading…" progress message is shown; otherwise a "Loading from cache…" message is shown. The probe is non-critical — if it fails, initialization proceeds normally with a generic "Loading…" message
 
 ### Graceful Degradation in Packaged Releases
 
@@ -598,6 +599,8 @@ The modified files immediately have fresh unenriched outlines (headings, links, 
 For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexing with KeyBERT is slower but runs infrequently — documents change much less often than code. The bottleneck is entirely keyword extraction, not structural parsing — markdown outline extraction for 50 files completes in <250ms. Batched extraction (see Integration section above) provides the primary speedup by letting the sentence-transformer encode all section texts in a single forward pass. Smaller models (e.g., `all-MiniLM-L6-v2`) reduce keyword extraction times by ~60% at some quality cost — see the model comparison table in Design Decisions.
 
 **Threaded cache writes:** During the background enrichment phase, a `ThreadPoolExecutor(max_workers=4)` overlaps disk sidecar writes with the CPU-bound keyword extraction for the next file. Since enrichment is CPU-bound (sentence-transformer embedding) and cache writes are I/O-bound, this keeps disk I/O off the critical path. The sentence-transformer itself is **not** run in threads — Python's GIL prevents CPU-bound threading from providing speedup, and the model's ~420MB memory footprint makes process-based parallelism impractical. The real speed win comes from batched extraction: `KeywordEnricher.enrich()` sends all sections to KeyBERT in a single `extract_keywords()` call, which lets the underlying transformer batch-encode embeddings in one forward pass (2-4× faster than per-heading calls).
+
+**Structure-only extraction method:** `DocIndex._extract_outlines_structure_only()` is a separate code path from `_extract_outlines()` that accepts any cached outline regardless of keyword model — it passes `keyword_model=None` to the cache `get()` call, which skips the model-match check. This means an outline enriched with an old model, or an unenriched outline, will be accepted and reused. Only files whose mtime has changed are re-parsed. This method is used by mode switching and chat requests (via `_stream_chat`) to avoid blocking on keyword enrichment during user-facing operations.
 
 **Two-phase indexing principle:** Structural extraction (headings, links, section sizes) is always **synchronous and instant** (<5ms per file via regex). Keyword enrichment is always **asynchronous and never blocks** any user-facing operation. This separation eliminates all blocking edge cases:
 
@@ -850,6 +853,8 @@ The reference index is built in two passes:
 
 1. **Collect**: iterate over all `DocOutline` objects, extracting every `DocLink` with its `source_heading` and `target_heading` fields. Build a mapping: `(source_path, source_heading) → [(target_path, target_heading)]`
 2. **Resolve**: for each link, look up the target path's `DocOutline` and resolve the `target_heading` anchor to a `DocHeading` node. Increment that heading's `incoming_ref_count`. Record the resolved link as a `DocSectionRef` on the source heading's `outgoing_refs` list
+
+**Image link resolution shortcut:** Image links (`is_image=True`) whose targets were already resolved to repo-relative paths by the markdown extractor's path-extension scan skip the `_resolve_link()` step entirely — their `target_file_part` is used directly as the resolved path. This avoids double-resolution (the markdown extractor already resolved relative paths against the source file's directory).
 
 This two-pass approach ensures all outlines are available before resolution begins (a link from doc A to doc B requires B's outline to resolve the heading anchor).
 

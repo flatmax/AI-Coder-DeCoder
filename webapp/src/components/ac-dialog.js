@@ -13,20 +13,16 @@ import './ac-files-tab.js';
 
 // Lazy-loaded tab imports
 const lazyImports = {
-  search: () => import('./ac-search-tab.js'),
   context: () => import('./ac-context-tab.js'),
-  cache: () => import('./ac-cache-tab.js'),
   settings: () => import('./ac-settings-tab.js'),
   convert: () => import('./ac-doc-convert-tab.js'),
 };
 
 const TABS = [
-  { id: 'files', icon: '📁', label: 'Files', shortcut: 'Alt+1' },
-  { id: 'search', icon: '🔍', label: 'Search', shortcut: 'Alt+2' },
-  { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+3' },
-  { id: 'cache', icon: '🗄️', label: 'Cache', shortcut: 'Alt+4' },
-  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+5', conditional: true },
-  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+6' },
+  { id: 'files', icon: '🗨', label: 'Chat', shortcut: 'Alt+1' },
+  { id: 'context', icon: '📊', label: 'Context', shortcut: 'Alt+2' },
+  { id: 'settings', icon: '⚙️', label: 'Settings', shortcut: 'Alt+3' },
+  { id: 'convert', icon: '📄', label: 'Doc Convert', shortcut: 'Alt+4', conditional: true, hidden: true },
 ];
 
 export class AcDialog extends RpcMixin(LitElement) {
@@ -52,6 +48,8 @@ export class AcDialog extends RpcMixin(LitElement) {
     _shareUrl: { type: String, state: true },
     _shareCopied: { type: Boolean, state: true },
     _collabDisabled: { type: Boolean, state: true },
+    _committing: { type: Boolean, state: true },
+    _streamingActive: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -84,19 +82,16 @@ export class AcDialog extends RpcMixin(LitElement) {
       cursor: grabbing;
     }
 
-    .header-label {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--text-secondary);
-      margin-right: 12px;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-
     .tab-buttons {
       display: flex;
       gap: 2px;
-      flex: 1;
+    }
+    .git-actions {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      margin-left: auto;
+      margin-right: auto;
     }
 
     .tab-btn {
@@ -120,9 +115,10 @@ export class AcDialog extends RpcMixin(LitElement) {
 
     .header-actions {
       display: flex;
-      gap: 4px;
+      gap: 2px;
       margin-left: auto;
       flex-shrink: 0;
+      align-items: center;
     }
 
     .header-action {
@@ -146,8 +142,26 @@ export class AcDialog extends RpcMixin(LitElement) {
       animation: pulse-building 1.5s ease-in-out infinite;
       cursor: wait;
     }
+    .header-action.committing {
+      color: var(--accent-primary);
+      animation: spin 1s linear infinite;
+    }
+    .header-action.danger:hover {
+      color: var(--accent-red);
+    }
     .header-action:disabled {
       pointer-events: none;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .header-divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border-primary);
+      opacity: 0.6;
+      flex-shrink: 0;
     }
     @keyframes pulse-building {
       0%, 100% { opacity: 0.4; }
@@ -330,7 +344,7 @@ export class AcDialog extends RpcMixin(LitElement) {
     .collab-popover {
       position: absolute;
       top: 100%;
-      right: 0;
+      left: 0;
       margin-top: 6px;
       background: var(--bg-tertiary);
       border: 1px solid var(--border-primary);
@@ -562,6 +576,62 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._collabPopoverOpen = false;
   }
 
+  _renderCollabPopover() {
+    return html`
+      <div class="collab-popover">
+        ${this._collabDisabled ? html`
+          <div class="collab-popover-title">Collaboration Disabled</div>
+          <div style="color: var(--text-secondary); padding: 4px 0; line-height: 1.5;">
+            Collaboration mode is not enabled. The server is listening on localhost only.
+          </div>
+          <div style="color: var(--text-muted); padding: 6px 0 2px; font-size: 0.78rem; line-height: 1.5;">
+            To allow others on your network to connect, restart with:
+          </div>
+          <div style="background: var(--bg-primary); padding: 6px 10px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-green); margin-top: 4px;">
+            ac-dc --collab
+          </div>
+        ` : html`
+          <div class="collab-popover-title">Connected Clients</div>
+          ${this._collabClients.length > 0 ? html`
+            <ul class="collab-client-list">
+              ${this._collabClients.map(c => html`
+                <li class="collab-client-item">
+                  <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
+                  <span class="collab-client-ip">${c.ip}</span>
+                  ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
+                </li>
+              `)}
+            </ul>
+          ` : html`
+            <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
+          `}
+          <hr class="collab-divider">
+          <div class="collab-share-section">
+            <div class="collab-share-label">Share Link</div>
+            ${this._shareUrl ? html`
+              <div class="collab-share-url">
+                <input type="text" readonly .value=${this._shareUrl}
+                  @click=${(e) => e.target.select()}>
+                <button class="${this._shareCopied ? 'copied' : ''}"
+                  @click=${() => this._copyShareUrl()}>
+                  ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
+                </button>
+              </div>
+              <div class="collab-share-hint">
+                Share this link with others on your network to collaborate.
+              </div>
+            ` : html`
+              <div class="collab-share-hint">
+                No routable network address detected.<br>
+                Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
+              </div>
+            `}
+          </div>
+        `}
+      </div>
+    `;
+  }
+
   async _copyShareUrl() {
     if (!this._shareUrl) return;
     try {
@@ -596,7 +666,11 @@ export class AcDialog extends RpcMixin(LitElement) {
     this._refreshReviewState();
     this._refreshMode();
     // Restore last-used tab now that RPC is connected and tabs can load data
-    const savedTab = this._loadPref('ac-dc-active-tab', 'files');
+    let savedTab = this._loadPref('ac-dc-active-tab', 'files');
+    // Migrate stale tab preferences — search is now integrated into files,
+    // cache is now a sub-view of context
+    if (savedTab === 'search') savedTab = 'files';
+    if (savedTab === 'cache') savedTab = 'context';
     if (savedTab !== this.activeTab) {
       this._switchTab(savedTab);
     }
@@ -611,6 +685,9 @@ export class AcDialog extends RpcMixin(LitElement) {
       window.addEventListener('session-loaded', () => this._refreshHistoryBar());
       window.addEventListener('review-started', () => { this._reviewActive = true; });
       window.addEventListener('review-ended', () => { this._reviewActive = false; });
+      window.addEventListener('stream-chunk', () => { this._streamingActive = true; });
+      window.addEventListener('stream-complete', () => { this._streamingActive = false; this._committing = false; });
+      window.addEventListener('commit-result', () => { this._committing = false; });
       window.addEventListener('mode-switch-progress', (e) => {
         if (this._docIndexReady) return;
         const { message, percent } = e.detail || {};
@@ -689,6 +766,25 @@ export class AcDialog extends RpcMixin(LitElement) {
     } catch (e) {
       // Ignore — RPC may not be ready
     }
+  }
+
+  // === Git action delegates ===
+
+  _getFilesTab() {
+    return this.shadowRoot?.querySelector('ac-files-tab');
+  }
+
+  _onCopyDiff() {
+    this._getFilesTab()?.copyDiff();
+  }
+
+  _onCommit() {
+    this._committing = true;
+    this._getFilesTab()?.commitAll();
+  }
+
+  _onConfirmReset() {
+    this._getFilesTab()?.confirmReset();
   }
 
   _onReviewClick() {
@@ -854,8 +950,8 @@ export class AcDialog extends RpcMixin(LitElement) {
   }
 
   _onKeyDown(e) {
-    // Alt+1..6 tab switching
-    if (e.altKey && e.key >= '1' && e.key <= '6') {
+    // Alt+1..4 tab switching
+    if (e.altKey && e.key >= '1' && e.key <= '4') {
       e.preventDefault();
       const idx = parseInt(e.key) - 1;
       const tab = TABS[idx];
@@ -870,18 +966,21 @@ export class AcDialog extends RpcMixin(LitElement) {
       this._toggleMinimize();
       return;
     }
-    // Ctrl+Shift+F → Search tab with selection/clipboard prefill
+    // Ctrl+Shift+F → Activate file search in files tab
     if (e.ctrlKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       // Capture selection synchronously before focus change clears it
       const sel = window.getSelection()?.toString()?.trim() || '';
-      this._switchTab('search');
-      if (sel && !sel.includes('\n')) {
-        this.updateComplete.then(() => {
-          const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
-          if (searchTab) searchTab.prefill(sel);
-        });
-      }
+      this._switchTab('files');
+      this.updateComplete.then(() => {
+        const filesTab = this.shadowRoot?.querySelector('ac-files-tab');
+        if (filesTab) {
+          const chatPanel = filesTab.shadowRoot?.querySelector('ac-chat-panel');
+          if (chatPanel) {
+            chatPanel.activateFileSearch(sel && !sel.includes('\n') ? sel : '');
+          }
+        }
+      });
       return;
     }
   }
@@ -902,17 +1001,6 @@ export class AcDialog extends RpcMixin(LitElement) {
         const child = panel.firstElementChild;
         if (child && typeof child.onTabVisible === 'function') {
           child.onTabVisible();
-        }
-      }
-      if (tabId === 'search') {
-        // Wait for lazy import to complete so the custom element is defined
-        await lazyReady;
-        // Wait one more update cycle for the element to render its shadow DOM
-        await this.updateComplete;
-        const searchTab = this.shadowRoot?.querySelector('ac-search-tab');
-        if (searchTab) {
-          await searchTab.updateComplete;
-          searchTab.focus();
         }
       }
     });
@@ -1178,10 +1266,8 @@ export class AcDialog extends RpcMixin(LitElement) {
 
     return html`
       <div class="header" @mousedown=${this._onHeaderMouseDown}>
-        <span class="header-label">${currentTab?.label || 'Files'}</span>
-
         <div class="tab-buttons" role="tablist" aria-label="Tool tabs">
-          ${TABS.filter(tab => !tab.conditional || this._docConvertAvailable).map(tab => html`
+          ${TABS.filter(tab => !tab.hidden && (!tab.conditional || this._docConvertAvailable)).map(tab => html`
             <button
               class="tab-btn ${tab.id === this.activeTab ? 'active' : ''}"
               role="tab"
@@ -1193,6 +1279,49 @@ export class AcDialog extends RpcMixin(LitElement) {
               @click=${(e) => { e.stopPropagation(); this._switchTab(tab.id); }}
             >${tab.icon}</button>
           `)}
+        </div>
+
+        <div class="git-actions">
+          <div class="collab-anchor">
+            <button class="header-action" style="font-size: 0.8rem;"
+              title="Collaboration — ${this._connectedClients} connected"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._toggleCollabPopover()}>
+              👥${this._connectedClients > 1 ? html` ${this._connectedClients}` : ''}
+            </button>
+            ${this._collabPopoverOpen ? html`
+              <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
+              ${this._renderCollabPopover()}
+            ` : ''}
+          </div>
+          <div class="header-divider"></div>
+          <button class="header-action" title="Copy diff (staged)" aria-label="Copy diff to clipboard"
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onCopyDiff()}
+            ?disabled=${!this.rpcConnected}>📋</button>
+          ${this._canMutate ? html`
+            <button class="header-action ${this._committing ? 'committing' : ''}"
+              title="${this._reviewActive ? 'Commit disabled during review' : 'Stage all & commit'}"
+              aria-label="${this._reviewActive ? 'Commit disabled during review' : 'Stage all and commit'}"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onCommit()}
+              ?disabled=${!this.rpcConnected || this._committing || this._streamingActive || this._reviewActive}>
+              ${this._committing ? '⏳' : '💾'}
+            </button>
+            <button class="header-action danger" title="Reset to HEAD" aria-label="Reset all changes to HEAD"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._onConfirmReset()}
+              ?disabled=${!this.rpcConnected || this._streamingActive}>⚠️</button>
+          ` : ''}
+          <div class="header-divider"></div>
+          <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
+            title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
+            aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
+            ?disabled=${!this._canMutate}
+            @mousedown=${(e) => e.stopPropagation()}
+            @click=${() => this._onReviewClick()}>
+            👁️
+          </button>
         </div>
 
         ${this._modeSwitching && !this._docIndexReady ? html`
@@ -1212,68 +1341,6 @@ export class AcDialog extends RpcMixin(LitElement) {
         ` : ''}
 
         <div class="header-actions">
-          <div class="collab-anchor">
-            <button class="header-action" style="font-size: 0.8rem;"
-              title="Collaboration — ${this._connectedClients} connected"
-              @mousedown=${(e) => e.stopPropagation()}
-              @click=${() => this._toggleCollabPopover()}>
-              👥${this._connectedClients > 1 ? html` ${this._connectedClients}` : ''}
-            </button>
-            ${this._collabPopoverOpen ? html`
-              <div class="collab-backdrop" @click=${() => this._closeCollabPopover()}></div>
-              <div class="collab-popover">
-                ${this._collabDisabled ? html`
-                  <div class="collab-popover-title">Collaboration Disabled</div>
-                  <div style="color: var(--text-secondary); padding: 4px 0; line-height: 1.5;">
-                    Collaboration mode is not enabled. The server is listening on localhost only.
-                  </div>
-                  <div style="color: var(--text-muted); padding: 6px 0 2px; font-size: 0.78rem; line-height: 1.5;">
-                    To allow others on your network to connect, restart with:
-                  </div>
-                  <div style="background: var(--bg-primary); padding: 6px 10px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-green); margin-top: 4px;">
-                    ac-dc --collab
-                  </div>
-                ` : html`
-                  <div class="collab-popover-title">Connected Clients</div>
-                  ${this._collabClients.length > 0 ? html`
-                    <ul class="collab-client-list">
-                      ${this._collabClients.map(c => html`
-                        <li class="collab-client-item">
-                          <span class="collab-client-role ${c.role === 'host' ? 'host' : ''}">${c.role}</span>
-                          <span class="collab-client-ip">${c.ip}</span>
-                          ${c.is_localhost ? html`<span class="collab-client-local">local</span>` : ''}
-                        </li>
-                      `)}
-                    </ul>
-                  ` : html`
-                    <div style="color: var(--text-muted); padding: 4px 0;">No clients connected</div>
-                  `}
-                  <hr class="collab-divider">
-                  <div class="collab-share-section">
-                    <div class="collab-share-label">Share Link</div>
-                    ${this._shareUrl ? html`
-                      <div class="collab-share-url">
-                        <input type="text" readonly .value=${this._shareUrl}
-                          @click=${(e) => e.target.select()}>
-                        <button class="${this._shareCopied ? 'copied' : ''}"
-                          @click=${() => this._copyShareUrl()}>
-                          ${this._shareCopied ? '✓ Copied' : '📋 Copy'}
-                        </button>
-                      </div>
-                      <div class="collab-share-hint">
-                        Share this link with others on your network to collaborate.
-                      </div>
-                    ` : html`
-                      <div class="collab-share-hint">
-                        No routable network address detected.<br>
-                        Others can connect using ws://&lt;your-ip&gt;:${new URLSearchParams(window.location.search).get('port') || '18080'}
-                      </div>
-                    `}
-                  </div>
-                `}
-              </div>
-            ` : ''}
-          </div>
           <label class="header-action" style="display: flex; align-items: center; gap: 3px; font-size: 0.72rem; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'}; opacity: ${this._canMutate ? 1 : 0.5};"
             title="${this._crossRefEnabled ? 'Disable cross-reference index' : 'Enable cross-reference index'}"
             @mousedown=${(e) => e.stopPropagation()}>
@@ -1283,7 +1350,7 @@ export class AcDialog extends RpcMixin(LitElement) {
               @change=${() => this._onCrossRefToggle()}
               style="margin: 0; cursor: ${this._canMutate ? 'pointer' : 'not-allowed'};">
             <span style="color: var(--text-muted); white-space: nowrap;">
-              ${this._mode === 'code' ? '+doc index' : '+code symbols'}
+              ${this._mode === 'code' ? '+doc' : '+code'}
             </span>
           </label>
           <button class="header-action ${this._mode === 'doc' ? 'review-active' : ''} ${this._docIndexBuilding ? 'building' : ''}"
@@ -1298,14 +1365,15 @@ export class AcDialog extends RpcMixin(LitElement) {
             @click=${() => this._onModeToggle()}>
             ${this._docIndexBuilding ? '⏳' : this._mode === 'doc' ? '📝' : '💻'}
           </button>
-          <button class="header-action ${this._reviewActive ? 'review-active' : ''}"
-            title="${this._reviewActive ? 'Exit Review' : 'Code Review'}"
-            aria-label="${this._reviewActive ? 'Exit code review' : 'Start code review'}"
-            ?disabled=${!this._canMutate}
-            @mousedown=${(e) => e.stopPropagation()}
-            @click=${() => this._onReviewClick()}>
-            👁️
-          </button>
+          ${this._docConvertAvailable ? html`
+            <button class="header-action ${this.activeTab === 'convert' ? 'review-active' : ''}"
+              title="Doc Convert (Alt+4)"
+              aria-label="Document conversion"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${() => this._switchTab('convert')}>
+              📄
+            </button>
+          ` : ''}
           <button class="header-action" title="Minimize (Alt+M)"
             aria-label="${this.minimized ? 'Expand panel' : 'Minimize panel'}"
             aria-expanded="${!this.minimized}"
@@ -1324,24 +1392,10 @@ export class AcDialog extends RpcMixin(LitElement) {
         </div>
 
         <!-- Lazy-loaded tabs — only render once visited -->
-        ${this._visitedTabs.has('search') ? html`
-          <div class="tab-panel ${this.activeTab === 'search' ? 'active' : ''}"
-               role="tabpanel" id="panel-search" aria-labelledby="tab-search">
-            <ac-search-tab></ac-search-tab>
-          </div>
-        ` : ''}
-
         ${this._visitedTabs.has('context') ? html`
           <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}"
                role="tabpanel" id="panel-context" aria-labelledby="tab-context">
             <ac-context-tab></ac-context-tab>
-          </div>
-        ` : ''}
-
-        ${this._visitedTabs.has('cache') ? html`
-          <div class="tab-panel ${this.activeTab === 'cache' ? 'active' : ''}"
-               role="tabpanel" id="panel-cache" aria-labelledby="tab-cache">
-            <ac-cache-tab></ac-cache-tab>
           </div>
         ` : ''}
 

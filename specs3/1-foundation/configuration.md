@@ -36,6 +36,8 @@ The `min_cacheable_tokens` is model-aware — per Anthropic's prompt caching doc
 - **4096 tokens** for Claude Opus 4.5/4.6, Haiku 4.5
 - **1024 tokens** for Claude Sonnet and other Claude models
 
+The version matching uses string-contains checks on the lowercased model name, matching both dash-separated and dot-separated version patterns (e.g., `"4-5"` and `"4.5"` both match). Non-Claude models default to 1024.
+
 The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
 
 A fallback `cache_target_tokens` property (without model reference) computes `cache_min_tokens × cache_buffer_multiplier` (default: 1126) for callers that don't have a model reference.
@@ -149,14 +151,16 @@ Users who customized managed files directly (instead of using `system_extra.md`)
 
 ## Token Counter Data Sources
 
-The token counter uses `litellm`'s model registry to determine model-specific limits:
+The token counter uses hardcoded model-family defaults for limits and `tiktoken` for tokenization:
 
 | Property | Source | Fallback |
 |----------|--------|----------|
-| Tokenizer | `tiktoken.get_encoding()` for the configured model | ~4 characters per token estimate |
-| `max_input_tokens` | `litellm` model info based on model name | Hardcoded defaults by model family |
-| `max_output_tokens` | `litellm` model info | Hardcoded defaults by model family |
+| Tokenizer | `tiktoken.get_encoding("cl100k_base")` | ~4 characters per token estimate |
+| `max_input_tokens` | Hardcoded: 1,000,000 for all currently supported models (Claude, GPT-4, GPT-3.5) | 1,000,000 |
+| `max_output_tokens` | Hardcoded: 8,192 for Claude models, 4,096 for others | 4,096 |
 | `max_history_tokens` | Computed: `max_input_tokens / 16` | — |
+
+**Note:** The implementation does not query `litellm`'s model registry at runtime. All limits are hardcoded constants in `token_counter.py`. The `cl100k_base` encoding is used for all models regardless of provider.
 
 ## Settings Service (RPC)
 
@@ -228,12 +232,12 @@ These files can still be edited directly on disk in the config directory.
 
 ## `.ac-dc/` Directory
 
-A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first run and added to `.gitignore`.
+A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first run by `ConfigManager._init_ac_dc_dir()` and added to `.gitignore`. The `images/` subdirectory is also created at this time (not lazily by the history store).
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|
 | `history.jsonl` | Persistent conversation history | Append-only |
 | `symbol_map.txt` | Current symbol map | Rebuilt on startup and before each LLM request |
 | `snippets.json` | Per-repo prompt snippets override (optional, all modes) | User-managed |
-| `images/` | Persisted chat images | Write on paste, read on session load |
+| `images/` | Persisted chat images | Created by ConfigManager on init; write on paste, read on session load |
 | `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed |

@@ -132,10 +132,14 @@ The MATLAB extractor (`MatlabExtractor`) uses **regex-based parsing** — no tre
 
 **Function body analysis:**
 
-For each function, the extractor also scans the body text to extract:
+Before pattern matching, a copy of the source text is preprocessed to strip line comments (`%...`) and string literals (`'...'` and `"..."`) to avoid false positives in call site and variable detection.
+
+For each function, the extractor scans the preprocessed body text to extract:
 - **Call sites** — identifiers followed by `(`, excluding MATLAB keywords. Produced as `CallSite` objects for the reference index
 - **Local variables** — LHS identifiers in assignments (`x = ...` or `[a, b] = ...`), excluding parameters, output args, and keywords. Attached as `variable`-kind children of the function symbol
 - **Read variables** — identifiers that appear in the body but are never assigned locally and are not parameters, outputs, or MATLAB builtins. Also attached as `variable`-kind children
+
+**Builtin exclusion:** A large set of common MATLAB builtins (`disp`, `fprintf`, `zeros`, `ones`, `plot`, `figure`, `fopen`, `exist`, `isa`, `class`, `double`, etc. — approximately 80 entries) and keywords (`if`, `for`, `end`, etc.) are excluded from both call site detection and read-variable detection to reduce noise in the symbol map.
 
 **Nesting and `end` tracking:**
 
@@ -148,7 +152,7 @@ MATLAB uses `end` to close `function`, `classdef`, `if`, `for`, `while`, `switch
 
 **Output arguments as return type:** If a function declares output arguments (`function [a, b] = myFunc(...)`), the output names are joined with `, ` and stored as `return_type` on the symbol (e.g., `"a, b"`).
 
-**Comment and string stripping:** Before pattern matching, line comments (`%...`) and string literals (`'...'` and `"..."`) are stripped from a copy of the source text to avoid false positives in call site and variable detection.
+**Comment and string stripping:** Line comments (`%...`) and string literals (`'...'` and `"..."`) are stripped at two levels: (1) a global copy of the source text is preprocessed for top-level pattern matching (`_FUNC_RE`, `_CLASS_RE`, `_VAR_RE`), and (2) each function's body text is independently stripped within `_extract_calls`, `_extract_local_vars`, and `_extract_read_vars` before scanning for identifiers. The per-function-body stripping ensures that comments and strings inside function bodies don't produce false positives even when the body text is sliced from the original (unstripped) source.
 
 **Builtin exclusion:** A large set of common MATLAB builtins (`disp`, `fprintf`, `zeros`, `plot`, etc.) and keywords (`if`, `for`, `end`, etc.) are excluded from read-variable detection to reduce noise in the symbol map.
 

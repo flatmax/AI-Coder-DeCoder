@@ -336,7 +336,7 @@ Three top-level service classes, registered via `add_class()`:
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `LLMService.get_current_state` | `() → {messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, cross_ref_enabled}` | Full state snapshot |
+| `LLMService.get_current_state` | `() → {messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available}` | Full state snapshot |
 | `LLMService.set_selected_files` | `(files) → [string]` | Update file selection |
 | `LLMService.get_selected_files` | `() → [string]` | Current selection |
 | `LLMService.chat_streaming` | `(request_id, message, files?, images?) → {status}` | Start streaming chat |
@@ -344,6 +344,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.new_session` | `() → {session_id}` | Start new session |
 | `LLMService.generate_commit_message` | `(diff_text) → string` | Generate commit message |
 | `LLMService.commit_all` | `() → {status: "started"}` | Stage, generate message, commit — result via `commitResult` broadcast |
+| `LLMService.reset_to_head` | `() → {status, system_event_message}` | Reset git to HEAD, record system event in conversation context and history |
 | `LLMService.get_context_breakdown` | `() → {model, total_tokens, blocks, breakdown, ...}` | Token/tier breakdown |
 | `LLMService.check_review_ready` | `() → {clean, message?}` | Check for clean tree |
 | `LLMService.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | Delegates to Repo |
@@ -402,6 +403,7 @@ Three top-level service classes, registered via `add_class()`:
 | `Collab.deny_client` | `(client_id) → {ok, client_id}` | Deny and disconnect a pending connection |
 | `Collab.get_connected_clients` | `() → [{client_id, ip, role, is_localhost}]` | List all connected clients |
 | `Collab.get_collab_role` | `() → {role, is_localhost, client_id}` | Calling client's own role |
+| `Collab.get_share_info` | `() → {ips: [string], port: int}` | Routable LAN IPs and WebSocket port for share URL construction |
 
 ### Browser Methods (Server → Client)
 

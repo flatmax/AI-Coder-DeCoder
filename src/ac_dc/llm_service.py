@@ -257,11 +257,11 @@ class LLMService:
                 return
             for msg in msgs:
                 self._context.add_message(msg["role"], msg["content"])
-            # Start a NEW session for upcoming messages — don't reuse the old
-            # session ID, otherwise new messages get appended to the previous
-            # session and the first chat after restart merges into old history.
-            self._session_id = self._new_session_id()
-            logger.info(f"Restored {len(msgs)} messages from session {session_id}, new session: {self._session_id}")
+            # Reuse the restored session ID so that subsequent messages
+            # (chat, commits, resets) are persisted to the same session.
+            # A new session is only created by explicit new_session() calls.
+            self._session_id = session_id
+            logger.info(f"Restored {len(msgs)} messages from session {session_id}")
         except Exception as e:
             logger.warning(f"Failed to restore last session: {e}")
 
@@ -2402,12 +2402,17 @@ class LLMService:
 
         self._committing = True
 
+        # Capture session ID now (before background task runs) so the
+        # commit event is persisted to the correct session even if the
+        # server restarted and _session_id was replaced by _restore_last_session.
+        session_id = self._session_id
+
         # Launch background task
-        asyncio.ensure_future(self._commit_all_background())
+        asyncio.ensure_future(self._commit_all_background(session_id))
 
         return {"status": "started"}
 
-    async def _commit_all_background(self):
+    async def _commit_all_background(self, session_id):
         """Background task for commit_all — stages, generates message, commits."""
         result = {}
         try:
@@ -2471,6 +2476,20 @@ class LLMService:
                 "message": commit_message,
             }
 
+            # Record system event in conversation context and persistent history
+            event_text = f"**Committed** `{sha}`\n\n```\n{commit_message}\n```"
+            self._context.add_message("user", event_text)
+            self._context._history[-1]["system_event"] = True
+            if self._history_store:
+                try:
+                    self._history_store.append_message(
+                        session_id=session_id,
+                        role="user",
+                        content=event_text,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist commit event: {e}")
+
         except Exception as e:
             logger.error(f"commit_all background failed: {e}")
             result = {"error": str(e)}
@@ -2484,6 +2503,49 @@ class LLMService:
                     await self._event_callback("commitResult", result)
                 except Exception as e:
                     logger.error(f"commitResult callback failed: {e}")
+
+    # === Reset to HEAD (RPC) ===
+
+    def reset_to_head(self):
+        """Reset working tree to HEAD and record system event. (RPC)
+
+        Delegates to Repo.reset_hard, then records a system event message
+        in conversation context and persistent history so the LLM knows
+        about the reset.
+
+        Returns:
+            Repo.reset_hard result dict, augmented with system_event_message.
+        """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+        if not self._repo:
+            return {"error": "No repository available"}
+
+        result = self._repo.reset_hard()
+        if isinstance(result, dict) and result.get("error"):
+            return result
+
+        # Record system event in conversation context and persistent history
+        event_text = "**Reset to HEAD** — all uncommitted changes have been discarded."
+        self._context.add_message("user", event_text)
+        self._context._history[-1]["system_event"] = True
+        if self._history_store:
+            try:
+                self._history_store.append_message(
+                    session_id=self._session_id,
+                    role="user",
+                    content=event_text,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist reset event: {e}")
+
+        # Include the event message in the result so the frontend can display it
+        if not isinstance(result, dict):
+            result = {"status": "ok"}
+        result["system_event_message"] = event_text
+
+        return result
 
     # === Context Breakdown (RPC) ===
 
