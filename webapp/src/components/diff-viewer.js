@@ -1031,6 +1031,55 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       });
     }
 
+    // Patch Monaco's editor service for cross-file Go-to-Definition.
+    // Ctrl+Click on a symbol in another file triggers openCodeEditor —
+    // we intercept it here to open the target in our tab system.
+    if (!this._editorServicePatched) {
+      this._editorServicePatched = true;
+      try {
+        const modifiedEditor = this._editor.getModifiedEditor();
+        const svc = modifiedEditor?._codeEditorService;
+        if (svc && typeof svc.openCodeEditor === 'function') {
+          const origOpen = svc.openCodeEditor.bind(svc);
+          svc.openCodeEditor = async (input, source, sideBySide) => {
+            const resourcePath = input?.resource?.path;
+            if (resourcePath) {
+              const cleanPath = resourcePath.replace(/^\/+/, '');
+              const line = input?.options?.selection?.startLineNumber;
+              await this.openFile({ path: cleanPath, line });
+              return source;
+            }
+            return origOpen(input, source, sideBySide);
+          };
+        }
+      } catch (_) { /* best-effort — LSP nav is not critical */ }
+    }
+
+    // Patch Monaco's code editor service to handle cross-file Go-to-Definition.
+    // When the user Ctrl+clicks a symbol defined in another file, Monaco tries
+    // to open it via ICodeEditorService.openCodeEditor — we intercept that to
+    // open the file in our tab system instead.
+    if (!this._editorServicePatched) {
+      this._editorServicePatched = true;
+      try {
+        const modifiedEditor = this._editor.getModifiedEditor();
+        const svc = modifiedEditor?._codeEditorService;
+        if (svc && typeof svc.openCodeEditor === 'function') {
+          const origOpen = svc.openCodeEditor.bind(svc);
+          svc.openCodeEditor = async (input, source, sideBySide) => {
+            const resourcePath = input?.resource?.path;
+            if (resourcePath) {
+              const cleanPath = resourcePath.replace(/^\/+/, '');
+              const line = input?.options?.selection?.startLineNumber;
+              await this.openFile({ path: cleanPath, line });
+              return source;
+            }
+            return origOpen(input, source, sideBySide);
+          };
+        }
+      } catch (_) { /* best-effort — LSP nav is not critical */ }
+    }
+
     // Problem 6 fix: listen on only the modified editor (not both) to
     // avoid double-firing scroll events in inline diff mode.
     if (this._editorScrollDisposable) {
@@ -1502,7 +1551,6 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
             position.lineNumber, position.column
           );
           if (result?.file && result?.range) {
-            await this.openFile({ path: result.file, line: result.range.start_line + 1 });
             return {
               uri: monaco.Uri.parse(`file:///${result.file}`),
               range: new monaco.Range(
@@ -1574,6 +1622,27 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         return { links };
       },
     });
+
+    // Intercept Go-to-Definition for cross-file navigation.
+    // Monaco's ICodeEditorService.openCodeEditor is called when the user
+    // Ctrl+clicks a symbol whose definition is in another file. We
+    // override it so the diff viewer opens the target file in a new tab
+    // instead of trying to create a new Monaco editor instance.
+    const editorService = this._editor?._codeEditorService;
+    if (editorService && !editorService._acPatched) {
+      editorService._acPatched = true;
+      const origOpen = editorService.openCodeEditor.bind(editorService);
+      editorService.openCodeEditor = async (input, source, sideBySide) => {
+        const targetPath = input?.resource?.path;
+        if (targetPath) {
+          const cleanPath = targetPath.replace(/^\/+/, '');
+          const line = input.options?.selection?.startLineNumber;
+          await this.openFile({ path: cleanPath, line });
+          return source; // return current editor to satisfy Monaco
+        }
+        return origOpen(input, source, sideBySide);
+      };
+    }
 
     // Intercept ac-navigate: links to open files in the editor
     monaco.editor.registerLinkOpener({
