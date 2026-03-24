@@ -20,7 +20,10 @@ function _isFilePath(line) {
   if (!s || s.length > 200) return false;
   if (/^[#\/*\->]|^```/.test(s)) return false;
   if (s.includes('/') || s.includes('\\')) return true;
-  if (/^[\w\-.]+\.\w+$/.test(s)) return true;
+  // Match filenames like "foo.js", ".gitignore", ".env.local", "Makefile"
+  if (/^\.?[\w\-.]+\.\w+$/.test(s)) return true;
+  // Match dotfiles without extension (e.g. ".gitignore", ".dockerignore", ".env")
+  if (/^\.\w[\w\-.]*$/.test(s)) return true;
   return false;
 }
 

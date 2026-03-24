@@ -87,8 +87,11 @@ def _is_file_path(line):
     # Must contain path separator or be a simple filename
     if "/" in line or "\\" in line:
         return True
-    # Simple filename with extension
-    if re.match(r'^[\w\-\.]+\.\w+$', line):
+    # Simple filename with extension (e.g. "foo.js", ".env.local")
+    if re.match(r'^\.?[\w\-\.]+\.\w+$', line):
+        return True
+    # Dotfiles without extension (e.g. ".gitignore", ".dockerignore", ".env")
+    if re.match(r'^\.\w[\w\-\.]*$', line):
         return True
     # Known extensionless filenames
     if line in ("Makefile", "Dockerfile", "Vagrantfile", "Gemfile",
