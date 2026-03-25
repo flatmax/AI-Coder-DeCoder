@@ -3235,8 +3235,9 @@ class LLMService:
             except Exception as e:
                 logger.warning(f"Failed to rebuild symbol index: {e}")
 
-        # Get review metadata
-        commits = self._repo.get_commit_log(base_commit, branch_tip)
+        # Get review metadata — use parent_commit (merge-base) as the range
+        # start so the commit log matches the staged diff exactly.
+        commits = self._repo.get_commit_log(parent_commit, branch_tip)
         changed_files = self._repo.get_review_changed_files()
         total_additions = sum(f.get("additions", 0) for f in changed_files)
         total_deletions = sum(f.get("deletions", 0) for f in changed_files)
@@ -3383,11 +3384,11 @@ class LLMService:
         parts = []
 
         # Review summary
-        parent_short = self._review_parent[:7] if self._review_parent else "?"
+        base_short = self._review_parent[:7] if self._review_parent else "?"
         tip_short = self._review_branch_tip[:7] if self._review_branch_tip else "?"
         stats = self._review_stats
         parts.append(
-            f"## Review: {self._review_branch} ({parent_short} → {tip_short})\n"
+            f"## Review: {self._review_branch} (merge-base {base_short} → {tip_short})\n"
             f"{stats.get('commit_count', 0)} commits, "
             f"{stats.get('files_changed', 0)} files changed, "
             f"+{stats.get('additions', 0)} -{stats.get('deletions', 0)}\n"
@@ -3408,7 +3409,7 @@ class LLMService:
         if self._symbol_map_before:
             parts.append(
                 "## Pre-Change Symbol Map\n"
-                "Symbol map from the parent commit (before the reviewed changes).\n"
+                "Symbol map from the merge-base commit (before the reviewed changes).\n"
                 "Compare against the current symbol map in the repository structure above.\n"
             )
             parts.append(self._symbol_map_before)

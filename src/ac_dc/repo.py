@@ -652,18 +652,25 @@ class Repo:
             return []
 
     def get_merge_base(self, ref1, ref2=None):
-        """Get merge base SHA."""
-        if ref2 is None:
-            ref2 = "main"
-        try:
-            output = self._run_git("merge-base", ref1, ref2)
-            return {"sha": output.strip()}
-        except subprocess.CalledProcessError:
+        """Get merge base SHA.
+
+        Tries ref2 first, then falls back to 'main', then 'master'.
+        """
+        candidates = []
+        if ref2 is not None:
+            candidates.append(ref2)
+        candidates.extend(["main", "master"])
+
+        last_error = None
+        for candidate in candidates:
             try:
-                output = self._run_git("merge-base", ref1, "master")
+                output = self._run_git("merge-base", ref1, candidate)
                 return {"sha": output.strip()}
             except subprocess.CalledProcessError as e:
-                return {"error": str(e)}
+                last_error = e
+                continue
+
+        return {"error": str(last_error)}
 
     def get_commit_graph(self, limit=100, offset=0, include_remote=False):
         """Get commit graph data for the review selector.
@@ -758,9 +765,16 @@ class Repo:
             return {"error": str(e)}
 
     def checkout_review_parent(self, branch, base_commit):
-        """Check out the parent of the base commit for review setup.
+        """Check out the merge-base of the review range for diff setup.
 
-        Steps: record original branch, checkout branch, checkout parent.
+        Computes the merge-base between the original branch (typically
+        master/main) and the branch tip.  This matches GitLab/GitHub MR
+        diff semantics: the diff shows only changes the feature branch
+        introduced, excluding changes that arrived via merge commits
+        from the target branch.
+
+        Steps: record original branch, resolve branch tip, compute
+        merge-base, checkout branch, checkout merge-base.
         """
         try:
             current = self.get_current_branch()
@@ -770,10 +784,22 @@ class Repo:
             if not branch_tip:
                 return {"error": f"Cannot resolve ref: {branch}"}
 
-            parent_result = self.get_commit_parent(base_commit)
-            if "error" in parent_result:
-                return {"error": f"Cannot get parent of {base_commit}: {parent_result['error']}"}
-            parent_commit = parent_result["sha"]
+            # Compute merge-base between the original branch and the
+            # branch tip.  This is the point where the feature branch
+            # diverged, matching GitLab MR diff behaviour.
+            merge_base_result = self.get_merge_base(branch_tip, original_branch)
+            if "error" in merge_base_result:
+                # Fallback: use parent of base_commit (old behaviour)
+                logger.warning(
+                    f"merge-base failed ({merge_base_result['error']}), "
+                    f"falling back to parent of {base_commit}"
+                )
+                parent_result = self.get_commit_parent(base_commit)
+                if "error" in parent_result:
+                    return {"error": f"Cannot get parent of {base_commit}: {parent_result['error']}"}
+                parent_commit = parent_result["sha"]
+            else:
+                parent_commit = merge_base_result["sha"]
 
             try:
                 self._run_git("checkout", branch)
@@ -787,7 +813,7 @@ class Repo:
                     self._run_git("checkout", original_branch)
                 except subprocess.CalledProcessError:
                     pass
-                return {"error": f"Cannot checkout parent {parent_commit}: {e.stderr}"}
+                return {"error": f"Cannot checkout merge-base {parent_commit[:7]}: {e.stderr}"}
 
             return {
                 "branch": branch,
