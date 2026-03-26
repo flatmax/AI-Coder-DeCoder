@@ -313,6 +313,8 @@ Three top-level service classes, registered via `add_class()`:
 | `Repo.get_flat_file_list` | `() → string` | Sorted one-per-line file list |
 | `Repo.get_staged_diff` | `() → string` | Git diff --cached |
 | `Repo.get_unstaged_diff` | `() → string` | Git diff |
+| `Repo.get_diff_to_branch` | `(branch) → {diff} or {error}` | Two-dot diff vs branch — working tree including uncommitted changes |
+| `Repo.list_all_branches` | `() → [{name, sha, is_current, is_remote}]` | All branches (local + remote), sorted by recency |
 | `Repo.stage_all` | `() → {status}` | Git add -A |
 | `Repo.commit` | `(message) → {sha, message}` | Create commit |
 | `Repo.reset_hard` | `() → {status}` | Git reset --hard HEAD |

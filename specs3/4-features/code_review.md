@@ -10,19 +10,20 @@ A review mode that leverages git's staging mechanism to present branch changes f
 User selects branch + base commit
     │
     ├─ Verify clean working tree
-    ├─ Checkout parent of base commit
+    ├─ Compute merge-base between original branch and branch tip
+    ├─ Checkout merge-base commit
     ├─ Build symbol_map_before (pre-review structure)
     ├─ Checkout branch HEAD
-    ├─ Soft reset to parent commit
+    ├─ Soft reset to merge-base commit
     │
     ▼
 Review Mode Active
     │
     ├─ Files on disk = branch tip (reviewed code)
-    ├─ Git HEAD = parent commit (pre-review)
-    ├─ Staged changes = all review modifications
+    ├─ Git HEAD = merge-base commit (pre-review)
+    ├─ Staged changes = all review modifications (merge-base → branch tip)
     ├─ Symbol map (current) = branch tip structure
-    ├─ Symbol map (before) = pre-review structure
+    ├─ Symbol map (before) = pre-review structure (at merge-base)
     │
     ├─ File picker shows staged files with S badges
     ├─ Diff viewer shows base vs reviewed (unchanged behavior)
@@ -31,8 +32,8 @@ Review Mode Active
     ▼
 User clicks Exit Review
     │
-    ├─ Soft reset to original branch tip
-    ├─ Checkout branch (reattach HEAD)
+    ├─ Soft reset to branch tip
+    ├─ Checkout original branch (reattach HEAD)
     └─ Rebuild symbol index
 ```
 
@@ -42,29 +43,34 @@ User clicks Exit Review
 
 Six operations transform the repository into review state. The branch may be a local branch (e.g. `feature-auth`) or a remote tracking ref (e.g. `origin/feature-auth`). Both work — remote refs already have commits locally from fetch.
 
+The diff base is computed as `git merge-base {branch_tip} {original_branch}` — the point where the feature branch diverged from the target branch (typically master/main). This matches GitLab/GitHub merge request diff semantics: the staged diff shows only changes the feature branch introduced, excluding changes that arrived via merge commits from the target branch. If `merge-base` fails, the system falls back to `{base_commit}^` (parent of the user-selected commit).
+
 | Step | Command | Git HEAD | Index (Staged) | Disk Files |
 |------|---------|----------|----------------|------------|
 | 0. Start | — | branch tip (Z) | clean | branch tip |
 | 1. Verify | `git status --porcelain -uno` | Z | must be clean | branch tip |
-| 2. Checkout branch | `git checkout {branch}` | Z | clean | branch tip |
-| 3. Checkout parent | `git checkout {base}^` | base^ (detached) | clean | pre-review |
-| 4. **Build symbol_map_before** | *(symbol index runs on disk)* | base^ | clean | pre-review |
-| 5. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
-| 6. Soft reset | `git reset --soft {base}^` | base^ (detached) | **all review changes staged** | branch tip |
-| 7. Clear file selection | *(frontend-driven)* | — | — | — |
-Step 7 is orchestrated by the frontend: the Files tab receives the `review-started` event, clears the selected files list, resets the file picker checkboxes, refreshes the file tree to show the new staged state, and updates the chat panel's review state. This ensures the review starts with a clean slate and the UI reflects the staged changes from the soft reset.
+| 2. Compute merge-base | `git merge-base {branch_tip} {original_branch}` | Z | clean | branch tip |
+| 3. Checkout branch | `git checkout {branch}` | Z | clean | branch tip |
+| 4. Checkout merge-base | `git checkout {merge_base}` | merge-base (detached) | clean | pre-review |
+| 5. **Build symbol_map_before** | *(symbol index runs on disk)* | merge-base | clean | pre-review |
+| 6. Checkout branch tip | `git checkout {branch_tip_sha}` | Z (detached) | clean | branch tip |
+| 7. Soft reset | `git reset --soft {merge_base}` | merge-base (detached) | **all review changes staged** | branch tip |
+| 8. Clear file selection | *(frontend-driven)* | — | — | — |
+Step 8 is orchestrated by the frontend: the Files tab receives the `review-started` event, clears the selected files list, resets the file picker checkboxes, refreshes the file tree to show the new staged state, and updates the chat panel's review state. This ensures the review starts with a clean slate and the UI reflects the staged changes from the soft reset.
 
-Step 5 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
+Step 2 computes the merge-base between the branch tip and the original branch (the branch the user was on before entering review — typically master/main). The `get_merge_base` method cascades through candidates: `original_branch` → `main` → `master`. If all fail, the system falls back to the parent of the user-selected base commit.
 
-Step 7 clears the selected files list so review starts with a clean slate — this prevents stale file selections from before the review from inadvertently including all diffs in the first message.
+Step 6 checks out the branch tip by SHA (not by name). This handles both local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD detached at the ref pointer rather than at the actual tip commit.
 
-After step 6, the repository is in the perfect review state:
+Step 8 clears the selected files list so review starts with a clean slate — this prevents stale file selections from before the review from inadvertently including all diffs in the first message.
+
+After step 7, the repository is in the perfect review state:
 
 | Aspect | State | Effect |
 |--------|-------|--------|
 | **Files on disk** | Branch tip content | User sees final reviewed code; symbol map reflects it |
-| **Git HEAD** | Parent of base commit (detached) | `git diff --cached` shows ALL review changes |
-| **Staged changes** | Everything being reviewed | File picker shows M/A/D badges naturally |
+| **Git HEAD** | Merge-base commit (detached) | `git diff --cached` shows only feature branch changes |
+| **Staged changes** | Feature branch changes only | File picker shows M/A/D badges naturally |
 | **Working tree** | Clean (matches disk) | No unstaged changes to confuse the UI |
 
 ### Exit Sequence
@@ -73,7 +79,7 @@ Three operations restore the repository, followed by an internal rebuild:
 
 | Step | Command | Result |
 |------|---------|--------|
-| 1. Reset to tip | `git reset --soft {branch_tip_sha}` | HEAD moves to original tip SHA, staging clears |
+| 1. Reset to tip | `git reset --soft {branch_tip_sha}` | HEAD moves to branch tip SHA, staging clears |
 | 2. Checkout original branch | `git checkout {original_branch}` | HEAD reattaches to the branch the user was on before review |
 | 3. Rebuild symbol index | *(internal)* | Symbol map reflects restored state |
 
@@ -101,6 +107,17 @@ git reset --soft {branch_tip_sha}
 git checkout {original_branch}
 ```
 Since disk files already match the branch tip, `reset --soft` just moves HEAD and clears staging, then checkout reattaches HEAD to the original branch.
+
+### Merge-Base Computation
+
+The diff base is computed using `git merge-base` rather than the parent of the user-selected base commit. This matches GitLab/GitHub merge request semantics — when a feature branch has merge commits from the target branch (e.g., `Merge branch 'master' into feature`), the merge-base approach excludes changes that originated on the target branch, showing only changes the feature branch introduced.
+
+The `get_merge_base` method cascades through candidates:
+1. The original branch (the branch HEAD was on before review — typically master/main)
+2. `main`
+3. `master`
+
+If all candidates fail (e.g., unrelated histories), the system falls back to `{base_commit}^` (parent of the user-selected commit) and logs a warning.
 
 ## Prerequisites
 
@@ -318,7 +335,7 @@ Review context is inserted as a dedicated section in the message array, between 
 ```
 # Code Review Context
 
-## Review: {branch} ({parent_short} → {tip_short})
+## Review: {branch} (merge-base {merge_base_short} → {tip_short})
 {commit_count} commits, {files_changed} files changed, +{additions} -{deletions}
 
 ## Commits
@@ -375,7 +392,7 @@ The review status bar shows "N/M diffs in context" so the user always knows how 
 
 ## Pre-Change Symbol Map
 
-On review entry the service captures `symbol_map_before` (the full symbol map built from the parent commit). This is injected into the review context so the LLM can compare the pre-change codebase topology against the current (post-change) symbol map that is already part of every request.
+On review entry the service captures `symbol_map_before` (the full symbol map built at the merge-base commit — the point where the feature branch diverged from the target branch). This is injected into the review context so the LLM can compare the pre-change codebase topology against the current (post-change) symbol map that is already part of every request.
 
 Having both maps lets the LLM assess blast radius, trace removed dependencies, and understand the structural evolution — much richer than a flat symbol diff summary.
 
@@ -582,15 +599,19 @@ get_commit_log(base, head?, limit?) -> [
 
 get_commit_parent(commit) -> {sha, short_sha} | {error}
 
-get_merge_base(ref1, ref2?) -> {sha, short_sha} | {error}
-    # If ref2 is omitted, defaults to "main".
-    # If merge-base with "main" fails, retries with "master" as fallback.
+get_merge_base(ref1, ref2?) -> {sha} | {error}
+    # Tries ref2 first, then falls back to "main", then "master".
+    # Used by checkout_review_parent to find the divergence point
+    # between the feature branch and the target branch.
 
 checkout_review_parent(branch, base_commit) -> {
     branch, branch_tip, base_commit, parent_commit,
     original_branch,
     phase: "at_parent"
 } | {error}
+    # Computes merge-base between original_branch and branch_tip.
+    # parent_commit is the merge-base SHA (not the parent of base_commit).
+    # Falls back to base_commit^ if merge-base computation fails.
     # branch can be local ("feature-auth") or remote ("origin/feature-auth")
     # original_branch is the branch HEAD was on before review (for restoration)
 
@@ -632,8 +653,9 @@ start_review(branch, base_commit) -> {
     changed_files: [{path, status, additions, deletions}],
     stats: {commit_count, files_changed, additions, deletions}
 } | {error}
-    # Full entry sequence: checkout_review_parent → build symbol_map_before →
-    # setup_review_soft_reset → rebuild symbol index
+    # Full entry sequence: checkout_review_parent (computes merge-base) →
+    # build symbol_map_before → setup_review_soft_reset → rebuild symbol index.
+    # Commit log uses merge-base..branch_tip range so it matches the staged diff.
 
 end_review() -> {status: "restored"} | {error}
     # Calls exit_review_mode(branch_tip, original_branch), clears review state,
@@ -661,7 +683,7 @@ The LLM service holds review state in memory:
 | `_review_branch` | str | Branch being reviewed |
 | `_review_branch_tip` | str | Original branch HEAD SHA (for restoration) |
 | `_review_base_commit` | str | First commit in the review |
-| `_review_parent` | str | Parent of base commit (current git HEAD) |
+| `_review_parent` | str | Merge-base commit SHA (current git HEAD during review) |
 | `_review_original_branch` | str | Branch HEAD was on before review (for restoration on exit) |
 | `_review_commits` | list | Commit log |
 | `_review_changed_files` | list | Changed file paths with status |

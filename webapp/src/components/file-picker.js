@@ -846,6 +846,20 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       node,
       isDir: node.type === 'dir',
     };
+    // After rendering, check if the menu overflows the viewport and reposition
+    this.updateComplete.then(() => {
+      const menu = this.shadowRoot?.querySelector('.context-menu');
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let { x, y } = this._contextMenu;
+      if (rect.bottom > vh) y = Math.max(4, y - (rect.bottom - vh) - 8);
+      if (rect.right > vw) x = Math.max(4, x - (rect.right - vw) - 8);
+      if (y !== this._contextMenu.y || x !== this._contextMenu.x) {
+        this._contextMenu = { ...this._contextMenu, x, y };
+      }
+    });
   }
 
   _onDocClick() {

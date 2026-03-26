@@ -282,6 +282,86 @@ class Repo:
         except subprocess.CalledProcessError:
             return {"diff": ""}
 
+    def get_diff_to_branch(self, branch):
+        """Get diff between working tree and another branch.
+
+        Uses two-dot diff (`git diff <branch>`) which compares the branch
+        tip directly against the current working tree.  This includes both
+        committed changes on the current branch *and* any uncommitted edits
+        on disk — i.e. everything the user would see if they were to create
+        a PR/MR right now including unsaved work.
+
+        Args:
+            branch: branch name (local or remote, e.g. 'main', 'origin/main')
+
+        Returns:
+            {diff: str} or {error: str}
+        """
+        if not branch or not branch.strip():
+            return {"error": "No branch specified"}
+        try:
+            # Verify the ref exists
+            self._run_git("rev-parse", "--verify", branch)
+            # Two-dot diff: branch tip vs working tree (includes uncommitted changes)
+            diff = self._run_git("diff", branch)
+            return {"diff": diff}
+        except subprocess.CalledProcessError as e:
+            return {"error": f"Cannot diff against {branch}: {e.stderr if hasattr(e, 'stderr') else str(e)}"}
+
+    def list_all_branches(self):
+        """List all branches (local and remote) for branch selection UI.
+
+        Returns list of {name, sha, is_current, is_remote} dicts,
+        sorted with local branches first, then remotes.
+        """
+        try:
+            output = self._run_git(
+                "branch", "-a", "--sort=-committerdate",
+                "--format=%(refname:short)|%(objectname:short)|%(HEAD)|%(refname)"
+            )
+            branches = []
+            seen_names = set()
+            for line in output.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split("|", 3)
+                if len(parts) < 3:
+                    continue
+                name = parts[0].strip()
+                sha = parts[1].strip()
+                is_current = parts[2].strip() == "*"
+                refname = parts[3].strip() if len(parts) > 3 else ""
+
+                # Skip HEAD pointers and symbolic refs
+                if name in ("HEAD", "origin/HEAD"):
+                    continue
+                if " -> " in name or " -> " in refname:
+                    continue
+
+                # Deduplicate (remote may duplicate local)
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+
+                is_remote = "/" in name and name.split("/")[0] not in (".", "..")
+
+                branches.append({
+                    "name": name,
+                    "sha": sha,
+                    "is_current": is_current,
+                    "is_remote": is_remote,
+                })
+
+            # Sort: current first, then local, then remote
+            branches.sort(key=lambda b: (
+                not b["is_current"],
+                b["is_remote"],
+                b["name"].lower(),
+            ))
+            return branches
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
     def commit(self, message):
         """Create commit."""
         restricted = self._check_localhost_only()
@@ -652,18 +732,25 @@ class Repo:
             return []
 
     def get_merge_base(self, ref1, ref2=None):
-        """Get merge base SHA."""
-        if ref2 is None:
-            ref2 = "main"
-        try:
-            output = self._run_git("merge-base", ref1, ref2)
-            return {"sha": output.strip()}
-        except subprocess.CalledProcessError:
+        """Get merge base SHA.
+
+        Tries ref2 first, then falls back to 'main', then 'master'.
+        """
+        candidates = []
+        if ref2 is not None:
+            candidates.append(ref2)
+        candidates.extend(["main", "master"])
+
+        last_error = None
+        for candidate in candidates:
             try:
-                output = self._run_git("merge-base", ref1, "master")
+                output = self._run_git("merge-base", ref1, candidate)
                 return {"sha": output.strip()}
             except subprocess.CalledProcessError as e:
-                return {"error": str(e)}
+                last_error = e
+                continue
+
+        return {"error": str(last_error)}
 
     def get_commit_graph(self, limit=100, offset=0, include_remote=False):
         """Get commit graph data for the review selector.
@@ -758,9 +845,16 @@ class Repo:
             return {"error": str(e)}
 
     def checkout_review_parent(self, branch, base_commit):
-        """Check out the parent of the base commit for review setup.
+        """Check out the merge-base of the review range for diff setup.
 
-        Steps: record original branch, checkout branch, checkout parent.
+        Computes the merge-base between the original branch (typically
+        master/main) and the branch tip.  This matches GitLab/GitHub MR
+        diff semantics: the diff shows only changes the feature branch
+        introduced, excluding changes that arrived via merge commits
+        from the target branch.
+
+        Steps: record original branch, resolve branch tip, compute
+        merge-base, checkout branch, checkout merge-base.
         """
         try:
             current = self.get_current_branch()
@@ -770,10 +864,22 @@ class Repo:
             if not branch_tip:
                 return {"error": f"Cannot resolve ref: {branch}"}
 
-            parent_result = self.get_commit_parent(base_commit)
-            if "error" in parent_result:
-                return {"error": f"Cannot get parent of {base_commit}: {parent_result['error']}"}
-            parent_commit = parent_result["sha"]
+            # Compute merge-base between the original branch and the
+            # branch tip.  This is the point where the feature branch
+            # diverged, matching GitLab MR diff behaviour.
+            merge_base_result = self.get_merge_base(branch_tip, original_branch)
+            if "error" in merge_base_result:
+                # Fallback: use parent of base_commit (old behaviour)
+                logger.warning(
+                    f"merge-base failed ({merge_base_result['error']}), "
+                    f"falling back to parent of {base_commit}"
+                )
+                parent_result = self.get_commit_parent(base_commit)
+                if "error" in parent_result:
+                    return {"error": f"Cannot get parent of {base_commit}: {parent_result['error']}"}
+                parent_commit = parent_result["sha"]
+            else:
+                parent_commit = merge_base_result["sha"]
 
             try:
                 self._run_git("checkout", branch)
@@ -787,7 +893,7 @@ class Repo:
                     self._run_git("checkout", original_branch)
                 except subprocess.CalledProcessError:
                     pass
-                return {"error": f"Cannot checkout parent {parent_commit}: {e.stderr}"}
+                return {"error": f"Cannot checkout merge-base {parent_commit[:7]}: {e.stderr}"}
 
             return {
                 "branch": branch,

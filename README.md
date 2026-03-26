@@ -26,6 +26,7 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 - **2D file navigation grid** — open files arrange spatially in a grid overlay. Navigate with `Alt+Arrow` keys for fast directional switching between files without reaching for tabs.
 - **Tree-sitter symbol index** across Python, JavaScript/TypeScript, and C/C++ with cross-file references.
 - **Document mode** — toggle to a documentation-focused context where markdown and SVG outlines replace code symbols. Keyword-enriched headings and cross-reference graphs help the LLM navigate doc-heavy repos. A cross-reference toggle lets the LLM see document outlines alongside the symbol map in code mode (and vice versa), so it can trace connections between code and documentation without a full mode switch. Install `pip install ac-dc[docs]` for keyword extraction and document conversion support (optional — document mode works without it).
+- **Copy diff to clipboard** — click 📋▾ in the header to copy the working diff, or pick any local/remote branch from a fuzzy-searchable dropdown to copy the diff between your working tree and that branch.
 - **Four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, and cascade rebalancing.
 - **History compaction** with LLM-powered topic boundary detection to keep long sessions within context limits.
 - **Token HUD** with per-request and session-total usage reporting.
