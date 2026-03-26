@@ -166,7 +166,7 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 | Section | Content |
 |---------|---------|
 | Left | Tab icon buttons |
-| Center | [👥 | 📋💾⚠️ | 👁️] |
+| Center | [👥 | 📋▾ 💾⚠️ | 👁️] |
 | Right | Cross-ref toggle (+doc/+code), mode toggle (💻/📝), doc convert (📄, conditional), minimize (▼) |
 
 **Collab indicator (👥):** Positioned to the left of the tab buttons (between the label and tabs), the collab button shows the connected client count when > 1. Clicking opens a popover with client details and a share URL. In single-user mode (no `--collab` flag), the popover explains how to enable collaboration. This placement treats it as a status indicator rather than an action, keeping the right-side actions area focused on workflow controls.
