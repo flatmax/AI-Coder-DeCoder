@@ -623,7 +623,19 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
       <svg class="graph-svg" width="${totalWidth}" height="${totalHeight}"
            xmlns="http://www.w3.org/2000/svg">
 
-        <!-- Vertical lane lines -->
+        <!-- Commit row backgrounds (rendered first so lines appear on top) -->
+        ${commits.map((c, i) => {
+          const isSelected = c.sha === this._selectedCommit;
+          return svg`
+            <rect class="row-bg" x="${graphWidth}" y="${i * ROW_HEIGHT}"
+                  width="${totalWidth - graphWidth}" height="${ROW_HEIGHT}"
+                  fill="${isSelected ? 'rgba(79, 195, 247, 0.1)' : 'transparent'}"
+                  @click=${(e) => this._onCommitClick(c, i, e)}
+                  style="cursor: pointer;" />
+          `;
+        })}
+
+        <!-- Vertical lane lines (on top of row backgrounds for hover) -->
         ${this._branchLanes.filter(bl => !this._hiddenBranches.has(bl.name)).map(bl => {
           // Find row range for this lane
           let minRow = commits.length, maxRow = 0;
@@ -635,15 +647,25 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
           }
           if (minRow > maxRow) return nothing;
           const x = GRAPH_LEFT_PAD + bl.lane * LANE_WIDTH + LANE_WIDTH / 2;
-          return svg`<line
-            x1="${x}" y1="${minRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
-            x2="${x}" y2="${maxRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
-            stroke="${bl.color}" stroke-width="2" opacity="0.4"
-            stroke-dasharray="${bl.is_remote ? '4,3' : 'none'}"
-          />`;
+          return svg`
+            <g>
+              <line
+                x1="${x}" y1="${minRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
+                x2="${x}" y2="${maxRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
+                stroke="transparent" stroke-width="12"
+                style="cursor: default;"
+              ><title>${bl.name}</title></line>
+              <line
+                x1="${x}" y1="${minRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
+                x2="${x}" y2="${maxRow * ROW_HEIGHT + ROW_HEIGHT / 2}"
+                stroke="${bl.color}" stroke-width="2" opacity="0.4"
+                stroke-dasharray="${bl.is_remote ? '4,3' : 'none'}"
+                pointer-events="none"
+              />
+            </g>`;
         })}
 
-        <!-- Fork/merge edges -->
+        <!-- Fork/merge edges (on top of row backgrounds for hover) -->
         ${this._forkEdges.map(edge => {
           const x1 = GRAPH_LEFT_PAD + edge.fromLane * LANE_WIDTH + LANE_WIDTH / 2;
           const y1 = edge.fromRow * ROW_HEIGHT + ROW_HEIGHT / 2;
@@ -651,11 +673,26 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
           const y2 = edge.toRow * ROW_HEIGHT + ROW_HEIGHT / 2;
           const my = (y1 + y2) / 2;
           const color = LANE_COLORS[edge.fromLane % LANE_COLORS.length];
-          return svg`<path
-            d="M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}"
-            fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"
-            stroke-dasharray="${edge.isMerge ? '4,3' : 'none'}"
-          />`;
+          const edgeBranches = this._branchLanes
+            .filter(bl => bl.lane === edge.fromLane)
+            .map(bl => bl.name);
+          const edgeLabel = edgeBranches.length > 0
+            ? edgeBranches.join(', ')
+            : `lane ${edge.fromLane}`;
+          return svg`
+            <g>
+              <path
+                d="M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}"
+                fill="none" stroke="transparent" stroke-width="12"
+                style="cursor: default;"
+              ><title>${edge.isMerge ? 'merge from ' : ''}${edgeLabel}</title></path>
+              <path
+                d="M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}"
+                fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"
+                stroke-dasharray="${edge.isMerge ? '4,3' : 'none'}"
+                pointer-events="none"
+              />
+            </g>`;
         })}
 
         <!-- Commit nodes and text -->
@@ -669,10 +706,8 @@ export class AcReviewSelector extends RpcMixin(LitElement) {
 
           return svg`
             <g class="commit-row ${isSelected ? 'selected' : ''}"
-               @click=${(e) => this._onCommitClick(c, i, e)}>
-              <rect class="row-bg" x="0" y="${i * ROW_HEIGHT}"
-                    width="${totalWidth}" height="${ROW_HEIGHT}"
-                    fill="transparent" />
+               @click=${(e) => this._onCommitClick(c, i, e)}
+               style="pointer-events: none;">
               ${isSelected ? svg`
                 <circle cx="${cx}" cy="${cy}" r="${NODE_RADIUS + 3}"
                         fill="none" stroke="${color}" stroke-width="2" opacity="0.5" />
