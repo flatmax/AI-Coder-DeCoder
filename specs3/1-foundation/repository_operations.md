@@ -80,6 +80,8 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 |--------|-------------|
 | `Repo.get_staged_diff()` | `git diff --cached` as text |
 | `Repo.get_unstaged_diff()` | `git diff` as text |
+| `Repo.get_diff_to_branch(branch)` | `git diff <branch>` — two-dot diff comparing branch tip against working tree, including both committed and uncommitted changes |
+| `Repo.list_all_branches()` | All local and remote branches sorted by recency, with deduplication. Returns `[{name, sha, is_current, is_remote}]` |
 | `Repo.stage_all()` | `git add -A` |
 | `Repo.commit(message)` | Create commit. Handles repos without HEAD |
 | `Repo.reset_hard()` | `git reset --hard HEAD` |
@@ -144,6 +146,8 @@ Paths containing `..` traversal are rejected. The resolved absolute path is veri
 - Tree includes modified, untracked, staged, deleted arrays
 - Flat file list contains expected paths
 - Search finds content, case-insensitive, no-results returns empty
+- `get_diff_to_branch` returns diff text, rejects empty branch, returns error for nonexistent ref
+- `list_all_branches` returns local and remote branches, deduplicates, filters symbolic refs
 
 ## Flat File List
 

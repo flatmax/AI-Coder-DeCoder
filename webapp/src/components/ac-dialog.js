@@ -50,6 +50,10 @@ export class AcDialog extends RpcMixin(LitElement) {
     _collabDisabled: { type: Boolean, state: true },
     _committing: { type: Boolean, state: true },
     _streamingActive: { type: Boolean, state: true },
+    _diffPopoverOpen: { type: Boolean, state: true },
+    _diffBranches: { type: Array, state: true },
+    _diffBranchFilter: { type: String, state: true },
+    _diffCopying: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -461,6 +465,146 @@ export class AcDialog extends RpcMixin(LitElement) {
       inset: 0;
       z-index: 199;
     }
+
+    /* Diff-to-branch popover */
+    .diff-anchor {
+      position: relative;
+    }
+    .diff-popover {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      min-width: 260px;
+      max-width: 340px;
+      max-height: 360px;
+      z-index: 200;
+      padding: 8px;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      display: flex;
+      flex-direction: column;
+    }
+    .diff-popover-title {
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+      font-size: 0.85rem;
+      flex-shrink: 0;
+    }
+    .diff-filter-input {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 0.8rem;
+      padding: 5px 8px;
+      outline: none;
+      margin-bottom: 6px;
+      flex-shrink: 0;
+    }
+    .diff-filter-input:focus {
+      border-color: var(--accent-primary);
+    }
+    .diff-filter-input::placeholder {
+      color: var(--text-muted);
+    }
+    .diff-branch-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
+    }
+    .diff-branch-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .diff-branch-item:hover {
+      background: var(--bg-secondary);
+    }
+    .diff-branch-item.current {
+      color: var(--accent-green);
+    }
+    .diff-branch-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+    .diff-branch-tag {
+      font-size: 0.65rem;
+      padding: 1px 5px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-primary);
+      color: var(--text-muted);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .diff-branch-tag.remote {
+      color: var(--accent-primary);
+    }
+    .diff-branch-sha {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .diff-popover-actions {
+      display: flex;
+      gap: 6px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-primary);
+      margin-top: 6px;
+      flex-shrink: 0;
+    }
+    .diff-action-btn {
+      flex: 1;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      text-align: center;
+    }
+    .diff-action-btn:hover {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    .diff-copying {
+      text-align: center;
+      padding: 12px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+    .diff-empty {
+      text-align: center;
+      padding: 12px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+    .diff-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 199;
+    }
   `];
 
   constructor() {
@@ -574,6 +718,149 @@ export class AcDialog extends RpcMixin(LitElement) {
 
   _closeCollabPopover() {
     this._collabPopoverOpen = false;
+  }
+
+  // === Diff-to-branch popover ===
+
+  async _toggleDiffPopover() {
+    if (this._diffPopoverOpen) {
+      this._closeDiffPopover();
+      return;
+    }
+    this._diffPopoverOpen = true;
+    this._diffBranchFilter = '';
+    this._diffCopying = false;
+    try {
+      const branches = await this.rpcExtract('Repo.list_all_branches');
+      if (Array.isArray(branches)) {
+        this._diffBranches = branches;
+      } else {
+        this._diffBranches = [];
+      }
+    } catch (e) {
+      console.warn('Failed to load branches:', e);
+      this._diffBranches = [];
+    }
+    // Focus the filter input after render
+    this.updateComplete.then(() => {
+      const input = this.shadowRoot?.querySelector('.diff-filter-input');
+      if (input) input.focus();
+    });
+  }
+
+  _closeDiffPopover() {
+    this._diffPopoverOpen = false;
+    this._diffBranchFilter = '';
+    this._diffCopying = false;
+  }
+
+  _onDiffFilterInput(e) {
+    this._diffBranchFilter = e.target.value;
+  }
+
+  _onDiffFilterKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      this._closeDiffPopover();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      // Select first visible branch
+      const filtered = this._getFilteredDiffBranches();
+      if (filtered.length > 0) {
+        this._copyDiffToBranch(filtered[0].name);
+      }
+    }
+  }
+
+  _fuzzyMatchBranch(name, filter) {
+    if (!filter) return true;
+    const lower = name.toLowerCase();
+    const f = filter.toLowerCase();
+    // Simple subsequence match
+    let fi = 0;
+    for (let i = 0; i < lower.length && fi < f.length; i++) {
+      if (lower[i] === f[fi]) fi++;
+    }
+    return fi === f.length;
+  }
+
+  _getFilteredDiffBranches() {
+    if (!this._diffBranchFilter) return this._diffBranches;
+    return this._diffBranches.filter(b => this._fuzzyMatchBranch(b.name, this._diffBranchFilter));
+  }
+
+  async _copyDiffToBranch(branch) {
+    this._diffCopying = true;
+    try {
+      const result = await this.rpcExtract('Repo.get_diff_to_branch', branch);
+      if (!result) {
+        dispatchToast('Failed to get diff', 'error');
+        this._closeDiffPopover();
+        return;
+      }
+      if (result.error) {
+        dispatchToast(`Diff failed: ${result.error}`, 'error');
+        this._closeDiffPopover();
+        return;
+      }
+      const diff = result.diff || '';
+      if (!diff.trim()) {
+        dispatchToast(`No differences vs ${branch}`, 'info');
+        this._closeDiffPopover();
+        return;
+      }
+      await navigator.clipboard.writeText(diff);
+      dispatchToast(`Diff vs ${branch} copied to clipboard`, 'success');
+      this._closeDiffPopover();
+    } catch (e) {
+      console.error('Failed to copy diff to branch:', e);
+      dispatchToast(`Failed: ${e.message || e}`, 'error');
+      this._closeDiffPopover();
+    }
+  }
+
+  _renderDiffPopover() {
+    const filtered = this._getFilteredDiffBranches();
+
+    return html`
+      <div class="diff-popover">
+        <div class="diff-popover-title">Copy diff vs branch</div>
+        <input class="diff-filter-input"
+          type="text"
+          placeholder="Filter branches…"
+          .value=${this._diffBranchFilter}
+          @input=${(e) => this._onDiffFilterInput(e)}
+          @keydown=${(e) => this._onDiffFilterKeyDown(e)}
+          @mousedown=${(e) => e.stopPropagation()}>
+        ${this._diffCopying ? html`
+          <div class="diff-copying">⏳ Generating diff…</div>
+        ` : filtered.length === 0 ? html`
+          <div class="diff-empty">${this._diffBranches.length === 0 ? 'No branches found' : 'No matching branches'}</div>
+        ` : html`
+          <ul class="diff-branch-list">
+            ${filtered.map(b => html`
+              <li class="diff-branch-item ${b.is_current ? 'current' : ''}"
+                  title="${b.name} (${b.sha})"
+                  @click=${() => this._copyDiffToBranch(b.name)}
+                  @mousedown=${(e) => e.stopPropagation()}>
+                <span class="diff-branch-name">${b.name}</span>
+                ${b.is_remote ? html`<span class="diff-branch-tag remote">remote</span>` : ''}
+                ${b.is_current ? html`<span class="diff-branch-tag">current</span>` : ''}
+                <span class="diff-branch-sha">${b.sha}</span>
+              </li>
+            `)}
+          </ul>
+        `}
+        <div class="diff-popover-actions">
+          <button class="diff-action-btn"
+            @click=${() => { this._closeDiffPopover(); this._onCopyDiff(); }}
+            @mousedown=${(e) => e.stopPropagation()}>
+            📋 Copy working diff
+          </button>
+        </div>
+      </div>
+    `;
   }
 
   _renderCollabPopover() {
@@ -1295,10 +1582,17 @@ export class AcDialog extends RpcMixin(LitElement) {
             ` : ''}
           </div>
           <div class="header-divider"></div>
-          <button class="header-action" title="Copy diff (staged)" aria-label="Copy diff to clipboard"
-            @mousedown=${(e) => e.stopPropagation()}
-            @click=${() => this._onCopyDiff()}
-            ?disabled=${!this.rpcConnected}>📋</button>
+          <div class="diff-anchor">
+            <button class="header-action" title="Copy diff — click to pick branch or copy working diff"
+              aria-label="Copy diff to clipboard"
+              @mousedown=${(e) => e.stopPropagation()}
+              @click=${(e) => { e.stopPropagation(); this._toggleDiffPopover(); }}
+              ?disabled=${!this.rpcConnected}>📋▾</button>
+            ${this._diffPopoverOpen ? html`
+              <div class="diff-backdrop" @click=${() => this._closeDiffPopover()}></div>
+              ${this._renderDiffPopover()}
+            ` : ''}
+          </div>
           ${this._canMutate ? html`
             <button class="header-action ${this._committing ? 'committing' : ''}"
               title="${this._reviewActive ? 'Commit disabled during review' : 'Stage all & commit'}"
