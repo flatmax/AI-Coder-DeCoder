@@ -1055,31 +1055,6 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       } catch (_) { /* best-effort — LSP nav is not critical */ }
     }
 
-    // Patch Monaco's code editor service to handle cross-file Go-to-Definition.
-    // When the user Ctrl+clicks a symbol defined in another file, Monaco tries
-    // to open it via ICodeEditorService.openCodeEditor — we intercept that to
-    // open the file in our tab system instead.
-    if (!this._editorServicePatched) {
-      this._editorServicePatched = true;
-      try {
-        const modifiedEditor = this._editor.getModifiedEditor();
-        const svc = modifiedEditor?._codeEditorService;
-        if (svc && typeof svc.openCodeEditor === 'function') {
-          const origOpen = svc.openCodeEditor.bind(svc);
-          svc.openCodeEditor = async (input, source, sideBySide) => {
-            const resourcePath = input?.resource?.path;
-            if (resourcePath) {
-              const cleanPath = resourcePath.replace(/^\/+/, '');
-              const line = input?.options?.selection?.startLineNumber;
-              await this.openFile({ path: cleanPath, line });
-              return source;
-            }
-            return origOpen(input, source, sideBySide);
-          };
-        }
-      } catch (_) { /* best-effort — LSP nav is not critical */ }
-    }
-
     // Problem 6 fix: listen on only the modified editor (not both) to
     // avoid double-firing scroll events in inline diff mode.
     if (this._editorScrollDisposable) {

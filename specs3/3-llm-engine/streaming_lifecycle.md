@@ -28,7 +28,13 @@ Background task: _stream_chat
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
     ├─ Initialize stability tracker from reference graph (if not already done at startup)
-    ├─ Re-extract doc file structures if doc mode (mtime-based, instant; changed files queued for background enrichment)
+    ├─ Re-extract doc file structures if doc mode:
+    │       ├─ Refresh repo file set and doc file list in executor
+    │       ├─ Use _extract_outlines_structure_only (accepts any cached outline regardless of keyword model)
+    │       ├─ Cache unenriched outlines immediately for newly-changed files
+    │       ├─ Queue changed files for background enrichment (non-blocking)
+    │       ├─ Rebuild reference index from all outlines (enriched + unenriched)
+    │       └─ Send doc_enrichment_queued event if files pending
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
     │       ├─ Skip already-fetched URLs (via `get_url_content` which checks in-memory dict then filesystem cache; only URLs returning the specific error "URL not yet fetched" are fetched)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
@@ -51,20 +57,32 @@ Background task: _stream_chat
     ├─ Add assistant response to context (user message already added before streaming)
     ├─ Save symbol map to .ac-dc/
     ├─ Print terminal HUD
-    ├─ Parse & apply edit blocks (→ edit_protocol.md; skipped in review mode)
+    ├─ Parse & apply edit blocks (→ edit_protocol.md)
+    │       ├─ Guard: skip all edit application if review mode active (read-only)
     │       ├─ Separate: in-context vs not-in-context files
     │       ├─ Apply in-context edits normally
     │       ├─ Mark not-in-context edits as NOT_IN_CONTEXT
     │       ├─ Auto-add not-in-context files to selected files, broadcast
-    │       └─ Stash modified doc files for deferred enrichment (doc mode only)
+    │       ├─ Invalidate symbol cache for all modified files
+    │       ├─ Invalidate doc index cache for all modified files:
+    │       │       ├─ invalidate_file(path) — remove cache entry
+    │       │       ├─ index_file_structure_only(path) — instant unenriched outline
+    │       │       └─ queue_enrichment(modified) — stash for deferred enrichment
+    │       └─ Stash enrichment queue in result dict under `_deferred_enrichment` key
     ├─ Persist assistant message
     ├─ Update cache stability (→ cache_tiering.md)
     │
     ▼
 Send streamComplete → browser
     │
+    ├─ Deferred enrichment queue (if doc files were modified):
+    │       ├─ Stashed in result dict under `_deferred_enrichment` key during edit processing
+    │       ├─ Contains list of (path, mtime, outline, text) tuples + keyword_model name
+    │       ├─ Key is stripped via result.pop("_deferred_enrichment") BEFORE streamComplete
+    │       │   (DocOutline objects aren't JSON-serializable — would kill the WebSocket write)
+    │       └─ After streamComplete + await sleep(0), launched via asyncio.ensure_future
     ├─ await sleep(0) — flush WebSocket frame before GIL-heavy work
-    ├─ Launch deferred doc enrichment (see below)
+    ├─ Launch deferred doc enrichment from the popped queue
     │
     ▼
 Post-response compaction (→ context_and_history.md)
@@ -86,6 +104,8 @@ The second pass iterates all tier items from the tracker, collecting `symbol:`, 
 ### Deferred Initialization Guard
 
 The LLM service supports a **deferred initialization** mode (`deferred_init=True`) used by the startup sequence. When deferred, the service skips stability initialization at construction time. The `_init_complete` flag starts as `False` and gates `chat_streaming` — requests arriving before initialization completes are rejected with `"Server is still initializing — please wait a moment"`. The flag is set to `True` after `complete_deferred_init()` finishes.
+
+**Session totals tracking:** `LLMService` maintains a `_session_totals` dict with cumulative token usage across all requests in the current server session: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` (all initialized to 0). After each streaming response, the per-request `usage` dict is accumulated into session totals. These totals are reported in `get_context_breakdown()` and the terminal HUD.
 
 **Session restore timing:** The last session is restored **eagerly** via `_restore_last_session()` — called in `main.py` *before* the WebSocket server starts accepting connections (`server.start()`). This ensures `get_current_state()` returns previous session messages as soon as the first browser connects, without waiting for the deferred initialization phase. `complete_deferred_init()` handles only symbol index wiring and does not re-run session restoration.
 
@@ -135,6 +155,8 @@ Runs in a thread pool to avoid blocking the async event loop:
 
 Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls. Server→browser calls use `ClassName.method` format (e.g., `AcApp.streamChunk`), matching the class name registered via `addClass` on the browser side.
 
+The streaming handler captures the main event loop reference (`self._main_loop = asyncio.get_event_loop()`) before launching the worker thread. The worker thread uses `asyncio.run_coroutine_threadsafe(callback, self._main_loop)` to schedule chunk callbacks on the event loop thread — this is required because the worker runs in a `ThreadPoolExecutor` and cannot `await` coroutines directly.
+
 ### Client Chunk Processing
 
 Coalesced per animation frame:
@@ -168,15 +190,17 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 StreamCompleteResult:
     response: string                    # Full assistant response text
     token_usage: TokenUsage             # Token counts for HUD display
-    edit_blocks: [{file, preview}]?     # Parsed blocks (preview text)
+    edit_blocks: [{file, is_create}]?   # Parsed blocks with create flag
     shell_commands: [string]?           # Detected shell suggestions
     passed: integer                     # Count of applied edits
+    already_applied: integer            # Count of edits already present in file
     failed: integer                     # Count of failed edits
     skipped: integer                    # Count of skipped edits
     not_in_context: integer             # Count of not-in-context edits
     files_modified: [string]?           # Paths of changed files
     edit_results: [EditResult]?         # Detailed per-edit results
     files_auto_added: [string]?         # Files added to context for not-in-context edits
+    user_message: string?               # Original user message text (for collaborator sync)
     cancelled: boolean?                 # Present if cancelled
     error: string?                      # Present if fatal error
     binary_files: [string]?             # Rejected binary files
@@ -297,6 +321,10 @@ The KeyBERT sentence-transformer model (~80–420 MB) is loaded lazily on first 
 
 The enrichment queue is stashed in the `streamComplete` result dict under a `_`-prefixed key (`_deferred_enrichment`), which contains the list of `(path, mtime, outline, text)` tuples and the keyword model name. This key is stripped via `result.pop("_deferred_enrichment", None)` **before** `streamComplete` is sent — the queue contains `DocOutline` objects that aren't JSON-serializable and would silently kill the WebSocket write. After `streamComplete` and an `await asyncio.sleep(0)` to flush the WebSocket frame, the enrichment is launched via `asyncio.ensure_future(_enrich_modified_docs_background(...))`. Each file is enriched in the thread pool executor, with per-file progress events sent to the browser. The reference index is rebuilt after all files complete.
 
+## Commit Background Task Guard
+
+The `commit_all` method uses a `_committing` boolean guard to prevent concurrent commits. The guard is set `True` before launching the background task and cleared in a `finally` block. The current `session_id` is captured **synchronously before launching the background task** — this prevents a race where `_restore_last_session()` during a concurrent server restart could replace `_session_id`, causing the commit event to be persisted to the wrong session.
+
 ## Token Usage Extraction
 
 Token usage is extracted from the LLM provider's response. Different providers report cache tokens under different field names:
@@ -358,7 +386,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available
+- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available (checks `_is_markitdown_available()` at call time)
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 - set_excluded_index_files stores exclusion set, removes tracker items, broadcasts filesChanged
 - get_current_state includes excluded_index_files field

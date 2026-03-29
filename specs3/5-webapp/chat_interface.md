@@ -312,6 +312,7 @@ Off-screen messages use `content-visibility: auto` with `contain: layout style p
 - Auto-resizing textarea
 - Enter to send, Shift+Enter for newline
 - Image paste (base64, 5MB max, 5 images max)
+- **Undo/redo workaround**: Native undo is broken in shadow DOM textareas when Lit re-renders set `.value` programmatically. The input handler intercepts Ctrl+Z (undo) and Ctrl+Shift+Z / Ctrl+Y (redo) and delegates to `document.execCommand('undo'/'redo')` as a fallback
 
 ### Paste Suppression for Middle-Click
 

@@ -176,7 +176,10 @@ The `URLService` class manages the lifecycle of URL content:
 |-------|-------------|
 | `_cache` | Filesystem cache for fetched content |
 | `_model` | Smaller model for summarization |
+| `_symbol_index_cls` | SymbolIndex class reference — passed to GitHub repo fetching so cloned repos get symbol maps generated |
 | `_fetched` | Dict of fetched `URLContent` objects (in-memory, keyed by URL) |
+
+The `LLMService` initializes the URL service via `_init_url_service()` which creates a `URLCache` from the `url_cache_config`, passes the `smaller_model` for summarization, and provides the `SymbolIndex` class reference for GitHub repo symbol map generation.
 
 | Method | Description |
 |--------|-------------|

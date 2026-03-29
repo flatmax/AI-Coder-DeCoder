@@ -184,9 +184,11 @@ README.md
 src/main.py
 ```
 
-### URL Context (Partially Cached)
+### URL Context (Currently Uncached)
 
-URL content that has graduated to a cached tier (L1–L0) is included in that tier's content block (concatenated into the tier's files section with a `# URL Context (continued)` header). Only URLs **not** in any cached tier appear in the uncached URL context pair:
+> **Implementation status:** URL tier graduation is not yet implemented. All fetched URLs currently appear in the uncached URL context pair below. The partially-cached design described here is the target for a future implementation — see [Cache Tiering — URL Content](cache_tiering.md#url-content--direct-tier-entry-not-yet-implemented).
+
+URL content that has graduated to a cached tier (L1–L0) would be included in that tier's content block (concatenated into the tier's files section with a `# URL Context (continued)` header). Currently, all URLs appear in the uncached URL context pair:
 
 ```pseudo
 {"role": "user", "content": URL_CONTEXT_HEADER + joined_url_parts}
@@ -203,7 +205,7 @@ The following content was fetched from URLs mentioned in the conversation:
 
 Multiple URLs joined with `\n---\n`. Each URL formatted as title + content + optional symbol map.
 
-URL content is static once fetched, so `url:{hash}` items enter the stability tracker directly at L1 (entry_n = 9) on first appearance. They promote through tiers normally from there. When all URLs are in cached tiers, the uncached URL context pair is omitted entirely.
+URL content is static once fetched. The target design has `url:{hash}` items entering the stability tracker directly at L1 (entry_n = 9) on first appearance, promoting through tiers normally from there. **This is not yet implemented** — currently all fetched URLs appear in the uncached URL context pair on every request regardless of stability.
 
 ### Active Files (Uncached)
 
@@ -326,13 +328,15 @@ for tier in [L0, L1, L2, L3]:
             if content:
                 files_text += format_as_fenced_block(path, content) + "\n\n"
 
-        elif key starts with "url:":
-            url_hash = key.removeprefix("url:")
-            url_content = url_service.get_url_content_by_hash(url_hash)
-            if url_content:
-                formatted = url_content.format_for_prompt()
-                if formatted:
-                    files_text += "\n---\n" + formatted + "\n"
+        # NOTE: url: items are not yet tracked in the stability tracker.
+        # When implemented, dispatch would be:
+        # elif key starts with "url:":
+        #     url_hash = key.removeprefix("url:")
+        #     url_content = url_service.get_url_content_by_hash(url_hash)
+        #     if url_content:
+        #         formatted = url_content.format_for_prompt()
+        #         if formatted:
+        #             files_text += "\n---\n" + formatted + "\n"
 
         elif key starts with "history:":
             index = int(key.removeprefix("history:"))
@@ -414,7 +418,7 @@ messages = context_manager.assemble_tiered_messages(
 | `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; index block excluded from main map |
 | `sym:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
 | `doc:{path}` in tier | `DocIndex.get_file_doc_block(path)` | Excluded from main doc index output |
-| `url:{hash}` in tier | `URLService.get_url_content(url).format_for_prompt()` | Excluded from uncached URL context pair |
+| `url:{hash}` in tier | `URLService.get_url_content(url).format_for_prompt()` | Excluded from uncached URL context pair (**not yet implemented** — URLs currently always appear in uncached section) |
 | `history:{N}` in tier | `ContextManager.get_history()[N]` | Excluded from active history messages |
 | `file:{path}` in active | `FileContext.get_content(path)` | Index block excluded from main map (full content present) |
 | `sym:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |

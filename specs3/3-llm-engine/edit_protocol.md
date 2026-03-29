@@ -208,7 +208,7 @@ During streaming, partially received blocks are tracked. The parser maintains st
 | Failed | Anchor not found, ambiguous, or old text mismatch |
 | Skipped | Binary file or pre-condition failed |
 | Not In Context | File was not in the active context; edit deferred (see below) |
-| Already Applied | New content already present in file (idempotent) |
+| Already Applied | New content already present in file (idempotent). Detected by searching the file for the full `new_lines` (anchor + new_only) as a contiguous block — if found, the edit was already applied in a prior request |
 
 Each result includes:
 

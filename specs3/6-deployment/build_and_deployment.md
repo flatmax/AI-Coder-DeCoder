@@ -123,6 +123,14 @@ The overlay fades out 400ms after `stage === 'ready'`. On reconnection (not firs
 
 `find_available_port(start, max_tries=50)` — tries binding to `127.0.0.1:{start}` through `{start+49}`.
 
+## GitHub Pages Deployment
+
+For users running from source (`pip install -e .`), the webapp is served from GitHub Pages rather than requiring a local build step. The webapp is deployed to `https://flatmax.github.io/AI-Coder-DeCoder/`.
+
+This allows `pip install` users to skip `npm install && npm run build` entirely — the Python backend serves the webapp from the GitHub Pages URL when no local `webapp/dist` directory is found.
+
+A GitHub Actions workflow handles building the webapp and deploying it to GitHub Pages.
+
 ## Binary Releases
 
 ### Workflow: `release.yml`
@@ -147,9 +155,16 @@ Platforms: Linux, Windows, macOS (ARM).
        --collect-all=tree_sitter_cpp \
        --collect-all=trafilatura \
        --hidden-import=boto3 --hidden-import=botocore \
+       --hidden-import=ac_dc \
+       --hidden-import=ac_dc.collab \
+       --hidden-import=ac_dc.doc_convert \
+       --hidden-import=ac_dc.base_cache \
+       --hidden-import=jrpc_oo \
        src/ac_dc/__main__.py
    ```
    **Note:** `--add-data` uses `:` separator on Unix, `;` on Windows. Destination `ac_dc` matches the package name so `Path(__file__).parent` resolves correctly at runtime. The bundled `webapp_dist` is served locally by the built-in static file server — no internet connection required.
+
+   The full list of `--hidden-import` flags in the CI workflow includes every `ac_dc.*` submodule (including all extractors and doc_index submodules) and `jrpc_oo`. PyInstaller's static analysis misses dynamically imported modules and modules only referenced via `add_class()`. The `--collect-all` flags handle packages with data files (grammars, model registries, tokenizer data). See `.github/workflows/release.yml` for the complete command.
 4. Create GitHub Release with all platform binaries attached
 
 ## Config Lifecycle in Packaged Builds

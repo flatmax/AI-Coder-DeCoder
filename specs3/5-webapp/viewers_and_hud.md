@@ -192,7 +192,14 @@ Per-item: numeric `N/threshold` label displayed inline, plus a proportional fill
 
 #### Item Click → View Map Block
 
-Clicking an item name opens a modal showing the full index block for that file. The backend (`get_file_map_block`) dispatches to the appropriate index based on the item's key prefix, not the current mode — so `doc:` items in code mode's cross-reference view correctly show the document outline, and `symbol:` items in doc mode show the symbol block. If the primary index for the current mode has no data for the path, the other index is tried before returning an error.
+Clicking an item name opens a modal showing the full index block for that file. The backend (`get_file_map_block`) dispatches based on a priority chain:
+
+1. **Special keys** — `system:prompt` returns the system prompt + legend for the current mode
+2. **Current mode's index** — in doc mode, tries `doc_index.get_file_doc_block(path)` first; in code mode, tries `symbol_index.get_file_symbol_block(path)` first
+3. **Cross-mode fallback** — if the primary index has no data for the path, the other index is tried. This handles cross-reference mode where `doc:` items appear in the code tracker (and vice versa) and need to be viewable from either mode
+4. **Error** — if neither index has data, returns an error
+
+The response includes the `mode` field (`"code"` or `"doc"`) indicating which index provided the content, so the frontend can apply appropriate formatting.
 
 #### Fuzzy Search
 

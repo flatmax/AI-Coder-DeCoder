@@ -239,7 +239,7 @@ Fitting respects the SVG's authored `viewBox` when one exists. Many SVGs — esp
 
 When no authored viewBox is present, fitting falls back to `getBBox()` (the actual rendered content bounding box) with a 3% margin. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
 
-For the left panel, the viewBox attribute is only updated from `getBBox()` if no authored viewBox exists, before `svg-pan-zoom` is initialized with `fit: true` and `center: true`. For the right panel (SvgEditor), if an authored viewBox exists it is fitted into the container dimensions directly (preserving aspect ratio); otherwise `fitContent()` computes a viewBox via `getBBox()`.
+For the left panel, the viewBox is expanded from `getBBox()` only when no authored viewBox exists, or when the authored viewBox is smaller than the content bounds AND the `getBBox` area is not suspiciously large (≤ 4× the authored viewBox area). If `getBBox` produces an area vastly larger than the authored viewBox (e.g., off-screen text at x=-28000 from font glyph definitions in `<defs>`), the authored viewBox is trusted as the correct viewport. The same sanity check applies in `_fitAll` for the right panel — if `getBBox` area exceeds 4× the stashed original viewBox area, `getBBox` is discarded and the stashed viewBox is used instead. `svg-pan-zoom` is then initialized with `fit: true` and `center: true`. For the right panel (SvgEditor), if an authored viewBox exists it is fitted into the container dimensions directly (preserving aspect ratio); otherwise `fitContent()` computes a viewBox via `getBBox()`.
 
 ### Status LED
 
@@ -269,6 +269,9 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
 
 1. `render()` creates empty `.svg-left` and `.svg-right` container divs
 2. `_injectSvgContent()` sets `innerHTML` on each container with the SVG string
+
+**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced.
+
 3. After injection, SVG elements are normalized:
    - `width`/`height` attributes removed (so SVG fills container)
    - `style.width` and `style.height` set to `100%`
@@ -406,6 +409,58 @@ The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
 Available via two paths:
 - **Context menu**: right-click → "Copy as PNG"
 - **Keyboard shortcut**: Ctrl+Shift+C (Cmd+Shift+C on Mac)
+
+## SVG ↔ Text Diff Mode Toggle
+
+SVG files can be viewed in either the visual SVG editor or the Monaco text diff editor. Two buttons enable bidirectional switching:
+
+| Button | Location | Direction |
+|--------|----------|-----------|
+| `</>` (code) | SVG viewer floating actions | Visual → Text diff |
+| `🎨 Visual` | Diff viewer overlay buttons | Text diff → Visual |
+
+### Toggle Mechanism
+
+Both directions dispatch a `toggle-svg-mode` window event with:
+
+```pseudo
+{
+    path: string,          // file path
+    target: 'diff' | 'visual',  // which viewer to switch to
+    modified?: string,     // latest content from the source viewer
+    savedContent?: string, // on-disk content for dirty tracking
+}
+```
+
+### App Shell Handler
+
+The app shell's `_onToggleSvgMode` handler orchestrates the switch:
+
+**Visual → Text (`target: 'diff'`):**
+1. Capture latest SVG content from the SVG editor (`_captureEditorContent`)
+2. Read the file object from the SVG viewer's internal files list
+3. Flip viewer visibility (show diff, hide SVG)
+4. Close any existing diff tab for the path, then open fresh with the captured content
+5. Set `savedContent` to the on-disk original so visual edits appear as dirty in the diff editor
+6. Layout Monaco after the DOM settles
+
+**Text → Visual (`target: 'visual'`):**
+1. Read the file object from the SVG viewer's files list (before closing)
+2. Flip viewer visibility (show SVG, hide diff)
+3. Close and reopen the SVG viewer with the latest text content from the diff editor
+4. Carry `savedContent` through so dirty state is preserved
+5. Close the diff viewer's tab for the path
+
+### Race Prevention
+
+A `_svgModeOverride` flag is set on the app shell during the toggle to prevent `_onActiveFileChanged` from interfering. The flag is cleared in a `requestAnimationFrame` callback after the toggle completes. Without this guard, the active-file-changed event from opening the new tab would trigger viewer visibility logic that conflicts with the toggle in progress.
+
+### Content Preservation
+
+`savedContent` (the last on-disk content) is carried across mode toggles so that:
+- Edits made in the SVG editor appear as dirty when switching to text mode
+- Edits made in the text editor appear as dirty when switching back to visual mode
+- Saving in either mode updates `savedContent` for both
 
 ## Future Enhancements
 

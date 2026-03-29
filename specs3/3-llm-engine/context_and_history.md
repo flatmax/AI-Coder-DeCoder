@@ -21,6 +21,16 @@ The context engine manages conversation history, token budgets, file context, an
 └──────────────────────────────────────────────┘
 ```
 
+## Mode Enum
+
+```pseudo
+Mode:
+    CODE = "code"    # Symbol index feeds context
+    DOC = "doc"      # Document index feeds context
+```
+
+The mode determines which index (symbol vs document) feeds the context engine. Set via `set_mode(mode)` (accepts string or enum). Queried via the `mode` property.
+
 ## Initialization
 
 ```pseudo
@@ -28,7 +38,8 @@ ContextManager(
     model_name,
     repo_root?,
     cache_target_tokens,
-    compaction_config?
+    compaction_config?,
+    system_prompt?
 )
 ```
 
@@ -46,13 +57,40 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 
 | Operation | Description |
 |-----------|-------------|
-| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after) |
+| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after). System event messages are created by calling `add_message("user", text)` then setting `system_event: true` on the appended dict directly (via `_history[-1]["system_event"] = True`) |
 | `add_exchange(user, assistant)` | Append pair atomically (used for session restore; not used during streaming) |
 | `get_history()` | Return a copy |
 | `set_history(messages)` | Replace entirely (after compaction or session load) |
 | `clear_history()` | Empty list + purge history from stability tracker |
 | `reregister_history_items()` | Purge stability entries without clearing history |
 | `history_token_count()` | Token count of current history |
+
+### System Prompt
+
+| Method | Description |
+|--------|-------------|
+| `set_system_prompt(prompt)` | Replace the system prompt (e.g., for review mode swap or mode switch) |
+| `get_system_prompt()` | Return the current system prompt |
+
+The system prompt is set at construction and can be swapped at runtime. Review mode saves the original prompt, swaps to the review prompt, and restores on exit. Mode switching swaps between `system.md` and `system_doc.md`.
+
+### URL Context
+
+| Method | Description |
+|--------|-------------|
+| `set_url_context(url_parts)` | Set URL context parts (list of formatted URL strings) for prompt assembly |
+| `clear_url_context()` | Clear URL context |
+
+URL context is injected as a user/assistant pair between the file tree and review context during prompt assembly. Multiple URLs are joined with `\n---\n`.
+
+### Review Context
+
+| Method | Description |
+|--------|-------------|
+| `set_review_context(review_text)` | Set review context string for prompt injection. Empty/None clears it |
+| `clear_review_context()` | Clear review context |
+
+Review context is injected as a user/assistant pair between URL context and active files during prompt assembly. Re-injected on each message during review mode.
 
 ---
 
@@ -344,6 +382,7 @@ The backend wraps `compact_history_if_needed()` with these notifications, sent v
 - L0 with history: cache_control on last history message, not system
 - L1 block produces user/assistant pair containing symbol content
 - Empty tiers produce no messages
+- Cross-reference mode: both symbol legend and doc legend included in L0 with appropriate headers
 - File tree, URL context, active files included at correct positions
 - Active history appears after active files, before user prompt
 - Multi-tier message order: L0 < L1 < L3 < tree < active < prompt
@@ -434,3 +473,5 @@ Reusing the session ID means subsequent messages (chat, commits, resets) are per
 This means the first `get_current_state()` call from a connecting browser returns the previous session's messages, providing seamless resumption after server restart. If no sessions exist or loading fails, the server starts with an empty history.
 
 **File selection not restored:** Auto-restore recovers conversation messages but does not restore file selection. The browser receives an empty `selected_files` list from `get_current_state()`. Users must re-select files after a server restart.
+
+**Call site:** `_restore_last_session()` is called explicitly in `main.py` after `LLMService` construction (with `deferred_init=True`) but before `server.start()`. It is NOT called inside the constructor or inside `complete_deferred_init()` — the deferred init method checks whether history is already populated and skips restore if so. This ordering ensures messages are available for `get_current_state()` on the very first WebSocket connection, before the heavy initialization phase begins.

@@ -6,6 +6,8 @@ The cache tiering system organizes LLM prompt content into stability-based tiers
 
 Four categories of content are managed: **files** (full content), **symbol map entries** (compact structure), **history messages** (conversation pairs), and **URL content** (fetched web pages, GitHub repos, documentation).
 
+The `StabilityTracker` is constructed with `cache_target_tokens` (default: 1536, but always overridden by `LLMService` with the model-aware computed value from `ConfigManager.cache_target_tokens_for_model()`).
+
 ## Tier Structure
 
 | Tier | Entry N | Promotion N | Description |
@@ -42,7 +44,9 @@ SHA256 hash of: file content (for files), compact symbol block (for symbols), or
 
 Files/symbols with N ≥ 3 graduate to L3 **regardless of whether they're still in the active items list**. Still-selected files have their content move from the uncached "Working Files" section to the cached L3 block.
 
-### URL Content — Direct Tier Entry
+### URL Content — Direct Tier Entry (Not Yet Implemented)
+
+> **Implementation status:** The URL tier entry mechanism described below is **specified but not yet implemented** in the current codebase. URL content currently flows through the uncached URL context section on every request (as a `user/assistant` pair between the file tree and review context). The stability tracker does not track `url:` items. This section describes the target design for a future implementation.
 
 URL content is static once fetched (web pages, GitHub repos, documentation). Unlike files which may be edited, fetched URL content never changes. URLs therefore skip the active → L3 graduation path entirely and enter directly at **L1** with `entry_n = 9`. This ensures they are cached from their first appearance, avoiding unnecessary re-ingestion costs.
 

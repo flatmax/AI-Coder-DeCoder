@@ -351,6 +351,8 @@ The source file walker excludes the following directories:
 
 These directories are skipped during repository-wide indexing. The import resolver must use the same exclusion list, including `.ac-dc`, to prevent resolving imports to files inside the application's working directory.
 
+The symbol index walker additionally excludes `.ac-dc` from its own directory scan (matching the import resolver's list). The doc index walker uses the same set of exclusions.
+
 ## Testing
 
 ### Python Extractor

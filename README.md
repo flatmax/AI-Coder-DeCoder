@@ -153,13 +153,11 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. 
 | `Escape` | Chat input | Clear @-filter → close snippets → clear input |
 | `@text` | Chat input | Filter file picker |
 | `Ctrl+S` | Diff viewer / Settings | Save file |
-| `Ctrl+Shift+F` | Global | Open search tab with selection |
+| `Ctrl+Shift+F` | Global | Activate file search with selection |
 | `Alt+1` | Global | Files & Chat tab |
-| `Alt+2` | Global | Search tab |
-| `Alt+3` | Global | Context Budget tab |
-| `Alt+4` | Global | Cache Tiers tab |
-| `Alt+5` | Global | Doc Convert tab |
-| `Alt+6` | Global | Settings tab |
+| `Alt+2` | Global | Context tab (Budget / Cache sub-views) |
+| `Alt+3` | Global | Settings tab |
+| `Alt+4` | Global | Doc Convert tab (when available) |
 | `Alt+M` | Global | Toggle minimize dialog |
 | `↑/↓` | Search results | Navigate matches |
 | `Enter` | Search results | Open match in diff viewer |
@@ -241,7 +239,7 @@ A connected-users indicator (`👥 N`) appears in the dialog header when multipl
 | `model` | — | Primary LLM model identifier |
 | `smallerModel` | — | Cheaper model for summaries and commit messages |
 | `cache_min_tokens` | `1024` | Minimum tokens for cache tier targeting |
-| `cache_buffer_multiplier` | `1.5` | Multiplier for cache target (`1024 × 1.5 = 1536`) |
+| `cache_buffer_multiplier` | `1.1` | Multiplier for cache target (`1024 × 1.1 = 1126`) |
 
 ### App Config Fields
 
@@ -387,7 +385,6 @@ npm run build
 
 ```
 .github/workflows/
-    deploy-pages.yml
     release.yml
 specs3/                          # Specification documents
     1-foundation/
@@ -487,7 +484,6 @@ webapp/
             ac-doc-convert-tab.js # Document conversion UI
             ac-files-tab.js      # Files & chat split panel
             ac-history-browser.js # Session browser modal
-            ac-search-tab.js     # Full-text search
             ac-settings-tab.js   # Configuration editor
             chat-panel.js        # Chat messages, streaming, input
             diff-viewer.js       # Monaco diff editor

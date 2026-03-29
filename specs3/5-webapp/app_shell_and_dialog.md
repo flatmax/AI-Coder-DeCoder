@@ -50,6 +50,18 @@ Methods the server calls on the client (registered via `addClass`):
 | `streamComplete(requestId, result)` | Dispatch `stream-complete` window event |
 | `compactionEvent(requestId, event)` | Dispatch `compaction-event` window event |
 | `filesChanged(selectedFiles)` | Dispatch `files-changed` window event |
+| `startupProgress(stage, message, percent)` | Update startup overlay. **Special case:** `stage === 'doc_index'` is intercepted and forwarded to the dialog header progress bar (via `mode-switch-progress` DOM event) instead of updating the startup overlay — only in-progress updates (`percent < 100`) are forwarded; the completion signal arrives via `compactionEvent` with `doc_index_ready` stage |
+| `navigateFile(data)` | Dispatch `navigate-file` window event with `_remote: true` flag to prevent re-broadcasting |
+| `modeChanged(data)` | Dispatch `mode-changed` window event |
+| `sessionChanged(data)` | Dispatch `session-loaded` window event |
+| `docConvertProgress(data)` | Dispatch `doc-convert-progress` window event |
+| `commitResult(result)` | Dispatch `commit-result` window event |
+| `userMessage(data)` | Dispatch `user-message` window event |
+| `admissionRequest(data)` | Add to `_admissionRequests` array (triggers admission toast) |
+| `admissionResult(data)` | Remove from `_admissionRequests` (dismisses toast) |
+| `clientJoined(data)` | Refresh connected client count |
+| `clientLeft(data)` | Refresh connected client count |
+| `roleChanged(data)` | Refresh collab role; toast if promoted to host |
 
 ### Startup Sequence
 
@@ -184,6 +196,11 @@ The dialog tracks review state via `_reviewActive` property, synced from:
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
 
+The dialog tracks streaming state via `_streamingActive` and `_committing` properties:
+- `_streamingActive`: set `true` on `stream-chunk`, set `false` on `stream-complete`
+- `_committing`: set `true` when commit button clicked, set `false` on `stream-complete` or `commit-result`
+- Both disable the commit button when `true`; `_streamingActive` also disables the reset button
+
 **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 ### Minimizing
@@ -241,6 +258,10 @@ The app shell persists the last-opened file and its viewport state to localStora
 |-----|---------|-----------|
 | `ac-last-open-file` | File path of the last opened/navigated file | Written on every `navigate-file` event |
 | `ac-last-viewport` | JSON: `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}}` | Written on `beforeunload` and before navigating to a different file |
+
+**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known.
+
+**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known.
 
 ### Save Triggers
 

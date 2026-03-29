@@ -26,7 +26,7 @@ Configuration is split across multiple files, each serving a distinct purpose. A
     model: "provider/model-name",
     smaller_model: "provider/model",   # also accepts "smallerModel" (camelCase)
     cache_min_tokens: 1024,
-    cache_buffer_multiplier: 1.5
+    cache_buffer_multiplier: 1.1
 }
 ```
 
@@ -38,9 +38,9 @@ The `min_cacheable_tokens` is model-aware — per Anthropic's prompt caching doc
 
 The version matching uses string-contains checks on the lowercased model name, matching both dash-separated and dot-separated version patterns (e.g., `"4-5"` and `"4.5"` both match). Non-Claude models default to 1024.
 
-The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
+The `cache_min_tokens` config value (default: 1024) can override upward but never below the model's hard minimum. The `cache_buffer_multiplier` defaults to `1.1`. Example: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`. Sonnet → `max(1024, 1024) × 1.1 = 1126`.
 
-A fallback `cache_target_tokens` property (without model reference) computes `cache_min_tokens × cache_buffer_multiplier` (default: 1126) for callers that don't have a model reference.
+A fallback `cache_target_tokens` property (without model reference) computes `cache_min_tokens × cache_buffer_multiplier` (default: `1024 × 1.1 = 1126`) for callers that don't have a model reference.
 
 ### App Config
 
@@ -117,7 +117,12 @@ Config directory relative to the application source.
 
 ### Config File Categories
 
-| Category | Files | Upgrade Behavior |
+Two constant sets in `config.py` control upgrade behavior:
+
+- `_MANAGED_FILES`: files safe to overwrite on upgrade (prompts, default settings)
+- `_USER_FILES`: files the user is expected to edit (never overwritten)
+
+| Category | Files (`_MANAGED_FILES` / `_USER_FILES`) | Upgrade Behavior |
 |----------|-------|-----------------|
 | **Managed** | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}`. Note: `commit.md` and `system_reminder.md` are managed files but are not exposed via the Settings RPC whitelist — they are loaded directly by `ConfigManager` methods |
 | **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
@@ -185,8 +190,8 @@ Only these types are accepted — arbitrary file paths are rejected.
 - Default LLM and app configs contain expected keys
 - Save and read-back round-trip for config content
 - Invalid config type key rejected with error
-- Cache target tokens fallback computed from defaults (1024 × 1.1 = 1126)
-- Cache target tokens model-aware: Opus 4.6 → max(1024, 4096) × 1.1 = 4505, Sonnet → 1126
+- Cache target tokens fallback computed from defaults (`1024 × 1.1 = 1126`)
+- Cache target tokens model-aware: Opus 4.6 → `max(1024, 4096) × 1.1 = 4505`, Sonnet → `max(1024, 1024) × 1.1 = 1126`
 - Snippets fallback returns non-empty list
 - System prompt assembly returns non-empty string
 - Commit prompt loads from commit.md and contains expected content
@@ -221,6 +226,42 @@ The following config files are loaded by `ConfigManager` methods but are **not**
 | `system_reminder.md` | `get_system_reminder()` | Appended to every user prompt; editing via UI could break edit protocol |
 
 These files can still be edited directly on disk in the config directory.
+
+### ConfigManager Properties
+
+The following computed properties on `ConfigManager` provide structured access to config sections:
+
+| Property | Returns | Source |
+|----------|---------|--------|
+| `llm_config` | Full LLM config dict | `llm.json` |
+| `app_config` | Full app config dict | `app.json` |
+| `model` | Primary model name | `llm_config.model` (default: `anthropic/claude-sonnet-4-20250514`) |
+| `smaller_model` | Smaller model name | `llm_config.smaller_model` or `llm_config.smallerModel` (default: `anthropic/claude-haiku-4-20250414`) |
+| `cache_min_tokens` | Minimum cache tokens | `llm_config.cache_min_tokens` (default: 1024) |
+| `cache_buffer_multiplier` | Buffer multiplier | `llm_config.cache_buffer_multiplier` (default: 1.1) |
+| `cache_target_tokens` | Fallback cache target | `cache_min_tokens × cache_buffer_multiplier` |
+| `compaction_config` | History compaction settings | `app_config.history_compaction` with defaults |
+| `doc_index_config` | Document index settings | `app_config.doc_index` with defaults |
+| `doc_convert_config` | Document conversion settings | `app_config.doc_convert` with defaults |
+| `url_cache_config` | URL cache settings | `app_config.url_cache` with defaults |
+| `repo_root` | Repository root path | Set at construction |
+| `config_dir` | Resolved config directory | Platform-dependent |
+
+Additionally, `cache_target_tokens_for_model(min_cacheable_tokens)` computes the model-aware cache target: `max(cache_min_tokens, min_cacheable_tokens) × cache_buffer_multiplier`.
+
+### Prompt Assembly Methods
+
+| Method | Description |
+|--------|-------------|
+| `get_system_prompt()` | Concatenate `system.md` + `system_extra.md` |
+| `get_doc_system_prompt()` | Concatenate `system_doc.md` + `system_extra.md` |
+| `get_review_prompt()` | Concatenate `review.md` + `system_extra.md` |
+| `get_compaction_prompt()` | Load `compaction.md` |
+| `get_commit_prompt()` | Load `commit.md` |
+| `get_system_reminder()` | Load `system_reminder.md`, prepend `\n\n` |
+| `get_snippets(mode?)` | Load snippets for a mode ("code", "review", "doc"). Two-location fallback: repo-local `.ac-dc/snippets.json` first, then config directory. Supports nested format (`{"code": [...]}`) and legacy flat format (`{"snippets": [...]}`) |
+| `get_review_snippets()` | Convenience: `get_snippets(mode="review")` |
+| `get_doc_snippets()` | Convenience: `get_snippets(mode="doc")` |
 
 ### Config Editing Flow
 

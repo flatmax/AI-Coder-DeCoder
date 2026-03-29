@@ -30,11 +30,36 @@ The LED replaces a traditional tab bar — multiple files are tracked internally
 
 ### Language Detection
 
-Map of common extensions to language identifiers: `.js`→javascript, `.ts`→typescript, `.py`→python, `.json`→json, `.yaml`/`.yml`→yaml, `.html`→html, `.css`→css, `.md`→markdown, `.c`/`.h`→c, `.cpp`/`.hpp`→cpp, `.sh`/`.bash`→shell. Fallback: plaintext.
+Map of common extensions to language identifiers: `.js`→javascript, `.ts`→typescript, `.py`→python, `.json`→json, `.yaml`/`.yml`→yaml, `.html`→html, `.css`→css, `.md`→markdown, `.c`/`.h`→c, `.cpp`/`.hpp`→cpp, `.sh`/`.bash`→shell, `.m`→matlab, `.java`→java, `.rs`→rust, `.go`→go, `.rb`→ruby, `.php`→php, `.sql`→sql, `.toml`/`.ini`/`.cfg`→ini. Fallback: plaintext.
+
+### MATLAB Syntax Highlighting
+
+MATLAB (`.m`) files use a custom Monarch tokenizer registered at module load time (before any editor instance is created) via `monaco.languages.register({ id: 'matlab' })` and `monaco.languages.setMonarchTokensProvider('matlab', {...})`. Since Monaco has no built-in MATLAB language, this registration must happen eagerly. The tokenizer handles:
+
+- **Keywords**: `break`, `case`, `catch`, `classdef`, `continue`, `else`, `elseif`, `end`, `for`, `function`, `if`, `methods`, `properties`, `return`, `switch`, `try`, `while`, `parfor`, `spmd`, etc.
+- **Builtins**: `abs`, `zeros`, `ones`, `eye`, `disp`, `fprintf`, `plot`, `figure`, `size`, `length`, `find`, `sort`, `struct`, `cell`, etc. (approximately 80 entries)
+- **Comments**: Line comments (`%...`) and block comments (`%{...%}`)
+- **Strings**: Single-quoted (`'...'`) and double-quoted (`"..."`)
+- **Numbers**: Integer, float, scientific notation, complex (`i`/`j` suffix)
+- **Operators**: Arithmetic (`+`, `-`, `*`, `/`, `^`), element-wise (`.^`, `.*`, `./`), comparison (`==`, `~=`, `>=`), logical (`&`, `|`, `&&`, `||`)
+- **Transpose**: The `'` operator after identifiers/brackets is tokenized as an operator (not a string delimiter)
+
+The tokenizer is registered via `monaco.languages.register()` and `monaco.languages.setMonarchTokensProvider()` at module load time, before any editor is created.
 
 ### Worker-Safe Languages
 
 Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. These workers may fail in certain build configurations. The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
+
+### Floating Panel Labels
+
+Two floating labels appear over the diff panels when contextual information is available:
+
+| Label | Position | Content |
+|-------|----------|---------|
+| Left | `right: calc(50% + 8px)` | Source label (e.g., custom label from `loadPanel`) |
+| Right | `right: 120px` | Source label (e.g., custom label from `loadPanel`) |
+
+Labels are semi-transparent with backdrop blur (`rgba(22, 27, 34, 0.78)`) and become more opaque on hover. In inline diff mode (preview), the left label is hidden. Labels are only shown for `loadPanel` comparisons — normal file diffs (same file, HEAD vs working) show no labels since the context is obvious from the file path.
 
 ### Monaco Shadow DOM Integration
 
@@ -74,6 +99,17 @@ Registered when editor and RPC are both ready:
 Line and column numbers are passed as **1-indexed** values (matching Monaco's convention and the backend's symbol storage). No conversion is needed at the RPC boundary.
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
+
+### Cross-File Navigation via Code Editor Service
+
+When the user Ctrl+clicks a symbol whose definition is in another file, Monaco's `ICodeEditorService.openCodeEditor` is called internally to open the target. The diff viewer patches this service method (once per component lifetime, guarded by `_editorServicePatched`) to intercept cross-file navigation:
+
+1. Extract the target file path from `input.resource.path` (strip leading slashes)
+2. Extract the target line from `input.options.selection.startLineNumber`
+3. Call `this.openFile({ path, line })` to open the target in the tab system
+4. Return the current editor instance to satisfy Monaco's API contract
+
+This enables seamless Go-to-Definition across files without Monaco trying to create a new standalone editor instance.
 
 ### Markdown Link Navigation
 
@@ -168,6 +204,16 @@ Toggling preview mode disposes and recreates the Monaco editor — switching bet
 ### Scroll to Edit Anchor
 
 When clicking an edit block's goto icon (↗): open file, search for progressively shorter prefixes of the edit text, scroll to and highlight match (3-second highlight).
+
+### Diff Computation Readiness
+
+Monaco's diff editor computes diffs asynchronously after models are set. Any scroll positioning (viewport restore, search-text scroll, line scroll) must wait for the diff computation to finish — scrolling before the diff result arrives is overwritten by Monaco's layout pass. The viewer provides a `_waitForDiffReady()` helper that:
+
+1. Registers a one-shot `onDidUpdateDiff` listener on the diff editor
+2. Resolves the returned Promise when the listener fires (with an extra `requestAnimationFrame` for layout settlement)
+3. Has a 2-second safety timeout — if the diff computation never fires (e.g., identical content), the Promise resolves anyway
+
+This is used by `openFile` (after initial content load), `_restorePerFileViewport`, and search-text scrolling.
 
 ## File Loading
 

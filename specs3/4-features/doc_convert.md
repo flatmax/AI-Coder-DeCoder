@@ -214,7 +214,7 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem. This subdirectory is created for **all formats** (`.docx`, `.xlsx`, `.csv`, etc. — not just presentations/PDFs) during `_convert_single()`. If no images are extracted and the subdirectory ends up empty, it is automatically removed after conversion:
+Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem. This subdirectory is created for **all formats** (`.docx`, `.xlsx`, `.csv`, etc. — not just presentations/PDFs) during `_convert_single()`. If no images are extracted and the subdirectory ends up empty, it is automatically removed after conversion. Image filenames in the markdown are prefixed with the subdirectory name (e.g., `stem/stem_img1.png`) so relative links resolve correctly from the sibling `.md` file:
 
 ```
 docs/
@@ -472,7 +472,7 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
-Conversion runs in a dedicated single-thread executor and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted back to the event loop from the worker thread via `call_soon_threadsafe` + `ensure_future`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The progress view provides per-file feedback.
+Conversion runs in a dedicated single-thread `ThreadPoolExecutor(max_workers=1)` and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted from the worker thread back to the asyncio event loop via `loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_convert_event(data)))`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The `_send_convert_event` method wraps the `_event_callback` call in `asyncio.ensure_future` to avoid blocking the conversion pipeline if the browser is slow to process a previous event. The progress view provides per-file feedback.
 
 ## RPC Methods
 
@@ -511,6 +511,7 @@ Conversion runs in a dedicated single-thread executor and does not block UI inte
 - PDF pages with raster images produce companion SVG with text stripped
 - PDF pages with non-trivial vector graphics (curves, filled shapes) produce SVG
 - PDF pages with only simple borders/underlines are treated as text-only
+- PDF pages with no extractable text AND no detected images still get a full-page SVG export as a fallback (ensures pages with only lightweight vector content aren't silently dropped)
 - SVG export emits text as `<text>` elements (`text_as_path=0`) for visual fidelity and selectability
 - Extracted text also appears in companion markdown for searchability
 - Image detection threshold requires ≥3 significant drawings (not just decorative rules)

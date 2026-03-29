@@ -27,7 +27,7 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 | Webapp bind address | `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed (so LAN collaborators can load the webapp) |
 | Protocol | `ws://` (plain WebSocket) |
 | Port passed to browser | via URL query parameter `?port=N` |
-| Remote timeout | 120 seconds |
+| Remote timeout | 120 seconds (server-side; browser-side uses 60 seconds) |
 
 ## jrpc-oo Patterns
 
@@ -38,7 +38,7 @@ A single WebSocket connection carries all traffic, multiplexed by JSON-RPC reque
 ```python
 from ac_dc.collab import CollabServer
 
-server = CollabServer(port, remote_timeout=60)
+server = CollabServer(port, remote_timeout=120)
 server.add_class(repo_instance)       # exposes Repo.get_file_tree, etc.
 server.add_class(llm_instance)        # exposes LLM.chat_streaming, etc.
 server.add_class(settings_instance)   # exposes Settings.get_config_info, etc.
@@ -373,6 +373,9 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.set_cross_reference` | `(enabled) → {status, cross_ref_enabled, message?}` | Enable/disable cross-reference mode |
 | `LLMService.set_excluded_index_files` | `(files) → [string]` | Set files excluded from index/map |
 | `LLMService.get_excluded_index_files` | `() → [string]` | Get current excluded files list |
+| `LLMService.get_mode` | `() → {mode, doc_index_ready, doc_index_building, cross_ref_ready, cross_ref_enabled}` | Current mode and index readiness state |
+| `LLMService.switch_mode` | `(mode) → {mode, message, building?, keywords_available?, keywords_message?}` | Switch between code and document modes |
+| `LLMService.get_file_map_block` | `(path) → {path, content, mode}` | Get index block for a file or special key (for cache viewer) |
 | `LLMService.navigate_file` | `(path) → {status, path}` | Broadcast file navigation to all clients |
 
 ### Settings Methods

@@ -129,7 +129,7 @@ Excluded files display:
 - Small `✕` badge in the badges area
 - Tooltip: "Excluded from index — Shift+click to re-include"
 
-The checkbox tooltip for all files reads: "Click to select · Shift+click to exclude from index".
+The checkbox tooltip for all files reads: `"Click to select · Shift+click to exclude from index"`. This appears on every file and directory checkbox via the `title` attribute, regardless of current selection or exclusion state.
 
 ### Context Menu
 
