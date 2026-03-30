@@ -112,7 +112,7 @@ File search is integrated into the Files tab's chat panel action bar rather than
 
 Non-default tabs (context, cache, settings, convert) are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
 
-Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
+Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. The convert tab uses a slightly broader condition — it renders if visited **or** if it is the active tab (`_visitedTabs.has('convert') || activeTab === 'convert'`), since it can be activated by the header button before being formally "visited" through the tab bar. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
 
 ### Tab Active Detection
 
@@ -204,7 +204,9 @@ The dialog tracks doc enrichment state via `_enrichingDocs` property:
 
 The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
-- `mode-changed` event: resets `_crossRefEnabled = false`
+- `mode-changed` event (triggered by `_switchMode`): resets `_crossRefEnabled = false`
+
+**Mode persistence:** The current mode is persisted to localStorage under a **repo-scoped key** (`ac-dc-mode:{repoName}`). On startup, a `_migrateModeKey()` function migrates the legacy bare key (`ac-dc-mode`) to the scoped key if no scoped value exists. On `_refreshMode()`, the dialog reads the saved preference and auto-switches if it differs from the server's current mode — but only for localhost clients (`_canMutate` must be true) and only when the doc index is ready. A `_modeSwitchInFlight` guard prevents `_refreshMode()` from reading the stale preference and switching back during an in-flight mode switch RPC (the guard is checked both before and after the async `get_mode` call).
 
 The dialog tracks review state via `_reviewActive` property, synced from:
 - `onRpcReady`: fetches `LLMService.get_review_state()`
