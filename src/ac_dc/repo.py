@@ -282,6 +282,86 @@ class Repo:
         except subprocess.CalledProcessError:
             return {"diff": ""}
 
+    def get_diff_to_branch(self, branch):
+        """Get diff between working tree and another branch.
+
+        Uses two-dot diff (`git diff <branch>`) which compares the branch
+        tip directly against the current working tree.  This includes both
+        committed changes on the current branch *and* any uncommitted edits
+        on disk — i.e. everything the user would see if they were to create
+        a PR/MR right now including unsaved work.
+
+        Args:
+            branch: branch name (local or remote, e.g. 'main', 'origin/main')
+
+        Returns:
+            {diff: str} or {error: str}
+        """
+        if not branch or not branch.strip():
+            return {"error": "No branch specified"}
+        try:
+            # Verify the ref exists
+            self._run_git("rev-parse", "--verify", branch)
+            # Two-dot diff: branch tip vs working tree (includes uncommitted changes)
+            diff = self._run_git("diff", branch)
+            return {"diff": diff}
+        except subprocess.CalledProcessError as e:
+            return {"error": f"Cannot diff against {branch}: {e.stderr if hasattr(e, 'stderr') else str(e)}"}
+
+    def list_all_branches(self):
+        """List all branches (local and remote) for branch selection UI.
+
+        Returns list of {name, sha, is_current, is_remote} dicts,
+        sorted with local branches first, then remotes.
+        """
+        try:
+            output = self._run_git(
+                "branch", "-a", "--sort=-committerdate",
+                "--format=%(refname:short)|%(objectname:short)|%(HEAD)|%(refname)"
+            )
+            branches = []
+            seen_names = set()
+            for line in output.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split("|", 3)
+                if len(parts) < 3:
+                    continue
+                name = parts[0].strip()
+                sha = parts[1].strip()
+                is_current = parts[2].strip() == "*"
+                refname = parts[3].strip() if len(parts) > 3 else ""
+
+                # Skip HEAD pointers and symbolic refs
+                if name in ("HEAD", "origin/HEAD"):
+                    continue
+                if " -> " in name or " -> " in refname:
+                    continue
+
+                # Deduplicate (remote may duplicate local)
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+
+                is_remote = "/" in name and name.split("/")[0] not in (".", "..")
+
+                branches.append({
+                    "name": name,
+                    "sha": sha,
+                    "is_current": is_current,
+                    "is_remote": is_remote,
+                })
+
+            # Sort: current first, then local, then remote
+            branches.sort(key=lambda b: (
+                not b["is_current"],
+                b["is_remote"],
+                b["name"].lower(),
+            ))
+            return branches
+        except subprocess.CalledProcessError as e:
+            return {"error": str(e)}
+
     def commit(self, message):
         """Create commit."""
         restricted = self._check_localhost_only()
