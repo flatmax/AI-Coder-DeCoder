@@ -25,9 +25,10 @@ If no bundled webapp is found, the server exits with an error message instructin
 A `http.server.ThreadingHTTPServer` runs in a daemon thread, serving files from the webapp dist directory. The threaded server handles concurrent requests (e.g., multiple browser tabs, parallel asset loads). Features:
 
 - **SPA fallback**: requests for paths without a file extension that don't match a real file are served `index.html` (for client-side routing)
-- **Silent logging**: per-request logs suppressed to avoid noise
+- **Silent logging**: per-request logs suppressed (custom handler with empty `log_message`)
 - **Bind address**: `127.0.0.1` by default; `0.0.0.0` when `--collab` is passed
-- **Error suppression**: `BrokenPipeError` and `ConnectionResetError` are silently caught in both the request handler (`do_GET`) and the server's `handle_error` override, preventing noisy tracebacks when clients disconnect mid-transfer
+- **Threading**: Uses `http.server.ThreadingHTTPServer` (not the single-threaded default) to handle concurrent requests from multiple browser tabs and parallel asset loads
+- **Error suppression**: `BrokenPipeError` and `ConnectionResetError` are silently caught in both the request handler (`do_GET` wrapped in try/except) and the server's `handle_error` override (checks `sys.exc_info()[1]` type), preventing noisy tracebacks when clients disconnect mid-transfer
 
 ### Vite Base Path
 
@@ -59,7 +60,7 @@ The startup is split into two phases to give the user early feedback. The browse
 
 ### Phase 1: Fast (< 1 second)
 
-1. Validate git repository (not a repo → write self-contained HTML to temp file, open as `file://` in browser, print terminal banner with `git init` / `cd` instructions, exit)
+1. Validate git repository (not a repo → write self-contained HTML to temp file, open as `file://` in browser, print terminal banner with `git init` / `cd` instructions, exit). The HTML page is a dark-themed (`#0d1117` background) centered layout showing the AC⚡DC brand at 4rem/18% opacity, the offending path highlighted in accent blue (`#58a6ff`) monospace, and remediation commands (`cd /path && git init`) in green (`#7ee787`) code blocks. The terminal banner mirrors the same information in plain text.
 2. Find available ports
 3. Initialize lightweight services: ConfigManager, Repo, Settings
 4. Start webapp server: bundled static server (default), Vite dev (`--dev`), or Vite preview (`--preview`)

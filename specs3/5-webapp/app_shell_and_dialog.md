@@ -259,9 +259,7 @@ The app shell persists the last-opened file and its viewport state to localStora
 | `ac-last-open-file` | File path of the last opened/navigated file | Written on every `navigate-file` event |
 | `ac-last-viewport` | JSON: `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}}` | Written on `beforeunload` and before navigating to a different file |
 
-**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known.
-
-**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known.
+**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known. The `_repoKey` function is defined at module level (not as a class method) and used by the app shell for both save and restore operations.
 
 ### Save Triggers
 

@@ -148,8 +148,8 @@ Hold **Shift** and click or drag to multi-select:
 | **Shift+click** on selected element | Immediately remove from multi-selection (toggle out) |
 | **Shift+click** on unselected element | Immediately add to multi-selection (toggle in), then begin marquee tracking so shift+drag still works |
 | **Shift+click** on empty space | Begin marquee selection |
-| **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
-| **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
+| **Shift+drag top-left→bottom-right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee. Forward mode requires the end point to be both right of AND below the start point |
+| **Shift+drag any other direction** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee. Any drag that isn't strictly top-left to bottom-right is treated as crossing mode |
 
 Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
 
@@ -270,13 +270,16 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
 1. `render()` creates empty `.svg-left` and `.svg-right` container divs
 2. `_injectSvgContent()` sets `innerHTML` on each container with the SVG string
 
-**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced.
+**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced. This applies to both the diff viewer (for Monaco editor creation) and the SVG viewer (for SVG element injection and pan-zoom initialization).
 
 3. After injection, SVG elements are normalized:
    - `width`/`height` attributes removed (so SVG fills container)
    - `style.width` and `style.height` set to `100%`
    - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
+   - For the editable (right) panel, `preserveAspectRatio="none"` is set so `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
+
+**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced.
 
 **Authored viewBox preservation**: Both panels prefer the SVG's authored `viewBox` attribute over a `getBBox()`-derived one. SVGs with `<defs>` containing font glyphs, clip paths, or symbol definitions often have elements with very small coordinate systems (e.g., 0–1 font units) that pollute `getBBox()` results, causing content to appear shrunken. The authored viewBox is trusted as the correct viewport. `getBBox()` is only used as a fallback when no viewBox attribute exists — in that case a 3% margin is added around the computed bounding box. For the right panel, `preserveAspectRatio="none"` is set so that `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform.
 

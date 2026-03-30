@@ -63,7 +63,13 @@ Labels are semi-transparent with backdrop blur (`rgba(22, 27, 34, 0.78)`) and be
 
 ### Monaco Shadow DOM Integration
 
-Monaco must render inside a Lit shadow DOM. The component clones all `<style>` and `<link>` nodes from `document.head` into its shadow root on editor creation, and watches for dynamically added/removed stylesheets via a `MutationObserver`. Style injection runs once per component lifetime. The observer is disconnected when the component is removed from the DOM.
+Monaco must render inside a Lit shadow DOM. Style injection has two phases:
+
+1. **Full re-sync** (`_syncAllStyles`): On every editor creation, all previously-cloned styles are removed and all current `<style>`/`<link>` nodes from `document.head` are re-cloned into the shadow root. This ensures Monaco's dynamically-added styles (created during editor construction) are captured. This runs every time `_showEditor` is called.
+
+2. **Incremental observation** (`MutationObserver`): Set up once per component lifetime, watches `document.head` for dynamically added/removed stylesheets after initial editor creation. Added nodes are cloned in; removed nodes have their corresponding clones found and removed by matching `textContent`.
+
+The re-sync approach (remove all + re-clone) prevents duplicate style accumulation when switching between files causes editor recreation. The observer is disconnected when the component is removed from the DOM.
 
 ## File Management
 

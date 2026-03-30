@@ -616,7 +616,7 @@ The distinction between the two extraction methods:
 | Method | Cache lookup | Returns in `needs_enrichment` | Used by |
 |--------|-------------|-------------------------------|---------|
 | `_extract_outlines()` | Requires `keyword_model` match | Files where cache misses due to model mismatch OR mtime change | Initial `index_repo()` build |
-| `_extract_outlines_structure_only()` | Accepts any cached outline (`keyword_model=None`) | Files where cache misses due to mtime change only | Mode switch, `_stream_chat` re-extraction |
+| `_extract_outlines_structure_only()` | Accepts any cached outline (`keyword_model=None` passed to `cache.get()`, which skips model-match check) | Files where cache misses due to mtime change only | Mode switch, `_stream_chat` re-extraction |
 
 Both methods populate `_all_outlines` with whatever outline they retrieve (enriched or unenriched). The caller decides what to do with the `needs_enrichment` return value — typically caching the unenriched outlines immediately and queueing them for background enrichment.
 
@@ -675,7 +675,12 @@ When files are queued for background keyword enrichment, a **non-blocking header
 
 **Header progress bar.** A compact bar appears in the dialog header showing the current enrichment file and completion percentage (e.g., `📝 Extracting keywords… (5/33 files) — cache_tiering.md  [=====>  ]`). This is visible regardless of which tab is active or whether the dialog is minimized. The bar is driven by `doc_index_progress` events received after `doc_index_ready` (when `_docIndexReady` is true). It auto-dismisses on `doc_enrichment_complete`.
 
-**Backend mechanism:** The `LLMService` sends `doc_index_progress` events via `compactionEvent` with per-file `message` and `percent` fields during the enrichment phase. Additionally, `doc_enrichment_queued`, `doc_enrichment_file_done`, and `doc_enrichment_complete` events are sent for state tracking (the dialog uses these to manage the `_enrichingDocs` flag).
+**Backend mechanism:** The `LLMService` sends progress through **two channels simultaneously** during both the structural extraction and enrichment phases:
+
+1. `startupProgress("doc_index", message, percent)` — intercepted by the app shell and forwarded to the dialog header progress bar (not the startup overlay) when `_docIndexReady` is already true
+2. `compactionEvent("doc_index_progress", {stage, message, percent})` — received by the dialog directly for header bar updates
+
+Both are fired from the same `_progress` helper inside `_build_doc_index_structure` and `_build_doc_index_enrichment`, using `asyncio.run_coroutine_threadsafe` to post from executor threads back to the event loop. Additionally, `doc_enrichment_queued`, `doc_enrichment_file_done`, and `doc_enrichment_complete` events are sent via `compactionEvent` for state tracking (the dialog uses these to manage the `_enrichingDocs` flag).
 
 **Frontend mechanism:** The dialog (`ac-dialog`) manages the header progress bar via `_enrichingDocs` and `_modeSwitchMessage`/`_modeSwitchPercent` state. When `_enrichingDocs` is true and `_modeSwitchMessage` is non-empty, the header bar renders. On `doc_enrichment_complete`, `_enrichingDocs` clears and the bar disappears.
 

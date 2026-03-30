@@ -20,6 +20,8 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 
 ### LLM Config
 
+The Python property default for `model` is `anthropic/claude-sonnet-4-20250514`. The bundled `llm.json` may specify a different default for packaged builds (e.g., a Bedrock model). When the config file is missing or the `model` key is absent, the property default is used.
+
 ```pseudo
 {
     env: { ENV_VAR: "value" },
@@ -122,10 +124,12 @@ Two constant sets in `config.py` control upgrade behavior:
 - `_MANAGED_FILES`: files safe to overwrite on upgrade (prompts, default settings)
 - `_USER_FILES`: files the user is expected to edit (never overwritten)
 
-| Category | Files (`_MANAGED_FILES` / `_USER_FILES`) | Upgrade Behavior |
+| Category | Files (constants in `config.py`) | Upgrade Behavior |
 |----------|-------|-----------------|
-| **Managed** | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}`. Note: `commit.md` and `system_reminder.md` are managed files but are not exposed via the Settings RPC whitelist — they are loaded directly by `ConfigManager` methods |
-| **User** | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
+| **Managed** (`_MANAGED_FILES`) | `system.md`, `system_doc.md`, `compaction.md`, `commit.md`, `system_reminder.md`, `review.md`, `app.json`, `snippets.json` | Overwritten on upgrade. Old version backed up as `{file}.{version}`. Note: `commit.md` and `system_reminder.md` are managed files but are not exposed via the Settings RPC whitelist — they are loaded directly by `ConfigManager` methods |
+| **User** (`_USER_FILES`) | `llm.json`, `system_extra.md` | Never overwritten. Only created if missing |
+
+These two sets are defined as module-level constants (`_MANAGED_FILES`, `_USER_FILES`) and checked during `_resolve_config_dir()` for packaged builds. Files not in either set (e.g., files with `.` prefix like `.bundled_version`) are skipped during iteration.
 
 ### Version-Aware Upgrade
 

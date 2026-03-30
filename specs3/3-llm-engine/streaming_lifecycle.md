@@ -262,19 +262,64 @@ for path in selected_files:
             "tokens": counter.count(content)
         }
 
-# 2. Index entries for selected files (sym: in code mode, doc: in document mode)
+# 2. Remove symbol/doc entries for selected files from the tracker.
+#    Selected files have full content in context — their index blocks are
+#    redundant. Both `symbol:` and `doc:` entries are removed (handles
+#    cross-reference mode correctly). Affected tiers are marked as broken.
+for path in selected_files:
+    for prefix in ("symbol:", "doc:"):
+        entry_key = prefix + path
+        if entry_key in tracker.items:
+            tier = tracker.items[entry_key].tier
+            del tracker.items[entry_key]
+            tracker.broken_tiers.add(tier)
+            log change: "file selected — full content replaces {prefix} entry"
+
+# 3. Index entries for ALL indexed files NOT in selected_files.
+#    These are symbol/doc blocks for the structural map. They are tracked
+#    for stability but NOT rendered separately — they appear in the main
+#    symbol map or are in cached tiers. Excluded files are also skipped.
 #    In doc mode, get_file_block returns the current cached outline — enriched if
 #    available, unenriched (structure-only) if enrichment is still pending.
-for path in selected_files:
-    prefix = "sym:" if mode == "code" else "doc:"
+for path in all_indexed_files:
+    if path in selected_files: continue
+    if path in excluded_index_files: continue
+    prefix = "doc:" if mode == "doc" else "symbol:"
     block = index.get_file_block(path)  # symbol_index or doc_index per mode
     if block:
+        # Use signature hash (from raw data) rather than hashing the formatted
+        # block — formatted output changes when path aliases or exclude_files
+        # change, causing spurious hash mismatches.
+        sig_hash = index.get_signature_hash(path)
         active_items[prefix + path] = {
-            "hash": sha256(block),
+            "hash": sig_hash or sha256(block),
             "tokens": counter.count(block)
         }
 
-# 3. Non-graduated history messages
+# 4. Cross-reference items (when cross-ref mode is enabled).
+#    Add the other index's items so they participate in N-value tracking.
+#    Only items already in the tracker (from initialization) are included.
+if cross_ref_enabled:
+    if mode == "code" and doc_index:
+        cross_index = doc_index
+        cross_prefix = "doc:"
+        all_cross = doc_index.all_outlines
+    elif mode == "doc" and symbol_index:
+        cross_index = symbol_index
+        cross_prefix = "symbol:"
+        all_cross = symbol_index.all_symbols
+    for path in all_cross:
+        key = cross_prefix + path
+        if key not in tracker.items: continue  # only track initialized items
+        block = cross_index.get_file_block(path)
+        if block:
+            sig_hash = cross_index.get_signature_hash(path)
+            active_items[key] = {
+                "hash": sig_hash or sha256(block),
+                "tokens": counter.count(block)
+            }
+
+# 5. Non-graduated history messages
 for i, msg in enumerate(history):
     key = "history:" + str(i)
     if key not in any cached tier:
@@ -284,7 +329,7 @@ for i, msg in enumerate(history):
             "tokens": counter.count_message(msg)
         }
 
-# 4. Deselected file cleanup: remove file:* entries not in selected_files
+# 6. Deselected file cleanup: remove file:* entries not in selected_files
 for key in tracker.items:
     if key starts with "file:" and key.removeprefix("file:") not in selected_files:
         remove from tier, mark tier as broken

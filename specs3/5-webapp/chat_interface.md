@@ -198,7 +198,7 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 
 | Method | Purpose |
 |--------|---------|
-| `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render |
+| `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render. Edit segments are matched to backend results using a **per-file index counter**: each file path tracks the next unmatched result index, so multiple edits to the same file are matched sequentially in order of appearance |
 | `_renderEditBlockHtml(seg, result)` | Renders a single edit block card: header with file path (click to toggle selection), goto icon (click to open in diff viewer with searchText), status badge, optional error, diff lines |
 | `_renderDiffLineHtml(line)` | Renders one diff line with optional character-level `<span class="diff-change">` highlights |
 
@@ -316,7 +316,7 @@ Off-screen messages use `content-visibility: auto` with `contain: layout style p
 
 ### Paste Suppression for Middle-Click
 
-When the file picker's middle-click inserts a path into the textarea, the browser's selection-buffer paste is suppressed to prevent duplicating the inserted path. The paste handler blocks the next paste event following a programmatic path insertion.
+When the file picker's middle-click inserts a path into the textarea, the browser's selection-buffer paste is suppressed to prevent duplicating the inserted path. The mechanism uses a `_suppressNextPaste` boolean flag on the chat panel: the middle-click handler (via `insert-path` event from the file picker) sets the flag to `true` after inserting the path, and the chat panel's `_onPaste` handler checks and clears the flag at the start of each paste event, calling `preventDefault()` to block the selection-buffer paste when the flag is set.
 
 ### @-Filter
 

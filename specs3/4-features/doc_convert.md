@@ -472,14 +472,16 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
-Conversion runs in a dedicated single-thread `ThreadPoolExecutor(max_workers=1)` and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted from the worker thread back to the asyncio event loop via `loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_convert_event(data)))`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The `_send_convert_event` method wraps the `_event_callback` call in `asyncio.ensure_future` to avoid blocking the conversion pipeline if the browser is slow to process a previous event. The progress view provides per-file feedback.
+Conversion runs in a dedicated single-thread `ThreadPoolExecutor(max_workers=1, thread_name_prefix="docconv")`, separate from the server's default executor, and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. The executor is shut down with `wait=False` after completion to avoid blocking the event loop thread. Progress events are posted from the worker thread back to the asyncio event loop via `loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_convert_event(data)))`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The `_send_convert_event` method wraps the `_event_callback` call in `asyncio.ensure_future` to avoid blocking the conversion pipeline if the browser is slow to process a previous event. The progress view provides per-file feedback.
+
+**Synchronous fallback:** When no asyncio event loop is running (e.g. in tests or edge cases where the event loop hasn't started), `convert_files` falls back to `_convert_files_sync` which runs all conversions synchronously and returns the full results dict inline instead of using background events.
 
 ## RPC Methods
 
 | Method | Description |
 |--------|-------------|
 | `DocConvert.scan_convertible_files()` | Returns list of convertible files with status badges. Includes clean-tree check |
-| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree |
+| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree. Falls back to synchronous conversion (returning full results inline) if no asyncio event loop is running |
 | `DocConvert.is_available()` | Returns dict with availability of markitdown, LibreOffice, PyMuPDF, and combined pdf_pipeline status |
 
 ## Testing
