@@ -102,7 +102,7 @@ The viewer has two modes, switchable programmatically via `_setMode()` (no UI to
 | **Pan** | `svg-pan-zoom` (navigation) | `svg-pan-zoom` (navigation) | Navigate both panels without editing |
 | **Present** | Hidden | `SvgEditor` (visual editing, full width) | Full-width editor with left panel hidden |
 
-Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger. Presentation mode is toggled via the `◱` floating button or the F11 keyboard shortcut.
+Switching modes calls `_captureEditorContent()` — which reads the current SVG from the `SvgEditor` via `getContent()` and writes it back to the active file object's `modified` field — then disposes the active interaction handlers and reinitializes for the new mode. This ensures the modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger. Presentation mode is toggled via the `◱` floating button or the F11 keyboard shortcut.
 
 ## Synchronized Pan/Zoom
 
@@ -151,6 +151,10 @@ Hold **Shift** and click or drag to multi-select:
 | **Shift+drag top-left→bottom-right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee. Forward mode requires the end point to be both right of AND below the start point |
 | **Shift+drag any other direction** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee. Any drag that isn't strictly top-left to bottom-right is treated as crossing mode |
 
+Marquee hit testing checks direct children of the root `<svg>` element and also one level of children inside `<g>` groups. Deeper nesting is not scanned — elements inside nested groups must be selected by clicking the group.
+
+Marquee hit testing checks direct children of the root `<svg>` element and also one level of children inside `<g>` groups. Deeper nesting is not scanned — elements inside nested groups must be selected by clicking the group.
+
 Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
 
 The count of selected elements is tracked internally (e.g., `_selectedTag` = "3 elements") but is not currently displayed in the UI. Multi-selected elements can be dragged as a group — clicking on any element that is part of a multi-selection initiates a group drag without breaking the selection.
@@ -182,6 +186,8 @@ Selection handles are rendered as a dedicated SVG `<g>` group overlaid on the se
 - **Vertex handles**: Small circles at each vertex for point editing (polyline, polygon)
 - **Path handles**: Circles at each command endpoint, with dotted lines to control points for cubic/quadratic curves
 - Handle radius scales inversely with zoom level to maintain a consistent screen size
+- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
+- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
 
 ### Interaction Model
 
@@ -195,7 +201,7 @@ The editor determines interaction behavior from the element type:
 | `line` | Translate both endpoints | Move individual endpoints |
 | `polyline`, `polygon` | Translate all points | Move individual vertices |
 | `path` | Translate via transform | Move individual path points |
-| `text` | Translate (x, y or transform — auto-detected) | — (double-click to edit) |
+| `text` | Translate (x, y or transform — auto-detected: uses `transform` if the element has a `transform` attribute, otherwise `x`/`y` attributes) | — (double-click to edit) |
 | `tspan` | Resolves to parent `text` | — |
 | `g` (group) | Translate via transform | — |
 

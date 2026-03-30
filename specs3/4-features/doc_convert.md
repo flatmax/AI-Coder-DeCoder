@@ -127,7 +127,7 @@ When the primary PyMuPDF pipeline is used, text-only slides appear as markdown p
 
 ### odfpy
 
-**odfpy** is included as an explicit dependency alongside `markitdown[all]` (which also pulls it in transitively). It provides native ODF format parsing for `.odt` files. The explicit dependency ensures `.odt` support is available even if markitdown's dependency groups change in future versions.
+**odfpy** is pulled in transitively by `markitdown[all]`. It provides native ODF format parsing for `.odt` files. If markitdown's dependency groups change in a future version and no longer include odfpy, an explicit dependency can be added to the `[docs]` extras.
 
 ### Colour-Aware Excel Extraction
 
@@ -149,7 +149,7 @@ pip install ac-dc[docs]
 uv sync --extra docs
 ```
 
-The `[docs]` extra includes `keybert`, `markitdown[all]`, `odfpy`, `python-pptx`, and `pymupdf` — a single install enables all document features.
+The `[docs]` extra includes `keybert`, `markitdown[all]`, `python-pptx`, and `pymupdf` — a single install enables all document features. (`odfpy` is pulled in transitively by `markitdown[all]`.)
 
 For the full PDF/presentation pipeline, **LibreOffice** must also be installed as a system dependency (`soffice` on PATH). Without it, `.pptx` falls back to python-pptx and `.pdf` is handled directly by PyMuPDF (no LibreOffice needed for `.pdf`).
 

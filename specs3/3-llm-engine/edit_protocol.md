@@ -365,8 +365,17 @@ The following edit(s) failed because the old text didn't match the actual file c
 
 - Only **in-context** mismatch failures trigger this prompt. Mismatch failures on files that were auto-added (not-in-context) are covered by the not-in-context retry prompt instead
 - **Anchor-not-found** failures do not trigger this prompt — they indicate the anchor text doesn't exist in the file at all, which is a different class of problem
-- **Ambiguous anchor** failures have their own retry prompt (see above)
-- When both ambiguous anchor and old-text-mismatch failures occur in the same response, both prompts are combined into a single auto-populated message
+- **Ambiguous anchor** failures have their own retry prompt (see above) and take priority — when both ambiguous and mismatch failures occur in the same response, only the ambiguous retry prompt is shown (the `else if` branch means mismatch is only checked when no ambiguous failures exist)
+
+## Shell Command Detection
+
+The `detect_shell_commands(text)` function (in `edit_parser.py`) extracts shell commands from assistant responses for display in the UI. It detects commands in:
+
+- Fenced code blocks with `bash`, `shell`, or `sh` language tags (lines starting with `#` are treated as comments and skipped)
+- Lines prefixed with `$ ` (dollar-space)
+- Lines prefixed with `> ` (greater-than-space), unless the line starts with common prose words (`Note`, `Warning`, `This`, `The`, `Make`)
+
+Returns a list of command strings. Empty lines inside code blocks are skipped.
 
 ## Testing
 
@@ -423,4 +432,4 @@ The following edit(s) failed because the old text didn't match the actual file c
 - Edit summary banner notes the prepared retry prompt
 - Only in-context mismatch failures trigger this; not-in-context files are covered by the auto-add prompt
 - Anchor-not-found failures do not trigger this prompt
-- When both ambiguous and mismatch failures occur, prompts are combined into a single message
+- When both ambiguous and mismatch failures occur, only the ambiguous prompt is shown (ambiguous takes priority via else-if)

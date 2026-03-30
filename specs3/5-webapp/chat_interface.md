@@ -214,7 +214,7 @@ Banner **after** all edit blocks (at the end of the assistant message, not the t
 
 ### Not-In-Context Retry Prompt
 
-When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt:
+When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt. **Note:** This runs after the edit failure retry prompt checks, so if both not-in-context files and edit failures (ambiguous or mismatch) are present in the same response, the not-in-context prompt overwrites the edit failure prompt in the textarea:
 
 - **Single file**: "The file {name} has been added to context. Please retry the edit for: ..."
 - **Multiple files**: "The files {name1}, {name2} have been added to context. Please retry the edits for: ..."
@@ -362,7 +362,7 @@ A separate component (`AcInputHistory`) hosted inside the chat input area. The c
 
 ### Snippet Drawer
 
-Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer open/closed state persisted to localStorage (`ac-dc-snippet-drawer`).
+Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer open/closed state persisted to localStorage (`ac-dc-snippet-drawer`). The drawer is automatically closed (and the closed state persisted) when a message is sent.
 
 ### Speech to Text
 
@@ -464,7 +464,7 @@ A `_committing` guard on both client and server prevents concurrent commits. The
 
 When a user sends a chat message, the server broadcasts `AcApp.userMessage({content})` to all clients before streaming begins. This ensures collaborators see the user's message immediately rather than waiting for `streamComplete`.
 
-The sending client ignores this broadcast — it already added the message optimistically in `_send()`. Collaborator clients (detected by having no active `_currentRequestId` or being in passive stream mode) add it to their message list.
+The sending client ignores this broadcast if it has an active `_currentRequestId` that is not a passive stream — it already added the message optimistically in `_send()`. Collaborator clients add it to their message list when they either have no active `_currentRequestId` or are in passive stream mode (`_isPassiveStream = true`).
 
 ### Session Sync (Collaborator)
 

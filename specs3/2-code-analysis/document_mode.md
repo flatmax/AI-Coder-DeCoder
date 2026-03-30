@@ -241,7 +241,7 @@ Image references are extracted as `DocLink` entries with `is_image: true`, ensur
 
 Rather than pattern-matching every possible markdown and HTML image syntax, the extractor uses a **path-extension scan**: each line is matched against `[\w./-]+\.svg` (and optionally other image extensions). This catches all embedding syntaxes — `![alt](path.svg)`, `<img src="path.svg">`, `<source srcset="path.svg">`, reference-style definitions, and even plain-text mentions — without needing per-syntax regexes.
 
-Matched paths are validated against the repository file tree (via `Repo.get_flat_file_list()`) to filter out false positives (e.g., a prose mention of "the old layout.svg was removed"). Only paths that resolve to an existing repo file become `DocLink` entries. This validation is cheap — the flat file list is already cached by the repo layer.
+Matched paths are validated against the repository file tree to filter out false positives (e.g., a prose mention of "the old layout.svg was removed"). Only paths that resolve to an existing repo file become `DocLink` entries. The file set is built by `DocIndex._get_all_repo_files()` using `os.walk` with the same directory exclusions as the symbol index walker. The set is passed to extractors via the `repo_files` parameter. When `repo_files` is `None` (e.g., single-file extraction without prior repo scan), all SVG path matches are included without validation.
 
 All matched references are stored as `DocLink` with `is_image: true`. The `is_image` flag allows the formatter to optionally annotate image refs differently in future (e.g., `→[img] assets/flow.svg`), though the current formatter treats them identically to regular links.
 
@@ -555,7 +555,7 @@ Keyword extraction results are cached alongside the structural outline using the
 
 **Disk persistence:** `DocCache` writes a JSON sidecar file per cached entry to `.ac-dc/doc_cache/` on every `put()`. On initialization, existing sidecar files are loaded back into the in-memory cache so that keyword-enriched outlines survive server restarts. This avoids the ~65s KeyBERT re-enrichment cost on every restart — only files whose mtime has changed since the last run need re-processing.
 
-Each sidecar file (`<safe_path>.json`) stores:
+Each sidecar file is named by replacing `/` and `\` in the source path with `__` and appending `.json` (e.g., `docs__readme.md.json`). Each file stores:
 - `path` — original relative file path
 - `mtime` — file modification time at indexing
 - `content_hash` — deterministic hash of the outline (for stability tracking)

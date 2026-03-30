@@ -169,6 +169,7 @@ The token counter uses hardcoded model-family defaults for limits and `tiktoken`
 | `max_input_tokens` | Hardcoded: 1,000,000 for all currently supported models (Claude, GPT-4, GPT-3.5) | 1,000,000 |
 | `max_output_tokens` | Hardcoded: 8,192 for Claude models, 4,096 for others | 4,096 |
 | `max_history_tokens` | Computed: `max_input_tokens / 16` | — |
+| `min_cacheable_tokens` | Model-aware: 4096 for Opus 4.5/4.6 and Haiku 4.5; 1024 for all other Claude models and non-Claude models. Used by `cache_target_tokens_for_model()` | 1,024 |
 
 **Note:** The implementation does not query `litellm`'s model registry at runtime. All limits are hardcoded constants in `token_counter.py`. The `cl100k_base` encoding is used for all models regardless of provider.
 
@@ -278,7 +279,7 @@ Additionally, `cache_target_tokens_for_model(min_cacheable_tokens)` computes the
 
 ## `.ac-dc/` Directory
 
-A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first run by `ConfigManager._init_ac_dc_dir()` and added to `.gitignore`. The `images/` subdirectory is also created at this time (not lazily by the history store).
+A per-repository working directory at `{repo_root}/.ac-dc/`. Created on first run by `ConfigManager._init_ac_dc_dir()` and added to `.gitignore`. The `images/` subdirectory is created by both `ConfigManager._init_ac_dc_dir()` and `HistoryStore.__init__()` (both use `mkdir(exist_ok=True)`, so whichever runs first creates it and the other is a no-op).
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|

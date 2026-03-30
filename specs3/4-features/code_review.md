@@ -279,10 +279,10 @@ get_commit_graph(limit?, offset?) -> {
 }
 ```
 
-Implementation: runs `git log --all --topo-order --format=...` with `%P` (parent SHAs) embedded in the format string, plus `--skip` and `--max-count` for pagination. The `%P` placeholder produces space-separated parent SHAs within the formatted output, which are then split during parsing. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). Both are fast operations — milliseconds even on large repositories.
+Implementation: runs `git log --all --topo-order --format=...` with `%P` (parent SHAs) embedded in the format string, plus `--skip` and `--max-count` for pagination. The `%P` placeholder produces space-separated parent SHAs within the formatted output, which are then split during parsing. Branch data comes from `git branch [-a] --sort=-committerdate --format=...` (with `-a` when remote branches are included). The branch format string includes `%(symref)` to detect symbolic references. Both are fast operations — milliseconds even on large repositories.
 
 The backend post-filters branch results to remove:
-- Symbolic refs: `HEAD`, `origin/HEAD`, entries containing ` -> `
+- Symbolic refs: `HEAD`, `origin/HEAD`, entries containing ` -> `, and any branch with a non-empty `%(symref)` value (which indicates a symbolic reference even when the name doesn't contain ` -> `)
 - Bare remote aliases: a name like `origin` that is a prefix of other branch names (e.g. `origin/master`) is a remote alias, not a real branch. Filtered by checking if any other branch name starts with `name + "/"`, excluding the current branch.
 
 The frontend computes lane assignment entirely client-side from the parent relationships and branch tip positions. No layout computation happens on the backend.

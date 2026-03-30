@@ -11,7 +11,6 @@ User clicks Send
     │
     ├─ Show user message in UI immediately
     ├─ Generate request ID for callback correlation
-    ├─ Start watchdog timer (5 min safety timeout)
     │
     ▼
 Server: LLMService.chat_streaming(request_id, message, files, images)
@@ -27,8 +26,12 @@ Background task: _stream_chat
     ├─ Remove deselected files from context
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
-    ├─ Initialize stability tracker from reference graph (if not already done at startup)
-    ├─ Re-extract doc file structures if doc mode:
+    ├─ Re-index symbol index (code mode) or re-extract doc structures (doc mode):
+    │   Code mode:
+    │       ├─ Run symbol_index.index_repo() on the full file list (mtime-based — only changed files re-parsed)
+    │       ├─ Initialize stability tracker from reference graph (if not already done at startup)
+    │       ├─ Seed system:prompt into L0 (on first request only, after index_repo so legend is final)
+    │   Doc mode:
     │       ├─ Refresh repo file set and doc file list in executor
     │       ├─ Use _extract_outlines_structure_only (accepts any cached outline regardless of keyword model)
     │       ├─ Cache unenriched outlines immediately for newly-changed files
@@ -132,14 +135,15 @@ User-excluded index files (see [Cache Tiering — User-Excluded Files](cache_tie
 ## Client-Side Initiation
 
 1. Guard — skip if empty input
-2. Reset scroll — re-enable auto-scroll
-3. Build URL context — get included fetched URLs, append to LLM message (not shown in UI)
-4. Show user message immediately
-5. Clear input, images, detected URLs
-6. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
-7. Track request — store in pending requests map
-8. Set streaming state (disable input, start watchdog)
-9. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
+2. Exit file search mode if active (restore full tree, clear search query)
+3. Reset scroll — re-enable auto-scroll
+4. Build URL context — get included fetched URLs, append to LLM message (not shown in UI)
+5. Show user message immediately
+6. Clear input, images, detected URLs, close snippet drawer
+7. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
+8. Track request — store current request ID
+9. Set streaming state (disable input)
+10. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
 
 ## LLM Streaming (Worker Thread)
 
@@ -446,7 +450,6 @@ Session total: 182,756
 | Invalid/binary files | streamComplete with error, client auto-deselects |
 | Concurrent stream | Rejected immediately |
 | Streaming exception | Caught, traceback printed, streamComplete with error |
-| Client watchdog | 5-minute timeout forces recovery |
 | History token emergency | Oldest messages truncated if > 2× compaction trigger |
 | Budget exceeded | Largest files shed with warning |
 

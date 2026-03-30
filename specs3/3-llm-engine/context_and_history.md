@@ -31,6 +31,17 @@ Mode:
 
 The mode determines which index (symbol vs document) feeds the context engine. Set via `set_mode(mode)` (accepts string or enum). Queried via the `mode` property. The mode also affects prompt assembly — in document mode, the symbol map header is replaced with a document outline header (`DOC_MAP_HEADER` instead of `REPO_MAP_HEADER`), and the system prompt header changes accordingly.
 
+## Header Constants
+
+The following module-level constants are defined in `context.py` and used by both `assemble_messages` and `assemble_tiered_messages`. Their values are documented in [Prompt Assembly — Header Constants](prompt_assembly.md#header-constants):
+
+- `REPO_MAP_HEADER`, `DOC_MAP_HEADER` — index section headers
+- `FILE_TREE_HEADER` — file tree section header
+- `URL_CONTEXT_HEADER` — URL context section header
+- `FILES_ACTIVE_HEADER`, `FILES_L0_HEADER`, `FILES_L1_HEADER`, `FILES_L2_HEADER`, `FILES_L3_HEADER` — file content section headers by tier
+- `TIER_SYMBOLS_HEADER` — continued repository structure header for L1–L3 symbol blocks
+- `REVIEW_CONTEXT_HEADER` — review context section header
+
 ## Initialization
 
 ```pseudo
@@ -57,7 +68,7 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 
 | Operation | Description |
 |-----------|-------------|
-| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after). System event messages are created by calling `add_message("user", text)` then setting `system_event: true` on the appended dict directly (via `_history[-1]["system_event"] = True`) |
+| `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after). System event messages are created by calling `add_message("user", text)` then setting `system_event: true` on the appended dict directly (via `_history[-1]["system_event"] = True`). The context manager does not have a dedicated system event method — the caller accesses `_history` directly for this flag |
 | `add_exchange(user, assistant)` | Append pair atomically (used for session restore; not used during streaming) |
 | `get_history()` | Return a copy |
 | `set_history(messages)` | Replace entirely with a shallow copy of each message dict (after compaction or session load) |
@@ -161,7 +172,7 @@ Three layers of defense:
 History compaction triggers when tokens exceed `compaction_trigger_tokens`. See Compaction section below.
 
 ### Layer 2: Emergency Truncation
-If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method exists on `ContextManager` as `emergency_truncate()` but is **not currently called** by `_stream_chat`. The streaming handler only calls `shed_files_if_needed()` (Layer 3). Emergency truncation is available as a manual safety net for future use or external callers but is not part of the current streaming pipeline.
+If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method exists on `ContextManager` as `emergency_truncate()` but is **not currently called** by `_stream_chat`. The streaming handler only calls `shed_files_if_needed()` (Layer 3) before prompt assembly, and `compact_history_if_needed()` after the response completes. Emergency truncation is available as a manual safety net for future use or external callers but is not part of the current streaming pipeline.
 
 ### Layer 3: Pre-Request Shedding
 Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat. The total estimate (`_estimate_total_tokens`) sums:

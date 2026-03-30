@@ -100,7 +100,7 @@ When `openFile` is called and an adjacent neighbor in the file navigation grid a
 
 ### Batch Save (`saveAll`)
 
-Public method that iterates all dirty files and saves each one. For each file, if it is the currently active file the content is read from the editor; otherwise the last-known `modified` content is used. Each file goes through the same save pipeline as single-file save (update `savedContent`, clear dirty state, dispatch event).
+Public method that iterates all dirty files and saves each one. For each file, the `_saveFile(path)` method is called. If the file is the currently active tab and the editor exists, its content is read live from the Monaco editor via `getModifiedEditor().getValue()`. Otherwise, the last-known `modified` content stored on the file object is used. Each file goes through the same save pipeline as single-file save (update `savedContent`, clear dirty state, dispatch event).
 
 ### Dirty Tracking
 Per-file `savedContent` vs current. Global dirty set. State change events to parent.
