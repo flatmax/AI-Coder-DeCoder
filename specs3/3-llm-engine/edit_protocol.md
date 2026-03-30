@@ -167,7 +167,15 @@ Merge when edits are: overlapping, adjacent (within 3 lines), or have sequential
 
 ### File Path Detection
 
-Recognized by: contains `/` or `\`, doesn't start with `#`/`//`/`*`/`-`/`>`, < 200 chars, immediately before `««« EDIT`.
+A line is considered a file path if it meets these criteria (< 200 chars, not empty):
+
+1. **Not a comment** — doesn't start with `#`, `//`, `*`, `-`, `>`, or triple backticks
+2. **Path with separators** — contains `/` or `\` (most common case)
+3. **Simple filename with extension** — matches `\.?[\w\-\.]+\.\w+` (e.g., `foo.js`, `.env.local`)
+4. **Dotfile without extension** — matches `\.\w[\w\-\.]*` (e.g., `.gitignore`, `.dockerignore`, `.env`)
+5. **Known extensionless filenames** — `Makefile`, `Dockerfile`, `Vagrantfile`, `Gemfile`, `Rakefile`, `Procfile`, `Brewfile`, `Justfile`
+
+The path must appear on the line **immediately before** `««« EDIT` (with nothing else between except blank lines that cause a state reset).
 
 ### Streaming Considerations
 

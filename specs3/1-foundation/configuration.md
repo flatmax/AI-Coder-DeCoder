@@ -17,6 +17,7 @@ Configuration is split across multiple files, each serving a distinct purpose. A
 | Commit message prompt | System instructions for commit message generation | Markdown |
 | System reminder | Edit-format reinforcement appended to each user prompt | Markdown |
 | Review system prompt | System instructions for code review mode | Markdown |
+| Document system prompt | System instructions for document mode | Markdown |
 
 ### LLM Config
 
@@ -240,7 +241,7 @@ The following computed properties on `ConfigManager` provide structured access t
 | `llm_config` | Full LLM config dict | `llm.json` |
 | `app_config` | Full app config dict | `app.json` |
 | `model` | Primary model name | `llm_config.model` (default: `anthropic/claude-sonnet-4-20250514`) |
-| `smaller_model` | Smaller model name | `llm_config.smaller_model` or `llm_config.smallerModel` (default: `anthropic/claude-haiku-4-20250414`) |
+| `smaller_model` | Smaller model name | `llm_config.smaller_model` or `llm_config.smallerModel` — accepts both snake_case and camelCase keys (default: `anthropic/claude-haiku-4-20250414`) |
 | `cache_min_tokens` | Minimum cache tokens | `llm_config.cache_min_tokens` (default: 1024) |
 | `cache_buffer_multiplier` | Buffer multiplier | `llm_config.cache_buffer_multiplier` (default: 1.1) |
 | `cache_target_tokens` | Fallback cache target | `cache_min_tokens × cache_buffer_multiplier` |

@@ -6,7 +6,7 @@ This is the **single source of truth** for how LLM messages are assembled. All p
 
 The assembly system supports two modes:
 - **Tiered assembly** (`assemble_tiered_messages`) — organizes content into L0–L3 cached blocks with `cache_control` markers. This is the primary mode.
-- **Flat assembly** (`assemble_messages`) — produces a flat message array without cache breakpoints. Used as a fallback or during development.
+- **Flat assembly** (`assemble_messages`) — produces a flat message array without cache breakpoints. Used as a fallback or during development. Accepts an optional `graduated_files` set — files in this set are excluded from the active "Working Files" section (their content is assumed to be in a cached tier).
 
 The streaming handler uses tiered assembly, passing a `tiered_content` dict built from the stability tracker's tier assignments (see [Tiered Assembly Data Flow](#tiered-assembly-data-flow) below).
 
@@ -175,7 +175,7 @@ Complete list of files in the repository:
 
 ```
 
-The file tree is a **flat sorted list** — one file per line, no indentation:
+The file tree content is built by the streaming handler as a **flat sorted list** with a count header — one file per line, no indentation. The `FILE_TREE_HEADER` is prepended during assembly:
 ```
 # File Tree (236 files)
 
@@ -183,6 +183,8 @@ The file tree is a **flat sorted list** — one file per line, no indentation:
 README.md
 src/main.py
 ```
+
+The streaming handler constructs this as `f"# File Tree ({len(flat_files)} files)\n\n" + "\n".join(flat_files)`, which is then wrapped by the assembly function with `FILE_TREE_HEADER`.
 
 ### URL Context (Currently Uncached)
 
@@ -310,8 +312,16 @@ for tier in [L0, L1, L2, L3]:
     history_messages = []
 
     for key, item in tier_items:
-        if key starts with "sym:":
-            path = key.removeprefix("sym:")
+        if key starts with "system:":
+            continue  # system prompt handled separately by assemble_tiered_messages
+
+        if key starts with "symbol:" or key starts with "doc:" or key starts with "file:":
+            path = key.split(":", 1)[1]
+            if path in excluded_index_files:
+                continue
+
+        if key starts with "symbol:":
+            path = key.removeprefix("symbol:")
             block = symbol_index.get_file_symbol_block(path)
             if block:
                 symbols_text += block + "\n"
@@ -368,7 +378,7 @@ for tier in [L0, L1, L2, L3]:
             path = key.removeprefix("file:")
             graduated_files.add(path)
             symbol_map_exclude.add(path)  # full content present, no need for index block
-        elif key starts with "sym:" or key starts with "doc:":
+        elif key starts with "symbol:" or key starts with "doc:":
             path = key.split(":", 1)[1]
             symbol_map_exclude.add(path)  # index block in tier, exclude from main map
         elif key starts with "url:":
@@ -416,19 +426,19 @@ messages = context_manager.assemble_tiered_messages(
 | Item Type | Content Source | Exclusion Effect |
 |-----------|--------------|------------------|
 | `file:{path}` in tier | `FileContext.get_content(path)` | Excluded from active Working Files; index block excluded from main map |
-| `sym:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
+| `symbol:{path}` in tier | `SymbolIndex.get_file_symbol_block(path)` | Excluded from main symbol map output |
 | `doc:{path}` in tier | `DocIndex.get_file_doc_block(path)` | Excluded from main doc index output |
 | `url:{hash}` in tier | `URLService.get_url_content(url).format_for_prompt()` | Excluded from uncached URL context pair (**not yet implemented** — URLs currently always appear in uncached section) |
 | `history:{N}` in tier | `ContextManager.get_history()[N]` | Excluded from active history messages |
 | `file:{path}` in active | `FileContext.get_content(path)` | Index block excluded from main map (full content present) |
-| `sym:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
+| `symbol:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
 | `doc:{path}` in active | Not rendered separately | Listed in active items for N-tracking only |
 | `url:{hash}` in active | Not rendered separately | Listed in active items for N-tracking only (first request only — enters L1 immediately) |
 
 ### A File Never Appears Twice
 
 A file's content is present in exactly one location:
-- **Full content** in a cached tier block (graduated) — index block excluded from all maps
+- **Full content** in a cached tier block (graduated) — index block (`symbol:` or `doc:` entry) excluded from all maps
 - **Full content** in the active Working Files section — index block excluded from main map
 - **Index block only** in a cached tier — when full content is not selected
 - **Index block only** in the main map — default for unselected, non-graduated files

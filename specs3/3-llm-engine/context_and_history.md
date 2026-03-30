@@ -29,7 +29,7 @@ Mode:
     DOC = "doc"      # Document index feeds context
 ```
 
-The mode determines which index (symbol vs document) feeds the context engine. Set via `set_mode(mode)` (accepts string or enum). Queried via the `mode` property.
+The mode determines which index (symbol vs document) feeds the context engine. Set via `set_mode(mode)` (accepts string or enum). Queried via the `mode` property. The mode also affects prompt assembly — in document mode, the symbol map header is replaced with a document outline header (`DOC_MAP_HEADER` instead of `REPO_MAP_HEADER`), and the system prompt header changes accordingly.
 
 ## Initialization
 
@@ -60,10 +60,11 @@ An in-memory list of `{role, content}` dicts. This is the **working copy** for a
 | `add_message(role, content)` | Append single message (used for user message before streaming, assistant message after). System event messages are created by calling `add_message("user", text)` then setting `system_event: true` on the appended dict directly (via `_history[-1]["system_event"] = True`) |
 | `add_exchange(user, assistant)` | Append pair atomically (used for session restore; not used during streaming) |
 | `get_history()` | Return a copy |
-| `set_history(messages)` | Replace entirely (after compaction or session load) |
+| `set_history(messages)` | Replace entirely with a shallow copy of each message dict (after compaction or session load) |
 | `clear_history()` | Empty list + purge history from stability tracker |
 | `reregister_history_items()` | Purge stability entries without clearing history |
 | `history_token_count()` | Token count of current history |
+| `set_stability_tracker(tracker)` | Attach or replace the stability tracker instance (used during mode switching) |
 
 ### System Prompt
 
@@ -78,10 +79,10 @@ The system prompt is set at construction and can be swapped at runtime. Review m
 
 | Method | Description |
 |--------|-------------|
-| `set_url_context(url_parts)` | Set URL context parts (list of formatted URL strings) for prompt assembly |
+| `set_url_context(url_parts)` | Set URL context parts (list of strings) for prompt assembly |
 | `clear_url_context()` | Clear URL context |
 
-URL context is injected as a user/assistant pair between the file tree and review context during prompt assembly. Multiple URLs are joined with `\n---\n`.
+URL context is injected as a user/assistant pair between the file tree and review context during prompt assembly. Multiple URL parts stored via `set_url_context` are joined with `\n---\n` during assembly (in `assemble_messages` and `assemble_tiered_messages`). In practice, the streaming handler calls `format_url_context()` on the URL service (which already joins multiple URLs with `\n---\n` internally) and passes the result as a single-element list to `set_url_context` — so the context manager's join is a no-op (single element). The two-level join design allows future callers to pass multiple URL parts directly if needed.
 
 ### Review Context
 
@@ -141,6 +142,13 @@ get_token_budget() -> {
     remaining,
     needs_summary        // delegates to should_compact()
 }
+
+get_compaction_status() -> {
+    enabled,
+    trigger_tokens,
+    current_tokens,      // current history token count
+    percent              // rounded: current / trigger * 100
+}
 ```
 
 ---
@@ -156,7 +164,13 @@ History compaction triggers when tokens exceed `compaction_trigger_tokens`. See 
 If compaction fails AND history exceeds `2 × compaction_trigger_tokens`, oldest messages are dropped without summarization. The method exists on `ContextManager` as `emergency_truncate()` but is **not currently called** by `_stream_chat`. The streaming handler only calls `shed_files_if_needed()` (Layer 3). Emergency truncation is available as a manual safety net for future use or external callers but is not part of the current streaming pipeline.
 
 ### Layer 3: Pre-Request Shedding
-Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat.
+Before assembling the prompt, if total estimated tokens exceed 90% of `max_input_tokens`, files are dropped from context (largest first) with a warning in chat. The total estimate (`_estimate_total_tokens`) sums:
+- System prompt tokens (`counter.count(system_prompt)`)
+- File context tokens (`file_context.count_tokens(counter)`)
+- History tokens (`history_token_count()`)
+- A fixed 500-token overhead for headers, formatting, and other structural content
+
+The shedding loop removes the largest file from context on each iteration until the total drops below the 90% threshold or no files remain.
 
 ---
 
@@ -297,6 +311,8 @@ oldest messages ◄────────────────────�
                            ▲ verbatim_start_idx
 ```
 
+The verbatim window start is found by counting backward from the end of the message list, accumulating tokens until `verbatim_window_tokens` is reached. Separately, `min_verbatim_exchanges` user messages are counted backward. The earlier (more inclusive) of the two indices is used as `verbatim_start_idx`.
+
 ### Topic Boundary Detection
 
 A smaller/cheaper LLM analyzes the conversation to find where the topic shifted.
@@ -328,7 +344,34 @@ On failure or unparseable output: safe defaults (null boundary, 0 confidence).
 | Summarize | Boundary before verbatim window, or low confidence, or no boundary | Replace pre-verbatim messages with summary |
 | None | Below trigger or empty | No changes |
 
-After compaction, if result contains fewer user messages than `min_verbatim_exchanges`, earlier messages are prepended.
+### Compaction Return Value
+
+```pseudo
+CompactionResult:
+    case: "truncate" | "summarize" | "none"
+    messages: list[{role, content}]    # The compacted message list
+    boundary: TopicBoundary?           # The detected boundary (present for truncate/summarize)
+    summary: string?                   # The summary text (present for summarize case)
+```
+
+`compact_history_if_needed` returns `None` when compaction is not needed (below threshold), or the `CompactionResult` dict. The caller checks `result.case != "none"` before replacing history. An `apply_compaction` convenience method on `HistoryCompactor` accepts the original messages and a compaction result, returning the compacted messages (or original messages if case is "none").
+
+### Summary Message Format
+
+When the summarize strategy is applied, the pre-verbatim messages are replaced with a summary pair:
+
+```pseudo
+{"role": "user", "content": "[History Summary]\n{summary_text}"}
+{"role": "assistant", "content": "Ok, I understand the context from the previous conversation."}
+```
+
+The remaining verbatim window messages follow immediately after this pair.
+
+After compaction, if the result contains fewer user messages than `min_verbatim_exchanges`, earlier messages from before the cut point are prepended. For summarize cases, the prepended messages are inserted after the summary pair (at offset 2) to maintain the summary → earlier context → verbatim window ordering.
+
+### Compaction Trigger Check
+
+`compact_history_if_needed(already_checked=False)` checks `should_compact()` unless `already_checked=True` is passed. The streaming handler pre-checks with `should_compact()` and passes `already_checked=True` to avoid the redundant check. Returns `None` if compaction is not needed.
 
 ### Integration with Cache Stability
 
@@ -338,14 +381,13 @@ After compaction, all `history:*` entries are purged from the stability tracker.
 
 Compaction progress is communicated via the `compactionEvent` callback (the same channel used for URL fetch notifications during streaming):
 
-| Event | Behavior |
+| Stage | Behavior |
 |-------|----------|
-| `compaction_start` | Show "Compacting..." message, disable input |
-| `compaction_complete` | Rebuild message display from compacted messages |
+| `compacting` | Show "🗜️ Compacting history..." toast |
+| `compacted` | Rebuild message display from compacted messages (includes `messages` array and `case` field) |
 | `compaction_error` | Show error, re-enable input |
-| `case: "none"` | Remove "Compacting..." silently |
 
-The backend wraps `compact_history_if_needed()` with these notifications, sent via `_event_callback("compactionEvent", request_id, event_dict)`. A 500ms delay before `compaction_start` prevents flicker for fast compactions.
+The backend wraps `compact_history_if_needed()` with these notifications, sent via `_event_callback("compactionEvent", request_id, event_dict)`. The `compaction_complete` event delivery uses a retry loop (up to 3 attempts with 1-second delays) since the WebSocket may be momentarily busy from the preceding `streamComplete` write.
 
 ---
 
@@ -365,6 +407,20 @@ The backend wraps `compact_history_if_needed()` with these notifications, sent v
 - should_compact false when disabled or below trigger
 - Compaction status returns enabled/trigger/percent
 
+### Non-Tiered Prompt Assembly Method
+
+```pseudo
+assemble_messages(
+    user_prompt,
+    images?,
+    symbol_map="",
+    symbol_legend="",
+    file_tree="",
+    graduated_files?      # set of file paths graduated to cached tiers
+                          # (excluded from active "Working Files" section)
+) -> list[message_dict]
+```
+
 ### Prompt Assembly (non-tiered)
 - System message first with system prompt content
 - Symbol map appended to system message under Repository Structure header
@@ -373,7 +429,25 @@ The backend wraps `compact_history_if_needed()` with these notifications, sent v
 - Active files as user/assistant pair with Working Files header
 - History messages appear before current user prompt
 - Images produce multimodal content blocks; no images produces string
-- estimate_prompt_tokens > 0
+- estimate_prompt_tokens(user_prompt, images?, symbol_map, symbol_legend, file_tree) > 0
+
+### Tiered Prompt Assembly Method
+
+```pseudo
+assemble_tiered_messages(
+    user_prompt,
+    images?,
+    symbol_map="",
+    symbol_legend="",
+    doc_legend="",        # included when cross-reference mode is active
+    file_tree="",
+    tiered_content?       # dict with l0/l1/l2/l3 keys, each containing:
+                          #   {symbols: str, files: str, history: list,
+                          #    graduated_files: list, graduated_history_indices: list}
+) -> list[message_dict]
+```
+
+See [Prompt Assembly — Tiered Assembly Data Flow](prompt_assembly.md#tiered-assembly-data-flow) for the complete data flow and [Prompt Assembly — Message Array Structure](prompt_assembly.md#message-array-structure) for the output format.
 
 ### Prompt Assembly (tiered)
 - Graduated files excluded from active files section
@@ -461,7 +535,7 @@ The history store reconstructs images into an `images` key on message dicts. Bot
 
 ### Auto-Restore on Startup
 
-On LLM service initialization (before any client connects), the server automatically loads the most recent session from the persistent store into the context manager:
+On LLM service initialization, the most recent session is loaded from the persistent store into the context manager:
 
 1. Query `list_sessions(limit=1)` for the newest session
 2. Load its messages via `get_session_messages_for_context`

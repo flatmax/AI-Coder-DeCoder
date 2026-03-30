@@ -218,8 +218,8 @@ The `compactionEvent` callback serves as a general-purpose progress channel duri
 
 | Stage | Purpose |
 |-------|---------|
-| `compaction_start` | History compaction beginning |
-| `compaction_complete` | History compaction finished |
+| `compacting` | History compaction beginning |
+| `compacted` | History compaction finished (includes `messages` array and `case` field) |
 | `compaction_error` | History compaction failed |
 | `url_fetch` | URL fetch in progress (toast notification) |
 | `url_ready` | URL fetch completed (success toast) |

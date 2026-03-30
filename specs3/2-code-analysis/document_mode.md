@@ -611,6 +611,8 @@ For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexin
 
 **Structure-only extraction method:** `DocIndex._extract_outlines_structure_only()` is a separate code path from `_extract_outlines()` that accepts any cached outline regardless of keyword model — it passes `keyword_model=None` to the cache `get()` call, which skips the model-match check. This means an outline enriched with an old model, or an unenriched outline, will be accepted and reused. Only files whose mtime has changed are re-parsed. This method is used by mode switching and chat requests (via `_stream_chat`) to avoid blocking on keyword enrichment during user-facing operations.
 
+Both methods return a list of `(path, mtime, outline, text)` tuples for files that needed re-parsing (cache miss). The caller uses this list to cache unenriched outlines immediately and optionally queue them for background keyword enrichment.
+
 The distinction between the two extraction methods:
 
 | Method | Cache lookup | Returns in `needs_enrichment` | Used by |
@@ -766,7 +768,7 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 ### What Changes in Document Mode
 
 1. **Symbol map removed** — no code symbols in context (unless cross-reference mode is enabled — see [Cache Tiering — Cross-Reference Mode](../3-llm-engine/cache_tiering.md#cross-reference-mode)). The entire token budget is available for document outlines, selected document content, and conversation history
-2. **File tree unchanged** — all files remain visible. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
+2. **File tree unchanged** — all files remain visible and file selection is preserved across mode switches. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
 5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
@@ -811,8 +813,7 @@ User clicks mode toggle
     ├── Reset cross-reference toggle to OFF (remove cross-ref items from tracker if active)
     ├── Re-extract doc file structures (mtime-based — only changed files re-parsed, instant)
     ├── Queue changed files for background enrichment (enrichment toast if any)
-    ├── Clear file context (selected files)
-    ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
+    ├── Preserve file selection (selected files carry over between modes)
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (get_snippets returns "doc" array from unified snippets.json)
     ├── Switch stability tracker to doc-mode instance (separate state per mode)

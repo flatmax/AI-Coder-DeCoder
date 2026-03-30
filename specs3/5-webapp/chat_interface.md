@@ -153,7 +153,13 @@ During streaming: edit blocks detected mid-stream render as `edit-pending` with 
 
 The file path line preceding `««« EDIT` is stripped from the text segment and attached to the edit segment. Consecutive file-path-like lines are handled by treating only the last one before `««« EDIT` as the actual path.
 
-**Note:** This is a separate, simplified parser from the backend's `edit_parser.py`. The frontend parser only needs to identify block boundaries for rendering — it does not perform anchor matching or validation. Its file-path heuristic (`_isFilePath`) uses simpler rules than the backend: rejects lines starting with `#`, `/`, `*`, `-`, `>`, or triple backticks; accepts lines containing `/` or `\`, or matching `word.ext` patterns; rejects lines over 200 characters.
+**Note:** This is a separate, simplified parser from the backend's `edit_parser.py`. The frontend parser only needs to identify block boundaries for rendering — it does not perform anchor matching or validation. Its file-path heuristic (`_isFilePath`) uses simpler rules than the backend:
+
+- Rejects: empty lines, lines > 200 chars, lines starting with `#`, `/`, `*`, `-`, `>`, or triple backticks
+- Accepts: lines containing `/` or `\` (path separators)
+- Accepts: lines matching `\.?[\w\-\.]+\.\w+` (filename with extension, e.g. `foo.js`, `.env.local`)
+- Accepts: lines matching `\.\w[\w\-\.]*` (dotfile without extension, e.g. `.gitignore`)
+- Does NOT check for known extensionless filenames (unlike the backend which recognizes `Makefile`, `Dockerfile`, etc.)
 
 **Code fence stripping:** When the LLM wraps an edit block inside a markdown code fence (`` ``` ``), the parser strips the opening fence (if it immediately precedes the file path) and the closing fence (if it immediately follows `»»» EDIT END`). This handles a common LLM formatting quirk without requiring the backend to be aware of it.
 
@@ -434,9 +440,14 @@ The overlay renders file match sections with `data-file-section` attributes for 
 
 When review mode is active, a slim status bar appears above the chat input showing review summary and diff inclusion count. See [Code Review — Review Status Bar](../4-features/code_review.md#review-status-bar). The commit button is disabled during review.
 
-### Review Snippets
+### Snippet Reloading
 
-When review mode is active, `LLMService.get_snippets()` returns review-specific snippets (from the `"review"` key in the unified `snippets.json`). The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+Snippets are reloaded from the server whenever the context changes:
+- On **RPC ready** (initial connection and reconnect)
+- On **review state change** (entering or exiting review mode)
+- On **mode change** (code ↔ document mode switch, via `mode-changed` event)
+
+`LLMService.get_snippets()` checks review mode first, then document mode, and returns the appropriate array from the unified `snippets.json`. The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
 
 ### Commit Flow (Server-Driven)
 
@@ -483,10 +494,14 @@ The chat panel's `_showToast` only sets its local `_toast` property — it does 
 The chat panel's `_onCompactionEvent` handler routes compaction event stages to appropriate toast types:
 
 - `url_fetch` and `url_ready` → transient local toast (during streaming)
+- `compacting` → transient local toast showing compaction in progress
+- `compacted` → replace message list with compacted messages (from `event.messages` array, mapped to `{role, content}` only); show success toast
 - `doc_enrichment_queued` → create persistent enrichment toast showing pending files
 - `doc_enrichment_file_done` → update persistent toast (remove completed file)
 - `doc_enrichment_complete` → transition persistent toast to success state, auto-dismiss after 3s
 - `doc_enrichment_failed` → show warning in persistent toast for the failed file
+
+The handler accepts events for both the current streaming request ID (`_currentRequestId`) and the most recently completed request ID (`_lastRequestId`), since compaction runs asynchronously after `streamComplete`.
 
 See [Document Mode — Enrichment Toast](../2-code-analysis/document_mode.md#enrichment-toast) for the full persistent toast specification.
 

@@ -7,17 +7,21 @@ Two components that consume the same backend data (`LLM.get_context_breakdown`) 
 ## Shared Backend
 
 Both viewer tabs and the HUD call the same endpoint, with shared capabilities:
-- URL content modal (view fetched URL content) — each tab renders its own `<ac-url-content-dialog>` instance; see [Chat Interface — URL Content Dialog](chat_interface.md#url-content-dialog) for the dialog spec
-- Symbol map modal (view full symbol map)
-- URL inclusion toggling and removal
-- Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)
-- Auto-refresh on `stream-complete` and `files-changed` events while visible; mark stale when hidden
 
 ### FileContext Sync Before Breakdown
 
 Before computing the breakdown, `get_context_breakdown()` synchronizes the in-memory `FileContext` with the current `_selected_files` list — removing files that are no longer selected and loading files that are newly selected. This ensures the breakdown reflects what the *next* LLM request would look like, not a stale snapshot from the last request. Without this sync, the context viewer would show outdated data when the user changes file selection between requests.
 
 **Limitation:** The sync silently skips binary files and files that don't exist (checking `is_binary_file` and `file_exists` before loading). Unlike `_stream_chat`, which reports `binary_files` and `invalid_files` in the stream result, the breakdown sync does not surface these problems. The context viewer may therefore show a clean token budget while the next actual request would produce binary/missing file warnings and exclude those files. The discrepancy is minor (binary/missing files would contribute zero tokens either way) but could be confusing if the user expects the viewer to flag invalid selections.
+- URL content modal (view fetched URL content) — each tab renders its own `<ac-url-content-dialog>` instance; see [Chat Interface — URL Content Dialog](chat_interface.md#url-content-dialog) for the dialog spec
+- Map block modal (view full symbol/doc map block for any item) — the cache tab reuses `<ac-url-content-dialog>` for this purpose, passing the map block content as the `content` field and the item path as the title. The dialog's generic layout (title, scrollable body) works for both URL content and map blocks
+- URL inclusion toggling and removal
+- Loading guard prevents concurrent requests (additional triggers while a fetch is in-flight are dropped)
+- Auto-refresh on `stream-complete` and `files-changed` events while visible; mark stale when hidden
+
+### Tier Content Breakdown (Shared)
+
+A static helper `_tier_content_breakdown(tier_items)` converts raw tracker items into structured detail dicts for both the frontend context breakdown and the terminal HUD. For each item, it classifies the type from the key prefix (`system:` → system, `file:` → files, `symbol:` → symbols, `doc:` → doc_symbols, `history:` → history), extracts the display name and path, and looks up the promotion threshold from the tier config. History items extract a numeric sort index from the key for correct ordering. The result is sorted by: system first, then symbols/doc_symbols, files, history (numerically by index), other.
 
 ### Mode-Aware Breakdown Computation
 
@@ -84,13 +88,15 @@ This ensures the context breakdown and terminal HUD report accurate token counts
 }
 ```
 
-Cache hit rate is computed locally as `cached_tokens / total_tokens` from tier data. **Real provider-reported usage** (cache read/write tokens) is available in the per-request `token_usage` object delivered via `streamComplete`, and in `session_totals`.
+Cache hit rate is computed locally as `cached_tokens / total_tokens` from tier data. Additionally, a **`provider_cache_rate`** field is computed from cumulative session data (`cache_read_tokens / input_tokens`) when available — this is more accurate than the tier-based estimate since it reflects actual LLM provider behavior across the full session. The HUD and context tab prefer `provider_cache_rate` when non-null, falling back to the local `cache_hit_rate`.
 
 ---
 
 ## Context Tab
 
-The Context tab contains two sub-views selectable via a **Budget / Cache** pill toggle in the toolbar. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same stale-detection and refresh-on-visible behavior.
+The Context tab contains two sub-views selectable via a **Budget / Cache** pill toggle in the toolbar. The active sub-view is persisted to localStorage (`ac-dc-context-subview`). Both sub-views share the same stale-detection and refresh-on-visible behavior. The Budget sub-view shows a refresh button in the toolbar; the Cache sub-view delegates its own toolbar (with filter input, sort toggle, stale badge, and refresh button) to the embedded `<ac-cache-tab>` component.
+
+Both sub-views listen for `stream-complete`, `files-changed`, and `mode-changed` window events. When visible, they refresh immediately; when hidden, they set a stale flag and refresh on next `onTabVisible()` call.
 
 ### Budget Sub-View
 
@@ -118,6 +124,20 @@ Session Totals
 #### Budget Bar Colors
 
 ≤ 75% Green, 75–90% Yellow, > 90% Red.
+
+#### Stacked Category Bar
+
+Below the budget bar, a proportional **stacked horizontal bar** visualizes the relative size of each category. Each segment is colored by category:
+
+| Category | Color |
+|----------|-------|
+| System | Green `#50c878` |
+| Symbol Map | Blue `#60a5fa` |
+| Files | Amber `#f59e0b` |
+| URLs | Purple `#a78bfa` |
+| History | Orange `#f97316` |
+
+Below the bar, a **legend row** shows colored dots with labels and token counts (e.g., `● System: 1.6K`). Only categories with non-zero tokens appear. In document mode, the symbol map label adapts: "Doc Map" (default), "Sym+Docs" or "Docs+Sym" (with cross-reference enabled).
 
 #### Model Info
 
@@ -147,13 +167,17 @@ Fixed footer below categories: grid showing cumulative session totals (total, pr
 
 Rendered by an embedded `<ac-cache-tab>` component inside the Context tab. When the user switches to the Cache sub-view, the context tab forwards `onTabVisible()` to the embedded cache tab to trigger a data refresh. The cache tab walks up through shadow DOM boundaries to find its parent `tab-panel` for active-state detection.
 
+#### Cache Performance Header
+
+A performance summary section at the top of the cache sub-view shows the cache hit rate as a percentage label and a proportional bar. Prefers `provider_cache_rate` when available, falling back to the local `cache_hit_rate`.
+
 #### Layout
 
 ```
 Cache Performance                     23% hit rate
 [████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
 ──────────────────────────────────────────────
-Filter items...                    ● stale  [↻]
+Filter items...              [⬇ Size] ● stale  [↻]
 ──────────────────────────────────────────────
 RECENT CHANGES
 📈 L3 → L2: symbol:src/ac_dc/context.py
@@ -179,10 +203,18 @@ Model: provider/model    Total: 38.7K
 |------|------|--------|
 | system | ⚙️ | Token count |
 | legend | 📖 | Token count |
-| symbols | 📦 (code) / 📝 (doc) | File path + stability bar (N/threshold) + tokens |
+| symbols | 📦 | File path + stability bar (N/threshold) + tokens |
+| doc_symbols | 📝 | File path + stability bar (N/threshold) + tokens (used for `doc:` items in cross-ref mode or doc mode) |
 | files | 📄 | File path + stability bar (N/threshold) + tokens |
 | urls | 🔗 | Title + tokens |
 | history | 💬 | Message count + tokens |
+
+#### Measured vs Unmeasured Items
+
+Within each tier, items are split into two groups for display:
+
+- **Measured items** (`tokens > 0`) — rendered individually with icon, name, token count, stability bar, and N/threshold label. Names are clickable to view the full map block.
+- **Unmeasured items** (`tokens === 0`) — collapsed into a single summary line: `📦 N pre-indexed {symbols|documents} (awaiting measurement)`. The label adapts based on whether the items include `doc_symbols` type entries. These are items that were initialized by the stability tracker from the reference graph but haven't had their token counts measured yet (measurement happens on the first `_update_stability` cycle after a chat request).
 
 **Mode-aware labels:** When `mode === "doc"`, the cache viewer shows "pre-indexed documents" instead of "pre-indexed symbols" for unmeasured tier items, and uses the 📝 icon for symbol-type entries. The context viewer shows "Doc Map" instead of "Symbol Map" for the symbol_map category, and the stacked bar legend label adapts similarly. When cross-reference mode is active, both `sym:` and `doc:` items appear in the cache viewer — `sym:` items use the 📦 icon and `doc:` items use the 📝 icon, regardless of the current mode.
 
@@ -204,6 +236,10 @@ The response includes the `mode` field (`"code"` or `"doc"`) indicating which in
 #### Fuzzy Search
 
 Character-by-character matching against item names. Hides non-matching items and tiers with no matching items.
+
+#### Sort Toggle
+
+A **Size / Name** sort toggle button in the toolbar switches between sorting tier contents by token count descending (default) or alphabetically by name. The active sort mode is persisted to localStorage (`ac-dc-cache-sort`). Clicking the button cycles between modes. The button label shows the current sort mode with a down-arrow indicator (`⬇ Size` or `⬇ Name`).
 
 #### Defaults
 
@@ -271,8 +307,9 @@ Floating overlay on the diff viewer background, appearing after each LLM respons
 - **Auto-hide**: 8 seconds → 800ms CSS opacity fade → hidden
 - **Hover pauses**: mouse enter cancels timers and removes fade; mouse leave restarts auto-hide
 - **Dismiss**: click ✕ to immediately hide
-- **Width**: 320px fixed, max-height 80vh with overflow scroll
+- **Width**: 340px fixed, max-height 80vh with overflow scroll
 - **Error filtering**: HUD does not appear for error responses or empty results
+- **Section collapse persistence**: Each section's expanded/collapsed state is persisted to localStorage (`ac-dc-hud-collapsed`). Sections are collapsible via ▼/▶ toggle with keyboard support (Enter/Space). The toggle state is stored as a JSON-serialized Set of collapsed section names
 
 ---
 
@@ -317,7 +354,19 @@ Three sections printed after each LLM response:
 
 Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by the token count and `[cached]`. Active tier shows token count only. Only non-empty tiers are listed. The box width auto-sizes to the widest line. Cache hit percentage is computed as `cached_tokens / total_tokens`.
 
-**L0 special-casing:** The terminal HUD always adds system prompt + legend tokens to L0's display, since these are fixed overhead not tracked by the stability tracker. System + legend tokens appear as a synthetic sub-item. Both the terminal HUD and frontend viewers should include this overhead in L0's total for consistency.
+Each tier line is followed by indented **sub-item summaries** grouped by type:
+
+```
+│ L0         1,622 tokens [cached]
+│   └─ system + legend (1,622 tok)
+│ L1        11,137 tokens [cached]
+│   └─ 18 symbols (11,137 tok)
+│ active    19,643 tokens
+│   └─ 3 files (15,502 tok)
+│   └─ 8 history msgs (4,141 tok)
+```
+
+Sub-items are aggregated by type (`system`, `symbols`, `files`, `history`, or the raw type name) with count and total tokens per group. This uses the same `_tier_content_breakdown()` method shared with the frontend viewers.
 
 ### Token Usage
 

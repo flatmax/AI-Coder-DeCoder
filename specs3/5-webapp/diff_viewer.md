@@ -10,9 +10,15 @@ For `.svg` files, see [SVG Viewer](svg_viewer.md) — a dedicated side-by-side v
 
 Background layer (`position: fixed; inset: 0`), sibling of the dialog. Empty state shows AC⚡DC watermark.
 
-### Status LED
+### Floating Overlay Buttons
 
-Instead of a tab bar, a single floating status LED indicator appears in the top-right corner when a file is open:
+When a file is open, floating overlay buttons appear in the top-right corner:
+
+- **Status LED** — a 10px circular indicator (see below)
+- **Preview button** — for `.md`/`.markdown` files, toggles Markdown preview mode (see [Markdown Preview](#markdown-preview))
+- **Visual button** — for `.svg` files, a "🎨 Visual" button that dispatches `toggle-svg-mode` to switch to the SVG viewer's visual editor. The SVG viewer has the reciprocal "`</>`" button — see [SVG Viewer — SVG ↔ Text Diff Mode Toggle](svg_viewer.md#svg--text-diff-mode-toggle)
+
+### Status LED
 
 | LED State | Color | Behavior |
 |-----------|-------|----------|
@@ -75,6 +81,14 @@ The re-sync approach (remove all + re-clone) prevents duplicate style accumulati
 
 Multiple files can be open simultaneously, tracked internally as an ordered list. There is no visible tab bar — navigation between open files uses keyboard shortcuts only (Ctrl+PageDown, Ctrl+PageUp, Ctrl+W). The status LED in the top-right reflects the active file's state.
 
+### Same-File Suppression
+
+When `openFile` is called for a file that is already the active file, the editor is not rebuilt — `_showEditor()` is skipped entirely. This avoids recreating Monaco models (which resets scroll position and cancels internal Delayers). If the file is open but not active, the tab is switched and the viewport is restored from the per-file viewport state map.
+
+### Adjacent Same-File Reuse
+
+When `openFile` is called and an adjacent neighbor in the file navigation grid already references the target path, navigation reuses that neighbor rather than creating a new node. See [File Navigation — Adjacent Same-File Reuse](file_navigation.md#adjacent-same-file-reuse).
+
 ## Saving
 
 ### Single File Save (Ctrl+S)
@@ -84,12 +98,24 @@ Multiple files can be open simultaneously, tracked internally as an ordered list
 3. Dispatch event: `{path, content, isConfig?, configType?}`
 4. Parent routes to Repo write or Settings save
 
-### Batch Save
+### Batch Save (`saveAll`)
 
-Iterates all dirty files, updates each, dispatches batch event.
+Public method that iterates all dirty files and saves each one. For each file, if it is the currently active file the content is read from the editor; otherwise the last-known `modified` content is used. Each file goes through the same save pipeline as single-file save (update `savedContent`, clear dirty state, dispatch event).
 
 ### Dirty Tracking
 Per-file `savedContent` vs current. Global dirty set. State change events to parent.
+
+## Load Panel (Ad-Hoc Comparison)
+
+The `loadPanel(content, panel, label)` method loads arbitrary text content into the left or right panel of the diff viewer, enabling ad-hoc comparison of content from different sources (e.g., history messages, file content loaded via context menu).
+
+**Behavior:**
+
+- If no file is open, creates a virtual comparison file at `virtual://compare`
+- If a `virtual://compare` file already exists, updates only the specified panel — the other side's content is preserved so both sides accumulate independently
+- If a real file is open, updates the specified panel's Monaco model directly (creates a new model, sets it on the editor, disposes the old model)
+- The `label` parameter sets a floating panel label (see [Floating Panel Labels](#floating-panel-labels)) — only `loadPanel` comparisons show labels; normal file diffs do not
+- After loading, the file's dirty state is cleared (the loaded content becomes the new baseline)
 
 ## LSP Integration
 
@@ -177,6 +203,15 @@ Editor and preview scroll positions are synchronized:
 
 **Scroll lock:** A mutex mechanism prevents infinite feedback loops. When one side initiates a scroll, it sets `_scrollLock` to `'editor'` or `'preview'`. The other side's scroll handler checks the lock and skips if the other side owns it. The lock auto-releases after 120ms.
 
+**Editor scroll listener management:** The editor scroll listener (`onDidScrollChange`) is attached only to the **modified editor** (not both editors) to avoid double-firing scroll events in inline diff mode. The listener disposable (`_editorScrollDisposable`) is tracked and explicitly disposed before creating a new one on each `_showEditor` call, and also in `_disposeEditor`. The listener is only created when preview mode is active.
+
+### Relative Path Resolution
+
+A `_resolveRelativePath(relativePath)` helper resolves a relative path against the current file's directory. It splits the current file's path at the last `/` to get the directory, joins the relative path, and normalizes the result via `_normalizePath()` (which resolves `.` and `..` segments by walking the path parts array). This helper is used by:
+
+- **Markdown link navigation** — both the Monaco LinkProvider (`navigate-markdown-link` event) and the preview pane click handler resolve link targets this way
+- **Preview image resolution** — relative image `src` attributes are resolved before RPC fetch
+
 ### Image Rendering
 
 Markdown images with relative `src` paths are resolved against the current file's directory and fetched from the repository via RPC. After each preview render, `_resolvePreviewImages()` post-processes `<img>` tags:
@@ -196,7 +231,7 @@ The `marked` markdown library does not parse `![alt](path with spaces)` — unen
 
 ### Toggle Behavior
 
-Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). The editor container reference is updated after the Lit template re-renders, and the `ResizeObserver` is reattached.
+Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). After disposal, the component waits for `updateComplete` (Lit re-render), then updates the editor container reference (`_editorContainer`) from the new DOM structure (`.editor-pane` in preview mode, `.editor-container` in normal mode). The `ResizeObserver` is disconnected and reattached to the new container. Finally `_showEditor()` rebuilds the editor in the new layout.
 
 ## Event Routing
 
@@ -254,7 +289,18 @@ The diff viewer normalizes responses from `Repo.get_file_content` which may retu
 
 A single `DiffEditor` instance is created and reused for all files. Switching files disposes old models and creates new ones on the existing editor — this prevents memory leaks and avoids the cost of recreating the editor on every tab switch. The editor is only fully disposed when the last file is closed.
 
-When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
+**Model disposal ordering:** When switching files on an existing editor, the old models must be disposed AFTER `setModel()` detaches them. Disposing while still attached causes "TextModel got disposed before DiffEditorWidget model got reset". The sequence is:
+
+1. Capture reference to old model pair (`editor.getModel()`)
+2. Update editor options (side-by-side mode, read-only state)
+3. Create new original and modified models with the correct language
+4. Call `editor.setModel({ original: newOrig, modified: newMod })` — this detaches the old models
+5. Dispose the old original and modified models
+6. Set read-only state on the modified editor (must come after `setModel` so inline diff mode doesn't override it)
+
+**Editor disposal ordering:** When the editor itself is disposed (last file closed), the diff editor is disposed FIRST, then the text models afterward. This ensures the editor releases its references before the models are destroyed.
+
+When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking and preview update.
 
 ### Per-File Viewport State
 

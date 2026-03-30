@@ -36,7 +36,7 @@ Background task: _stream_chat
     │       ├─ Rebuild reference index from all outlines (enriched + unenriched)
     │       └─ Send doc_enrichment_queued event if files pending
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
-    │       ├─ Skip already-fetched URLs (via `get_url_content` which checks in-memory dict then filesystem cache; only URLs returning the specific error "URL not yet fetched" are fetched)
+    │       ├─ Skip already-fetched URLs: calls `url_service.get_url_content(url)` and checks `existing.error == "URL not yet fetched"` (this exact string is the sentinel returned by `URLService.get_url_content` when a URL has never been fetched — any other error value, or no error, means the URL was previously fetched and should be skipped)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
     │       ├─ Fetch, cache, and summarize each URL
     │       ├─ Notify client: compactionEvent with stage "url_ready"
@@ -253,6 +253,22 @@ Build the active items list and run the tracker update:
 ```pseudo
 active_items = {}
 
+# 0. System prompt + legend — always present, should stabilize to L0.
+#    Hash only the system prompt text (not legend) for stability —
+#    the legend includes path aliases that change with exclude_files.
+#    Token count includes both prompt + legend.
+if mode == "doc":
+    system_prompt = config.get_doc_system_prompt()
+else:
+    system_prompt = config.get_system_prompt()
+if system_prompt:
+    legend = index.get_legend() if index else ""
+    system_content = system_prompt + legend
+    active_items["system:prompt"] = {
+        "hash": sha256(system_prompt),    # prompt only, not legend
+        "tokens": counter.count(system_content)
+    }
+
 # 1. Selected files: full content hash
 for path in selected_files:
     content = file_context.get_content(path)
@@ -319,22 +335,28 @@ if cross_ref_enabled:
                 "tokens": counter.count(block)
             }
 
-# 5. Non-graduated history messages
+# 5. History messages (all — the tracker handles graduated history internally)
 for i, msg in enumerate(history):
     key = "history:" + str(i)
-    if key not in any cached tier:
-        content = msg["role"] + ":" + msg["content"]
-        active_items[key] = {
-            "hash": sha256(content),
-            "tokens": counter.count_message(msg)
-        }
+    content = msg["role"] + ":" + msg["content"]
+    active_items[key] = {
+        "hash": sha256(content),
+        "tokens": counter.count_message(msg)
+    }
 
-# 6. Deselected file cleanup: remove file:* entries not in selected_files
-for key in tracker.items:
-    if key starts with "file:" and key.removeprefix("file:") not in selected_files:
-        remove from tier, mark tier as broken
+# 6. Remove excluded items from tracker before update cycle —
+#    they exist on disk so remove_stale won't catch them, but
+#    they must not occupy tier slots or appear in context.
+for excl_path in excluded_index_files:
+    for prefix in ("symbol:", "doc:", "file:"):
+        key = prefix + excl_path
+        if key in tracker.items:
+            remove from tier, mark tier as broken
 
-# 5. Run tracker update
+# 7. Run tracker update
+#    The tracker's process_active_items handles:
+#    - Removing file:* and history:* items no longer in active_items (deselected files, compacted history)
+#    - symbol:* and doc:* items persist in their earned tiers (repo structure, not user-selected)
 stability_tracker.update(active_items, existing_files=repo.get_flat_file_list())
 ```
 
@@ -431,7 +453,7 @@ Session total: 182,756
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available (checks `_is_markitdown_available()` at call time)
+- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available (dynamically checks `_is_markitdown_available()` on each call — not cached at startup)
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 - set_excluded_index_files stores exclusion set, removes tracker items, broadcasts filesChanged
 - get_current_state includes excluded_index_files field
@@ -449,7 +471,7 @@ Session total: 182,756
 - Session totals initially zero
 
 ### Mode Switch Effects
-- Mode switch clears selected files and broadcasts filesChanged to frontend
+- Mode switch preserves file selection across modes (selected files are not cleared)
 - Cache tab and context tab listen for mode-changed and files-changed events, triggering refresh
 - Stability tracker switches to mode-specific instance; _update_stability runs immediately
 - Context breakdown reflects new mode's index (symbol map or doc map) after switch

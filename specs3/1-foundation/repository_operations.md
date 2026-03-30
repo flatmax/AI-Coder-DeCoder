@@ -85,6 +85,15 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 | `Repo.reset_hard()` | `git reset --hard HEAD` |
 | `Repo.search_commits(query, branch?, limit?)` | Search commits by message/SHA/author via `git log --grep` |
 
+### Branch Operations
+
+| Method | Description |
+|--------|-------------|
+| `Repo.get_current_branch()` | Returns `{branch, sha, detached}`. For detached HEAD, `branch` is `null` and `sha` is the full HEAD SHA |
+| `Repo.resolve_ref(ref)` | Resolve a git ref (branch name, tag, SHA prefix) to a full SHA. Returns `null` if not found |
+| `Repo.list_branches()` | Returns `{branches: [{name, sha, message, is_current}]}` |
+| `Repo.is_clean()` | Check if working tree is clean via `git status --porcelain -uno` (ignores untracked files) |
+
 ### Commit Flow (UI-Driven)
 
 1. User clicks 💾 in action bar → `LLMService.commit_all()`

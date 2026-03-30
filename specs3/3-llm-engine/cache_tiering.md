@@ -227,8 +227,10 @@ Cache hit statistics are **read directly from the LLM provider's usage response*
 
 ## Order of Operations (Per Request)
 
+At the start of each update cycle, `_broken_tiers` and `_changes` are cleared — each cycle starts with a fresh view of what changed.
+
 ### Phase 0: Remove Stale Items
-Check tracked items against current repo files. Remove items whose files no longer exist.
+Check tracked items against current repo files. Remove `file:`, `symbol:`, and `doc:` items whose underlying file path no longer exists in the repo.
 
 ### Phase 1: Process Active Items
 For each item in the active items list:
@@ -255,7 +257,13 @@ Log promotions/demotions for frontend display. Store current active items for ne
 
 ### Post-Cascade Consolidation Detail
 
-The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
+The `_demote_underfilled` step iterates tiers in reverse cascade order and skips three categories:
+
+1. **L0** — terminal tier, never demoted
+2. **L3** — items would demote to active, which is handled by a different mechanism (hash mismatch demotion)
+3. **Tiers in the `_broken_tiers` set** — tiers that received promotions or experienced changes during this cycle. This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle
+
+Only stable, untouched tiers (L1 and L2 in practice) that happen to be below `cache_target_tokens` are candidates for demotion. Each item demotes at most one level per call to avoid cascading double-demotions within a single pass.
 
 ## Index Exclusion
 
