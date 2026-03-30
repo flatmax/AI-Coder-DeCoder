@@ -74,6 +74,12 @@ When a tier's cache block is invalidated, veterans from the tier below may promo
 
 **Critical rule:** Only promote into broken tiers. If a tier is stable, nothing promotes into it and tiers below remain cached.
 
+### L0 Backfill
+
+When L0 drops below `cache_target_tokens` (e.g., items removed due to file selection or deletion), the provider won't cache it — wasting the breakpoint. Rather than proactively breaking L1 to fill L0 (which would invalidate L1's cache), the system **piggybacks on L1 already being broken**: if L1 is in `_broken_tiers` for any reason during this cycle AND L0 is underfilled, L0 is also marked broken. This lets eligible L1 veterans (N ≥ 12) promote into L0 through the normal cascade. The threshold anchoring mechanism in L1 processing ensures L1 retains at least `cache_target_tokens` worth of items — anchored items have frozen N and cannot promote. This means L0 backfill never drains L1 below its caching threshold.
+
+If L1 is stable (not broken), no backfill occurs — L0 stays underfilled until L1 is naturally invalidated by some other event (content change, item removal, etc.).
+
 ### Promotion Thresholds
 
 | Source Tier | Promotion N | Destination |

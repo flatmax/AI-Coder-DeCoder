@@ -297,6 +297,15 @@ class StabilityTracker:
         Repeats until no promotions occur.
         Post-cascade: demote underfilled tiers.
         """
+        # L0 backfill: if L0 is underfilled and L1 is already broken,
+        # mark L0 broken so eligible L1 veterans can promote into it.
+        # Anchoring in the L1 processing ensures L1 retains at least
+        # cache_target_tokens worth of items — no explicit surplus check needed.
+        if (self._cache_target_tokens > 0
+                and self.get_tier_tokens(Tier.L0) < self._cache_target_tokens
+                and Tier.L1 in self._broken_tiers):
+            self._broken_tiers.add(Tier.L0)
+
         max_iterations = 10  # safety limit
         iteration = 0
 
