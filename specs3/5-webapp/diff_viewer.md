@@ -197,9 +197,9 @@ The preview updates on every keystroke — the editor's `onDidChangeModelContent
 
 Editor and preview scroll positions are synchronized:
 
-**Editor → Preview:** When the editor scrolls, the top visible line is computed from `scrollTop / lineHeight`. The preview pane's `data-source-line` anchors are scanned to find the element at or just before that line. Linear interpolation between adjacent anchors provides smooth sub-element scrolling.
+**Editor → Preview:** When the editor scrolls, the top visible line is computed from `scrollTop / lineHeight`. The preview pane's `data-source-line` anchors are collected, deduplicated (first element per source line only), and filtered for monotonically non-decreasing `offsetTop` — this prevents jumps caused by nested container elements with identical or regressing positions. A binary search finds the anchor at or just before the top line. Linear interpolation between adjacent anchors provides smooth sub-element scrolling. When the editor is past the last anchor, proportional fallback (`editorFraction × maxPreviewScroll`) ensures both panels reach their bottoms together.
 
-**Preview → Editor:** When the preview pane scrolls, the reverse mapping finds which source line corresponds to the current scroll offset. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning.
+**Preview → Editor:** When the preview pane scrolls, the same deduplication and monotonicity filtering is applied. A binary search by `offsetTop` finds the anchor at or just before the scroll position. The reverse mapping computes the corresponding source line via interpolation. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning. Past the last anchor, proportional fallback maps the preview scroll fraction to the editor scroll range.
 
 **Scroll lock:** A mutex mechanism prevents infinite feedback loops. When one side initiates a scroll, it sets `_scrollLock` to `'editor'` or `'preview'`. The other side's scroll handler checks the lock and skips if the other side owns it. The lock auto-releases after 120ms.
 
@@ -289,12 +289,27 @@ TeX compilation is expensive (spawns `make4ht` subprocess). Unlike Markdown prev
 
 ### Scroll Synchronization
 
-TeX preview injects `data-source-line` attributes by matching visible text in the HTML output against source lines in the `.tex` file. The matching uses:
+TeX preview uses a two-pass **anchor-and-interpolation** strategy to inject `data-source-line` attributes into the make4ht HTML output. This avoids fragile text matching (which fails on math, tables, and algorithmic environments where KaTeX rendering destroys the original text).
 
-1. Strip TeX commands from source lines to extract visible text
-2. For each block-level HTML element, extract its text content
-3. Match via exact text equality, then substring containment
-4. Assigned lines are tracked to prevent duplicates
+**Phase 1 — Structural anchor extraction:** The TeX source is scanned for structural commands, each mapped to its 1-based line number:
+
+| Command Pattern | Anchor Kind |
+|----------------|-------------|
+| `\section{...}`, `\subsection{...}`, etc. | Heading (with text for verification) |
+| `\begin{...}` | Environment start |
+| `\end{...}` | Environment end (skipped, not matched to elements) |
+| `\item` | List item |
+| `\STATE`, `\REQUIRE`, `\IF`, `\WHILE`, etc. | Algorithmic pseudo-code |
+| `\caption{...}` | Caption |
+| `\maketitle` | Title block |
+
+These anchors are matched against HTML elements by structural role and document order — headings match `<h1>`–`<h6>` or `<div>` elements with `sectionHead`/`subsectionHead` class names, `\item` and algorithmic commands match `<li>`/`<p>`/`<div>` elements sequentially, and `\begin{...}` matches container elements (`<div>`, `<table>`, `<ol>`, `<ul>`, `<pre>`). Each anchor searches a small lookahead window (6–12 elements) to tolerate make4ht wrapper elements.
+
+**Phase 2 — Interpolation:** All block-level elements in the HTML are collected in document order. Elements that received an anchor in Phase 1 keep their exact line number. The first and last elements are assigned boundary values (line 1 and total line count) if unanchored. All remaining unmatched elements are assigned linearly-interpolated line numbers between their nearest anchored neighbors.
+
+**Phase 3 — Attribute injection:** `data-source-line` attributes are spliced into the HTML string back-to-front (so earlier insertions don't shift later offsets).
+
+The result: every block element gets a `data-source-line` attribute, scroll sync is continuous with zero dead zones, and no text comparison is involved.
 
 The same bidirectional scroll sync mechanism used for Markdown preview (editor → preview and preview → editor with scroll lock) applies to TeX preview.
 
