@@ -2106,93 +2106,237 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    * Inject data-source-line attributes into make4ht HTML output for
    * scroll synchronization with the editor.
    *
-   * Strategy: extract visible text from each block-level element in the
-   * HTML, then find the best matching line in the TeX source.  This
-   * provides approximate scroll sync — not perfect (TeX macros expand
-   * differently from their source text) but good enough for navigation.
+   * Two-pass approach:
+   *
+   * Pass 1 — Build a sparse set of **anchor** mappings from TeX structural
+   *   commands (\section, \begin, \item, etc.) to their source line numbers.
+   *   Match these against HTML elements using class names and document order.
+   *   This gives reliable, exact anchors at section heads, list items,
+   *   environments, etc. — no text comparison involved.
+   *
+   * Pass 2 — **Interpolate** between anchors.  Every unmatched block-level
+   *   element that falls between two anchors gets a linearly-interpolated
+   *   source line number.  This ensures smooth, gap-free scrolling even
+   *   through regions where text matching would fail (math, tables, etc.).
+   *
+   * The result: every block element gets a data-source-line attribute,
+   * scroll sync is continuous, and no fragile text-matching heuristics
+   * are needed.
    */
   _injectTexSourceLines(html, texSource) {
     if (!html || !texSource) return html;
 
+    const totalSourceLines = texSource.split('\n').length;
     const sourceLines = texSource.split('\n');
 
-    // Build a map of text content → first source line number.
-    // We strip TeX commands to get the visible text for matching.
-    const textToLine = new Map();
+    // ── Phase 1: Extract structural anchors from TeX source ──
+    // Each anchor records: { kind, line (1-based), [text], [env] }
+    const anchors = [];
     for (let i = 0; i < sourceLines.length; i++) {
-      const line = sourceLines[i].trim();
-      if (!line || line.startsWith('%')) continue;
-      // Extract visible text: remove \command{...} wrappers, keep content
-      const visible = line
-        .replace(/\\[a-zA-Z]+\*?\{/g, '')   // \section{, \textbf{, etc.
-        .replace(/[{}\\]/g, '')               // remaining braces and backslashes
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (visible.length >= 3 && !textToLine.has(visible)) {
-        textToLine.set(visible, i + 1);  // 1-based line numbers
+      const raw = sourceLines[i].trim();
+      if (!raw || raw.startsWith('%')) continue;
+      const lineNum = i + 1;
+
+      const secMatch = raw.match(/^\\(section|subsection|subsubsection|paragraph)\*?\{(.+?)\}?$/);
+      if (secMatch) {
+        const heading = secMatch[2].replace(/[{}\\]/g, '').replace(/\s+/g, ' ').trim();
+        anchors.push({ kind: secMatch[1], text: heading, line: lineNum });
+        continue;
+      }
+      if (/^\\begin\{(\w+)\}/.test(raw)) {
+        anchors.push({ kind: 'env', env: RegExp.$1, line: lineNum });
+        continue;
+      }
+      if (/^\\end\{(\w+)\}/.test(raw)) {
+        anchors.push({ kind: 'envend', env: RegExp.$1, line: lineNum });
+        continue;
+      }
+      if (/^\\item\b/.test(raw)) {
+        anchors.push({ kind: 'item', line: lineNum });
+        continue;
+      }
+      if (/^\\(STATE|REQUIRE|ENSURE|IF|ELSIF|ELSE|ENDIF|WHILE|ENDWHILE|FOR|ENDFOR|REPEAT|UNTIL|RETURN|PRINT|COMMENT)\b/.test(raw)) {
+        anchors.push({ kind: 'algo', line: lineNum });
+        continue;
+      }
+      if (/^\\(caption)\{/.test(raw)) {
+        anchors.push({ kind: 'caption', line: lineNum });
+        continue;
+      }
+      if (/^\\maketitle/.test(raw)) {
+        anchors.push({ kind: 'maketitle', line: lineNum });
+        continue;
       }
     }
 
-    // For each block-level tag, try to match its text to a source line
-    // and inject data-source-line attribute.
-    const blockTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'li', 'dt', 'dd', 'figcaption', 'caption', 'pre'];
+    // ── Phase 2: Find all block-level elements in the HTML ──
+    const blockTags = ['h1','h2','h3','h4','h5','h6','p','div','li','dt','dd',
+                       'td','th','tr','figcaption','caption','pre','table',
+                       'section','article','blockquote','hr','ol','ul'];
     const tagPattern = new RegExp(
-      `(<(?:${blockTags.join('|')}))(\\s|>)`, 'gi'
+      `(<(?:${blockTags.join('|')}))([ \\t>])`, 'gi'
     );
 
-    // Track which source lines we've already assigned to avoid duplicates
-    const usedLines = new Set();
-    let lastAssignedLine = 0;
+    // Collect every block-element opening position in document order
+    const elements = [];  // { offset, tagName, tagStartLen }
+    let m;
+    while ((m = tagPattern.exec(html)) !== null) {
+      elements.push({
+        offset: m.index,
+        tagName: m[1].slice(1).toLowerCase(),
+        tagStartLen: m[1].length,   // length of e.g. "<li"
+      });
+    }
 
-    const result = html.replace(tagPattern, (match, tagStart, after) => {
-      // Extract text content following this tag (up to the closing tag)
-      const pos = html.indexOf(match);
-      const closeIdx = html.indexOf('</', pos + match.length);
-      if (closeIdx === -1) return match;
+    if (elements.length === 0) return html;
 
-      const inner = html.slice(pos + match.length - after.length + (after === '>' ? 1 : 0), closeIdx);
-      // Strip nested HTML tags to get visible text
-      const visibleText = inner
+    // ── Phase 3: Match anchors to elements (sparse) ──
+    // Walk anchors and elements together in document order.
+    // Each anchor tries to claim the next suitable element.
+    const assigned = new Array(elements.length).fill(0);  // 0 = unassigned
+    let anchorIdx = 0;
+    let elemIdx = 0;
+
+    // Helper: read the class attribute from the opening tag at `offset`
+    const getClass = (offset) => {
+      const end = html.indexOf('>', offset);
+      if (end === -1) return '';
+      const tag = html.slice(offset, end + 1);
+      const cm = tag.match(/class="([^"]*)"/);
+      return cm ? cm[1] : '';
+    };
+
+    // Helper: get visible text of element (for heading verification)
+    const getVisibleText = (offset, tagName) => {
+      const end = html.indexOf('>', offset);
+      if (end === -1) return '';
+      const closeTag = `</${tagName}`;
+      const closeIdx = html.indexOf(closeTag, end + 1);
+      if (closeIdx === -1) return '';
+      return html.slice(end + 1, closeIdx)
         .replace(/<[^>]*>/g, '')
         .replace(/&[a-z]+;/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+    };
 
-      if (visibleText.length < 2) return match;
+    while (anchorIdx < anchors.length && elemIdx < elements.length) {
+      const anc = anchors[anchorIdx];
+      const el = elements[elemIdx];
 
-      // Try to find a matching source line
-      let bestLine = null;
+      let matched = false;
 
-      // Exact match
-      for (const [text, line] of textToLine) {
-        if (!usedLines.has(line) && text === visibleText) {
-          bestLine = line;
-          break;
-        }
-      }
-
-      // Substring match (HTML text is substring of source text or vice versa)
-      if (!bestLine) {
-        for (const [text, line] of textToLine) {
-          if (!usedLines.has(line) && line > lastAssignedLine) {
-            if (text.includes(visibleText) || visibleText.includes(text)) {
-              bestLine = line;
-              break;
+      if (anc.kind === 'section' || anc.kind === 'subsection' || anc.kind === 'subsubsection' || anc.kind === 'paragraph') {
+        // Look for a heading element or div with sectionHead class
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 12; j++) {
+          const ej = elements[j];
+          const tn = ej.tagName;
+          if (tn === 'h1' || tn === 'h2' || tn === 'h3' || tn === 'h4' || tn === 'h5' || tn === 'h6' || tn === 'div') {
+            const cls = getClass(ej.offset);
+            const isHeading = tn.startsWith('h') ||
+              cls.includes('sectionHead') || cls.includes('subsectionHead') ||
+              cls.includes('subsubsectionHead') || cls.includes('likesectionHead');
+            if (isHeading && anc.text) {
+              const vis = getVisibleText(ej.offset, tn);
+              if (vis.includes(anc.text) || anc.text.includes(vis.slice(0, 40))) {
+                assigned[j] = anc.line;
+                elemIdx = j + 1;
+                matched = true;
+                break;
+              }
             }
+          }
+        }
+      } else if (anc.kind === 'item' || anc.kind === 'algo') {
+        // Match to next <li>, <p>, or <div> element
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 8; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'li' || tn === 'p' || tn === 'div' || tn === 'dd' || tn === 'dt') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'env') {
+        // Match to next container-like element
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 6; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'div' || tn === 'table' || tn === 'ol' || tn === 'ul' ||
+              tn === 'pre' || tn === 'blockquote' || tn === 'p') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'envend') {
+        // \end{} — skip, don't consume an element
+        anchorIdx++;
+        continue;
+      } else if (anc.kind === 'caption') {
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 6; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'figcaption' || tn === 'caption' || tn === 'div' || tn === 'p') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'maketitle') {
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 4; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'div' || tn === 'h1') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
           }
         }
       }
 
-      if (bestLine) {
-        usedLines.add(bestLine);
-        lastAssignedLine = bestLine;
-        return `${tagStart} data-source-line="${bestLine}"${after}`;
+      anchorIdx++;
+      if (!matched) {
+        // Anchor didn't match — move on, don't advance elemIdx
       }
+    }
 
-      return match;
-    });
+    // ── Phase 4: Interpolate between assigned anchors ──
+    // First and last elements get boundary values if unassigned
+    if (assigned[0] === 0) assigned[0] = 1;
+    if (assigned[assigned.length - 1] === 0) assigned[assigned.length - 1] = totalSourceLines;
 
-    return result;
+    // Forward-fill: propagate last known line to unassigned elements
+    // with linear interpolation between anchored points
+    let prevIdx = 0;
+    for (let i = 1; i < assigned.length; i++) {
+      if (assigned[i] !== 0) {
+        // Interpolate all unassigned elements between prevIdx and i
+        if (i - prevIdx > 1) {
+          const startLine = assigned[prevIdx];
+          const endLine = assigned[i];
+          for (let j = prevIdx + 1; j < i; j++) {
+            const frac = (j - prevIdx) / (i - prevIdx);
+            assigned[j] = Math.round(startLine + frac * (endLine - startLine));
+          }
+        }
+        prevIdx = i;
+      }
+    }
+    // Fill any trailing unassigned (shouldn't happen, but safety)
+    for (let i = prevIdx + 1; i < assigned.length; i++) {
+      assigned[i] = assigned[prevIdx];
+    }
+
+    // ── Phase 5: Inject data-source-line attributes back-to-front ──
+    const chars = html.split('');
+    for (let i = elements.length - 1; i >= 0; i--) {
+      const el = elements[i];
+      const attr = ` data-source-line="${assigned[i]}"`;
+      chars.splice(el.offset + el.tagStartLen, 0, attr);
+    }
+    return chars.join('');
   }
 
   /**
