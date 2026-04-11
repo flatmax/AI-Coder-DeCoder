@@ -314,7 +314,15 @@ Before enabling TeX preview, the diff viewer calls `LLMService.is_tex_preview_av
 
 ### Temp Directory Lifecycle
 
-Each compilation creates a temp directory for make4ht output. The previous compilation's temp directory is cleaned up at the start of the next compilation (`_cleanup_old_tex_preview`). This keeps at most one temp directory alive so generated images can be served during the preview session.
+Each compilation creates a temp directory under `.ac-dc/tex_preview/` (repo-scoped, already gitignored). The previous compilation's temp directory is cleaned up at the start of the next compilation (`_cleanup_old_tex_preview`). This keeps at most one temp directory alive so generated images can be served during the preview session. Using `.ac-dc/` instead of the system temp directory avoids cross-repo collisions and ensures cleanup is scoped to the repository.
+
+On server startup, `Repo.__init__` calls `_cleanup_tex_preview_dir()` which removes the entire `.ac-dc/tex_preview/` directory tree. This handles orphaned temp dirs from crashed or killed previous runs.
+
+### Working Directory Isolation
+
+`make4ht` runs with `cwd` set to the temp directory (`tmp_dir`), not the file's parent directory. This is critical because make4ht and the underlying TeX engine write numerous intermediate files (`.aux`, `.dvi`, `.4ct`, `.4tc`, `.idv`, `.lg`, `.tmp`, `.xref`, `.log`, `.css`) into the current working directory — the `-d` output flag only controls the final HTML output location. Without this, every preview compilation would litter the user's repository with TeX build artifacts.
+
+For `\input`, `\include`, and `\includegraphics` resolution, the `TEXINPUTS` environment variable is set to the original file's parent directory (with a trailing separator to append system defaults). This gives TeX the same path resolution it would have if running in the file's directory, while keeping all output in the temp dir.
 
 ### CSS Styling
 

@@ -24,6 +24,8 @@ class Repo:
         self._collab = None  # Set by main.py when --collab is passed
         if not (self._root / ".git").exists():
             raise ValueError(f"Not a git repository: {self._root}")
+        # Clean up any leftover TeX preview temp directories from previous runs
+        self._cleanup_tex_preview_dir()
 
     @property
     def root(self):
@@ -223,8 +225,11 @@ class Repo:
         if not work_dir:
             work_dir = str(self._root)
 
-        # Create temp directory for make4ht output
-        tmp_dir = tempfile.mkdtemp(prefix="ac_dc_tex_")
+        # Create temp directory for make4ht output inside .ac-dc/
+        # (repo-scoped, already gitignored, no cross-repo collision)
+        ac_dc_dir = os.path.join(str(self._root), ".ac-dc", "tex_preview")
+        os.makedirs(ac_dc_dir, exist_ok=True)
+        tmp_dir = tempfile.mkdtemp(prefix="tex_", dir=ac_dc_dir)
         tex_path = os.path.join(tmp_dir, "preview.tex")
         html_path = os.path.join(tmp_dir, "preview.html")
 
@@ -251,10 +256,23 @@ class Repo:
 
             # Run make4ht with HTML5 output + mathjax math rendering
             # -f html5: HTML5 output format
-            # -d tmp_dir: output directory
+            # -d tmp_dir: output directory (final HTML)
             # -a debug: reduced logging
             # -c preview.cfg: use our config for mathjax math output
-            # We set cwd to the file's directory for relative path resolution
+            #
+            # CRITICAL: cwd must be tmp_dir so ALL intermediate files
+            # (.aux, .dvi, .4ct, .4tc, .idv, .lg, .tmp, .xref, .log, .css)
+            # go into the temp directory — not the user's repo.
+            # The -d flag only controls the final HTML output location,
+            # not where make4ht/TeX writes intermediates.
+            #
+            # For \input/\includegraphics resolution we set TEXINPUTS
+            # to include the file's original directory.
+            env = os.environ.copy()
+            # TEXINPUTS: search order is file_dir, then system defaults
+            # The trailing colon/semicolon means "append system defaults"
+            texinputs_sep = ";" if os.name == "nt" else ":"
+            env["TEXINPUTS"] = work_dir + texinputs_sep
             try:
                 result = subprocess.run(
                     [
@@ -268,7 +286,8 @@ class Repo:
                     capture_output=True,
                     text=True,
                     timeout=30,
-                    cwd=work_dir,
+                    cwd=tmp_dir,
+                    env=env,
                 )
             except subprocess.TimeoutExpired:
                 return {"error": "TeX compilation timed out (30s limit)"}
@@ -337,6 +356,21 @@ class Repo:
         if old_dir and os.path.isdir(old_dir):
             try:
                 _shutil.rmtree(old_dir, ignore_errors=True)
+            except OSError:
+                pass
+
+    def _cleanup_tex_preview_dir(self):
+        """Remove the entire .ac-dc/tex_preview/ directory.
+
+        Called on startup to clean up leftover temp dirs from previous
+        server runs that may not have been cleaned up (e.g. crash).
+        """
+        import shutil as _shutil
+        tex_dir = os.path.join(str(self._root), ".ac-dc", "tex_preview")
+        if os.path.isdir(tex_dir):
+            try:
+                _shutil.rmtree(tex_dir, ignore_errors=True)
+                logger.debug(f"Cleaned up TeX preview directory: {tex_dir}")
             except OSError:
                 pass
 

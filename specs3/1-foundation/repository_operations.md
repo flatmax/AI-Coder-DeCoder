@@ -120,6 +120,15 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 5. Return result with `system_event_message` field
 6. Client displays system event card and refreshes file tree
 
+## TeX Preview
+
+| Method | Description |
+|--------|-------------|
+| `Repo.is_make4ht_available()` | Static method. Returns `true` if `make4ht` is on PATH |
+| `Repo.compile_tex_preview(content, file_path?)` | Compile TeX source to HTML via make4ht. Returns `{html}` or `{error, log?, install_hint?}` |
+
+`compile_tex_preview` writes content to a temp file under `.ac-dc/tex_preview/`, runs `make4ht -f html5` with a mathjax config, extracts the `<body>` content plus `<head>` styles, inlines assets as data URIs, and strips make4ht alt-text artifacts. The working directory is set to the temp directory (not the repo) so all intermediate files (`.aux`, `.dvi`, `.4ct`, `.log`, etc.) stay contained. `TEXINPUTS` is set to the file's parent directory for `\input`/`\includegraphics` resolution. Compilation has a 30-second timeout. Temp directories are cleaned up on the next compilation (at most one alive at a time). The entire `.ac-dc/tex_preview/` directory is removed on server startup to handle orphans from crashed runs.
+
 ## Search
 
 ```pseudo
