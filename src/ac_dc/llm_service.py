@@ -3511,6 +3511,36 @@ class LLMService:
 
         return {"error": "No index available"}
 
+    # === TeX Preview (RPC) ===
+
+    def is_tex_preview_available(self):
+        """Check if make4ht is installed for TeX preview. (RPC)"""
+        if not self._repo:
+            return {"available": False, "reason": "No repository"}
+        return {
+            "available": self._repo.is_make4ht_available(),
+            "install_hint": (
+                "Install make4ht for TeX preview:\n"
+                "  Ubuntu/Debian: sudo apt install texlive-extra-utils\n"
+                "  macOS: brew install --cask mactex\n"
+                "  Windows: install TeX Live from https://tug.org/texlive/"
+            ),
+        }
+
+    def compile_tex_preview(self, content, file_path=None):
+        """Compile TeX content to HTML for preview. (RPC)
+
+        Args:
+            content: TeX source text
+            file_path: optional repo-relative path for resolving includes
+
+        Returns:
+            {html: str} or {error: str, log?: str, install_hint?: str}
+        """
+        if not self._repo:
+            return {"error": "No repository available"}
+        return self._repo.compile_tex_preview(content, file_path)
+
     def lsp_get_hover(self, path, line, col):
         """Proxy to SymbolIndex.lsp_get_hover for RPC access."""
         if not self._symbol_index:

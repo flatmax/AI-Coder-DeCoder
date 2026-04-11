@@ -333,6 +333,8 @@ Three top-level service classes, registered via `add_class()`:
 | `Repo.exit_review_mode` | `(branch_tip, original_branch) → {status}` | Review exit |
 | `Repo.get_review_file_diff` | `(path) → {path, diff}` | Single file review diff |
 | `Repo.get_review_changed_files` | `() → [{path, status, additions, deletions}]` | Changed files in review |
+| `Repo.is_make4ht_available` | `() → boolean` | Check if make4ht is on PATH |
+| `Repo.compile_tex_preview` | `(content, file_path?) → {html} or {error, log?, install_hint?}` | Compile TeX to HTML for preview |
 
 ### LLMService Methods
 
@@ -379,6 +381,8 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.switch_mode` | `(mode) → {mode, message, building?, keywords_available?, keywords_message?}` | Switch between code and document modes |
 | `LLMService.get_file_map_block` | `(path) → {path, content, mode}` | Get index block for a file or special key (for cache viewer) |
 | `LLMService.navigate_file` | `(path) → {status, path}` | Broadcast file navigation to all clients |
+| `LLMService.is_tex_preview_available` | `() → {available, install_hint?}` | Check if make4ht is installed for TeX preview |
+| `LLMService.compile_tex_preview` | `(content, file_path?) → {html} or {error, log?, install_hint?}` | Compile TeX to HTML via make4ht for live preview |
 
 ### Settings Methods
 

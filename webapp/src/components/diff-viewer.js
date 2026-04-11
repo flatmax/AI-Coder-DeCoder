@@ -18,6 +18,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
+import katex from 'katex';
 import * as monaco from 'monaco-editor';
 
 // === Register MATLAB language with Monarch tokenizer ===
@@ -436,6 +437,80 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       margin: 1.5em 0;
     }
 
+    /* TeX preview (make4ht) styles */
+    .preview-pane .centerline { text-align: center; }
+    .preview-pane .cmr-17 { font-size: 1.7em; }
+    .preview-pane .cmr-12 { font-size: 1.2em; }
+    .preview-pane .cmbx-12, .preview-pane .cmbx-10 { font-weight: bold; }
+    .preview-pane .cmti-10, .preview-pane .cmti-12 { font-style: italic; }
+    .preview-pane .cmtt-10 { font-family: var(--font-mono, monospace); }
+    .preview-pane .sectionHead,
+    .preview-pane .subsectionHead,
+    .preview-pane .subsubsectionHead {
+      color: var(--text-primary, #e0e0e0);
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid var(--border, #333);
+      padding-bottom: 0.3em;
+    }
+    .preview-pane .likesectionHead {
+      color: var(--text-primary, #e0e0e0);
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+    }
+    .preview-pane .math-display { text-align: center; margin: 1em 0; }
+    .preview-pane .equation { text-align: center; margin: 1em 0; }
+    .preview-pane .verbatim {
+      background: var(--bg-tertiary, #161b22);
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--font-mono, monospace);
+    }
+    .preview-pane .lstlisting {
+      background: var(--bg-tertiary, #161b22);
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--font-mono, monospace);
+      font-size: 0.88em;
+    }
+    .preview-pane .fbox, .preview-pane .framebox {
+      border: 1px solid var(--border, #333);
+      padding: 8px;
+      border-radius: 4px;
+    }
+    .preview-pane .caption { font-size: 0.9em; color: var(--text-secondary, #8b949e); margin-top: 4px; }
+    .preview-pane .footnotes { font-size: 0.85em; border-top: 1px solid var(--border, #333); margin-top: 2em; padding-top: 1em; }
+    .preview-pane .tabular { border-collapse: collapse; margin: 0.8em 0; }
+    .preview-pane .tabular td, .preview-pane .tabular th {
+      border: 1px solid var(--border, #333);
+      padding: 4px 10px;
+    }
+    .preview-pane .enumerate, .preview-pane .itemize { padding-left: 1.5em; }
+    .preview-pane .description dt { font-weight: bold; }
+    .preview-pane .maketitle { text-align: center; margin-bottom: 2em; }
+    .preview-pane .titleHead { font-size: 1.8em; color: var(--text-primary); }
+    .preview-pane .author { font-size: 1.1em; color: var(--text-secondary); }
+    .preview-pane .date { font-size: 0.95em; color: var(--text-muted); }
+    /* make4ht math SVGs — ensure they inherit text color */
+    .preview-pane svg { fill: currentColor; }
+    .preview-pane img[src*="preview"] { max-width: 100%; }
+
+    /* KaTeX math rendering in TeX preview */
+    .preview-pane .math-display {
+      text-align: center;
+      margin: 1.2em 0;
+      overflow-x: auto;
+    }
+    .preview-pane .katex-display {
+      margin: 0;
+      padding: 0.8em 0;
+    }
+    .preview-pane .katex {
+      font-size: 1.1em;
+    }
+
     /* Floating file-name labels for left/right diff panels */
     .panel-label {
       position: absolute;
@@ -504,6 +579,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
     this._scrollLockTimer = null;  // Timer to release the lock
     this._editorScrollDisposable = null; // Monaco scroll listener disposable
+    this._texPreviewTimer = null;  // Debounce timer for TeX preview compilation
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onMarkdownLinkNav = this._onMarkdownLinkNav.bind(this);
@@ -532,6 +608,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if (this._scrollLockTimer) {
       clearTimeout(this._scrollLockTimer);
       this._scrollLockTimer = null;
+    }
+    if (this._texPreviewTimer) {
+      clearTimeout(this._texPreviewTimer);
+      this._texPreviewTimer = null;
     }
   }
 
@@ -1027,7 +1107,17 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Track dirty state on modified editor
       this._editor.getModifiedEditor().onDidChangeModelContent(() => {
         this._checkDirty();
-        if (this._previewMode) this._updatePreview();
+        if (this._previewMode) {
+          // For TeX files, don't compile on every keystroke — too expensive.
+          // Instead, debounce with a longer delay.
+          const activeFile = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+          if (activeFile && this._isTexFile(activeFile.path)) {
+            clearTimeout(this._texPreviewTimer);
+            this._texPreviewTimer = setTimeout(() => this._updatePreview(), 2000);
+          } else {
+            this._updatePreview();
+          }
+        }
       });
     }
 
@@ -1082,6 +1172,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _disposeEditor() {
+    // Clear TeX preview debounce timer
+    if (this._texPreviewTimer) {
+      clearTimeout(this._texPreviewTimer);
+      this._texPreviewTimer = null;
+    }
     // Dispose the scroll listener first
     if (this._editorScrollDisposable) {
       this._editorScrollDisposable.dispose();
@@ -1290,6 +1385,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       },
     }));
 
+    // Trigger TeX preview recompile on save
+    if (this._previewMode && this._isTexFile(file.path)) {
+      this._updateTexPreview();
+    }
   }
 
   /**
@@ -1703,6 +1802,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return ext === '.md' || ext === '.markdown';
   }
 
+  _isTexFile(path) {
+    if (!path) return false;
+    const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+    return ext === '.tex' || ext === '.latex';
+  }
+
+  _isPreviewableFile(path) {
+    return this._isMarkdownFile(path) || this._isTexFile(path);
+  }
+
   _isSvgFile(path) {
     if (!path) return false;
     return path.toLowerCase().endsWith('.svg');
@@ -1724,7 +1833,51 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     }));
   }
 
-  _togglePreview() {
+  async _togglePreview() {
+    // If enabling preview for a TeX file, check make4ht availability first
+    if (!this._previewMode) {
+      const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+      if (file && this._isTexFile(file.path)) {
+        try {
+          const check = await this.rpcExtract('LLMService.is_tex_preview_available');
+          if (check && !check.available) {
+            // Show install instructions in the preview pane instead of
+            // blocking the toggle — user can see what's needed
+            this._previewMode = true;
+            this._previewContent = `<div style="padding: 20px;">
+              <h3 style="color: var(--accent-orange);">⚠️ TeX Preview Unavailable</h3>
+              <p style="color: var(--text-secondary);">
+                <code>make4ht</code> is required for TeX preview but is not installed.
+              </p>
+              <pre style="color: var(--accent-green); background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin-top: 12px;">${check.install_hint || 'sudo apt install texlive-extra-utils'}</pre>
+              <p style="color: var(--text-muted); margin-top: 12px; font-size: 0.85rem;">
+                After installing, the preview will work automatically — no restart needed.
+              </p>
+            </div>`;
+            // Still switch to preview layout so the message is visible
+            this._disposeEditor();
+            this.updateComplete.then(() => {
+              this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
+                                       this.shadowRoot.querySelector('.editor-container');
+              if (this._resizeObserver) this._resizeObserver.disconnect();
+              this._resizeObserver = new ResizeObserver(() => {
+                if (this._editor) this._editor.layout();
+              });
+              this._resizeObserver.observe(this);
+              if (this._editorContainer) {
+                this._resizeObserver.observe(this._editorContainer);
+              }
+              this._showEditor();
+            });
+            return;
+          }
+        } catch (e) {
+          console.warn('TeX availability check failed:', e);
+          // Proceed anyway — the compile call will surface the error
+        }
+      }
+    }
+
     this._previewMode = !this._previewMode;
     if (this._previewMode) {
       this._updatePreview();
@@ -1747,8 +1900,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _updatePreview() {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (file && this._isTexFile(file.path)) {
+      this._updateTexPreview();
+      return;
+    }
     if (!this._editor) {
-      const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
       this._previewContent = file ? renderMarkdownWithSourceMap(file.modified) : '';
     } else {
       const content = this._editor.getModifiedEditor()?.getValue() ?? '';
@@ -1757,6 +1914,285 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this.requestUpdate();
     // After DOM update, resolve relative image paths
     this.updateComplete.then(() => this._resolvePreviewImages());
+  }
+
+  async _updateTexPreview() {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return;
+    const content = this._editor?.getModifiedEditor()?.getValue() ?? file.modified;
+    if (!content.trim()) {
+      this._previewContent = '<p style="color: var(--text-muted);">Empty document</p>';
+      this.requestUpdate();
+      return;
+    }
+    // Show loading state
+    this._previewContent = '<p style="color: var(--text-muted);">⏳ Compiling TeX…</p>';
+    this.requestUpdate();
+
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.compile_tex_preview', content, file.path
+      );
+      if (!result) {
+        this._previewContent = '<p style="color: var(--accent-red);">Preview failed: no response</p>';
+        this.requestUpdate();
+        return;
+      }
+      if (result.error) {
+        let errorHtml = `<div style="color: var(--accent-red); margin-bottom: 12px;">
+          <strong>⚠️ ${this._escapePreviewHtml(result.error)}</strong>
+        </div>`;
+        if (result.install_hint) {
+          errorHtml += `<pre style="color: var(--text-secondary); font-size: 0.85rem; white-space: pre-wrap;">${this._escapePreviewHtml(result.install_hint)}</pre>`;
+        }
+        if (result.log) {
+          errorHtml += `<details style="margin-top: 12px;">
+            <summary style="cursor: pointer; color: var(--text-muted);">Compilation log</summary>
+            <pre style="color: var(--text-secondary); font-size: 0.78rem; white-space: pre-wrap; max-height: 400px; overflow-y: auto; margin-top: 8px;">${this._escapePreviewHtml(result.log)}</pre>
+          </details>`;
+        }
+        this._previewContent = errorHtml;
+        this.requestUpdate();
+        return;
+      }
+      // Success — render LaTeX math with KaTeX, then inject source lines for scroll sync
+      let processed = this._renderTexMathWithKatex(result.html);
+      processed = this._injectTexSourceLines(processed, content);
+      this._previewContent = processed;
+      this.requestUpdate();
+    } catch (e) {
+      console.error('TeX preview failed:', e);
+      this._previewContent = `<p style="color: var(--accent-red);">Preview error: ${this._escapePreviewHtml(e.message || String(e))}</p>`;
+      this.requestUpdate();
+    }
+  }
+
+  _escapePreviewHtml(text) {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /**
+   * Render LaTeX math in make4ht output using KaTeX.
+   *
+   * When make4ht runs with the "mathjax" option, it emits raw LaTeX
+   * math wrapped in \(...\) (inline) and \[...\] (display) delimiters
+   * instead of generating SVG/PNG images.  This method finds those
+   * delimiters and replaces them with KaTeX-rendered HTML.
+   *
+   * Also handles $$...$$ display math and $...$ inline math that
+   * make4ht may pass through, as well as \begin{equation}...\end{equation}
+   * environments.
+   */
+  /**
+   * Strip LaTeX commands that KaTeX doesn't support or that leak as
+   * visible text: \label{...}, \tag{...}, \nonumber, \notag.
+   */
+  _cleanTexForKatex(tex) {
+    return tex
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/\\label\{[^}]*\}/g, '')
+      .replace(/\\tag\{[^}]*\}/g, '')
+      .replace(/\\nonumber/g, '')
+      .replace(/\\notag/g, '')
+      .trim();
+  }
+
+  _renderTexMathWithKatex(htmlStr) {
+    if (!htmlStr) return htmlStr;
+    try {
+      // Phase 1: Remove make4ht alt-text spans/divs that duplicate
+      // the math content as plain text BEFORE processing delimiters.
+      htmlStr = htmlStr.replace(
+        /<span\s+class="(?:math-display|MathJax_Preview)"[^>]*>[\s\S]*?<\/span>/g,
+        ''
+      );
+      htmlStr = htmlStr.replace(
+        /<div\s+class="(?:math-display|MathJax_Preview)"[^>]*>[\s\S]*?<\/div>/g,
+        ''
+      );
+
+      // Phase 2: Render math delimiters with KaTeX.
+      // Order matters: \begin{equation} before \[...\] because make4ht
+      // sometimes wraps one inside the other.
+
+      // Display math environments: \begin{equation}...\end{equation} etc.
+      htmlStr = htmlStr.replace(/\\begin\{(equation|align|gather|multline|displaymath|eqnarray)\*?\}([\s\S]*?)\\end\{\1\*?\}/g, (_match, env, tex) => {
+        try {
+          let katexTex = this._cleanTexForKatex(tex);
+          if (env === 'align' || env === 'align*') {
+            katexTex = `\\begin{aligned}${katexTex}\\end{aligned}`;
+          } else if (env === 'gather' || env === 'gather*') {
+            katexTex = `\\begin{gathered}${katexTex}\\end{gathered}`;
+          }
+          return `<div class="math-display katex-rendered">${katex.renderToString(katexTex, { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Display math: \[...\]
+      htmlStr = htmlStr.replace(/\\\[([\s\S]*?)\\\]/g, (_match, tex) => {
+        try {
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Display math: $$...$$
+      htmlStr = htmlStr.replace(/\$\$([\s\S]*?)\$\$/g, (_match, tex) => {
+        try {
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Inline math: \(...\)
+      htmlStr = htmlStr.replace(/\\\(([\s\S]*?)\\\)/g, (_match, tex) => {
+        try {
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+        } catch (_) {
+          return `<code>${this._escapePreviewHtml(tex)}</code>`;
+        }
+      });
+
+      // Inline math: $...$  (single dollar, non-greedy, no spaces around $)
+      htmlStr = htmlStr.replace(/(?<![\\$])\$([^\s$](?:[^$]*[^\s$])?)\$(?!\$)/g, (_match, tex) => {
+        try {
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+        } catch (_) {
+          return `<code>${this._escapePreviewHtml(tex)}</code>`;
+        }
+      });
+
+      // Phase 3: Remove alt-text fallbacks placed adjacent to rendered math.
+      // After KaTeX rendering, orphan text between a closing katex-rendered
+      // tag and the next HTML tag is likely a plain-text duplicate.
+      htmlStr = htmlStr.replace(
+        /(<\/(?:span|div)>)(\s*(?:<br\s*\/?>)?\s*)([^<]{2,}?)(\s*<)/g,
+        (_match, closeTag, ws1, text, openTag) => {
+          const looksLikeMath = /[=+\-−×÷<>≤≥|∣(){}^_,0-9]/.test(text)
+            && !/\.\s+[A-Z]/.test(text);
+          if (looksLikeMath) {
+            return `${closeTag}${openTag}`;
+          }
+          return _match;
+        }
+      );
+
+      // Strip text containing \label after rendered display math
+      htmlStr = htmlStr.replace(
+        /(<\/div>)\s*(?:<br\s*\/?>)?\s*([^<]{5,}\\label[^<]*)/g,
+        '$1'
+      );
+
+      return htmlStr;
+    } catch (e) {
+      console.warn('KaTeX rendering failed:', e);
+      return htmlStr;
+    }
+  }
+
+
+  /**
+   * Inject data-source-line attributes into make4ht HTML output for
+   * scroll synchronization with the editor.
+   *
+   * Strategy: extract visible text from each block-level element in the
+   * HTML, then find the best matching line in the TeX source.  This
+   * provides approximate scroll sync — not perfect (TeX macros expand
+   * differently from their source text) but good enough for navigation.
+   */
+  _injectTexSourceLines(html, texSource) {
+    if (!html || !texSource) return html;
+
+    const sourceLines = texSource.split('\n');
+
+    // Build a map of text content → first source line number.
+    // We strip TeX commands to get the visible text for matching.
+    const textToLine = new Map();
+    for (let i = 0; i < sourceLines.length; i++) {
+      const line = sourceLines[i].trim();
+      if (!line || line.startsWith('%')) continue;
+      // Extract visible text: remove \command{...} wrappers, keep content
+      const visible = line
+        .replace(/\\[a-zA-Z]+\*?\{/g, '')   // \section{, \textbf{, etc.
+        .replace(/[{}\\]/g, '')               // remaining braces and backslashes
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (visible.length >= 3 && !textToLine.has(visible)) {
+        textToLine.set(visible, i + 1);  // 1-based line numbers
+      }
+    }
+
+    // For each block-level tag, try to match its text to a source line
+    // and inject data-source-line attribute.
+    const blockTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'li', 'dt', 'dd', 'figcaption', 'caption', 'pre'];
+    const tagPattern = new RegExp(
+      `(<(?:${blockTags.join('|')}))(\\s|>)`, 'gi'
+    );
+
+    // Track which source lines we've already assigned to avoid duplicates
+    const usedLines = new Set();
+    let lastAssignedLine = 0;
+
+    const result = html.replace(tagPattern, (match, tagStart, after) => {
+      // Extract text content following this tag (up to the closing tag)
+      const pos = html.indexOf(match);
+      const closeIdx = html.indexOf('</', pos + match.length);
+      if (closeIdx === -1) return match;
+
+      const inner = html.slice(pos + match.length - after.length + (after === '>' ? 1 : 0), closeIdx);
+      // Strip nested HTML tags to get visible text
+      const visibleText = inner
+        .replace(/<[^>]*>/g, '')
+        .replace(/&[a-z]+;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (visibleText.length < 2) return match;
+
+      // Try to find a matching source line
+      let bestLine = null;
+
+      // Exact match
+      for (const [text, line] of textToLine) {
+        if (!usedLines.has(line) && text === visibleText) {
+          bestLine = line;
+          break;
+        }
+      }
+
+      // Substring match (HTML text is substring of source text or vice versa)
+      if (!bestLine) {
+        for (const [text, line] of textToLine) {
+          if (!usedLines.has(line) && line > lastAssignedLine) {
+            if (text.includes(visibleText) || visibleText.includes(text)) {
+              bestLine = line;
+              break;
+            }
+          }
+        }
+      }
+
+      if (bestLine) {
+        usedLines.add(bestLine);
+        lastAssignedLine = bestLine;
+        return `${tagStart} data-source-line="${bestLine}"${after}`;
+      }
+
+      return match;
+    });
+
+    return result;
   }
 
   /**
@@ -1926,7 +2362,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const hasFiles = this._files.length > 0;
     const file = hasFiles && this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
     const isDirty = file ? this._dirtySet.has(file.path) : false;
-    const showPreviewBtn = file && this._isMarkdownFile(file.path);
+    const showPreviewBtn = file && this._isPreviewableFile(file.path);
 
     if (this._previewMode && file) {
       return html`

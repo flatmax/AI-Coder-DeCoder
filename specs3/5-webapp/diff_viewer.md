@@ -233,6 +233,93 @@ The `marked` markdown library does not parse `![alt](path with spaces)` — unen
 
 Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). After disposal, the component waits for `updateComplete` (Lit re-render), then updates the editor container reference (`_editorContainer`) from the new DOM structure (`.editor-pane` in preview mode, `.editor-container` in normal mode). The `ResizeObserver` is disconnected and reattached to the new container. Finally `_showEditor()` rebuilds the editor in the new layout.
 
+## TeX Preview
+
+For `.tex` and `.latex` files, the same **Preview** button activates a live TeX preview. Instead of client-side Markdown rendering, TeX preview compiles the source with `make4ht` on the server and renders the resulting HTML with KaTeX math in the browser.
+
+### Compilation Pipeline
+
+1. The diff viewer sends the current editor content to `LLMService.compile_tex_preview(content, file_path)` via RPC
+2. The server writes content to a temp `.tex` file and runs `make4ht` with `mathjax` option
+3. The resulting HTML body is extracted, assets (images, CSS) are inlined as data URIs
+4. make4ht alt-text fallbacks are stripped server-side (`_clean_mathjax_output`)
+5. The client renders math delimiters (`\(...\)`, `\[...\]`, `\begin{equation}...`) with KaTeX
+6. Remaining alt-text duplicates are stripped client-side (`_renderTexMathWithKatex`)
+
+### make4ht Configuration
+
+A custom `.cfg` file is generated per compilation to force mathjax-compatible output:
+
+```
+\Preamble{xhtml,mathjax}
+\begin{document}
+\EndPreamble
+```
+
+This tells TeX4ht to emit raw LaTeX math delimiters instead of converting equations to SVG/PNG images. The browser-side KaTeX renderer handles the actual math display.
+
+### Math Rendering (KaTeX)
+
+The `_renderTexMathWithKatex` method processes make4ht HTML output in three phases:
+
+1. **Phase 1: Strip alt-text elements** — Remove `<span class="MathJax_Preview">` and similar elements that make4ht emits as plain-text fallbacks alongside the delimited math
+2. **Phase 2: Render delimiters** — Process math delimiters in priority order:
+   - `\begin{equation}...\end{equation}` (and `align`, `gather`, `multline`, `eqnarray`) → KaTeX display math
+   - `\[...\]` → KaTeX display math
+   - `$$...$$` → KaTeX display math
+   - `\(...\)` → KaTeX inline math
+   - `$...$` → KaTeX inline math
+3. **Phase 3: Strip orphan alt-text** — Remove bare text nodes between rendered math elements and the next HTML tag that look like flattened math duplicates
+
+The `_cleanTexForKatex` helper reverses HTML entity escaping (`&lt;` → `<`, `&gt;` → `>`, `&amp;` → `&`) that make4ht applies inside math regions before passing to KaTeX. It also strips unsupported commands (`\label`, `\tag`, `\nonumber`, `\notag`).
+
+### Server-Side Alt-Text Stripping
+
+`Repo._clean_mathjax_output` removes known make4ht artifacts before the HTML reaches the browser:
+
+- `<span class="MathJax_Preview">` fallback spans
+- `<script type="math/tex">` blocks
+- `<td class="eq-no">` equation number cells
+- Inline alt-text after `\)` delimiters (plain-text renderings like "hm+1 = filter(am,bm,hm)")
+- Display alt-text after `\]` and `\end{...}` delimiters
+
+### Debounced Compilation
+
+TeX compilation is expensive (spawns `make4ht` subprocess). Unlike Markdown preview which updates on every keystroke, TeX preview debounces with a 2-second timer. Saving the file (`Ctrl+S`) triggers an immediate recompile.
+
+### Scroll Synchronization
+
+TeX preview injects `data-source-line` attributes by matching visible text in the HTML output against source lines in the `.tex` file. The matching uses:
+
+1. Strip TeX commands from source lines to extract visible text
+2. For each block-level HTML element, extract its text content
+3. Match via exact text equality, then substring containment
+4. Assigned lines are tracked to prevent duplicates
+
+The same bidirectional scroll sync mechanism used for Markdown preview (editor → preview and preview → editor with scroll lock) applies to TeX preview.
+
+### Asset Resolution
+
+`Repo._resolve_tex_assets` converts relative paths in make4ht output to inline data URIs:
+
+- `src="..."` attributes on `<img>` tags → base64 data URIs
+- `url(...)` in inline CSS → base64 data URIs
+- `<link rel="stylesheet" href="...">` → inlined `<style>` blocks
+
+The working directory for `make4ht` is set to the file's parent directory so that `\input`, `\include`, and `\includegraphics` resolve relative paths correctly.
+
+### Availability Check
+
+Before enabling TeX preview, the diff viewer calls `LLMService.is_tex_preview_available()` to check if `make4ht` is installed. If not, the preview pane displays installation instructions instead of an error.
+
+### Temp Directory Lifecycle
+
+Each compilation creates a temp directory for make4ht output. The previous compilation's temp directory is cleaned up at the start of the next compilation (`_cleanup_old_tex_preview`). This keeps at most one temp directory alive so generated images can be served during the preview session.
+
+### CSS Styling
+
+make4ht generates class names for TeX formatting (`cmr-17`, `cmbx-12`, `cmti-10`, etc.). The diff viewer maps these to appropriate styles (font sizes, bold, italic, monospace). Section headings (`sectionHead`, `subsectionHead`, `subsubsectionHead`) receive the same styling as Markdown headings.
+
 ## Event Routing
 
 | Source | Event Path |

@@ -20,6 +20,7 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 - **Collaboration mode** — multiple browsers can connect to one backend over LAN. The host is auto-admitted; subsequent connections require explicit approval via an in-browser toast. Non-localhost participants get a read-only view (browse files, view diffs, watch streaming) while the host retains full control. Enable with `--collab`.
 - **Voice dictation** via Web Speech API.
 - **Math rendering** — LaTeX expressions in LLM responses render as formatted math via KaTeX (`$$...$$` for display blocks, `$...$` for inline).
+- **TeX preview** — live-rendered LaTeX preview for `.tex` files with KaTeX math rendering, bidirectional scroll sync, and make4ht compilation. Requires `make4ht` (part of TeX Live).
 - **Configurable prompt snippets** for common actions.
 - **Full-text search** with a two-panel layout — file picker (left) showing matching files with match counts, and a match context panel (right) with highlighted results and bidirectional scroll sync. Supports regex, whole-word, and case-insensitive modes.
 - **Session history browser** — search, revisit, and reload past conversations.
@@ -62,6 +63,25 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 4. Select files to include their reverse diffs in context.
 5. Chat with the LLM about the changes.
 6. Click **Exit Review** to restore the branch.
+
+### TeX Preview
+
+Open any `.tex` or `.latex` file and click the **Preview** button to see a live-rendered preview alongside the editor. The preview uses [make4ht](https://ctan.org/pkg/make4ht) (TeX4ht) to compile TeX to HTML, then renders math expressions with KaTeX in the browser.
+
+- **Live update** — preview recompiles on save (debounced 2s during typing to avoid excessive compilations)
+- **Math rendering** — inline `\(...\)` and display `\[...\]` math, plus `\begin{equation}`, `\begin{align}`, `\begin{gather}` environments rendered via KaTeX
+- **Scroll sync** — bidirectional: scroll the editor and the preview follows, and vice versa
+- **Relative paths** — `\input`, `\include`, and `\includegraphics` resolve relative to the file's directory
+- **Asset inlining** — generated images and CSS from make4ht are converted to inline data URIs
+- **Graceful degradation** — if `make4ht` is not installed, the preview pane shows installation instructions
+
+Requires `make4ht` (part of TeX Live):
+```bash
+# Ubuntu/Debian
+sudo apt install texlive-extra-utils
+# macOS
+brew install --cask mactex
+```
 
 ### SVG Viewer & Editor
 
@@ -373,6 +393,7 @@ npm run build
 | Tool | Purpose |
 |------|---------|
 | [LibreOffice](https://www.libreoffice.org/) | Headless conversion of `.pptx`, `.odp` → PDF for the full PDF pipeline (`soffice` must be on PATH). Not needed for `.docx`, `.xlsx`, `.csv`, `.rtf`, `.odt` (handled by markitdown) or `.pdf` (handled directly by PyMuPDF). Without LibreOffice, `.pptx` falls back to python-pptx for basic SVG export. |
+| [make4ht](https://ctan.org/pkg/make4ht) | TeX-to-HTML compilation for live `.tex` file preview. Part of TeX Live (`texlive-extra-utils` on Debian/Ubuntu, `mactex` on macOS). Without it, TeX preview shows installation instructions instead of rendered output. |
 
 **Build & Deploy:**
 
