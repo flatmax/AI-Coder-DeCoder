@@ -2426,8 +2426,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    * Editor → Preview: find which source line is at the top of the editor
    * viewport and scroll the preview pane to the corresponding element.
    *
-   * Problem 4 fix: no artificial offsets — symmetric in both directions.
-   * Problem 5 fix: uses pixel-precise setScrollTop instead of revealLine.
+   * Uses a deduplicated, monotonic anchor map so that increasing editor
+   * lines always produce increasing preview scroll positions.  Falls back
+   * to proportional scrolling at the boundaries.
    */
   _scrollPreviewToEditorLine() {
     const previewPane = this.shadowRoot?.querySelector('.preview-pane');
@@ -2435,26 +2436,58 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
 
     const modifiedEditor = this._editor.getModifiedEditor();
     const scrollTop = modifiedEditor.getScrollTop();
+    const scrollHeight = modifiedEditor.getScrollHeight();
+    const clientHeight = modifiedEditor.getLayoutInfo().height;
+
+    // Edge case: if editor content fits without scrollbar, nothing to sync
+    if (scrollHeight <= clientHeight) return;
+
     const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
     const topLine = Math.floor(scrollTop / lineHeight) + 1;
 
-    const anchors = _getPreviewAnchors(previewPane);
+    const rawAnchors = _getPreviewAnchors(previewPane);
+    if (rawAnchors.length === 0) return;
+
+    // Deduplicate: keep only the first element for each source line, and
+    // ensure offsetTop is monotonically non-decreasing.  Interpolated
+    // line numbers from Phase 4 can produce runs of identical line values
+    // with wildly different offsets (nested containers), which makes the
+    // editor→preview mapping non-monotonic and causes jumps.
+    const anchors = [];
+    let lastLine = -1;
+    let lastOffset = -1;
+    for (const a of rawAnchors) {
+      if (a.line === lastLine) continue;          // skip duplicate lines
+      if (a.offsetTop < lastOffset) continue;     // skip non-monotonic offsets
+      anchors.push(a);
+      lastLine = a.line;
+      lastOffset = a.offsetTop;
+    }
     if (anchors.length === 0) return;
 
-    // Find the anchor at or just before topLine
-    let target = anchors[0];
-    for (const a of anchors) {
-      if (a.line <= topLine) target = a;
-      else break;
+    // Binary search for the anchor at or just before topLine
+    let lo = 0, hi = anchors.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (anchors[mid].line <= topLine) lo = mid;
+      else hi = mid - 1;
     }
 
-    // Interpolate between this anchor and the next for smooth scrolling
-    const idx = anchors.indexOf(target);
-    const next = anchors[idx + 1];
-    let scrollTarget = target.offsetTop;
+    const target = anchors[lo];
+    const next = lo + 1 < anchors.length ? anchors[lo + 1] : null;
+
+    let scrollTarget;
     if (next && next.line > target.line) {
-      const fraction = (topLine - target.line) / (next.line - target.line);
-      scrollTarget += fraction * (next.offsetTop - target.offsetTop);
+      const fraction = Math.min(1, Math.max(0,
+        (topLine - target.line) / (next.line - target.line)
+      ));
+      scrollTarget = target.offsetTop + fraction * (next.offsetTop - target.offsetTop);
+    } else {
+      // Past the last anchor — use proportional scrolling to the end
+      // of the preview pane so we reach the bottom smoothly.
+      const maxPreviewScroll = previewPane.scrollHeight - previewPane.clientHeight;
+      const editorFraction = scrollTop / (scrollHeight - clientHeight);
+      scrollTarget = editorFraction * maxPreviewScroll;
     }
 
     previewPane.scrollTop = scrollTarget;
@@ -2463,6 +2496,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   /**
    * Preview → Editor: find which data-source-line element is at the top of
    * the preview viewport and scroll the editor to that line.
+   *
+   * Uses the same deduplication / monotonicity filtering as the forward
+   * direction so the mapping is consistent in both directions.
    */
   _scrollEditorToPreviewLine() {
     if (!this._editor) return;
@@ -2475,28 +2511,57 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
 
     const scrollTop = previewPane.scrollTop;
-    const anchors = _getPreviewAnchors(previewPane);
+    const maxPreviewScroll = previewPane.scrollHeight - previewPane.clientHeight;
+
+    const rawAnchors = _getPreviewAnchors(previewPane);
+    if (rawAnchors.length === 0) return;
+
+    // Deduplicate and enforce monotonicity (same logic as forward direction)
+    const anchors = [];
+    let lastLine = -1;
+    let lastOffset = -1;
+    for (const a of rawAnchors) {
+      if (a.line === lastLine) continue;
+      if (a.offsetTop < lastOffset) continue;
+      anchors.push(a);
+      lastLine = a.line;
+      lastOffset = a.offsetTop;
+    }
     if (anchors.length === 0) return;
 
-    // Find the anchor at or just before current scroll position
-    let target = anchors[0];
-    for (const a of anchors) {
-      if (a.offsetTop <= scrollTop) target = a;
-      else break;
-    }
-
-    // Interpolate for sub-anchor precision
-    const idx = anchors.indexOf(target);
-    const next = anchors[idx + 1];
-    let targetLine = target.line;
-    if (next && next.offsetTop > target.offsetTop) {
-      const fraction = (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop);
-      targetLine += fraction * (next.line - target.line);
-    }
-
-    // Problem 5 fix: pixel-precise positioning instead of revealLine
     const modifiedEditor = this._editor.getModifiedEditor();
     const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    const scrollHeight = modifiedEditor.getScrollHeight();
+    const clientHeight = modifiedEditor.getLayoutInfo().height;
+
+    // Binary search for the anchor at or just before scrollTop (by offset)
+    let lo = 0, hi = anchors.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (anchors[mid].offsetTop <= scrollTop) lo = mid;
+      else hi = mid - 1;
+    }
+
+    const target = anchors[lo];
+    const next = lo + 1 < anchors.length ? anchors[lo + 1] : null;
+
+    let targetLine;
+    if (next && next.offsetTop > target.offsetTop) {
+      const fraction = Math.min(1, Math.max(0,
+        (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop)
+      ));
+      targetLine = target.line + fraction * (next.line - target.line);
+    } else {
+      // Past the last anchor — proportional fallback
+      if (maxPreviewScroll > 0) {
+        const previewFraction = scrollTop / maxPreviewScroll;
+        const maxEditorScroll = scrollHeight - clientHeight;
+        modifiedEditor.setScrollTop(previewFraction * maxEditorScroll);
+        return;
+      }
+      targetLine = target.line;
+    }
+
     modifiedEditor.setScrollTop((targetLine - 1) * lineHeight);
   }
 
