@@ -10,9 +10,15 @@ For `.svg` files, see [SVG Viewer](svg_viewer.md) — a dedicated side-by-side v
 
 Background layer (`position: fixed; inset: 0`), sibling of the dialog. Empty state shows AC⚡DC watermark.
 
-### Status LED
+### Floating Overlay Buttons
 
-Instead of a tab bar, a single floating status LED indicator appears in the top-right corner when a file is open:
+When a file is open, floating overlay buttons appear in the top-right corner:
+
+- **Status LED** — a 10px circular indicator (see below)
+- **Preview button** — for `.md`/`.markdown` files, toggles Markdown preview mode (see [Markdown Preview](#markdown-preview))
+- **Visual button** — for `.svg` files, a "🎨 Visual" button that dispatches `toggle-svg-mode` to switch to the SVG viewer's visual editor. The SVG viewer has the reciprocal "`</>`" button — see [SVG Viewer — SVG ↔ Text Diff Mode Toggle](svg_viewer.md#svg--text-diff-mode-toggle)
+
+### Status LED
 
 | LED State | Color | Behavior |
 |-----------|-------|----------|
@@ -30,19 +36,58 @@ The LED replaces a traditional tab bar — multiple files are tracked internally
 
 ### Language Detection
 
-Map of common extensions to language identifiers: `.js`→javascript, `.ts`→typescript, `.py`→python, `.json`→json, `.yaml`/`.yml`→yaml, `.html`→html, `.css`→css, `.md`→markdown, `.c`/`.h`→c, `.cpp`/`.hpp`→cpp, `.sh`/`.bash`→shell. Fallback: plaintext.
+Map of common extensions to language identifiers: `.js`→javascript, `.ts`→typescript, `.py`→python, `.json`→json, `.yaml`/`.yml`→yaml, `.html`→html, `.css`→css, `.md`→markdown, `.c`/`.h`→c, `.cpp`/`.hpp`→cpp, `.sh`/`.bash`→shell, `.m`→matlab, `.java`→java, `.rs`→rust, `.go`→go, `.rb`→ruby, `.php`→php, `.sql`→sql, `.toml`/`.ini`/`.cfg`→ini. Fallback: plaintext.
+
+### MATLAB Syntax Highlighting
+
+MATLAB (`.m`) files use a custom Monarch tokenizer registered at module load time (before any editor instance is created) via `monaco.languages.register({ id: 'matlab' })` and `monaco.languages.setMonarchTokensProvider('matlab', {...})`. Since Monaco has no built-in MATLAB language, this registration must happen eagerly. The tokenizer handles:
+
+- **Keywords**: `break`, `case`, `catch`, `classdef`, `continue`, `else`, `elseif`, `end`, `for`, `function`, `if`, `methods`, `properties`, `return`, `switch`, `try`, `while`, `parfor`, `spmd`, etc.
+- **Builtins**: `abs`, `zeros`, `ones`, `eye`, `disp`, `fprintf`, `plot`, `figure`, `size`, `length`, `find`, `sort`, `struct`, `cell`, etc. (approximately 80 entries)
+- **Comments**: Line comments (`%...`) and block comments (`%{...%}`)
+- **Strings**: Single-quoted (`'...'`) and double-quoted (`"..."`)
+- **Numbers**: Integer, float, scientific notation, complex (`i`/`j` suffix)
+- **Operators**: Arithmetic (`+`, `-`, `*`, `/`, `^`), element-wise (`.^`, `.*`, `./`), comparison (`==`, `~=`, `>=`), logical (`&`, `|`, `&&`, `||`)
+- **Transpose**: The `'` operator after identifiers/brackets is tokenized as an operator (not a string delimiter)
+
+The tokenizer is registered via `monaco.languages.register()` and `monaco.languages.setMonarchTokensProvider()` at module load time, before any editor is created.
 
 ### Worker-Safe Languages
 
 Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. These workers may fail in certain build configurations. The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
 
+### Floating Panel Labels
+
+Two floating labels appear over the diff panels when contextual information is available:
+
+| Label | Position | Content |
+|-------|----------|---------|
+| Left | `right: calc(50% + 8px)` | Source label (e.g., custom label from `loadPanel`) |
+| Right | `right: 120px` | Source label (e.g., custom label from `loadPanel`) |
+
+Labels are semi-transparent with backdrop blur (`rgba(22, 27, 34, 0.78)`) and become more opaque on hover. In inline diff mode (preview), the left label is hidden. Labels are only shown for `loadPanel` comparisons — normal file diffs (same file, HEAD vs working) show no labels since the context is obvious from the file path.
+
 ### Monaco Shadow DOM Integration
 
-Monaco must render inside a Lit shadow DOM. The component clones all `<style>` and `<link>` nodes from `document.head` into its shadow root on editor creation, and watches for dynamically added/removed stylesheets via a `MutationObserver`. Style injection runs once per component lifetime. The observer is disconnected when the component is removed from the DOM.
+Monaco must render inside a Lit shadow DOM. Style injection has two phases:
+
+1. **Full re-sync** (`_syncAllStyles`): On every editor creation, all previously-cloned styles are removed and all current `<style>`/`<link>` nodes from `document.head` are re-cloned into the shadow root. This ensures Monaco's dynamically-added styles (created during editor construction) are captured. This runs every time `_showEditor` is called.
+
+2. **Incremental observation** (`MutationObserver`): Set up once per component lifetime, watches `document.head` for dynamically added/removed stylesheets after initial editor creation. Added nodes are cloned in; removed nodes have their corresponding clones found and removed by matching `textContent`.
+
+The re-sync approach (remove all + re-clone) prevents duplicate style accumulation when switching between files causes editor recreation. The observer is disconnected when the component is removed from the DOM.
 
 ## File Management
 
 Multiple files can be open simultaneously, tracked internally as an ordered list. There is no visible tab bar — navigation between open files uses keyboard shortcuts only (Ctrl+PageDown, Ctrl+PageUp, Ctrl+W). The status LED in the top-right reflects the active file's state.
+
+### Same-File Suppression
+
+When `openFile` is called for a file that is already the active file, the editor is not rebuilt — `_showEditor()` is skipped entirely. This avoids recreating Monaco models (which resets scroll position and cancels internal Delayers). If the file is open but not active, the tab is switched and the viewport is restored from the per-file viewport state map.
+
+### Adjacent Same-File Reuse
+
+When `openFile` is called and an adjacent neighbor in the file navigation grid already references the target path, navigation reuses that neighbor rather than creating a new node. See [File Navigation — Adjacent Same-File Reuse](file_navigation.md#adjacent-same-file-reuse).
 
 ## Saving
 
@@ -53,12 +98,24 @@ Multiple files can be open simultaneously, tracked internally as an ordered list
 3. Dispatch event: `{path, content, isConfig?, configType?}`
 4. Parent routes to Repo write or Settings save
 
-### Batch Save
+### Batch Save (`saveAll`)
 
-Iterates all dirty files, updates each, dispatches batch event.
+Public method that iterates all dirty files and saves each one. For each file, the `_saveFile(path)` method is called. If the file is the currently active tab and the editor exists, its content is read live from the Monaco editor via `getModifiedEditor().getValue()`. Otherwise, the last-known `modified` content stored on the file object is used. Each file goes through the same save pipeline as single-file save (update `savedContent`, clear dirty state, dispatch event).
 
 ### Dirty Tracking
 Per-file `savedContent` vs current. Global dirty set. State change events to parent.
+
+## Load Panel (Ad-Hoc Comparison)
+
+The `loadPanel(content, panel, label)` method loads arbitrary text content into the left or right panel of the diff viewer, enabling ad-hoc comparison of content from different sources (e.g., history messages, file content loaded via context menu).
+
+**Behavior:**
+
+- If no file is open, creates a virtual comparison file at `virtual://compare`
+- If a `virtual://compare` file already exists, updates only the specified panel — the other side's content is preserved so both sides accumulate independently
+- If a real file is open, updates the specified panel's Monaco model directly (creates a new model, sets it on the editor, disposes the old model)
+- The `label` parameter sets a floating panel label (see [Floating Panel Labels](#floating-panel-labels)) — only `loadPanel` comparisons show labels; normal file diffs do not
+- After loading, the file's dirty state is cleared (the loaded content becomes the new baseline)
 
 ## LSP Integration
 
@@ -74,6 +131,17 @@ Registered when editor and RPC are both ready:
 Line and column numbers are passed as **1-indexed** values (matching Monaco's convention and the backend's symbol storage). No conversion is needed at the RPC boundary.
 
 Cross-file definition: returns `{file, range}`, loads file if needed, scrolls to target.
+
+### Cross-File Navigation via Code Editor Service
+
+When the user Ctrl+clicks a symbol whose definition is in another file, Monaco's `ICodeEditorService.openCodeEditor` is called internally to open the target. The diff viewer patches this service method (once per component lifetime, guarded by `_editorServicePatched`) to intercept cross-file navigation:
+
+1. Extract the target file path from `input.resource.path` (strip leading slashes)
+2. Extract the target line from `input.options.selection.startLineNumber`
+3. Call `this.openFile({ path, line })` to open the target in the tab system
+4. Return the current editor instance to satisfy Monaco's API contract
+
+This enables seamless Go-to-Definition across files without Monaco trying to create a new standalone editor instance.
 
 ### Markdown Link Navigation
 
@@ -129,11 +197,20 @@ The preview updates on every keystroke — the editor's `onDidChangeModelContent
 
 Editor and preview scroll positions are synchronized:
 
-**Editor → Preview:** When the editor scrolls, the top visible line is computed from `scrollTop / lineHeight`. The preview pane's `data-source-line` anchors are scanned to find the element at or just before that line. Linear interpolation between adjacent anchors provides smooth sub-element scrolling.
+**Editor → Preview:** When the editor scrolls, the top visible line is computed from `scrollTop / lineHeight`. The preview pane's `data-source-line` anchors are collected, deduplicated (first element per source line only), and filtered for monotonically non-decreasing `offsetTop` — this prevents jumps caused by nested container elements with identical or regressing positions. A binary search finds the anchor at or just before the top line. Linear interpolation between adjacent anchors provides smooth sub-element scrolling. When the editor is past the last anchor, proportional fallback (`editorFraction × maxPreviewScroll`) ensures both panels reach their bottoms together.
 
-**Preview → Editor:** When the preview pane scrolls, the reverse mapping finds which source line corresponds to the current scroll offset. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning.
+**Preview → Editor:** When the preview pane scrolls, the same deduplication and monotonicity filtering is applied. A binary search by `offsetTop` finds the anchor at or just before the scroll position. The reverse mapping computes the corresponding source line via interpolation. The editor uses pixel-precise `setScrollTop((targetLine - 1) * lineHeight)` rather than `revealLine()` to avoid jumpy repositioning. Past the last anchor, proportional fallback maps the preview scroll fraction to the editor scroll range.
 
 **Scroll lock:** A mutex mechanism prevents infinite feedback loops. When one side initiates a scroll, it sets `_scrollLock` to `'editor'` or `'preview'`. The other side's scroll handler checks the lock and skips if the other side owns it. The lock auto-releases after 120ms.
+
+**Editor scroll listener management:** The editor scroll listener (`onDidScrollChange`) is attached only to the **modified editor** (not both editors) to avoid double-firing scroll events in inline diff mode. The listener disposable (`_editorScrollDisposable`) is tracked and explicitly disposed before creating a new one on each `_showEditor` call, and also in `_disposeEditor`. The listener is only created when preview mode is active.
+
+### Relative Path Resolution
+
+A `_resolveRelativePath(relativePath)` helper resolves a relative path against the current file's directory. It splits the current file's path at the last `/` to get the directory, joins the relative path, and normalizes the result via `_normalizePath()` (which resolves `.` and `..` segments by walking the path parts array). This helper is used by:
+
+- **Markdown link navigation** — both the Monaco LinkProvider (`navigate-markdown-link` event) and the preview pane click handler resolve link targets this way
+- **Preview image resolution** — relative image `src` attributes are resolved before RPC fetch
 
 ### Image Rendering
 
@@ -154,7 +231,117 @@ The `marked` markdown library does not parse `![alt](path with spaces)` — unen
 
 ### Toggle Behavior
 
-Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). The editor container reference is updated after the Lit template re-renders, and the `ResizeObserver` is reattached.
+Toggling preview mode disposes and recreates the Monaco editor — switching between `renderSideBySide: true` (normal diff) and `renderSideBySide: false` (inline diff for preview). After disposal, the component waits for `updateComplete` (Lit re-render), then updates the editor container reference (`_editorContainer`) from the new DOM structure (`.editor-pane` in preview mode, `.editor-container` in normal mode). The `ResizeObserver` is disconnected and reattached to the new container. Finally `_showEditor()` rebuilds the editor in the new layout.
+
+## TeX Preview
+
+For `.tex` and `.latex` files, the same **Preview** button activates a live TeX preview. Instead of client-side Markdown rendering, TeX preview compiles the source with `make4ht` on the server and renders the resulting HTML with KaTeX math in the browser.
+
+### Compilation Pipeline
+
+1. The diff viewer sends the current editor content to `LLMService.compile_tex_preview(content, file_path)` via RPC
+2. The server writes content to a temp `.tex` file and runs `make4ht` with `mathjax` option
+3. The resulting HTML body is extracted, assets (images, CSS) are inlined as data URIs
+4. make4ht alt-text fallbacks are stripped server-side (`_clean_mathjax_output`)
+5. The client renders math delimiters (`\(...\)`, `\[...\]`, `\begin{equation}...`) with KaTeX
+6. Remaining alt-text duplicates are stripped client-side (`_renderTexMathWithKatex`)
+
+### make4ht Configuration
+
+A custom `.cfg` file is generated per compilation to force mathjax-compatible output:
+
+```
+\Preamble{xhtml,mathjax}
+\begin{document}
+\EndPreamble
+```
+
+This tells TeX4ht to emit raw LaTeX math delimiters instead of converting equations to SVG/PNG images. The browser-side KaTeX renderer handles the actual math display.
+
+### Math Rendering (KaTeX)
+
+The `_renderTexMathWithKatex` method processes make4ht HTML output in three phases:
+
+1. **Phase 1: Strip alt-text elements** — Remove `<span class="MathJax_Preview">` and similar elements that make4ht emits as plain-text fallbacks alongside the delimited math
+2. **Phase 2: Render delimiters** — Process math delimiters in priority order:
+   - `\begin{equation}...\end{equation}` (and `align`, `gather`, `multline`, `eqnarray`) → KaTeX display math
+   - `\[...\]` → KaTeX display math
+   - `$$...$$` → KaTeX display math
+   - `\(...\)` → KaTeX inline math
+   - `$...$` → KaTeX inline math
+3. **Phase 3: Strip orphan alt-text** — Remove bare text nodes between rendered math elements and the next HTML tag that look like flattened math duplicates
+
+The `_cleanTexForKatex` helper reverses HTML entity escaping (`&lt;` → `<`, `&gt;` → `>`, `&amp;` → `&`) that make4ht applies inside math regions before passing to KaTeX. It also strips unsupported commands (`\label`, `\tag`, `\nonumber`, `\notag`).
+
+### Server-Side Alt-Text Stripping
+
+`Repo._clean_mathjax_output` removes known make4ht artifacts before the HTML reaches the browser:
+
+- `<span class="MathJax_Preview">` fallback spans
+- `<script type="math/tex">` blocks
+- `<td class="eq-no">` equation number cells
+- Inline alt-text after `\)` delimiters (plain-text renderings like "hm+1 = filter(am,bm,hm)")
+- Display alt-text after `\]` and `\end{...}` delimiters
+
+### Debounced Compilation
+
+TeX compilation is expensive (spawns `make4ht` subprocess). Unlike Markdown preview which updates on every keystroke, TeX preview debounces with a 2-second timer. Saving the file (`Ctrl+S`) triggers an immediate recompile.
+
+### Scroll Synchronization
+
+TeX preview uses a two-pass **anchor-and-interpolation** strategy to inject `data-source-line` attributes into the make4ht HTML output. This avoids fragile text matching (which fails on math, tables, and algorithmic environments where KaTeX rendering destroys the original text).
+
+**Phase 1 — Structural anchor extraction:** The TeX source is scanned for structural commands, each mapped to its 1-based line number:
+
+| Command Pattern | Anchor Kind |
+|----------------|-------------|
+| `\section{...}`, `\subsection{...}`, etc. | Heading (with text for verification) |
+| `\begin{...}` | Environment start |
+| `\end{...}` | Environment end (skipped, not matched to elements) |
+| `\item` | List item |
+| `\STATE`, `\REQUIRE`, `\IF`, `\WHILE`, etc. | Algorithmic pseudo-code |
+| `\caption{...}` | Caption |
+| `\maketitle` | Title block |
+
+These anchors are matched against HTML elements by structural role and document order — headings match `<h1>`–`<h6>` or `<div>` elements with `sectionHead`/`subsectionHead` class names, `\item` and algorithmic commands match `<li>`/`<p>`/`<div>` elements sequentially, and `\begin{...}` matches container elements (`<div>`, `<table>`, `<ol>`, `<ul>`, `<pre>`). Each anchor searches a small lookahead window (6–12 elements) to tolerate make4ht wrapper elements.
+
+**Phase 2 — Interpolation:** All block-level elements in the HTML are collected in document order. Elements that received an anchor in Phase 1 keep their exact line number. The first and last elements are assigned boundary values (line 1 and total line count) if unanchored. All remaining unmatched elements are assigned linearly-interpolated line numbers between their nearest anchored neighbors.
+
+**Phase 3 — Attribute injection:** `data-source-line` attributes are spliced into the HTML string back-to-front (so earlier insertions don't shift later offsets).
+
+The result: every block element gets a `data-source-line` attribute, scroll sync is continuous with zero dead zones, and no text comparison is involved.
+
+The same bidirectional scroll sync mechanism used for Markdown preview (editor → preview and preview → editor with scroll lock) applies to TeX preview.
+
+### Asset Resolution
+
+`Repo._resolve_tex_assets` converts relative paths in make4ht output to inline data URIs:
+
+- `src="..."` attributes on `<img>` tags → base64 data URIs
+- `url(...)` in inline CSS → base64 data URIs
+- `<link rel="stylesheet" href="...">` → inlined `<style>` blocks
+
+The working directory for `make4ht` is set to the file's parent directory so that `\input`, `\include`, and `\includegraphics` resolve relative paths correctly.
+
+### Availability Check
+
+Before enabling TeX preview, the diff viewer calls `LLMService.is_tex_preview_available()` to check if `make4ht` is installed. If not, the preview pane displays installation instructions instead of an error.
+
+### Temp Directory Lifecycle
+
+Each compilation creates a temp directory under `.ac-dc/tex_preview/` (repo-scoped, already gitignored). The previous compilation's temp directory is cleaned up at the start of the next compilation (`_cleanup_old_tex_preview`). This keeps at most one temp directory alive so generated images can be served during the preview session. Using `.ac-dc/` instead of the system temp directory avoids cross-repo collisions and ensures cleanup is scoped to the repository.
+
+On server startup, `Repo.__init__` calls `_cleanup_tex_preview_dir()` which removes the entire `.ac-dc/tex_preview/` directory tree. This handles orphaned temp dirs from crashed or killed previous runs.
+
+### Working Directory Isolation
+
+`make4ht` runs with `cwd` set to the temp directory (`tmp_dir`), not the file's parent directory. This is critical because make4ht and the underlying TeX engine write numerous intermediate files (`.aux`, `.dvi`, `.4ct`, `.4tc`, `.idv`, `.lg`, `.tmp`, `.xref`, `.log`, `.css`) into the current working directory — the `-d` output flag only controls the final HTML output location. Without this, every preview compilation would litter the user's repository with TeX build artifacts.
+
+For `\input`, `\include`, and `\includegraphics` resolution, the `TEXINPUTS` environment variable is set to the original file's parent directory (with a trailing separator to append system defaults). This gives TeX the same path resolution it would have if running in the file's directory, while keeping all output in the temp dir.
+
+### CSS Styling
+
+make4ht generates class names for TeX formatting (`cmr-17`, `cmbx-12`, `cmti-10`, etc.). The diff viewer maps these to appropriate styles (font sizes, bold, italic, monospace). Section headings (`sectionHead`, `subsectionHead`, `subsubsectionHead`) receive the same styling as Markdown headings.
 
 ## Event Routing
 
@@ -168,6 +355,16 @@ Toggling preview mode disposes and recreates the Monaco editor — switching bet
 ### Scroll to Edit Anchor
 
 When clicking an edit block's goto icon (↗): open file, search for progressively shorter prefixes of the edit text, scroll to and highlight match (3-second highlight).
+
+### Diff Computation Readiness
+
+Monaco's diff editor computes diffs asynchronously after models are set. Any scroll positioning (viewport restore, search-text scroll, line scroll) must wait for the diff computation to finish — scrolling before the diff result arrives is overwritten by Monaco's layout pass. The viewer provides a `_waitForDiffReady()` helper that:
+
+1. Registers a one-shot `onDidUpdateDiff` listener on the diff editor
+2. Resolves the returned Promise when the listener fires (with an extra `requestAnimationFrame` for layout settlement)
+3. Has a 2-second safety timeout — if the diff computation never fires (e.g., identical content), the Promise resolves anyway
+
+This is used by `openFile` (after initial content load), `_restorePerFileViewport`, and search-text scrolling.
 
 ## File Loading
 
@@ -202,7 +399,18 @@ The diff viewer normalizes responses from `Repo.get_file_content` which may retu
 
 A single `DiffEditor` instance is created and reused for all files. Switching files disposes old models and creates new ones on the existing editor — this prevents memory leaks and avoids the cost of recreating the editor on every tab switch. The editor is only fully disposed when the last file is closed.
 
-When switching files: dispose old original and modified models → create new models with correct language → set on editor → update read-only state. When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking.
+**Model disposal ordering:** When switching files on an existing editor, the old models must be disposed AFTER `setModel()` detaches them. Disposing while still attached causes "TextModel got disposed before DiffEditorWidget model got reset". The sequence is:
+
+1. Capture reference to old model pair (`editor.getModel()`)
+2. Update editor options (side-by-side mode, read-only state)
+3. Create new original and modified models with the correct language
+4. Call `editor.setModel({ original: newOrig, modified: newMod })` — this detaches the old models
+5. Dispose the old original and modified models
+6. Set read-only state on the modified editor (must come after `setModel` so inline diff mode doesn't override it)
+
+**Editor disposal ordering:** When the editor itself is disposed (last file closed), the diff editor is disposed FIRST, then the text models afterward. This ensures the editor releases its references before the models are destroyed.
+
+When no editor exists: create new `DiffEditor` with configuration, create models, attach content change listener for dirty tracking and preview update.
 
 ### Per-File Viewport State
 

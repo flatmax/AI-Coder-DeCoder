@@ -102,7 +102,7 @@ The viewer has two modes, switchable programmatically via `_setMode()` (no UI to
 | **Pan** | `svg-pan-zoom` (navigation) | `svg-pan-zoom` (navigation) | Navigate both panels without editing |
 | **Present** | Hidden | `SvgEditor` (visual editing, full width) | Full-width editor with left panel hidden |
 
-Switching modes captures the current editor content, disposes the active interaction handlers, and reinitializes for the new mode. The modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger. Presentation mode is toggled via the `◱` floating button or the F11 keyboard shortcut.
+Switching modes calls `_captureEditorContent()` — which reads the current SVG from the `SvgEditor` via `getContent()` and writes it back to the active file object's `modified` field — then disposes the active interaction handlers and reinitializes for the new mode. This ensures the modified SVG content is preserved across mode switches. In practice, the viewer starts in Select mode and stays there — Pan mode infrastructure exists but has no UI trigger. Presentation mode is toggled via the `◱` floating button or the F11 keyboard shortcut.
 
 ## Synchronized Pan/Zoom
 
@@ -148,8 +148,12 @@ Hold **Shift** and click or drag to multi-select:
 | **Shift+click** on selected element | Immediately remove from multi-selection (toggle out) |
 | **Shift+click** on unselected element | Immediately add to multi-selection (toggle in), then begin marquee tracking so shift+drag still works |
 | **Shift+click** on empty space | Begin marquee selection |
-| **Shift+drag left→right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee |
-| **Shift+drag right→left** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee |
+| **Shift+drag top-left→bottom-right** (forward) | **Containment mode** — solid blue border, selects only elements fully inside the marquee. Forward mode requires the end point to be both right of AND below the start point |
+| **Shift+drag any other direction** (reverse) | **Crossing mode** — dashed green border, selects any elements that touch or intersect the marquee. Any drag that isn't strictly top-left to bottom-right is treated as crossing mode |
+
+Marquee hit testing checks direct children of the root `<svg>` element and also one level of children inside `<g>` groups. Deeper nesting is not scanned — elements inside nested groups must be selected by clicking the group.
+
+Marquee hit testing checks direct children of the root `<svg>` element and also one level of children inside `<g>` groups. Deeper nesting is not scanned — elements inside nested groups must be selected by clicking the group.
 
 Shift+click toggles elements immediately without waiting for pointer-up. When shift-clicking an unselected element, a marquee is also started (with `_marqueeClickTarget` set to `null` to prevent double-toggle) so that if the user continues dragging, area selection still works. If the resulting drag distance is below 5px, the tiny-marquee fallback is skipped since the toggle was already applied.
 
@@ -182,6 +186,8 @@ Selection handles are rendered as a dedicated SVG `<g>` group overlaid on the se
 - **Vertex handles**: Small circles at each vertex for point editing (polyline, polygon)
 - **Path handles**: Circles at each command endpoint, with dotted lines to control points for cubic/quadratic curves
 - Handle radius scales inversely with zoom level to maintain a consistent screen size
+- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
+- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
 
 ### Interaction Model
 
@@ -195,7 +201,7 @@ The editor determines interaction behavior from the element type:
 | `line` | Translate both endpoints | Move individual endpoints |
 | `polyline`, `polygon` | Translate all points | Move individual vertices |
 | `path` | Translate via transform | Move individual path points |
-| `text` | Translate (x, y or transform — auto-detected) | — (double-click to edit) |
+| `text` | Translate (x, y or transform — auto-detected: uses `transform` if the element has a `transform` attribute, otherwise `x`/`y` attributes) | — (double-click to edit) |
 | `tspan` | Resolves to parent `text` | — |
 | `g` (group) | Translate via transform | — |
 
@@ -239,7 +245,7 @@ Fitting respects the SVG's authored `viewBox` when one exists. Many SVGs — esp
 
 When no authored viewBox is present, fitting falls back to `getBBox()` (the actual rendered content bounding box) with a 3% margin. The viewBox is then expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default `preserveAspectRatio="xMidYMid meet"` is effectively a no-op (viewBox AR matches container AR). This approach works correctly for both portrait and landscape SVGs.
 
-For the left panel, the viewBox attribute is only updated from `getBBox()` if no authored viewBox exists, before `svg-pan-zoom` is initialized with `fit: true` and `center: true`. For the right panel (SvgEditor), if an authored viewBox exists it is fitted into the container dimensions directly (preserving aspect ratio); otherwise `fitContent()` computes a viewBox via `getBBox()`.
+For the left panel, the viewBox is expanded from `getBBox()` only when no authored viewBox exists, or when the authored viewBox is smaller than the content bounds AND the `getBBox` area is not suspiciously large (≤ 4× the authored viewBox area). If `getBBox` produces an area vastly larger than the authored viewBox (e.g., off-screen text at x=-28000 from font glyph definitions in `<defs>`), the authored viewBox is trusted as the correct viewport. The same sanity check applies in `_fitAll` for the right panel — if `getBBox` area exceeds 4× the stashed original viewBox area, `getBBox` is discarded and the stashed viewBox is used instead. `svg-pan-zoom` is then initialized with `fit: true` and `center: true`. For the right panel (SvgEditor), if an authored viewBox exists it is fitted into the container dimensions directly (preserving aspect ratio); otherwise `fitContent()` computes a viewBox via `getBBox()`.
 
 ### Status LED
 
@@ -269,11 +275,17 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
 
 1. `render()` creates empty `.svg-left` and `.svg-right` container divs
 2. `_injectSvgContent()` sets `innerHTML` on each container with the SVG string
+
+**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced. This applies to both the diff viewer (for Monaco editor creation) and the SVG viewer (for SVG element injection and pan-zoom initialization).
+
 3. After injection, SVG elements are normalized:
    - `width`/`height` attributes removed (so SVG fills container)
    - `style.width` and `style.height` set to `100%`
    - `viewBox` attribute added if missing (computed from the original `width` and `height` attributes before they are removed — e.g., `width="200" height="100"` becomes `viewBox="0 0 200 100"`)
+   - For the editable (right) panel, `preserveAspectRatio="none"` is set so `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
+
+**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced.
 
 **Authored viewBox preservation**: Both panels prefer the SVG's authored `viewBox` attribute over a `getBBox()`-derived one. SVGs with `<defs>` containing font glyphs, clip paths, or symbol definitions often have elements with very small coordinate systems (e.g., 0–1 font units) that pollute `getBBox()` results, causing content to appear shrunken. The authored viewBox is trusted as the correct viewport. `getBBox()` is only used as a fallback when no viewBox attribute exists — in that case a 3% margin is added around the computed bounding box. For the right panel, `preserveAspectRatio="none"` is set so that `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform.
 
@@ -406,6 +418,58 @@ The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
 Available via two paths:
 - **Context menu**: right-click → "Copy as PNG"
 - **Keyboard shortcut**: Ctrl+Shift+C (Cmd+Shift+C on Mac)
+
+## SVG ↔ Text Diff Mode Toggle
+
+SVG files can be viewed in either the visual SVG editor or the Monaco text diff editor. Two buttons enable bidirectional switching:
+
+| Button | Location | Direction |
+|--------|----------|-----------|
+| `</>` (code) | SVG viewer floating actions | Visual → Text diff |
+| `🎨 Visual` | Diff viewer overlay buttons | Text diff → Visual |
+
+### Toggle Mechanism
+
+Both directions dispatch a `toggle-svg-mode` window event with:
+
+```pseudo
+{
+    path: string,          // file path
+    target: 'diff' | 'visual',  // which viewer to switch to
+    modified?: string,     // latest content from the source viewer
+    savedContent?: string, // on-disk content for dirty tracking
+}
+```
+
+### App Shell Handler
+
+The app shell's `_onToggleSvgMode` handler orchestrates the switch:
+
+**Visual → Text (`target: 'diff'`):**
+1. Capture latest SVG content from the SVG editor (`_captureEditorContent`)
+2. Read the file object from the SVG viewer's internal files list
+3. Flip viewer visibility (show diff, hide SVG)
+4. Close any existing diff tab for the path, then open fresh with the captured content
+5. Set `savedContent` to the on-disk original so visual edits appear as dirty in the diff editor
+6. Layout Monaco after the DOM settles
+
+**Text → Visual (`target: 'visual'`):**
+1. Read the file object from the SVG viewer's files list (before closing)
+2. Flip viewer visibility (show SVG, hide diff)
+3. Close and reopen the SVG viewer with the latest text content from the diff editor
+4. Carry `savedContent` through so dirty state is preserved
+5. Close the diff viewer's tab for the path
+
+### Race Prevention
+
+A `_svgModeOverride` flag is set on the app shell during the toggle to prevent `_onActiveFileChanged` from interfering. The flag is cleared in a `requestAnimationFrame` callback after the toggle completes. Without this guard, the active-file-changed event from opening the new tab would trigger viewer visibility logic that conflicts with the toggle in progress.
+
+### Content Preservation
+
+`savedContent` (the last on-disk content) is carried across mode toggles so that:
+- Edits made in the SVG editor appear as dirty when switching to text mode
+- Edits made in the text editor appear as dirty when switching back to visual mode
+- Saving in either mode updates `savedContent` for both
 
 ## Future Enhancements
 

@@ -144,7 +144,7 @@ When Alt+Arrow is pressed and no node exists in the adjacent cell, navigation **
 | Up (no upper neighbor) | Bottommost node on the same column |
 | Down (no lower neighbor) | Topmost node on the same column |
 
-The scan considers only nodes sharing the same row (for left/right) or same column (for up/down) as the current node. If no other node exists on that axis, the navigation is a no-op. The wrap target does not need to be directly adjacent — it can be any distance away along the axis.
+The scan iterates all nodes in the grid, filtering to those sharing the same row (for left/right wrap) or same column (for up/down wrap), excluding the current node. Among candidates, the one with the maximum or minimum grid coordinate on the relevant axis is selected (e.g., for left-wrap, the node with the highest `gridX` on the same `gridY`). If no candidate exists on that axis, the navigation is a no-op. The wrap target does not need to be directly adjacent — it can be any distance away along the axis.
 
 Travel counts are incremented for the current↔wrap-target pair, the same as for any other traversal.
 

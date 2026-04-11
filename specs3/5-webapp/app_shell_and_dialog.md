@@ -50,6 +50,18 @@ Methods the server calls on the client (registered via `addClass`):
 | `streamComplete(requestId, result)` | Dispatch `stream-complete` window event |
 | `compactionEvent(requestId, event)` | Dispatch `compaction-event` window event |
 | `filesChanged(selectedFiles)` | Dispatch `files-changed` window event |
+| `startupProgress(stage, message, percent)` | Update startup overlay. **Special case:** `stage === 'doc_index'` is intercepted and forwarded to the dialog header progress bar (via `mode-switch-progress` DOM event) instead of updating the startup overlay — only in-progress updates (`percent < 100`) are forwarded; the completion signal arrives via `compactionEvent` with `doc_index_ready` stage |
+| `navigateFile(data)` | Dispatch `navigate-file` window event with `_remote: true` flag to prevent re-broadcasting |
+| `modeChanged(data)` | Dispatch `mode-changed` window event |
+| `sessionChanged(data)` | Dispatch `session-loaded` window event |
+| `docConvertProgress(data)` | Dispatch `doc-convert-progress` window event |
+| `commitResult(result)` | Dispatch `commit-result` window event |
+| `userMessage(data)` | Dispatch `user-message` window event |
+| `admissionRequest(data)` | Add to `_admissionRequests` array (triggers admission toast) |
+| `admissionResult(data)` | Remove from `_admissionRequests` (dismisses toast) |
+| `clientJoined(data)` | Refresh connected client count |
+| `clientLeft(data)` | Refresh connected client count |
+| `roleChanged(data)` | Refresh collab role; toast if promoted to host |
 
 ### Startup Sequence
 
@@ -100,7 +112,7 @@ File search is integrated into the Files tab's chat panel action bar rather than
 
 Non-default tabs (context, cache, settings, convert) are loaded on first visit via dynamic `import()`. A `lazyImports` map associates tab IDs with import functions. A `_visitedTabs` set tracks which tabs have been rendered — Lit templates conditionally include tab panels only for visited tabs, so unvisited tabs have no DOM presence at all.
 
-Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
+Once visited, tab panels remain in DOM (hidden via CSS, not destroyed). Switching tabs toggles the `.active` class. The convert tab uses a slightly broader condition — it renders if visited **or** if it is the active tab (`_visitedTabs.has('convert') || activeTab === 'convert'`), since it can be activated by the header button before being formally "visited" through the tab bar. Each tab component may implement an `onTabVisible()` callback — the dialog calls this when switching to a tab, allowing the component to refresh stale data (e.g., context/cache tabs that missed `stream-complete` events while hidden).
 
 ### Tab Active Detection
 
@@ -173,7 +185,7 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 **Cross-reference toggle:** A checkbox labeled **+doc** (in code mode) or **+code** (in document mode) appears in the header actions area, to the left of the review toggle. The checkbox is **always visible** once the initial startup completes — in code mode the doc index's structural extraction finishes within ~250ms of the "ready" signal (before any user interaction is possible), so the toggle is available immediately; in document mode the symbol index is always available. Checking the box calls `LLMService.set_cross_reference(true)` via RPC; unchecking calls `set_cross_reference(false)`. A toast notifies the user of the token impact on activation and confirms removal on deactivation. The checkbox resets to unchecked on mode switch.
 
-**Git action buttons** (📋▾ copy diff, 💾 commit, ⚠️ reset) and the **review toggle** (👁️) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. The review toggle highlights with `accent-primary` when review is active; clicking it opens the review selector or exits review mode. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
+**Git action buttons** (📋▾ copy diff, 💾 commit, ⚠️ reset) and the **review toggle** (👁️) are placed in a `.git-actions` group centered in the gap between the tab buttons and the right-side controls (`margin-left: auto; margin-right: auto`). This keeps frequently-used actions near the center of the header where they're easy to reach, and prevents the header from looking lopsided. The commit and reset buttons are only rendered when `_canMutate` is true (localhost clients in collab mode, or all clients in single-user mode). The commit button shows a spinning ⏳ while committing and is disabled during review mode or active streaming. The reset button shows a confirmation dialog via the chat panel. These buttons delegate to `ac-files-tab` → `ac-chat-panel` methods where the commit/reset logic lives. The review toggle highlights with `accent-primary` when review is active; clicking it opens the review selector or exits review mode. The review toggle is disabled when `_canMutate` is false. **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
 **Copy Diff Dropdown (📋▾):** The copy diff button includes a `▾` dropdown indicator. Clicking it opens a branch picker popover (`.diff-popover`) that lists all local and remote branches via `Repo.list_all_branches()`. The popover includes:
 
@@ -185,14 +197,26 @@ All handles show an accent-colored highlight on hover. All three are hidden when
 
 The popover reuses the same styling pattern as the collab popover (`.collab-popover`). Branch data is fetched fresh each time the popover opens.
 
+The dialog tracks doc enrichment state via `_enrichingDocs` property:
+- `doc_enrichment_queued` compaction event → sets `true` (header progress bar shows)
+- `doc_enrichment_complete` compaction event → sets `false` (header progress bar hides)
+- `doc_index_progress` compaction events after `_docIndexReady` → updates `_modeSwitchMessage` and `_modeSwitchPercent` for header bar display; also sets `_enrichingDocs = true` to recover the bar state after browser refresh (when `doc_enrichment_queued` was missed but progress events continue arriving)
+
 The dialog tracks cross-ref state via `_crossRefEnabled` property, synced from:
 - `onRpcReady` / `state-loaded`: reads `cross_ref_enabled` from `get_current_state()`
-- `mode-changed` event: resets `_crossRefEnabled = false`
+- `mode-changed` event (triggered by `_switchMode`): resets `_crossRefEnabled = false`
+
+**Mode persistence:** The current mode is persisted to localStorage under a **repo-scoped key** (`ac-dc-mode:{repoName}`). On startup, a `_migrateModeKey()` function migrates the legacy bare key (`ac-dc-mode`) to the scoped key if no scoped value exists. On `_refreshMode()`, the dialog reads the saved preference and auto-switches if it differs from the server's current mode — but only for localhost clients (`_canMutate` must be true) and only when the doc index is ready. A `_modeSwitchInFlight` guard prevents `_refreshMode()` from reading the stale preference and switching back during an in-flight mode switch RPC (the guard is checked both before and after the async `get_mode` call).
 
 The dialog tracks review state via `_reviewActive` property, synced from:
 - `onRpcReady`: fetches `LLMService.get_review_state()`
 - `review-started` window event → sets `true`
 - `review-ended` window event → sets `false`
+
+The dialog tracks streaming state via `_streamingActive` and `_committing` properties:
+- `_streamingActive`: set `true` on `stream-chunk`, set `false` on `stream-complete`
+- `_committing`: set `true` when commit button clicked, set `false` on `stream-complete` or `commit-result`
+- Both disable the commit button when `true`; `_streamingActive` also disables the reset button
 
 **Session buttons** (✨ new session, 📜 history browser) remain in the chat panel's action bar. See [Chat Interface — Action Bar](chat_interface.md#action-bar).
 
@@ -251,6 +275,8 @@ The app shell persists the last-opened file and its viewport state to localStora
 |-----|---------|-----------|
 | `ac-last-open-file` | File path of the last opened/navigated file | Written on every `navigate-file` event |
 | `ac-last-viewport` | JSON: `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}}` | Written on `beforeunload` and before navigating to a different file |
+
+**Repo-scoped keys:** Both keys are scoped per repository using a `_repoKey(key, repoName)` helper that produces `{key}:{repoName}` (e.g., `ac-last-open-file:my-project`). This prevents opening a different repo from restoring the wrong file. Falls back to the bare key if the repo name is not yet known. The `_repoKey` function is defined at module level (not as a class method) and used by the app shell for both save and restore operations.
 
 ### Save Triggers
 

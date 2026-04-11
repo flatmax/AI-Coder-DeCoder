@@ -24,6 +24,8 @@ class Repo:
         self._collab = None  # Set by main.py when --collab is passed
         if not (self._root / ".git").exists():
             raise ValueError(f"Not a git repository: {self._root}")
+        # Clean up any leftover TeX preview temp directories from previous runs
+        self._cleanup_tex_preview_dir()
 
     @property
     def root(self):
@@ -171,6 +173,416 @@ class Repo:
             return {"error": str(e)}
         except OSError as e:
             return {"error": str(e)}
+
+    # === TeX Preview ===
+
+    @staticmethod
+    def is_make4ht_available():
+        """Check if make4ht (TeX4ht) is installed for TeX preview."""
+        import shutil
+        return shutil.which("make4ht") is not None
+
+    def compile_tex_preview(self, content, file_path=None):
+        """Compile TeX content to HTML using make4ht.
+
+        Writes content to a temp .tex file, runs make4ht, reads the
+        resulting .html file, and returns it.
+
+        Args:
+            content: TeX source text
+            file_path: optional repo-relative path (used for resolving
+                       \\input/\\include and images relative to the file)
+
+        Returns:
+            {html: str} or {error: str, log: str?}
+        """
+        import shutil
+        import tempfile
+
+        if not shutil.which("make4ht"):
+            return {
+                "error": "make4ht is not installed",
+                "install_hint": (
+                    "Install with:\n"
+                    "  Ubuntu/Debian: sudo apt install texlive-extra-utils\n"
+                    "  macOS: brew install --cask mactex\n"
+                    "  Windows: install TeX Live from https://tug.org/texlive/"
+                ),
+            }
+
+        if not content or not content.strip():
+            return {"html": ""}
+
+        # Determine working directory — use the file's directory so that
+        # \input, \include, \includegraphics resolve relative paths.
+        work_dir = None
+        if file_path:
+            try:
+                resolved = self._resolve_path(file_path)
+                work_dir = str(resolved.parent)
+            except (ValueError, OSError):
+                pass
+        if not work_dir:
+            work_dir = str(self._root)
+
+        # Create temp directory for make4ht output inside .ac-dc/
+        # (repo-scoped, already gitignored, no cross-repo collision)
+        ac_dc_dir = os.path.join(str(self._root), ".ac-dc", "tex_preview")
+        os.makedirs(ac_dc_dir, exist_ok=True)
+        tmp_dir = tempfile.mkdtemp(prefix="tex_", dir=ac_dc_dir)
+        tex_path = os.path.join(tmp_dir, "preview.tex")
+        html_path = os.path.join(tmp_dir, "preview.html")
+
+        # Write a make4ht config file that forces mathjax-compatible
+        # output for math environments.  The "mathjax" option tells
+        # TeX4ht to emit raw LaTeX math delimiters (\(...\) and
+        # \[...\]) instead of converting equations to SVG/PNG images.
+        # The frontend renders these with KaTeX (already loaded).
+        cfg_path = os.path.join(tmp_dir, "preview.cfg")
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "\\Preamble{xhtml,mathjax}\n"
+                    "\\begin{document}\n"
+                    "\\EndPreamble\n"
+                )
+        except OSError:
+            pass  # proceed without config — will use default (image) math
+
+        try:
+            # Write TeX source
+            with open(tex_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            # Run make4ht with HTML5 output + mathjax math rendering
+            # -f html5: HTML5 output format
+            # -d tmp_dir: output directory (final HTML)
+            # -a debug: reduced logging
+            # -c preview.cfg: use our config for mathjax math output
+            #
+            # CRITICAL: cwd must be tmp_dir so ALL intermediate files
+            # (.aux, .dvi, .4ct, .4tc, .idv, .lg, .tmp, .xref, .log, .css)
+            # go into the temp directory — not the user's repo.
+            # The -d flag only controls the final HTML output location,
+            # not where make4ht/TeX writes intermediates.
+            #
+            # For \input/\includegraphics resolution we set TEXINPUTS
+            # to include the file's original directory.
+            env = os.environ.copy()
+            # TEXINPUTS: search order is file_dir, then system defaults
+            # The trailing colon/semicolon means "append system defaults"
+            texinputs_sep = ";" if os.name == "nt" else ":"
+            env["TEXINPUTS"] = work_dir + texinputs_sep
+            try:
+                result = subprocess.run(
+                    [
+                        "make4ht",
+                        "-f", "html5",
+                        "-d", tmp_dir,
+                        "-a", "debug",
+                        "-c", cfg_path,
+                        tex_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=tmp_dir,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return {"error": "TeX compilation timed out (30s limit)"}
+            except FileNotFoundError:
+                return {
+                    "error": "make4ht not found",
+                    "install_hint": "sudo apt install texlive-extra-utils",
+                }
+
+            # Read HTML output
+            if os.path.exists(html_path):
+                with open(html_path, "r", encoding="utf-8") as f:
+                    html_content = f.read()
+
+                # Extract just the <body> content — make4ht produces a
+                # full HTML document; we only need the body for the
+                # preview pane.
+                html_content = self._extract_body(html_content)
+
+                # Resolve relative image/CSS paths in the HTML to point
+                # to the temp directory (for any generated images)
+                html_content = self._resolve_tex_assets(
+                    html_content, tmp_dir
+                )
+
+                # Clean up make4ht math output artifacts.
+                # With the mathjax option, make4ht may emit both
+                # delimited math AND a plain-text alt fallback.
+                # Remove known alt-text patterns.
+                html_content = self._clean_mathjax_output(
+                    html_content
+                )
+
+                return {"html": html_content}
+            else:
+                # Compilation failed — return log
+                log = result.stderr or result.stdout or "Unknown error"
+                # Try to find .log file
+                log_path = os.path.join(tmp_dir, "preview.log")
+                if os.path.exists(log_path):
+                    try:
+                        with open(log_path, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            log = f.read()
+                    except OSError:
+                        pass
+                return {
+                    "error": "TeX compilation failed",
+                    "log": log[-3000:],  # last 3000 chars of log
+                }
+
+        except Exception as e:
+            return {"error": f"TeX preview failed: {e}"}
+
+        finally:
+            # Clean up temp directory — but keep it briefly so images
+            # can be served.  We use a background cleanup approach:
+            # store the path and clean it up on the next compilation.
+            self._cleanup_old_tex_preview()
+            self._last_tex_preview_dir = tmp_dir
+
+    def _cleanup_old_tex_preview(self):
+        """Clean up the previous TeX preview temp directory."""
+        import shutil as _shutil
+        old_dir = getattr(self, "_last_tex_preview_dir", None)
+        if old_dir and os.path.isdir(old_dir):
+            try:
+                _shutil.rmtree(old_dir, ignore_errors=True)
+            except OSError:
+                pass
+
+    def _cleanup_tex_preview_dir(self):
+        """Remove the entire .ac-dc/tex_preview/ directory.
+
+        Called on startup to clean up leftover temp dirs from previous
+        server runs that may not have been cleaned up (e.g. crash).
+        """
+        import shutil as _shutil
+        tex_dir = os.path.join(str(self._root), ".ac-dc", "tex_preview")
+        if os.path.isdir(tex_dir):
+            try:
+                _shutil.rmtree(tex_dir, ignore_errors=True)
+                logger.debug(f"Cleaned up TeX preview directory: {tex_dir}")
+            except OSError:
+                pass
+
+    @staticmethod
+    def _extract_body(html_text):
+        """Extract body content and inline <head> styles from make4ht output.
+
+        make4ht generates a full HTML document. We need the <body> content
+        plus any <style> or <link rel="stylesheet"> from <head> so that
+        math and layout CSS is preserved.
+        """
+        parts = []
+
+        # Extract <style> blocks from <head>
+        head_end = html_text.find("</head>")
+        if head_end == -1:
+            head_end = html_text.find("<body")
+        head_section = html_text[:head_end] if head_end != -1 else ""
+
+        # Collect inline <style> blocks
+        import re as _re
+        for style_match in _re.finditer(
+            r'<style[^>]*>(.*?)</style>', head_section, _re.DOTALL
+        ):
+            parts.append(f"<style>{style_match.group(1)}</style>")
+
+        # Collect <link rel="stylesheet"> (will be resolved by _resolve_tex_assets)
+        for link_match in _re.finditer(
+            r'<link[^>]+rel="stylesheet"[^>]*/?>',
+            head_section, _re.DOTALL
+        ):
+            parts.append(link_match.group(0))
+
+        # Extract <body> content
+        body_start = html_text.find("<body")
+        if body_start == -1:
+            parts.append(html_text)
+        else:
+            tag_end = html_text.find(">", body_start)
+            if tag_end == -1:
+                parts.append(html_text)
+            else:
+                body_end = html_text.find("</body>", tag_end)
+                if body_end == -1:
+                    parts.append(html_text[tag_end + 1:])
+                else:
+                    parts.append(html_text[tag_end + 1:body_end])
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _clean_mathjax_output(html_content):
+        """Clean up make4ht mathjax-mode output.
+
+        make4ht with the mathjax option emits BOTH the math-delimited
+        version (\\(...\\), \\[...\\]) AND a plain-text alt-text fallback
+        for each equation.  The alt-text appears as:
+
+        - <span class="MathJax_Preview">plain text</span>
+        - <script type="math/tex">...</script>
+        - Bare text nodes adjacent to the math delimiters containing the
+          flattened equation (e.g. "hm+1 = filter(am, bm, hm)")
+        - <td class="eq-no"> with equation numbers
+
+        We strip all alt-text artifacts so only the delimited math remains
+        for the browser-side KaTeX renderer.
+        """
+        # Remove MathJax preview spans (make4ht inserts these as fallbacks)
+        html_content = re.sub(
+            r'<span\s+class="MathJax_Preview"[^>]*>.*?</span>',
+            '', html_content, flags=re.DOTALL,
+        )
+
+        # Remove <script type="math/tex"> blocks (another mathjax fallback)
+        html_content = re.sub(
+            r'<script\s+type="math/tex[^"]*"[^>]*>.*?</script>',
+            '', html_content, flags=re.DOTALL,
+        )
+
+        # Remove alt-text that make4ht puts inside <table> equation wrappers
+        # alongside the real math delimiters.  Pattern: a <td> containing
+        # only raw TeX-like text (no math delimiters) next to a <td> with
+        # the real equation.
+        html_content = re.sub(
+            r'<td\s+class="eq-no"[^>]*>\s*\(\d+\)\s*</td>',
+            '', html_content,
+        )
+
+        # Remove inline alt-text: make4ht emits a plain-text version of
+        # each inline math expression immediately after the \(...\)
+        # delimiters.  The pattern is:
+        #   \(tex\)PLAIN_TEXT
+        # where PLAIN_TEXT is the flattened rendering (no TeX commands).
+        # We detect this by looking for text between \) and the next HTML
+        # tag that contains math-like characters (digits, operators,
+        # parentheses, subscripts rendered as plain letters).
+        html_content = re.sub(
+            r'(\\\))\s*([A-Za-z0-9,()+=\-−. ]{2,}?)(?=\s*(?:<|\\[(\[$]))',
+            r'\1',
+            html_content,
+        )
+
+        # Remove display alt-text: make4ht emits a plain-text version
+        # after display math \[...\] and \begin{equation}...\end{equation}.
+        # Pattern: bare text after \] or \end{...} before the next tag.
+        html_content = re.sub(
+            r'(\\\])\s*([^<\\]{2,}?)(?=\s*<)',
+            r'\1',
+            html_content,
+        )
+        html_content = re.sub(
+            r'(\\end\{[^}]+\})\s*([^<\\]{2,}?)(?=\s*<)',
+            r'\1',
+            html_content,
+        )
+
+        return html_content
+
+    @staticmethod
+    def _resolve_tex_assets(html_content, tmp_dir):
+        """Convert relative asset paths in make4ht output to data URIs.
+
+        make4ht may generate SVG/PNG images for complex math or TikZ
+        figures.  We convert them to inline data URIs so they display
+        in the preview pane without needing a file server.
+
+        Also handles:
+        - src="..." attributes (img tags)
+        - url(...) in inline CSS (background images)
+        - href="..." for CSS stylesheets generated by make4ht
+        """
+        import base64
+        import mimetypes
+
+        def _asset_to_data_uri(filename):
+            """Convert a filename in tmp_dir to a data URI, or None."""
+            # Try exact path first
+            asset_path = os.path.join(tmp_dir, filename)
+            if not os.path.exists(asset_path):
+                # Try just the basename (make4ht sometimes uses flat names)
+                asset_path = os.path.join(tmp_dir, os.path.basename(filename))
+            if not os.path.exists(asset_path):
+                return None
+            try:
+                data = open(asset_path, "rb").read()
+                mime, _ = mimetypes.guess_type(asset_path)
+                if not mime:
+                    ext = os.path.splitext(filename)[1].lower()
+                    mime_map = {
+                        ".svg": "image/svg+xml",
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".gif": "image/gif",
+                        ".css": "text/css",
+                    }
+                    mime = mime_map.get(ext, "application/octet-stream")
+                b64 = base64.b64encode(data).decode("ascii")
+                return f"data:{mime};base64,{b64}"
+            except OSError:
+                return None
+
+        def _replace_src(match):
+            src = match.group(1)
+            if src.startswith(("http://", "https://", "data:", "//")):
+                return match.group(0)
+            data_uri = _asset_to_data_uri(src)
+            if data_uri:
+                return f'src="{data_uri}"'
+            return match.group(0)
+
+        def _replace_css_url(match):
+            url = match.group(1)
+            if url.startswith(("http://", "https://", "data:", "//")):
+                return match.group(0)
+            data_uri = _asset_to_data_uri(url)
+            if data_uri:
+                return f'url({data_uri})'
+            return match.group(0)
+
+        # Replace src="..." attributes
+        html_content = re.sub(
+            r'src="([^"]*)"', _replace_src, html_content
+        )
+
+        # Replace url(...) in inline styles
+        html_content = re.sub(
+            r'url\(([^)]+)\)', _replace_css_url, html_content
+        )
+
+        # Inline <link rel="stylesheet"> references to make4ht CSS
+        def _inline_css_link(match):
+            href = match.group(1)
+            if href.startswith(("http://", "https://", "data:")):
+                return match.group(0)
+            css_path = os.path.join(tmp_dir, href)
+            if not os.path.exists(css_path):
+                css_path = os.path.join(tmp_dir, os.path.basename(href))
+            if os.path.exists(css_path):
+                try:
+                    css_text = open(css_path, "r", encoding="utf-8").read()
+                    return f"<style>{css_text}</style>"
+                except OSError:
+                    pass
+            return match.group(0)
+
+        html_content = re.sub(
+            r'<link[^>]+href="([^"]*\.css)"[^>]*/?>',
+            _inline_css_link, html_content
+        )
+
+        return html_content
 
     def delete_file(self, path):
         """Remove file from filesystem."""

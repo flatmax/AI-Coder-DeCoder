@@ -9,11 +9,12 @@ The repository layer wraps version control operations and file I/O. It is expose
 | Method | Description |
 |--------|-------------|
 | `Repo.get_file_content(path, version?)` | Read file content. Optional `version` (e.g., "HEAD") for committed content |
+| `Repo.get_file_base64(path)` | Read file as base64 data URI with auto-detected MIME type. Falls back to common image extension map (`.png`→`image/png`, `.jpg`→`image/jpeg`, etc.) then `application/octet-stream`. Used by SVG viewer and diff viewer markdown preview to resolve relative image references |
 | `Repo.write_file(path, content)` | Write content to file. Creates parent directories |
 | `Repo.create_file(path, content)` | Create new file. Errors if file exists |
 | `Repo.file_exists(path)` | Check if file exists |
 | `Repo.is_binary_file(path)` | Binary detection: check first 8KB for null bytes |
-| `Repo.get_file_base64(path)` | Read file and return as base64 data URI (`{data_uri}` or `{error}`). Used by SVG viewer to resolve relative image references |
+| `Repo.delete_file(path)` | Remove from filesystem |
 
 ### Git Staging
 
@@ -22,7 +23,6 @@ The repository layer wraps version control operations and file I/O. It is expose
 | `Repo.stage_files(paths)` | Stage files for commit (git add) |
 | `Repo.unstage_files(paths)` | Remove from staging area |
 | `Repo.discard_changes(paths)` | Tracked: restore from HEAD. Untracked: delete |
-| `Repo.delete_file(path)` | Remove from filesystem |
 
 ### Rename/Move
 
@@ -87,17 +87,29 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 | `Repo.reset_hard()` | `git reset --hard HEAD` |
 | `Repo.search_commits(query, branch?, limit?)` | Search commits by message/SHA/author via `git log --grep` |
 
+### Branch Operations
+
+| Method | Description |
+|--------|-------------|
+| `Repo.get_current_branch()` | Returns `{branch, sha, detached}`. For detached HEAD, `branch` is `null` and `sha` is the full HEAD SHA |
+| `Repo.resolve_ref(ref)` | Resolve a git ref (branch name, tag, SHA prefix) to a full SHA. Returns `null` if not found |
+| `Repo.list_branches()` | Returns `{branches: [{name, sha, message, is_current}]}` |
+| `Repo.is_clean()` | Check if working tree is clean via `git status --porcelain -uno` (ignores untracked files) |
+| `Repo.get_review_changed_files()` | List files changed in review (staged changes) with status and diff stats from `git diff --cached --name-status` and `--numstat` |
+
 ### Commit Flow (UI-Driven)
 
 1. User clicks 💾 in action bar → `LLMService.commit_all()`
-2. Server captures current session ID **synchronously before launching the background task**, returns `{status: "started"}` immediately. The session ID is captured early so the commit event is persisted to the correct session even if `_session_id` is replaced by `_restore_last_session()` during a concurrent server restart.
-3. Background task: stage all changes (`stage_all`)
-4. Get staged diff (`get_staged_diff`)
-5. Send diff to LLM to generate commit message
-6. Commit with generated message (`commit`)
-7. Record a **system event message** (`role: "user"`, `system_event: true`) in conversation context and persistent history, using the captured session ID
-8. Broadcast `commitResult` to all clients (displays as system event card in chat)
-9. Clients refresh file tree
+2. Server checks `_committing` guard — rejects with error if a commit is already in progress. Sets `_committing = True`.
+3. Server captures current session ID **synchronously before launching the background task**, returns `{status: "started"}` immediately. The session ID is captured early so the commit event is persisted to the correct session even if `_session_id` is replaced by `_restore_last_session()` during a concurrent server restart.
+4. Background task: stage all changes (`stage_all`)
+5. Get staged diff (`get_staged_diff`)
+6. Send diff to LLM to generate commit message (via `run_in_executor` to avoid blocking the event loop)
+7. Commit with generated message (`commit`)
+8. Record a **system event message** (`role: "user"`, `system_event: true`) in conversation context and persistent history, using the captured session ID
+9. Set `_committing = False` in a `finally` block
+10. Broadcast `commitResult` to all clients (displays as system event card in chat)
+11. Clients refresh file tree
 
 ### Reset Flow (UI-Driven)
 
@@ -107,6 +119,15 @@ Per-file addition/deletion counts from `git diff --numstat` (both staged and uns
 4. Record a **system event message** (`role: "user"`, `system_event: true`) in conversation context and persistent history
 5. Return result with `system_event_message` field
 6. Client displays system event card and refreshes file tree
+
+## TeX Preview
+
+| Method | Description |
+|--------|-------------|
+| `Repo.is_make4ht_available()` | Static method. Returns `true` if `make4ht` is on PATH |
+| `Repo.compile_tex_preview(content, file_path?)` | Compile TeX source to HTML via make4ht. Returns `{html}` or `{error, log?, install_hint?}` |
+
+`compile_tex_preview` writes content to a temp file under `.ac-dc/tex_preview/`, runs `make4ht -f html5` with a mathjax config, extracts the `<body>` content plus `<head>` styles, inlines assets as data URIs, and strips make4ht alt-text artifacts. The working directory is set to the temp directory (not the repo) so all intermediate files (`.aux`, `.dvi`, `.4ct`, `.log`, etc.) stay contained. `TEXINPUTS` is set to the file's parent directory for `\input`/`\includegraphics` resolution. Compilation has a 30-second timeout. Temp directories are cleaned up on the next compilation (at most one alive at a time). The entire `.ac-dc/tex_preview/` directory is removed on server startup to handle orphans from crashed runs.
 
 ## Search
 

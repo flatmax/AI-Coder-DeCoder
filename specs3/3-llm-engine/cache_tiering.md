@@ -6,6 +6,8 @@ The cache tiering system organizes LLM prompt content into stability-based tiers
 
 Four categories of content are managed: **files** (full content), **symbol map entries** (compact structure), **history messages** (conversation pairs), and **URL content** (fetched web pages, GitHub repos, documentation).
 
+The `StabilityTracker` is constructed with `cache_target_tokens` (default: 1536, but always overridden by `LLMService` with the model-aware computed value from `ConfigManager.cache_target_tokens_for_model()`).
+
 ## Tier Structure
 
 | Tier | Entry N | Promotion N | Description |
@@ -42,7 +44,9 @@ SHA256 hash of: file content (for files), compact symbol block (for symbols), or
 
 Files/symbols with N ≥ 3 graduate to L3 **regardless of whether they're still in the active items list**. Still-selected files have their content move from the uncached "Working Files" section to the cached L3 block.
 
-### URL Content — Direct Tier Entry
+### URL Content — Direct Tier Entry (Not Yet Implemented)
+
+> **Implementation status:** The URL tier entry mechanism described below is **specified but not yet implemented** in the current codebase. URL content currently flows through the uncached URL context section on every request (as a `user/assistant` pair between the file tree and review context). The stability tracker does not track `url:` items. This section describes the target design for a future implementation.
 
 URL content is static once fetched (web pages, GitHub repos, documentation). Unlike files which may be edited, fetched URL content never changes. URLs therefore skip the active → L3 graduation path entirely and enter directly at **L1** with `entry_n = 9`. This ensures they are cached from their first appearance, avoiding unnecessary re-ingestion costs.
 
@@ -69,6 +73,12 @@ The `cache_min_tokens` config value (default: 1024) can override upward but neve
 When a tier's cache block is invalidated, veterans from the tier below may promote upward. This cascades downward through the tier stack.
 
 **Critical rule:** Only promote into broken tiers. If a tier is stable, nothing promotes into it and tiers below remain cached.
+
+### L0 Backfill
+
+When L0 drops below `cache_target_tokens` (e.g., items removed due to file selection or deletion), the provider won't cache it — wasting the breakpoint. Rather than proactively breaking L1 to fill L0 (which would invalidate L1's cache), the system **piggybacks on L1 already being broken**: if L1 is in `_broken_tiers` for any reason during this cycle AND L0 is underfilled, L0 is also marked broken. This lets eligible L1 veterans (N ≥ 12) promote into L0 through the normal cascade. The threshold anchoring mechanism in L1 processing ensures L1 retains at least `cache_target_tokens` worth of items — anchored items have frozen N and cannot promote. This means L0 backfill never drains L1 below its caching threshold.
+
+If L1 is stable (not broken), no backfill occurs — L0 stays underfilled until L1 is naturally invalidated by some other event (content change, item removal, etc.).
 
 ### Promotion Thresholds
 
@@ -223,8 +233,10 @@ Cache hit statistics are **read directly from the LLM provider's usage response*
 
 ## Order of Operations (Per Request)
 
+At the start of each update cycle, `_broken_tiers` and `_changes` are cleared — each cycle starts with a fresh view of what changed.
+
 ### Phase 0: Remove Stale Items
-Check tracked items against current repo files. Remove items whose files no longer exist.
+Check tracked items against current repo files. Remove `file:`, `symbol:`, and `doc:` items whose underlying file path no longer exists in the repo.
 
 ### Phase 1: Process Active Items
 For each item in the active items list:
@@ -251,7 +263,13 @@ Log promotions/demotions for frontend display. Store current active items for ne
 
 ### Post-Cascade Consolidation Detail
 
-The `_demote_underfilled` step skips tiers that are in the `_broken_tiers` set (i.e., tiers that received promotions or experienced changes during this cycle). This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle. Only stable, untouched tiers that happen to be below `cache_target_tokens` are candidates for demotion.
+The `_demote_underfilled` step iterates tiers in reverse cascade order and skips three categories:
+
+1. **L0** — terminal tier, never demoted
+2. **L3** — items would demote to active, which is handled by a different mechanism (hash mismatch demotion)
+3. **Tiers in the `_broken_tiers` set** — tiers that received promotions or experienced changes during this cycle. This prevents immediately undoing promotions that just occurred — if items were promoted into L2 this cycle, L2 won't be evaluated for underfill demotion in the same cycle
+
+Only stable, untouched tiers (L1 and L2 in practice) that happen to be below `cache_target_tokens` are candidates for demotion. Each item demotes at most one level per call to avoid cascading double-demotions within a single pass.
 
 ## Index Exclusion
 

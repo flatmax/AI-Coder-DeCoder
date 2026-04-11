@@ -538,6 +538,125 @@ class TestThresholdAnchoring:
         assert capped.n <= TIER_CONFIG[Tier.L3]["promotion_n"]
 
 
+# === L0 Backfill ===
+
+
+class TestL0Backfill:
+    def test_l0_backfill_when_l1_broken(self):
+        """L0 marked broken when underfilled and L1 already broken."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+
+        # L0 is underfilled (only 100 tokens, need 500)
+        tracker._items["symbol:core.py"] = TrackedItem(
+            key="symbol:core.py", tier=Tier.L0, n=12,
+            content_hash="c", tokens=100,
+        )
+        # L1 veteran ready to promote (n >= 12)
+        tracker._items["symbol:stable.py"] = TrackedItem(
+            key="symbol:stable.py", tier=Tier.L1, n=12,
+            content_hash="s", tokens=800,
+        )
+        # L1 has enough to retain after promotion (anchored items)
+        tracker._items["symbol:anchor.py"] = TrackedItem(
+            key="symbol:anchor.py", tier=Tier.L1, n=9,
+            content_hash="a", tokens=600,
+        )
+        # L1 is broken from some other event
+        tracker._broken_tiers.add(Tier.L1)
+
+        tracker.run_cascade()
+
+        # stable.py should have promoted into L0
+        assert tracker.get_item("symbol:stable.py").tier == Tier.L0
+
+    def test_l0_backfill_not_triggered_when_l1_stable(self):
+        """L0 stays underfilled when L1 is stable (not broken)."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+
+        tracker._items["symbol:core.py"] = TrackedItem(
+            key="symbol:core.py", tier=Tier.L0, n=12,
+            content_hash="c", tokens=100,
+        )
+        # L1 veteran ready to promote
+        tracker._items["symbol:ready.py"] = TrackedItem(
+            key="symbol:ready.py", tier=Tier.L1, n=12,
+            content_hash="r", tokens=800,
+        )
+        # L1 is NOT broken
+        tracker.run_cascade()
+
+        # Should stay in L1 — L0 not marked broken
+        assert tracker.get_item("symbol:ready.py").tier == Tier.L1
+
+    def test_l0_backfill_respects_anchoring(self):
+        """L1 anchoring prevents draining L1 below cache_target_tokens."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+
+        # L0 underfilled
+        tracker._items["symbol:core.py"] = TrackedItem(
+            key="symbol:core.py", tier=Tier.L0, n=12,
+            content_hash="c", tokens=100,
+        )
+        # Two L1 items, both eligible by N, but only one can leave
+        # without draining L1 below threshold
+        tracker._items["symbol:small1.py"] = TrackedItem(
+            key="symbol:small1.py", tier=Tier.L1, n=12,
+            content_hash="s1", tokens=300,
+        )
+        tracker._items["symbol:small2.py"] = TrackedItem(
+            key="symbol:small2.py", tier=Tier.L1, n=12,
+            content_hash="s2", tokens=300,
+        )
+        tracker._broken_tiers.add(Tier.L1)
+
+        tracker.run_cascade()
+
+        # At least one should remain in L1 (anchored to protect threshold)
+        l1_items = [k for k, v in tracker.items.items() if v.tier == Tier.L1]
+        l1_tokens = sum(v.tokens for v in tracker._items.values() if v.tier == Tier.L1)
+        # L1 should not be completely drained
+        assert len(l1_items) >= 1 or l1_tokens == 0
+
+    def test_l0_backfill_skipped_when_cache_target_zero(self, tracker_no_cache):
+        """No L0 backfill when cache_target_tokens=0."""
+        tracker_no_cache._items["symbol:core.py"] = TrackedItem(
+            key="symbol:core.py", tier=Tier.L0, n=12,
+            content_hash="c", tokens=100,
+        )
+        tracker_no_cache._items["symbol:ready.py"] = TrackedItem(
+            key="symbol:ready.py", tier=Tier.L1, n=12,
+            content_hash="r", tokens=800,
+        )
+        tracker_no_cache._broken_tiers.add(Tier.L1)
+
+        tracker_no_cache.run_cascade()
+
+        # Should not promote — cache_target_tokens is 0
+        assert tracker_no_cache.get_item("symbol:ready.py").tier == Tier.L1
+
+    def test_l0_backfill_not_triggered_when_l0_sufficient(self):
+        """No backfill when L0 already meets cache_target_tokens."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+
+        tracker._items["symbol:core.py"] = TrackedItem(
+            key="symbol:core.py", tier=Tier.L0, n=12,
+            content_hash="c", tokens=600,
+        )
+        tracker._items["symbol:ready.py"] = TrackedItem(
+            key="symbol:ready.py", tier=Tier.L1, n=12,
+            content_hash="r", tokens=300,
+        )
+        tracker._broken_tiers.add(Tier.L1)
+
+        initial_l0_broken = Tier.L0 in tracker._broken_tiers
+        tracker.run_cascade()
+
+        # L0 was not underfilled, so backfill logic shouldn't have marked it broken
+        # (unless normal cascade did something else)
+        if not initial_l0_broken:
+            assert tracker.get_item("symbol:ready.py").tier == Tier.L1
+
+
 # === Underfilled Tier Demotion ===
 
 

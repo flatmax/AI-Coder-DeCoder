@@ -167,7 +167,15 @@ Merge when edits are: overlapping, adjacent (within 3 lines), or have sequential
 
 ### File Path Detection
 
-Recognized by: contains `/` or `\`, doesn't start with `#`/`//`/`*`/`-`/`>`, < 200 chars, immediately before `««« EDIT`.
+A line is considered a file path if it meets these criteria (< 200 chars, not empty):
+
+1. **Not a comment** — doesn't start with `#`, `//`, `*`, `-`, `>`, or triple backticks
+2. **Path with separators** — contains `/` or `\` (most common case)
+3. **Simple filename with extension** — matches `\.?[\w\-\.]+\.\w+` (e.g., `foo.js`, `.env.local`)
+4. **Dotfile without extension** — matches `\.\w[\w\-\.]*` (e.g., `.gitignore`, `.dockerignore`, `.env`)
+5. **Known extensionless filenames** — `Makefile`, `Dockerfile`, `Vagrantfile`, `Gemfile`, `Rakefile`, `Procfile`, `Brewfile`, `Justfile`
+
+The path must appear on the line **immediately before** `««« EDIT` (with nothing else between except blank lines that cause a state reset).
 
 ### Streaming Considerations
 
@@ -208,7 +216,7 @@ During streaming, partially received blocks are tracked. The parser maintains st
 | Failed | Anchor not found, ambiguous, or old text mismatch |
 | Skipped | Binary file or pre-condition failed |
 | Not In Context | File was not in the active context; edit deferred (see below) |
-| Already Applied | New content already present in file (idempotent) |
+| Already Applied | New content already present in file (idempotent). Detected by searching the file for the full `new_lines` (anchor + new_only) as a contiguous block — if found, the edit was already applied in a prior request |
 
 Each result includes:
 
@@ -357,8 +365,17 @@ The following edit(s) failed because the old text didn't match the actual file c
 
 - Only **in-context** mismatch failures trigger this prompt. Mismatch failures on files that were auto-added (not-in-context) are covered by the not-in-context retry prompt instead
 - **Anchor-not-found** failures do not trigger this prompt — they indicate the anchor text doesn't exist in the file at all, which is a different class of problem
-- **Ambiguous anchor** failures have their own retry prompt (see above)
-- When both ambiguous anchor and old-text-mismatch failures occur in the same response, both prompts are combined into a single auto-populated message
+- **Ambiguous anchor** failures have their own retry prompt (see above) and take priority — when both ambiguous and mismatch failures occur in the same response, only the ambiguous retry prompt is shown (the `else if` branch means mismatch is only checked when no ambiguous failures exist)
+
+## Shell Command Detection
+
+The `detect_shell_commands(text)` function (in `edit_parser.py`) extracts shell commands from assistant responses for display in the UI. It detects commands in:
+
+- Fenced code blocks with `bash`, `shell`, or `sh` language tags (lines starting with `#` are treated as comments and skipped)
+- Lines prefixed with `$ ` (dollar-space)
+- Lines prefixed with `> ` (greater-than-space), unless the line starts with common prose words (`Note`, `Warning`, `This`, `The`, `Make`)
+
+Returns a list of command strings. Empty lines inside code blocks are skipped.
 
 ## Testing
 
@@ -415,4 +432,4 @@ The following edit(s) failed because the old text didn't match the actual file c
 - Edit summary banner notes the prepared retry prompt
 - Only in-context mismatch failures trigger this; not-in-context files are covered by the auto-add prompt
 - Anchor-not-found failures do not trigger this prompt
-- When both ambiguous and mismatch failures occur, prompts are combined into a single message
+- When both ambiguous and mismatch failures occur, only the ambiguous prompt is shown (ambiguous takes priority via else-if)

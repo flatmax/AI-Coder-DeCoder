@@ -11,7 +11,6 @@ User clicks Send
     │
     ├─ Show user message in UI immediately
     ├─ Generate request ID for callback correlation
-    ├─ Start watchdog timer (5 min safety timeout)
     │
     ▼
 Server: LLMService.chat_streaming(request_id, message, files, images)
@@ -27,10 +26,20 @@ Background task: _stream_chat
     ├─ Remove deselected files from context
     ├─ Validate files (reject binary/missing)
     ├─ Load files into context
-    ├─ Initialize stability tracker from reference graph (if not already done at startup)
-    ├─ Re-extract doc file structures if doc mode (mtime-based, instant; changed files queued for background enrichment)
+    ├─ Re-index symbol index (code mode) or re-extract doc structures (doc mode):
+    │   Code mode:
+    │       ├─ Run symbol_index.index_repo() on the full file list (mtime-based — only changed files re-parsed)
+    │       ├─ Initialize stability tracker from reference graph (if not already done at startup)
+    │       ├─ Seed system:prompt into L0 (on first request only, after index_repo so legend is final)
+    │   Doc mode:
+    │       ├─ Refresh repo file set and doc file list in executor
+    │       ├─ Use _extract_outlines_structure_only (accepts any cached outline regardless of keyword model)
+    │       ├─ Cache unenriched outlines immediately for newly-changed files
+    │       ├─ Queue changed files for background enrichment (non-blocking)
+    │       ├─ Rebuild reference index from all outlines (enriched + unenriched)
+    │       └─ Send doc_enrichment_queued event if files pending
     ├─ Detect & fetch URLs from prompt (up to 3 per message)
-    │       ├─ Skip already-fetched URLs (via `get_url_content` which checks in-memory dict then filesystem cache; only URLs returning the specific error "URL not yet fetched" are fetched)
+    │       ├─ Skip already-fetched URLs: calls `url_service.get_url_content(url)` and checks `existing.error == "URL not yet fetched"` (this exact string is the sentinel returned by `URLService.get_url_content` when a URL has never been fetched — any other error value, or no error, means the URL was previously fetched and should be skipped)
     │       ├─ Notify client: compactionEvent with stage "url_fetch"
     │       ├─ Fetch, cache, and summarize each URL
     │       ├─ Notify client: compactionEvent with stage "url_ready"
@@ -51,20 +60,32 @@ Background task: _stream_chat
     ├─ Add assistant response to context (user message already added before streaming)
     ├─ Save symbol map to .ac-dc/
     ├─ Print terminal HUD
-    ├─ Parse & apply edit blocks (→ edit_protocol.md; skipped in review mode)
+    ├─ Parse & apply edit blocks (→ edit_protocol.md)
+    │       ├─ Guard: skip all edit application if review mode active (read-only)
     │       ├─ Separate: in-context vs not-in-context files
     │       ├─ Apply in-context edits normally
     │       ├─ Mark not-in-context edits as NOT_IN_CONTEXT
     │       ├─ Auto-add not-in-context files to selected files, broadcast
-    │       └─ Stash modified doc files for deferred enrichment (doc mode only)
+    │       ├─ Invalidate symbol cache for all modified files
+    │       ├─ Invalidate doc index cache for all modified files:
+    │       │       ├─ invalidate_file(path) — remove cache entry
+    │       │       ├─ index_file_structure_only(path) — instant unenriched outline
+    │       │       └─ queue_enrichment(modified) — stash for deferred enrichment
+    │       └─ Stash enrichment queue in result dict under `_deferred_enrichment` key
     ├─ Persist assistant message
     ├─ Update cache stability (→ cache_tiering.md)
     │
     ▼
 Send streamComplete → browser
     │
+    ├─ Deferred enrichment queue (if doc files were modified):
+    │       ├─ Stashed in result dict under `_deferred_enrichment` key during edit processing
+    │       ├─ Contains list of (path, mtime, outline, text) tuples + keyword_model name
+    │       ├─ Key is stripped via result.pop("_deferred_enrichment") BEFORE streamComplete
+    │       │   (DocOutline objects aren't JSON-serializable — would kill the WebSocket write)
+    │       └─ After streamComplete + await sleep(0), launched via asyncio.ensure_future
     ├─ await sleep(0) — flush WebSocket frame before GIL-heavy work
-    ├─ Launch deferred doc enrichment (see below)
+    ├─ Launch deferred doc enrichment from the popped queue
     │
     ▼
 Post-response compaction (→ context_and_history.md)
@@ -86,6 +107,8 @@ The second pass iterates all tier items from the tracker, collecting `symbol:`, 
 ### Deferred Initialization Guard
 
 The LLM service supports a **deferred initialization** mode (`deferred_init=True`) used by the startup sequence. When deferred, the service skips stability initialization at construction time. The `_init_complete` flag starts as `False` and gates `chat_streaming` — requests arriving before initialization completes are rejected with `"Server is still initializing — please wait a moment"`. The flag is set to `True` after `complete_deferred_init()` finishes.
+
+**Session totals tracking:** `LLMService` maintains a `_session_totals` dict with cumulative token usage across all requests in the current server session: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` (all initialized to 0). After each streaming response, the per-request `usage` dict is accumulated into session totals. These totals are reported in `get_context_breakdown()` and the terminal HUD.
 
 **Session restore timing:** The last session is restored **eagerly** via `_restore_last_session()` — called in `main.py` *before* the WebSocket server starts accepting connections (`server.start()`). This ensures `get_current_state()` returns previous session messages as soon as the first browser connects, without waiting for the deferred initialization phase. `complete_deferred_init()` handles only symbol index wiring and does not re-run session restoration.
 
@@ -112,14 +135,15 @@ User-excluded index files (see [Cache Tiering — User-Excluded Files](cache_tie
 ## Client-Side Initiation
 
 1. Guard — skip if empty input
-2. Reset scroll — re-enable auto-scroll
-3. Build URL context — get included fetched URLs, append to LLM message (not shown in UI)
-4. Show user message immediately
-5. Clear input, images, detected URLs
-6. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
-7. Track request — store in pending requests map
-8. Set streaming state (disable input, start watchdog)
-9. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
+2. Exit file search mode if active (restore full tree, clear search query)
+3. Reset scroll — re-enable auto-scroll
+4. Build URL context — get included fetched URLs, append to LLM message (not shown in UI)
+5. Show user message immediately
+6. Clear input, images, detected URLs, close snippet drawer
+7. Generate request ID: `{epoch_ms}-{random_alphanumeric}`
+8. Track request — store current request ID
+9. Set streaming state (disable input)
+10. RPC call: `LLMService.chat_streaming(request_id, message, files, images)`
 
 ## LLM Streaming (Worker Thread)
 
@@ -134,6 +158,8 @@ Runs in a thread pool to avoid blocking the async event loop:
 ### Chunk Delivery
 
 Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls. Server→browser calls use `ClassName.method` format (e.g., `AcApp.streamChunk`), matching the class name registered via `addClass` on the browser side.
+
+The streaming handler captures the main event loop reference (`self._main_loop = asyncio.get_event_loop()`) before launching the worker thread. The worker thread uses `asyncio.run_coroutine_threadsafe(callback, self._main_loop)` to schedule chunk callbacks on the event loop thread — this is required because the worker runs in a `ThreadPoolExecutor` and cannot `await` coroutines directly.
 
 ### Client Chunk Processing
 
@@ -168,15 +194,17 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 StreamCompleteResult:
     response: string                    # Full assistant response text
     token_usage: TokenUsage             # Token counts for HUD display
-    edit_blocks: [{file, preview}]?     # Parsed blocks (preview text)
+    edit_blocks: [{file, is_create}]?   # Parsed blocks with create flag
     shell_commands: [string]?           # Detected shell suggestions
     passed: integer                     # Count of applied edits
+    already_applied: integer            # Count of edits already present in file
     failed: integer                     # Count of failed edits
     skipped: integer                    # Count of skipped edits
     not_in_context: integer             # Count of not-in-context edits
     files_modified: [string]?           # Paths of changed files
     edit_results: [EditResult]?         # Detailed per-edit results
     files_auto_added: [string]?         # Files added to context for not-in-context edits
+    user_message: string?               # Original user message text (for collaborator sync)
     cancelled: boolean?                 # Present if cancelled
     error: string?                      # Present if fatal error
     binary_files: [string]?             # Rejected binary files
@@ -229,6 +257,22 @@ Build the active items list and run the tracker update:
 ```pseudo
 active_items = {}
 
+# 0. System prompt + legend — always present, should stabilize to L0.
+#    Hash only the system prompt text (not legend) for stability —
+#    the legend includes path aliases that change with exclude_files.
+#    Token count includes both prompt + legend.
+if mode == "doc":
+    system_prompt = config.get_doc_system_prompt()
+else:
+    system_prompt = config.get_system_prompt()
+if system_prompt:
+    legend = index.get_legend() if index else ""
+    system_content = system_prompt + legend
+    active_items["system:prompt"] = {
+        "hash": sha256(system_prompt),    # prompt only, not legend
+        "tokens": counter.count(system_content)
+    }
+
 # 1. Selected files: full content hash
 for path in selected_files:
     content = file_context.get_content(path)
@@ -238,34 +282,85 @@ for path in selected_files:
             "tokens": counter.count(content)
         }
 
-# 2. Index entries for selected files (sym: in code mode, doc: in document mode)
+# 2. Remove symbol/doc entries for selected files from the tracker.
+#    Selected files have full content in context — their index blocks are
+#    redundant. Both `symbol:` and `doc:` entries are removed (handles
+#    cross-reference mode correctly). Affected tiers are marked as broken.
+for path in selected_files:
+    for prefix in ("symbol:", "doc:"):
+        entry_key = prefix + path
+        if entry_key in tracker.items:
+            tier = tracker.items[entry_key].tier
+            del tracker.items[entry_key]
+            tracker.broken_tiers.add(tier)
+            log change: "file selected — full content replaces {prefix} entry"
+
+# 3. Index entries for ALL indexed files NOT in selected_files.
+#    These are symbol/doc blocks for the structural map. They are tracked
+#    for stability but NOT rendered separately — they appear in the main
+#    symbol map or are in cached tiers. Excluded files are also skipped.
 #    In doc mode, get_file_block returns the current cached outline — enriched if
 #    available, unenriched (structure-only) if enrichment is still pending.
-for path in selected_files:
-    prefix = "sym:" if mode == "code" else "doc:"
+for path in all_indexed_files:
+    if path in selected_files: continue
+    if path in excluded_index_files: continue
+    prefix = "doc:" if mode == "doc" else "symbol:"
     block = index.get_file_block(path)  # symbol_index or doc_index per mode
     if block:
+        # Use signature hash (from raw data) rather than hashing the formatted
+        # block — formatted output changes when path aliases or exclude_files
+        # change, causing spurious hash mismatches.
+        sig_hash = index.get_signature_hash(path)
         active_items[prefix + path] = {
-            "hash": sha256(block),
+            "hash": sig_hash or sha256(block),
             "tokens": counter.count(block)
         }
 
-# 3. Non-graduated history messages
+# 4. Cross-reference items (when cross-ref mode is enabled).
+#    Add the other index's items so they participate in N-value tracking.
+#    Only items already in the tracker (from initialization) are included.
+if cross_ref_enabled:
+    if mode == "code" and doc_index:
+        cross_index = doc_index
+        cross_prefix = "doc:"
+        all_cross = doc_index.all_outlines
+    elif mode == "doc" and symbol_index:
+        cross_index = symbol_index
+        cross_prefix = "symbol:"
+        all_cross = symbol_index.all_symbols
+    for path in all_cross:
+        key = cross_prefix + path
+        if key not in tracker.items: continue  # only track initialized items
+        block = cross_index.get_file_block(path)
+        if block:
+            sig_hash = cross_index.get_signature_hash(path)
+            active_items[key] = {
+                "hash": sig_hash or sha256(block),
+                "tokens": counter.count(block)
+            }
+
+# 5. History messages (all — the tracker handles graduated history internally)
 for i, msg in enumerate(history):
     key = "history:" + str(i)
-    if key not in any cached tier:
-        content = msg["role"] + ":" + msg["content"]
-        active_items[key] = {
-            "hash": sha256(content),
-            "tokens": counter.count_message(msg)
-        }
+    content = msg["role"] + ":" + msg["content"]
+    active_items[key] = {
+        "hash": sha256(content),
+        "tokens": counter.count_message(msg)
+    }
 
-# 4. Deselected file cleanup: remove file:* entries not in selected_files
-for key in tracker.items:
-    if key starts with "file:" and key.removeprefix("file:") not in selected_files:
-        remove from tier, mark tier as broken
+# 6. Remove excluded items from tracker before update cycle —
+#    they exist on disk so remove_stale won't catch them, but
+#    they must not occupy tier slots or appear in context.
+for excl_path in excluded_index_files:
+    for prefix in ("symbol:", "doc:", "file:"):
+        key = prefix + excl_path
+        if key in tracker.items:
+            remove from tier, mark tier as broken
 
-# 5. Run tracker update
+# 7. Run tracker update
+#    The tracker's process_active_items handles:
+#    - Removing file:* and history:* items no longer in active_items (deselected files, compacted history)
+#    - symbol:* and doc:* items persist in their earned tiers (repo structure, not user-selected)
 stability_tracker.update(active_items, existing_files=repo.get_flat_file_list())
 ```
 
@@ -296,6 +391,10 @@ When edit blocks modify document files in doc mode, their structures are re-extr
 The KeyBERT sentence-transformer model (~80–420 MB) is loaded lazily on first use. Loading holds the GIL for ~10 seconds (PyTorch weight materialization). To prevent this from blocking the mode-switch RPC response, the model is **eagerly pre-initialized** at the end of `_build_doc_index_background_silent` Phase 1, **before** the `doc_index_ready` event is sent to the frontend. This runs unconditionally (not gated on `needs_enrichment`) because even when all files are cached from disk, a future mode switch may discover mtime-changed files and queue them for enrichment. By the time `doc_index_ready` is sent and the user can click the doc mode button, the model is already loaded.
 
 The enrichment queue is stashed in the `streamComplete` result dict under a `_`-prefixed key (`_deferred_enrichment`), which contains the list of `(path, mtime, outline, text)` tuples and the keyword model name. This key is stripped via `result.pop("_deferred_enrichment", None)` **before** `streamComplete` is sent — the queue contains `DocOutline` objects that aren't JSON-serializable and would silently kill the WebSocket write. After `streamComplete` and an `await asyncio.sleep(0)` to flush the WebSocket frame, the enrichment is launched via `asyncio.ensure_future(_enrich_modified_docs_background(...))`. Each file is enriched in the thread pool executor, with per-file progress events sent to the browser. The reference index is rebuilt after all files complete.
+
+## Commit Background Task Guard
+
+The `commit_all` method uses a `_committing` boolean guard to prevent concurrent commits. The guard is set `True` before launching the background task and cleared in a `finally` block. The current `session_id` is captured **synchronously before launching the background task** — this prevents a race where `_restore_last_session()` during a concurrent server restart could replace `_session_id`, causing the commit event to be persisted to the wrong session.
 
 ## Token Usage Extraction
 
@@ -351,14 +450,13 @@ Session total: 182,756
 | Invalid/binary files | streamComplete with error, client auto-deselects |
 | Concurrent stream | Rejected immediately |
 | Streaming exception | Caught, traceback printed, streamComplete with error |
-| Client watchdog | 5-minute timeout forces recovery |
 | History token emergency | Oldest messages truncated if > 2× compaction trigger |
 | Budget exceeded | Largest files shed with warning |
 
 ## Testing
 
 ### State Management
-- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available
+- get_current_state returns messages, selected_files, excluded_index_files, streaming_active, session_id, repo_name, init_complete, mode, cross_ref_ready, cross_ref_enabled, doc_convert_available (dynamically checks `_is_markitdown_available()` on each call — not cached at startup)
 - set_selected_files updates and returns copy; get_selected_files returns independent copy
 - set_excluded_index_files stores exclusion set, removes tracker items, broadcasts filesChanged
 - get_current_state includes excluded_index_files field
@@ -376,7 +474,7 @@ Session total: 182,756
 - Session totals initially zero
 
 ### Mode Switch Effects
-- Mode switch clears selected files and broadcasts filesChanged to frontend
+- Mode switch preserves file selection across modes (selected files are not cleared)
 - Cache tab and context tab listen for mode-changed and files-changed events, triggering refresh
 - Stability tracker switches to mode-specific instance; _update_stability runs immediately
 - Context breakdown reflects new mode's index (symbol map or doc map) after switch

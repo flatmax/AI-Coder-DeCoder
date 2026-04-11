@@ -127,7 +127,7 @@ When the primary PyMuPDF pipeline is used, text-only slides appear as markdown p
 
 ### odfpy
 
-**odfpy** is included as an explicit dependency alongside `markitdown[all]` (which also pulls it in transitively). It provides native ODF format parsing for `.odt` files. The explicit dependency ensures `.odt` support is available even if markitdown's dependency groups change in future versions.
+**odfpy** is pulled in transitively by `markitdown[all]`. It provides native ODF format parsing for `.odt` files. If markitdown's dependency groups change in a future version and no longer include odfpy, an explicit dependency can be added to the `[docs]` extras.
 
 ### Colour-Aware Excel Extraction
 
@@ -149,7 +149,7 @@ pip install ac-dc[docs]
 uv sync --extra docs
 ```
 
-The `[docs]` extra includes `keybert`, `markitdown[all]`, `odfpy`, `python-pptx`, and `pymupdf` — a single install enables all document features.
+The `[docs]` extra includes `keybert`, `markitdown[all]`, `python-pptx`, and `pymupdf` — a single install enables all document features. (`odfpy` is pulled in transitively by `markitdown[all]`.)
 
 For the full PDF/presentation pipeline, **LibreOffice** must also be installed as a system dependency (`soffice` on PATH). Without it, `.pptx` falls back to python-pptx and `.pdf` is handled directly by PyMuPDF (no LibreOffice needed for `.pdf`).
 
@@ -214,7 +214,7 @@ The provenance header is parsed with a simple regex matching `<!-- docuvert: ...
 
 ## Output Placement
 
-Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem. This subdirectory is created for **all formats** (`.docx`, `.xlsx`, `.csv`, etc. — not just presentations/PDFs) during `_convert_single()`. If no images are extracted and the subdirectory ends up empty, it is automatically removed after conversion:
+Converted files are placed as **siblings** to the original. Extracted images and auxiliary files are placed in a **subdirectory** named after the source file stem. This subdirectory is created for **all formats** (`.docx`, `.xlsx`, `.csv`, etc. — not just presentations/PDFs) during `_convert_single()`. If no images are extracted and the subdirectory ends up empty, it is automatically removed after conversion. Image filenames in the markdown are prefixed with the subdirectory name (e.g., `stem/stem_img1.png`) so relative links resolve correctly from the sibling `.md` file:
 
 ```
 docs/
@@ -472,14 +472,16 @@ The feature is entirely optional — the document index, mode toggle, keyword en
 | Data URI image extraction | ~10-50ms/image | Base64 decode + file write |
 | Full conversion (10 files) | ~2-10s | Sequential in background executor |
 
-Conversion runs in a dedicated single-thread executor and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. Progress events are posted back to the event loop from the worker thread via `call_soon_threadsafe` + `ensure_future`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The progress view provides per-file feedback.
+Conversion runs in a dedicated single-thread `ThreadPoolExecutor(max_workers=1, thread_name_prefix="docconv")`, separate from the server's default executor, and does not block UI interaction or the asyncio event loop. The entire sequential conversion executes inside a single `run_in_executor` call. The executor is shut down with `wait=False` after completion to avoid blocking the event loop thread. Progress events are posted from the worker thread back to the asyncio event loop via `loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_convert_event(data)))`, ensuring WebSocket pings and RPC responses keep flowing even when GIL-heavy C extensions (openpyxl, PyMuPDF) are running. The `_send_convert_event` method wraps the `_event_callback` call in `asyncio.ensure_future` to avoid blocking the conversion pipeline if the browser is slow to process a previous event. The progress view provides per-file feedback.
+
+**Synchronous fallback:** When no asyncio event loop is running (e.g. in tests or edge cases where the event loop hasn't started), `convert_files` falls back to `_convert_files_sync` which runs all conversions synchronously and returns the full results dict inline instead of using background events.
 
 ## RPC Methods
 
 | Method | Description |
 |--------|-------------|
 | `DocConvert.scan_convertible_files()` | Returns list of convertible files with status badges. Includes clean-tree check |
-| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree |
+| `DocConvert.convert_files(paths: list[str])` | Returns `{status: "started"}` immediately. Conversion runs in a background executor thread; per-file progress and final summary are delivered via `docConvertProgress` server→client events. Requires clean tree. Falls back to synchronous conversion (returning full results inline) if no asyncio event loop is running |
 | `DocConvert.is_available()` | Returns dict with availability of markitdown, LibreOffice, PyMuPDF, and combined pdf_pipeline status |
 
 ## Testing
@@ -511,6 +513,7 @@ Conversion runs in a dedicated single-thread executor and does not block UI inte
 - PDF pages with raster images produce companion SVG with text stripped
 - PDF pages with non-trivial vector graphics (curves, filled shapes) produce SVG
 - PDF pages with only simple borders/underlines are treated as text-only
+- PDF pages with no extractable text AND no detected images still get a full-page SVG export as a fallback (ensures pages with only lightweight vector content aren't silently dropped)
 - SVG export emits text as `<text>` elements (`text_as_path=0`) for visual fidelity and selectability
 - Extracted text also appears in companion markdown for searchability
 - Image detection threshold requires ≥3 significant drawings (not just decorative rules)

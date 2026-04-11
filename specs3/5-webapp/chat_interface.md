@@ -153,7 +153,13 @@ During streaming: edit blocks detected mid-stream render as `edit-pending` with 
 
 The file path line preceding `««« EDIT` is stripped from the text segment and attached to the edit segment. Consecutive file-path-like lines are handled by treating only the last one before `««« EDIT` as the actual path.
 
-**Note:** This is a separate, simplified parser from the backend's `edit_parser.py`. The frontend parser only needs to identify block boundaries for rendering — it does not perform anchor matching or validation. Its file-path heuristic (`_isFilePath`) uses simpler rules than the backend: rejects lines starting with `#`, `/`, `*`, `-`, `>`, or triple backticks; accepts lines containing `/` or `\`, or matching `word.ext` patterns; rejects lines over 200 characters.
+**Note:** This is a separate, simplified parser from the backend's `edit_parser.py`. The frontend parser only needs to identify block boundaries for rendering — it does not perform anchor matching or validation. Its file-path heuristic (`_isFilePath`) uses simpler rules than the backend:
+
+- Rejects: empty lines, lines > 200 chars, lines starting with `#`, `/`, `*`, `-`, `>`, or triple backticks
+- Accepts: lines containing `/` or `\` (path separators)
+- Accepts: lines matching `\.?[\w\-\.]+\.\w+` (filename with extension, e.g. `foo.js`, `.env.local`)
+- Accepts: lines matching `\.\w[\w\-\.]*` (dotfile without extension, e.g. `.gitignore`)
+- Does NOT check for known extensionless filenames (unlike the backend which recognizes `Makefile`, `Dockerfile`, etc.)
 
 **Code fence stripping:** When the LLM wraps an edit block inside a markdown code fence (`` ``` ``), the parser strips the opening fence (if it immediately precedes the file path) and the closing fence (if it immediately follows `»»» EDIT END`). This handles a common LLM formatting quirk without requiring the backend to be aware of it.
 
@@ -198,7 +204,7 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 
 | Method | Purpose |
 |--------|---------|
-| `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render |
+| `_renderAssistantContent(content, editResults, isFinal)` | Segments response, renders text with markdown and edit blocks inline. Applies file mentions only on final render. Edit segments are matched to backend results using a **per-file index counter**: each file path tracks the next unmatched result index, so multiple edits to the same file are matched sequentially in order of appearance |
 | `_renderEditBlockHtml(seg, result)` | Renders a single edit block card: header with file path (click to toggle selection), goto icon (click to open in diff viewer with searchText), status badge, optional error, diff lines |
 | `_renderDiffLineHtml(line)` | Renders one diff line with optional character-level `<span class="diff-change">` highlights |
 
@@ -208,7 +214,7 @@ Banner **after** all edit blocks (at the end of the assistant message, not the t
 
 ### Not-In-Context Retry Prompt
 
-When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt:
+When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt. **Note:** This runs after the edit failure retry prompt checks, so if both not-in-context files and edit failures (ambiguous or mismatch) are present in the same response, the not-in-context prompt overwrites the edit failure prompt in the textarea:
 
 - **Single file**: "The file {name} has been added to context. Please retry the edit for: ..."
 - **Multiple files**: "The files {name1}, {name2} have been added to context. Please retry the edits for: ..."
@@ -312,10 +318,11 @@ Off-screen messages use `content-visibility: auto` with `contain: layout style p
 - Auto-resizing textarea
 - Enter to send, Shift+Enter for newline
 - Image paste (base64, 5MB max, 5 images max)
+- **Undo/redo workaround**: Native undo is broken in shadow DOM textareas when Lit re-renders set `.value` programmatically. The input handler intercepts Ctrl+Z (undo) and Ctrl+Shift+Z / Ctrl+Y (redo) and delegates to `document.execCommand('undo'/'redo')` as a fallback
 
 ### Paste Suppression for Middle-Click
 
-When the file picker's middle-click inserts a path into the textarea, the browser's selection-buffer paste is suppressed to prevent duplicating the inserted path. The paste handler blocks the next paste event following a programmatic path insertion.
+When the file picker's middle-click inserts a path into the textarea, the browser's selection-buffer paste is suppressed to prevent duplicating the inserted path. The mechanism uses a `_suppressNextPaste` boolean flag on the chat panel: the middle-click handler (via `insert-path` event from the file picker) sets the flag to `true` after inserting the path, and the chat panel's `_onPaste` handler checks and clears the flag at the start of each paste event, calling `preventDefault()` to block the selection-buffer paste when the flag is set.
 
 ### @-Filter
 
@@ -355,7 +362,7 @@ A separate component (`AcInputHistory`) hosted inside the chat input area. The c
 
 ### Snippet Drawer
 
-Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer open/closed state persisted to localStorage (`ac-dc-snippet-drawer`).
+Toggleable quick-insert buttons from config. Click inserts at cursor. Drawer open/closed state persisted to localStorage (`ac-dc-snippet-drawer`). The drawer is automatically closed (and the closed state persisted) when a message is sent.
 
 ### Speech to Text
 
@@ -433,9 +440,14 @@ The overlay renders file match sections with `data-file-section` attributes for 
 
 When review mode is active, a slim status bar appears above the chat input showing review summary and diff inclusion count. See [Code Review — Review Status Bar](../4-features/code_review.md#review-status-bar). The commit button is disabled during review.
 
-### Review Snippets
+### Snippet Reloading
 
-When review mode is active, `LLMService.get_snippets()` returns review-specific snippets (from the `"review"` key in the unified `snippets.json`). The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
+Snippets are reloaded from the server whenever the context changes:
+- On **RPC ready** (initial connection and reconnect)
+- On **review state change** (entering or exiting review mode)
+- On **mode change** (code ↔ document mode switch, via `mode-changed` event)
+
+`LLMService.get_snippets()` checks review mode first, then document mode, and returns the appropriate array from the unified `snippets.json`. The snippet drawer displays whichever mode's snippets are returned — it does not merge modes. See [Code Review — Review Snippets](../4-features/code_review.md#review-snippets).
 
 ### Commit Flow (Server-Driven)
 
@@ -452,7 +464,7 @@ A `_committing` guard on both client and server prevents concurrent commits. The
 
 When a user sends a chat message, the server broadcasts `AcApp.userMessage({content})` to all clients before streaming begins. This ensures collaborators see the user's message immediately rather than waiting for `streamComplete`.
 
-The sending client ignores this broadcast — it already added the message optimistically in `_send()`. Collaborator clients (detected by having no active `_currentRequestId` or being in passive stream mode) add it to their message list.
+The sending client ignores this broadcast if it has an active `_currentRequestId` that is not a passive stream — it already added the message optimistically in `_send()`. Collaborator clients add it to their message list when they either have no active `_currentRequestId` or are in passive stream mode (`_isPassiveStream = true`).
 
 ### Session Sync (Collaborator)
 
@@ -482,10 +494,14 @@ The chat panel's `_showToast` only sets its local `_toast` property — it does 
 The chat panel's `_onCompactionEvent` handler routes compaction event stages to appropriate toast types:
 
 - `url_fetch` and `url_ready` → transient local toast (during streaming)
+- `compacting` → transient local toast showing compaction in progress
+- `compacted` → replace message list with compacted messages (from `event.messages` array, mapped to `{role, content}` only); show success toast
 - `doc_enrichment_queued` → create persistent enrichment toast showing pending files
 - `doc_enrichment_file_done` → update persistent toast (remove completed file)
 - `doc_enrichment_complete` → transition persistent toast to success state, auto-dismiss after 3s
 - `doc_enrichment_failed` → show warning in persistent toast for the failed file
+
+The handler accepts events for both the current streaming request ID (`_currentRequestId`) and the most recently completed request ID (`_lastRequestId`), since compaction runs asynchronously after `streamComplete`.
 
 See [Document Mode — Enrichment Toast](../2-code-analysis/document_mode.md#enrichment-toast) for the full persistent toast specification.
 

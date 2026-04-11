@@ -241,7 +241,7 @@ Image references are extracted as `DocLink` entries with `is_image: true`, ensur
 
 Rather than pattern-matching every possible markdown and HTML image syntax, the extractor uses a **path-extension scan**: each line is matched against `[\w./-]+\.svg` (and optionally other image extensions). This catches all embedding syntaxes — `![alt](path.svg)`, `<img src="path.svg">`, `<source srcset="path.svg">`, reference-style definitions, and even plain-text mentions — without needing per-syntax regexes.
 
-Matched paths are validated against the repository file tree (via `Repo.get_flat_file_list()`) to filter out false positives (e.g., a prose mention of "the old layout.svg was removed"). Only paths that resolve to an existing repo file become `DocLink` entries. This validation is cheap — the flat file list is already cached by the repo layer.
+Matched paths are validated against the repository file tree to filter out false positives (e.g., a prose mention of "the old layout.svg was removed"). Only paths that resolve to an existing repo file become `DocLink` entries. The file set is built by `DocIndex._get_all_repo_files()` using `os.walk` with the same directory exclusions as the symbol index walker. The set is passed to extractors via the `repo_files` parameter. When `repo_files` is `None` (e.g., single-file extraction without prior repo scan), all SVG path matches are included without validation.
 
 All matched references are stored as `DocLink` with `is_image: true`. The `is_image` flag allows the formatter to optionally annotate image refs differently in future (e.g., `→[img] assets/flow.svg`), though the current formatter treats them identically to regular links.
 
@@ -356,15 +356,21 @@ If the batched call fails (e.g., KeyBERT version incompatibility), the enricher 
 
 ```pseudo
 KeywordEnricher:
+    _model_name: string      # sentence-transformer model name (default: "BAAI/bge-small-en-v1.5")
     _model: KeyBERT          # lazily initialized, shared across files
     _top_n: int              # keywords per section (default: 3)
     _ngram_range: (int, int) # (1, 2) for single words and bigrams
     _min_section_chars: int  # skip keyword extraction for very short sections (default: 50)
+    _min_score: float        # minimum relevance score to include (default: 0.3)
     _diversity: float        # MMR diversity (0.0 = no diversity, 1.0 = max; default: 0.5)
     _tfidf_fallback_chars: int  # sections below this use TF-IDF instead of KeyBERT (default: 150)
     _max_doc_freq: float     # corpus-frequency ceiling for keyword filtering (default: 0.6)
 
-    enrich(outline: DocOutline, full_text: string) -> DocOutline:
+    enrich(outline: DocOutline, full_text: string, progress_callback?: function) -> DocOutline:
+        # progress_callback is passed only on the first file to trigger lazy model init
+        # with progress reporting. Subsequent calls pass None.
+        if not _init_model(progress_callback):
+            return outline
         full_text_lines = full_text.splitlines()
         all_headings = _flatten(outline.headings)  # recursive tree→list
 
@@ -513,10 +519,13 @@ detect_doc_type(path: string, headings: DocHeading[]) -> string:
 
 ### Lazy Loading
 
-KeyBERT depends on `sentence-transformers` which downloads the configured model on first use (~420MB for the default `all-mpnet-base-v2`). The enricher follows the same lazy-loading pattern as tree-sitter languages in `parser.py`:
+KeyBERT depends on `sentence-transformers` which downloads the configured model on first use (size varies by model — ~130MB for the default `BAAI/bge-small-en-v1.5`). The enricher exposes a `model_name` read-only property that returns the configured model name string. This property is used by `DocCache` for model-match validation and by `DocIndex` when passing the model name to cache `put()` calls.
 
-- `KeyBERT` is imported inside `__init__` or on first call
-- If `keybert` is not installed, a warning is logged and headings are emitted without keywords
+The enricher follows the same lazy-loading pattern as tree-sitter languages in `parser.py`:
+
+- `KeyBERT` is imported inside `_init_model()`, which is called lazily on first `enrich()` call or on first `available` property access
+- An `_available` tristate (`None` = not yet checked, `True`, `False`) prevents re-initialization attempts
+- If `keybert` is not installed, `_available` is set to `False`, a warning is logged, and headings are emitted without keywords
 - The model is initialized once and reused across all files in an indexing run
 - Before loading the model, the enricher probes the Hugging Face local cache via `huggingface_hub.try_to_load_from_cache()` to determine whether the sentence-transformer model needs downloading. If the probe returns `None` (model not cached), a "Downloading…" progress message is shown; otherwise a "Loading from cache…" message is shown. The probe is non-critical — if it fails, initialization proceeds normally with a generic "Loading…" message
 
@@ -546,7 +555,7 @@ Keyword extraction results are cached alongside the structural outline using the
 
 **Disk persistence:** `DocCache` writes a JSON sidecar file per cached entry to `.ac-dc/doc_cache/` on every `put()`. On initialization, existing sidecar files are loaded back into the in-memory cache so that keyword-enriched outlines survive server restarts. This avoids the ~65s KeyBERT re-enrichment cost on every restart — only files whose mtime has changed since the last run need re-processing.
 
-Each sidecar file (`<safe_path>.json`) stores:
+Each sidecar file is named by replacing `/` and `\` in the source path with `__` and appending `.json` (e.g., `docs__readme.md.json`). Each file stores:
 - `path` — original relative file path
 - `mtime` — file modification time at indexing
 - `content_hash` — deterministic hash of the outline (for stability tracking)
@@ -602,6 +611,17 @@ For comparison, tree-sitter indexing of a full repo takes 1-5s. Document indexin
 
 **Structure-only extraction method:** `DocIndex._extract_outlines_structure_only()` is a separate code path from `_extract_outlines()` that accepts any cached outline regardless of keyword model — it passes `keyword_model=None` to the cache `get()` call, which skips the model-match check. This means an outline enriched with an old model, or an unenriched outline, will be accepted and reused. Only files whose mtime has changed are re-parsed. This method is used by mode switching and chat requests (via `_stream_chat`) to avoid blocking on keyword enrichment during user-facing operations.
 
+Both methods return a list of `(path, mtime, outline, text)` tuples for files that needed re-parsing (cache miss). The caller uses this list to cache unenriched outlines immediately and optionally queue them for background keyword enrichment.
+
+The distinction between the two extraction methods:
+
+| Method | Cache lookup | Returns in `needs_enrichment` | Used by |
+|--------|-------------|-------------------------------|---------|
+| `_extract_outlines()` | Requires `keyword_model` match | Files where cache misses due to model mismatch OR mtime change | Initial `index_repo()` build |
+| `_extract_outlines_structure_only()` | Accepts any cached outline (`keyword_model=None` passed to `cache.get()`, which skips model-match check) | Files where cache misses due to mtime change only | Mode switch, `_stream_chat` re-extraction |
+
+Both methods populate `_all_outlines` with whatever outline they retrieve (enriched or unenriched). The caller decides what to do with the `needs_enrichment` return value — typically caching the unenriched outlines immediately and queueing them for background enrichment.
+
 **Two-phase indexing principle:** Structural extraction (headings, links, section sizes) is always **synchronous and instant** (<5ms per file via regex). Keyword enrichment is always **asynchronous and never blocks** any user-facing operation. This separation eliminates all blocking edge cases:
 
 - Mode switches are instant — unenriched outlines are available immediately
@@ -628,13 +648,41 @@ This means the LLM may see unenriched outlines (headings without keyword annotat
 
 The `DocIndex` exposes `enrich_single_file()` for this per-file pattern and `index_file_structure_only()` for instant unenriched extraction.
 
+```pseudo
+DocIndex.enrich_single_file(path, mtime, outline, text, keyword_model?, progress_callback?) -> DocOutline:
+    # Enrich and cache a single file's outline.
+    # Called from LLMService._build_doc_index to process one file at a time
+    # with asyncio.sleep(0) between files for event loop yielding.
+    if _enricher:
+        outline = _enricher.enrich(outline, text, progress_callback)
+    _cache.put(path, mtime, outline, keyword_model)
+    _all_outlines[path] = outline
+    return outline
+
+DocIndex.index_file_structure_only(path) -> DocOutline?:
+    # Extract and cache structural outline without keyword enrichment.
+    # Cached with keyword_model=None so subsequent get() with a real model
+    # treats this as stale and triggers re-enrichment.
+    # Returns None if file doesn't exist or has unsupported extension.
+
+DocIndex.queue_enrichment(paths) -> list[(path, mtime, outline, text)]:
+    # Queue files for background keyword enrichment.
+    # Returns tuples that need enrichment — caller drives the loop.
+    # Skips SVG files, already-enriched files, nonexistent files.
+```
+
 ### Enrichment Progress Feedback
 
 When files are queued for background keyword enrichment, a **non-blocking header progress bar** in the `ac-dialog` header is the sole UI feedback channel. No toast is shown — toasts overlay the chat input area and obstruct interaction during the multi-minute enrichment phase.
 
 **Header progress bar.** A compact bar appears in the dialog header showing the current enrichment file and completion percentage (e.g., `📝 Extracting keywords… (5/33 files) — cache_tiering.md  [=====>  ]`). This is visible regardless of which tab is active or whether the dialog is minimized. The bar is driven by `doc_index_progress` events received after `doc_index_ready` (when `_docIndexReady` is true). It auto-dismisses on `doc_enrichment_complete`.
 
-**Backend mechanism:** The `LLMService` sends `doc_index_progress` events via `compactionEvent` with per-file `message` and `percent` fields during the enrichment phase. Additionally, `doc_enrichment_queued`, `doc_enrichment_file_done`, and `doc_enrichment_complete` events are sent for state tracking (the dialog uses these to manage the `_enrichingDocs` flag).
+**Backend mechanism:** The `LLMService` sends progress through **two channels simultaneously** during both the structural extraction and enrichment phases:
+
+1. `startupProgress("doc_index", message, percent)` — intercepted by the app shell and forwarded to the dialog header progress bar (not the startup overlay) when `_docIndexReady` is already true
+2. `compactionEvent("doc_index_progress", {stage, message, percent})` — received by the dialog directly for header bar updates
+
+Both are fired from the same `_progress` helper inside `_build_doc_index_structure` and `_build_doc_index_enrichment`, using `asyncio.run_coroutine_threadsafe` to post from executor threads back to the event loop. Additionally, `doc_enrichment_queued`, `doc_enrichment_file_done`, and `doc_enrichment_complete` events are sent via `compactionEvent` for state tracking (the dialog uses these to manage the `_enrichingDocs` flag).
 
 **Frontend mechanism:** The dialog (`ac-dialog`) manages the header progress bar via `_enrichingDocs` and `_modeSwitchMessage`/`_modeSwitchPercent` state. When `_enrichingDocs` is true and `_modeSwitchMessage` is non-empty, the header bar renders. On `doc_enrichment_complete`, `_enrichingDocs` clears and the bar disappears.
 
@@ -685,7 +733,7 @@ Keyword enrichment is controlled via `app.json`:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `keyword_model` | string | `"all-mpnet-base-v2"` | Sentence-transformer model name |
+| `keyword_model` | string | `"BAAI/bge-small-en-v1.5"` | Sentence-transformer model name |
 | `keywords_enabled` | bool | `true` | Enable/disable keyword extraction entirely |
 | `keywords_top_n` | int | `3` | Keywords per section. Consider 4–5 for repos with complex spec documents |
 | `keywords_ngram_range` | [int, int] | `[1, 2]` | Unigrams and bigrams |
@@ -720,7 +768,7 @@ Document mode is a **full context switch**, not an additive layer. It replaces t
 ### What Changes in Document Mode
 
 1. **Symbol map removed** — no code symbols in context (unless cross-reference mode is enabled — see [Cache Tiering — Cross-Reference Mode](../3-llm-engine/cache_tiering.md#cross-reference-mode)). The entire token budget is available for document outlines, selected document content, and conversation history
-2. **File tree unchanged** — all files remain visible. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
+2. **File tree unchanged** — all files remain visible and file selection is preserved across mode switches. Non-technical users may still need to see the full repository structure for orientation, and the tree is cheap in tokens. Filtering it adds complexity for no benefit
 3. **System prompt swapped** — a separate `system_doc.md` prompt tuned for document work: summarisation, restructuring, cross-referencing, writing assistance. No code editing instructions
 4. **Edit protocol unchanged** — the LLM still uses the same edit block format to modify `.md` and other text files. The anchor-matching system in `edit_parser.py` works on any text content
 5. **Cache tiering operates on doc blocks** — the stability tracker and tier system work identically, just with document outline blocks instead of code symbol blocks
@@ -765,8 +813,7 @@ User clicks mode toggle
     ├── Reset cross-reference toggle to OFF (remove cross-ref items from tracker if active)
     ├── Re-extract doc file structures (mtime-based — only changed files re-parsed, instant)
     ├── Queue changed files for background enrichment (enrichment toast if any)
-    ├── Clear file context (selected files)
-    ├── Broadcast cleared file selection via filesChanged → frontend picker deselects
+    ├── Preserve file selection (selected files carry over between modes)
     ├── Swap system prompt (system.md → system_doc.md)
     ├── Swap snippets (get_snippets returns "doc" array from unified snippets.json)
     ├── Switch stability tracker to doc-mode instance (separate state per mode)
@@ -780,7 +827,7 @@ Mode switches are **instant** — the structural re-extraction (<5ms per changed
 
 **History across mode switches:** Conversation history is preserved as-is — messages generated under the code system prompt remain in history when switching to document mode and vice versa. The mode-switch system message (e.g., "Switched to document mode") provides sufficient context for the LLM to reinterpret prior messages. If compaction runs after a mode switch, the compaction prompt uses the *current* mode's prompt, so any summary it generates reflects the active mode. In practice, users who switch modes frequently will naturally start new sessions, and the history compactor's topic boundary detection will identify mode switches as natural conversation boundaries.
 
-**Mode persistence:** The current mode is stored in the webapp's `localStorage` (keyed per repo, like other dialog preferences) and sent to the backend on reconnect. The backend does not persist mode state — it defaults to code mode on startup and accepts the mode from the frontend during the initial `setupDone` handshake.
+**Mode persistence:** The current mode is stored in the webapp's `localStorage` under a repo-scoped key (`ac-dc-mode:{repoName}`, with fallback to bare `ac-dc-mode`). On first connection after a server restart, the dialog's `_refreshMode()` reads the saved preference and calls `switch_mode` if it differs from the backend's default (code mode). A `_migrateModeKey()` method runs once when the repo name becomes available, copying any legacy bare `ac-dc-mode` value to the repo-scoped key. The backend does not persist mode state — it defaults to code mode on startup.
 
 **Stability tracker lifecycle:** Two independent `StabilityTracker` instances are held — one for code mode, one for document mode. Each tracks its own tier state, graduation history, and content hashes. Mode switching activates the appropriate tracker instance; the inactive instance retains its state so switching back is instant with no re-initialization. Both trackers are initialized lazily — the document tracker is created on first switch to document mode, using `DocReferenceIndex.connected_components()` for initial tier assignment.
 
@@ -926,13 +973,14 @@ The existing `search_files` in `repo.py` (grep over file content) is used as-is 
 
 ### Sentence-Transformer Model — User Configurable
 
-The sentence-transformer model used by KeyBERT is configurable via `app.json`. The default is `all-mpnet-base-v2` — the highest quality English model. Load time (~5s first run, ~400ms cached) is acceptable given the fine-grained progress reporting described below. Comparative performance for a 50-document repo (1000 sections):
+The sentence-transformer model used by KeyBERT is configurable via `app.json`. The default is `BAAI/bge-small-en-v1.5` — a compact, high-quality English embedding model (~130MB). Load time (~2-3s first run, ~200ms cached) is acceptable given the fine-grained progress reporting described below. Comparative performance for a 50-document repo (1000 sections):
 
 | Model | Size | Load (first) | Load (cached) | Per-section | Full repo (1000 sections, batched) |
 |---|---|---|---|---|---|
+| `BAAI/bge-small-en-v1.5` (default) | ~130MB | ~2-3s | ~200ms | ~20-30ms | ~15s |
 | `all-MiniLM-L6-v2` | 80MB | ~2s | ~200ms | ~20-30ms | ~15s |
 | `all-MiniLM-L12-v2` | 120MB | ~2.5s | ~250ms | ~25-40ms | ~18s |
-| `all-mpnet-base-v2` (default) | 420MB | ~5s | ~400ms | ~40-60ms | ~35s |
+| `all-mpnet-base-v2` | 420MB | ~5s | ~400ms | ~40-60ms | ~35s |
 | `all-distilroberta-v1` | 290MB | ~4s | ~350ms | ~35-50ms | ~25s |
 
 Configuration in `app.json`:
@@ -940,7 +988,7 @@ Configuration in `app.json`:
 ```json
 {
   "doc_index": {
-    "keyword_model": "all-mpnet-base-v2"
+    "keyword_model": "BAAI/bge-small-en-v1.5"
   }
 }
 ```
@@ -955,7 +1003,9 @@ Document indexing has two phases with very different performance characteristics
 
 1. **Structure extraction** — runs in executor after "ready" signal. Completes in <250ms for 50 files. All unenriched outlines are immediately cached and the doc mode toggle is enabled. No progress reporting needed — it's too fast to warrant UI feedback.
 2. **Reference index build** — runs immediately after extraction. Also fast (<50ms). No progress reporting.
-3. **Keyword enrichment** — the slow phase. Each file queued for background enrichment. The persistent enrichment toast appears in the chat panel showing the list of files being processed. Files are removed from the toast as they complete.
+3. **KeyBERT model pre-initialization** — runs unconditionally in executor after structure extraction, BEFORE `doc_index_ready` is sent. This ensures the ~10s GIL-heavy PyTorch weight materialization happens before the user can click the doc mode button. Runs even when all files are cached from disk (no `needs_enrichment`) because a future mode switch may discover mtime-changed files and queue them for enrichment. By the time `doc_index_ready` fires, the model is warm.
+4. **`doc_index_ready` event sent** — frontend enables doc mode toggle and cross-reference checkbox.
+5. **Keyword enrichment** — the slow phase. Each file queued for background enrichment. The header progress bar shows current file and percentage. Files complete one at a time with `asyncio.sleep(0)` between them.
 
 **Backend enrichment events** — communicated via `compactionEvent`:
 

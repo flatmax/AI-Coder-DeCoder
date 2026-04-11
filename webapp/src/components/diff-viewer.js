@@ -18,6 +18,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
+import katex from 'katex';
 import * as monaco from 'monaco-editor';
 
 // === Register MATLAB language with Monarch tokenizer ===
@@ -436,6 +437,80 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       margin: 1.5em 0;
     }
 
+    /* TeX preview (make4ht) styles */
+    .preview-pane .centerline { text-align: center; }
+    .preview-pane .cmr-17 { font-size: 1.7em; }
+    .preview-pane .cmr-12 { font-size: 1.2em; }
+    .preview-pane .cmbx-12, .preview-pane .cmbx-10 { font-weight: bold; }
+    .preview-pane .cmti-10, .preview-pane .cmti-12 { font-style: italic; }
+    .preview-pane .cmtt-10 { font-family: var(--font-mono, monospace); }
+    .preview-pane .sectionHead,
+    .preview-pane .subsectionHead,
+    .preview-pane .subsubsectionHead {
+      color: var(--text-primary, #e0e0e0);
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid var(--border, #333);
+      padding-bottom: 0.3em;
+    }
+    .preview-pane .likesectionHead {
+      color: var(--text-primary, #e0e0e0);
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+    }
+    .preview-pane .math-display { text-align: center; margin: 1em 0; }
+    .preview-pane .equation { text-align: center; margin: 1em 0; }
+    .preview-pane .verbatim {
+      background: var(--bg-tertiary, #161b22);
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--font-mono, monospace);
+    }
+    .preview-pane .lstlisting {
+      background: var(--bg-tertiary, #161b22);
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--font-mono, monospace);
+      font-size: 0.88em;
+    }
+    .preview-pane .fbox, .preview-pane .framebox {
+      border: 1px solid var(--border, #333);
+      padding: 8px;
+      border-radius: 4px;
+    }
+    .preview-pane .caption { font-size: 0.9em; color: var(--text-secondary, #8b949e); margin-top: 4px; }
+    .preview-pane .footnotes { font-size: 0.85em; border-top: 1px solid var(--border, #333); margin-top: 2em; padding-top: 1em; }
+    .preview-pane .tabular { border-collapse: collapse; margin: 0.8em 0; }
+    .preview-pane .tabular td, .preview-pane .tabular th {
+      border: 1px solid var(--border, #333);
+      padding: 4px 10px;
+    }
+    .preview-pane .enumerate, .preview-pane .itemize { padding-left: 1.5em; }
+    .preview-pane .description dt { font-weight: bold; }
+    .preview-pane .maketitle { text-align: center; margin-bottom: 2em; }
+    .preview-pane .titleHead { font-size: 1.8em; color: var(--text-primary); }
+    .preview-pane .author { font-size: 1.1em; color: var(--text-secondary); }
+    .preview-pane .date { font-size: 0.95em; color: var(--text-muted); }
+    /* make4ht math SVGs — ensure they inherit text color */
+    .preview-pane svg { fill: currentColor; }
+    .preview-pane img[src*="preview"] { max-width: 100%; }
+
+    /* KaTeX math rendering in TeX preview */
+    .preview-pane .math-display {
+      text-align: center;
+      margin: 1.2em 0;
+      overflow-x: auto;
+    }
+    .preview-pane .katex-display {
+      margin: 0;
+      padding: 0.8em 0;
+    }
+    .preview-pane .katex {
+      font-size: 1.1em;
+    }
+
     /* Floating file-name labels for left/right diff panels */
     .panel-label {
       position: absolute;
@@ -504,6 +579,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._scrollLock = null;       // Which side owns scroll: 'editor' | 'preview' | null
     this._scrollLockTimer = null;  // Timer to release the lock
     this._editorScrollDisposable = null; // Monaco scroll listener disposable
+    this._texPreviewTimer = null;  // Debounce timer for TeX preview compilation
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onMarkdownLinkNav = this._onMarkdownLinkNav.bind(this);
@@ -532,6 +608,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     if (this._scrollLockTimer) {
       clearTimeout(this._scrollLockTimer);
       this._scrollLockTimer = null;
+    }
+    if (this._texPreviewTimer) {
+      clearTimeout(this._texPreviewTimer);
+      this._texPreviewTimer = null;
     }
   }
 
@@ -1027,38 +1107,23 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Track dirty state on modified editor
       this._editor.getModifiedEditor().onDidChangeModelContent(() => {
         this._checkDirty();
-        if (this._previewMode) this._updatePreview();
+        if (this._previewMode) {
+          // For TeX files, don't compile on every keystroke — too expensive.
+          // Instead, debounce with a longer delay.
+          const activeFile = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+          if (activeFile && this._isTexFile(activeFile.path)) {
+            clearTimeout(this._texPreviewTimer);
+            this._texPreviewTimer = setTimeout(() => this._updatePreview(), 2000);
+          } else {
+            this._updatePreview();
+          }
+        }
       });
     }
 
     // Patch Monaco's editor service for cross-file Go-to-Definition.
     // Ctrl+Click on a symbol in another file triggers openCodeEditor —
     // we intercept it here to open the target in our tab system.
-    if (!this._editorServicePatched) {
-      this._editorServicePatched = true;
-      try {
-        const modifiedEditor = this._editor.getModifiedEditor();
-        const svc = modifiedEditor?._codeEditorService;
-        if (svc && typeof svc.openCodeEditor === 'function') {
-          const origOpen = svc.openCodeEditor.bind(svc);
-          svc.openCodeEditor = async (input, source, sideBySide) => {
-            const resourcePath = input?.resource?.path;
-            if (resourcePath) {
-              const cleanPath = resourcePath.replace(/^\/+/, '');
-              const line = input?.options?.selection?.startLineNumber;
-              await this.openFile({ path: cleanPath, line });
-              return source;
-            }
-            return origOpen(input, source, sideBySide);
-          };
-        }
-      } catch (_) { /* best-effort — LSP nav is not critical */ }
-    }
-
-    // Patch Monaco's code editor service to handle cross-file Go-to-Definition.
-    // When the user Ctrl+clicks a symbol defined in another file, Monaco tries
-    // to open it via ICodeEditorService.openCodeEditor — we intercept that to
-    // open the file in our tab system instead.
     if (!this._editorServicePatched) {
       this._editorServicePatched = true;
       try {
@@ -1107,6 +1172,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _disposeEditor() {
+    // Clear TeX preview debounce timer
+    if (this._texPreviewTimer) {
+      clearTimeout(this._texPreviewTimer);
+      this._texPreviewTimer = null;
+    }
     // Dispose the scroll listener first
     if (this._editorScrollDisposable) {
       this._editorScrollDisposable.dispose();
@@ -1315,6 +1385,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       },
     }));
 
+    // Trigger TeX preview recompile on save
+    if (this._previewMode && this._isTexFile(file.path)) {
+      this._updateTexPreview();
+    }
   }
 
   /**
@@ -1728,6 +1802,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     return ext === '.md' || ext === '.markdown';
   }
 
+  _isTexFile(path) {
+    if (!path) return false;
+    const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+    return ext === '.tex' || ext === '.latex';
+  }
+
+  _isPreviewableFile(path) {
+    return this._isMarkdownFile(path) || this._isTexFile(path);
+  }
+
   _isSvgFile(path) {
     if (!path) return false;
     return path.toLowerCase().endsWith('.svg');
@@ -1749,7 +1833,51 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     }));
   }
 
-  _togglePreview() {
+  async _togglePreview() {
+    // If enabling preview for a TeX file, check make4ht availability first
+    if (!this._previewMode) {
+      const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+      if (file && this._isTexFile(file.path)) {
+        try {
+          const check = await this.rpcExtract('LLMService.is_tex_preview_available');
+          if (check && !check.available) {
+            // Show install instructions in the preview pane instead of
+            // blocking the toggle — user can see what's needed
+            this._previewMode = true;
+            this._previewContent = `<div style="padding: 20px;">
+              <h3 style="color: var(--accent-orange);">⚠️ TeX Preview Unavailable</h3>
+              <p style="color: var(--text-secondary);">
+                <code>make4ht</code> is required for TeX preview but is not installed.
+              </p>
+              <pre style="color: var(--accent-green); background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin-top: 12px;">${check.install_hint || 'sudo apt install texlive-extra-utils'}</pre>
+              <p style="color: var(--text-muted); margin-top: 12px; font-size: 0.85rem;">
+                After installing, the preview will work automatically — no restart needed.
+              </p>
+            </div>`;
+            // Still switch to preview layout so the message is visible
+            this._disposeEditor();
+            this.updateComplete.then(() => {
+              this._editorContainer = this.shadowRoot.querySelector('.editor-pane') ||
+                                       this.shadowRoot.querySelector('.editor-container');
+              if (this._resizeObserver) this._resizeObserver.disconnect();
+              this._resizeObserver = new ResizeObserver(() => {
+                if (this._editor) this._editor.layout();
+              });
+              this._resizeObserver.observe(this);
+              if (this._editorContainer) {
+                this._resizeObserver.observe(this._editorContainer);
+              }
+              this._showEditor();
+            });
+            return;
+          }
+        } catch (e) {
+          console.warn('TeX availability check failed:', e);
+          // Proceed anyway — the compile call will surface the error
+        }
+      }
+    }
+
     this._previewMode = !this._previewMode;
     if (this._previewMode) {
       this._updatePreview();
@@ -1772,8 +1900,12 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   }
 
   _updatePreview() {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (file && this._isTexFile(file.path)) {
+      this._updateTexPreview();
+      return;
+    }
     if (!this._editor) {
-      const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
       this._previewContent = file ? renderMarkdownWithSourceMap(file.modified) : '';
     } else {
       const content = this._editor.getModifiedEditor()?.getValue() ?? '';
@@ -1782,6 +1914,429 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this.requestUpdate();
     // After DOM update, resolve relative image paths
     this.updateComplete.then(() => this._resolvePreviewImages());
+  }
+
+  async _updateTexPreview() {
+    const file = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file) return;
+    const content = this._editor?.getModifiedEditor()?.getValue() ?? file.modified;
+    if (!content.trim()) {
+      this._previewContent = '<p style="color: var(--text-muted);">Empty document</p>';
+      this.requestUpdate();
+      return;
+    }
+    // Show loading state
+    this._previewContent = '<p style="color: var(--text-muted);">⏳ Compiling TeX…</p>';
+    this.requestUpdate();
+
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.compile_tex_preview', content, file.path
+      );
+      if (!result) {
+        this._previewContent = '<p style="color: var(--accent-red);">Preview failed: no response</p>';
+        this.requestUpdate();
+        return;
+      }
+      if (result.error) {
+        let errorHtml = `<div style="color: var(--accent-red); margin-bottom: 12px;">
+          <strong>⚠️ ${this._escapePreviewHtml(result.error)}</strong>
+        </div>`;
+        if (result.install_hint) {
+          errorHtml += `<pre style="color: var(--text-secondary); font-size: 0.85rem; white-space: pre-wrap;">${this._escapePreviewHtml(result.install_hint)}</pre>`;
+        }
+        if (result.log) {
+          errorHtml += `<details style="margin-top: 12px;">
+            <summary style="cursor: pointer; color: var(--text-muted);">Compilation log</summary>
+            <pre style="color: var(--text-secondary); font-size: 0.78rem; white-space: pre-wrap; max-height: 400px; overflow-y: auto; margin-top: 8px;">${this._escapePreviewHtml(result.log)}</pre>
+          </details>`;
+        }
+        this._previewContent = errorHtml;
+        this.requestUpdate();
+        return;
+      }
+      // Success — render LaTeX math with KaTeX, then inject source lines for scroll sync
+      let processed = this._renderTexMathWithKatex(result.html);
+      processed = this._injectTexSourceLines(processed, content);
+      this._previewContent = processed;
+      this.requestUpdate();
+    } catch (e) {
+      console.error('TeX preview failed:', e);
+      this._previewContent = `<p style="color: var(--accent-red);">Preview error: ${this._escapePreviewHtml(e.message || String(e))}</p>`;
+      this.requestUpdate();
+    }
+  }
+
+  _escapePreviewHtml(text) {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /**
+   * Render LaTeX math in make4ht output using KaTeX.
+   *
+   * When make4ht runs with the "mathjax" option, it emits raw LaTeX
+   * math wrapped in \(...\) (inline) and \[...\] (display) delimiters
+   * instead of generating SVG/PNG images.  This method finds those
+   * delimiters and replaces them with KaTeX-rendered HTML.
+   *
+   * Also handles $$...$$ display math and $...$ inline math that
+   * make4ht may pass through, as well as \begin{equation}...\end{equation}
+   * environments.
+   */
+  /**
+   * Strip LaTeX commands that KaTeX doesn't support or that leak as
+   * visible text: \label{...}, \tag{...}, \nonumber, \notag.
+   */
+  _cleanTexForKatex(tex) {
+    return tex
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/\\label\{[^}]*\}/g, '')
+      .replace(/\\tag\{[^}]*\}/g, '')
+      .replace(/\\nonumber/g, '')
+      .replace(/\\notag/g, '')
+      .trim();
+  }
+
+  _renderTexMathWithKatex(htmlStr) {
+    if (!htmlStr) return htmlStr;
+    try {
+      // Phase 1: Remove make4ht alt-text spans/divs that duplicate
+      // the math content as plain text BEFORE processing delimiters.
+      htmlStr = htmlStr.replace(
+        /<span\s+class="(?:math-display|MathJax_Preview)"[^>]*>[\s\S]*?<\/span>/g,
+        ''
+      );
+      htmlStr = htmlStr.replace(
+        /<div\s+class="(?:math-display|MathJax_Preview)"[^>]*>[\s\S]*?<\/div>/g,
+        ''
+      );
+
+      // Phase 2: Render math delimiters with KaTeX.
+      // Order matters: \begin{equation} before \[...\] because make4ht
+      // sometimes wraps one inside the other.
+
+      // Display math environments: \begin{equation}...\end{equation} etc.
+      htmlStr = htmlStr.replace(/\\begin\{(equation|align|gather|multline|displaymath|eqnarray)\*?\}([\s\S]*?)\\end\{\1\*?\}/g, (_match, env, tex) => {
+        try {
+          let katexTex = this._cleanTexForKatex(tex);
+          if (env === 'align' || env === 'align*') {
+            katexTex = `\\begin{aligned}${katexTex}\\end{aligned}`;
+          } else if (env === 'gather' || env === 'gather*') {
+            katexTex = `\\begin{gathered}${katexTex}\\end{gathered}`;
+          }
+          return `<div class="math-display katex-rendered">${katex.renderToString(katexTex, { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Display math: \[...\]
+      htmlStr = htmlStr.replace(/\\\[([\s\S]*?)\\\]/g, (_match, tex) => {
+        try {
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Display math: $$...$$
+      htmlStr = htmlStr.replace(/\$\$([\s\S]*?)\$\$/g, (_match, tex) => {
+        try {
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+        } catch (_) {
+          return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
+        }
+      });
+
+      // Inline math: \(...\)
+      htmlStr = htmlStr.replace(/\\\(([\s\S]*?)\\\)/g, (_match, tex) => {
+        try {
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+        } catch (_) {
+          return `<code>${this._escapePreviewHtml(tex)}</code>`;
+        }
+      });
+
+      // Inline math: $...$  (single dollar, non-greedy, no spaces around $)
+      htmlStr = htmlStr.replace(/(?<![\\$])\$([^\s$](?:[^$]*[^\s$])?)\$(?!\$)/g, (_match, tex) => {
+        try {
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+        } catch (_) {
+          return `<code>${this._escapePreviewHtml(tex)}</code>`;
+        }
+      });
+
+      // Phase 3: Remove alt-text fallbacks placed adjacent to rendered math.
+      // After KaTeX rendering, orphan text between a closing katex-rendered
+      // tag and the next HTML tag is likely a plain-text duplicate.
+      htmlStr = htmlStr.replace(
+        /(<\/(?:span|div)>)(\s*(?:<br\s*\/?>)?\s*)([^<]{2,}?)(\s*<)/g,
+        (_match, closeTag, ws1, text, openTag) => {
+          const looksLikeMath = /[=+\-−×÷<>≤≥|∣(){}^_,0-9]/.test(text)
+            && !/\.\s+[A-Z]/.test(text);
+          if (looksLikeMath) {
+            return `${closeTag}${openTag}`;
+          }
+          return _match;
+        }
+      );
+
+      // Strip text containing \label after rendered display math
+      htmlStr = htmlStr.replace(
+        /(<\/div>)\s*(?:<br\s*\/?>)?\s*([^<]{5,}\\label[^<]*)/g,
+        '$1'
+      );
+
+      return htmlStr;
+    } catch (e) {
+      console.warn('KaTeX rendering failed:', e);
+      return htmlStr;
+    }
+  }
+
+
+  /**
+   * Inject data-source-line attributes into make4ht HTML output for
+   * scroll synchronization with the editor.
+   *
+   * Two-pass approach:
+   *
+   * Pass 1 — Build a sparse set of **anchor** mappings from TeX structural
+   *   commands (\section, \begin, \item, etc.) to their source line numbers.
+   *   Match these against HTML elements using class names and document order.
+   *   This gives reliable, exact anchors at section heads, list items,
+   *   environments, etc. — no text comparison involved.
+   *
+   * Pass 2 — **Interpolate** between anchors.  Every unmatched block-level
+   *   element that falls between two anchors gets a linearly-interpolated
+   *   source line number.  This ensures smooth, gap-free scrolling even
+   *   through regions where text matching would fail (math, tables, etc.).
+   *
+   * The result: every block element gets a data-source-line attribute,
+   * scroll sync is continuous, and no fragile text-matching heuristics
+   * are needed.
+   */
+  _injectTexSourceLines(html, texSource) {
+    if (!html || !texSource) return html;
+
+    const totalSourceLines = texSource.split('\n').length;
+    const sourceLines = texSource.split('\n');
+
+    // ── Phase 1: Extract structural anchors from TeX source ──
+    // Each anchor records: { kind, line (1-based), [text], [env] }
+    const anchors = [];
+    for (let i = 0; i < sourceLines.length; i++) {
+      const raw = sourceLines[i].trim();
+      if (!raw || raw.startsWith('%')) continue;
+      const lineNum = i + 1;
+
+      const secMatch = raw.match(/^\\(section|subsection|subsubsection|paragraph)\*?\{(.+?)\}?$/);
+      if (secMatch) {
+        const heading = secMatch[2].replace(/[{}\\]/g, '').replace(/\s+/g, ' ').trim();
+        anchors.push({ kind: secMatch[1], text: heading, line: lineNum });
+        continue;
+      }
+      if (/^\\begin\{(\w+)\}/.test(raw)) {
+        anchors.push({ kind: 'env', env: RegExp.$1, line: lineNum });
+        continue;
+      }
+      if (/^\\end\{(\w+)\}/.test(raw)) {
+        anchors.push({ kind: 'envend', env: RegExp.$1, line: lineNum });
+        continue;
+      }
+      if (/^\\item\b/.test(raw)) {
+        anchors.push({ kind: 'item', line: lineNum });
+        continue;
+      }
+      if (/^\\(STATE|REQUIRE|ENSURE|IF|ELSIF|ELSE|ENDIF|WHILE|ENDWHILE|FOR|ENDFOR|REPEAT|UNTIL|RETURN|PRINT|COMMENT)\b/.test(raw)) {
+        anchors.push({ kind: 'algo', line: lineNum });
+        continue;
+      }
+      if (/^\\(caption)\{/.test(raw)) {
+        anchors.push({ kind: 'caption', line: lineNum });
+        continue;
+      }
+      if (/^\\maketitle/.test(raw)) {
+        anchors.push({ kind: 'maketitle', line: lineNum });
+        continue;
+      }
+    }
+
+    // ── Phase 2: Find all block-level elements in the HTML ──
+    const blockTags = ['h1','h2','h3','h4','h5','h6','p','div','li','dt','dd',
+                       'td','th','tr','figcaption','caption','pre','table',
+                       'section','article','blockquote','hr','ol','ul'];
+    const tagPattern = new RegExp(
+      `(<(?:${blockTags.join('|')}))([ \\t>])`, 'gi'
+    );
+
+    // Collect every block-element opening position in document order
+    const elements = [];  // { offset, tagName, tagStartLen }
+    let m;
+    while ((m = tagPattern.exec(html)) !== null) {
+      elements.push({
+        offset: m.index,
+        tagName: m[1].slice(1).toLowerCase(),
+        tagStartLen: m[1].length,   // length of e.g. "<li"
+      });
+    }
+
+    if (elements.length === 0) return html;
+
+    // ── Phase 3: Match anchors to elements (sparse) ──
+    // Walk anchors and elements together in document order.
+    // Each anchor tries to claim the next suitable element.
+    const assigned = new Array(elements.length).fill(0);  // 0 = unassigned
+    let anchorIdx = 0;
+    let elemIdx = 0;
+
+    // Helper: read the class attribute from the opening tag at `offset`
+    const getClass = (offset) => {
+      const end = html.indexOf('>', offset);
+      if (end === -1) return '';
+      const tag = html.slice(offset, end + 1);
+      const cm = tag.match(/class="([^"]*)"/);
+      return cm ? cm[1] : '';
+    };
+
+    // Helper: get visible text of element (for heading verification)
+    const getVisibleText = (offset, tagName) => {
+      const end = html.indexOf('>', offset);
+      if (end === -1) return '';
+      const closeTag = `</${tagName}`;
+      const closeIdx = html.indexOf(closeTag, end + 1);
+      if (closeIdx === -1) return '';
+      return html.slice(end + 1, closeIdx)
+        .replace(/<[^>]*>/g, '')
+        .replace(/&[a-z]+;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    while (anchorIdx < anchors.length && elemIdx < elements.length) {
+      const anc = anchors[anchorIdx];
+      const el = elements[elemIdx];
+
+      let matched = false;
+
+      if (anc.kind === 'section' || anc.kind === 'subsection' || anc.kind === 'subsubsection' || anc.kind === 'paragraph') {
+        // Look for a heading element or div with sectionHead class
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 12; j++) {
+          const ej = elements[j];
+          const tn = ej.tagName;
+          if (tn === 'h1' || tn === 'h2' || tn === 'h3' || tn === 'h4' || tn === 'h5' || tn === 'h6' || tn === 'div') {
+            const cls = getClass(ej.offset);
+            const isHeading = tn.startsWith('h') ||
+              cls.includes('sectionHead') || cls.includes('subsectionHead') ||
+              cls.includes('subsubsectionHead') || cls.includes('likesectionHead');
+            if (isHeading && anc.text) {
+              const vis = getVisibleText(ej.offset, tn);
+              if (vis.includes(anc.text) || anc.text.includes(vis.slice(0, 40))) {
+                assigned[j] = anc.line;
+                elemIdx = j + 1;
+                matched = true;
+                break;
+              }
+            }
+          }
+        }
+      } else if (anc.kind === 'item' || anc.kind === 'algo') {
+        // Match to next <li>, <p>, or <div> element
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 8; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'li' || tn === 'p' || tn === 'div' || tn === 'dd' || tn === 'dt') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'env') {
+        // Match to next container-like element
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 6; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'div' || tn === 'table' || tn === 'ol' || tn === 'ul' ||
+              tn === 'pre' || tn === 'blockquote' || tn === 'p') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'envend') {
+        // \end{} — skip, don't consume an element
+        anchorIdx++;
+        continue;
+      } else if (anc.kind === 'caption') {
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 6; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'figcaption' || tn === 'caption' || tn === 'div' || tn === 'p') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      } else if (anc.kind === 'maketitle') {
+        for (let j = elemIdx; j < elements.length && j < elemIdx + 4; j++) {
+          const tn = elements[j].tagName;
+          if (tn === 'div' || tn === 'h1') {
+            assigned[j] = anc.line;
+            elemIdx = j + 1;
+            matched = true;
+            break;
+          }
+        }
+      }
+
+      anchorIdx++;
+      if (!matched) {
+        // Anchor didn't match — move on, don't advance elemIdx
+      }
+    }
+
+    // ── Phase 4: Interpolate between assigned anchors ──
+    // First and last elements get boundary values if unassigned
+    if (assigned[0] === 0) assigned[0] = 1;
+    if (assigned[assigned.length - 1] === 0) assigned[assigned.length - 1] = totalSourceLines;
+
+    // Forward-fill: propagate last known line to unassigned elements
+    // with linear interpolation between anchored points
+    let prevIdx = 0;
+    for (let i = 1; i < assigned.length; i++) {
+      if (assigned[i] !== 0) {
+        // Interpolate all unassigned elements between prevIdx and i
+        if (i - prevIdx > 1) {
+          const startLine = assigned[prevIdx];
+          const endLine = assigned[i];
+          for (let j = prevIdx + 1; j < i; j++) {
+            const frac = (j - prevIdx) / (i - prevIdx);
+            assigned[j] = Math.round(startLine + frac * (endLine - startLine));
+          }
+        }
+        prevIdx = i;
+      }
+    }
+    // Fill any trailing unassigned (shouldn't happen, but safety)
+    for (let i = prevIdx + 1; i < assigned.length; i++) {
+      assigned[i] = assigned[prevIdx];
+    }
+
+    // ── Phase 5: Inject data-source-line attributes back-to-front ──
+    const chars = html.split('');
+    for (let i = elements.length - 1; i >= 0; i--) {
+      const el = elements[i];
+      const attr = ` data-source-line="${assigned[i]}"`;
+      chars.splice(el.offset + el.tagStartLen, 0, attr);
+    }
+    return chars.join('');
   }
 
   /**
@@ -1871,8 +2426,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
    * Editor → Preview: find which source line is at the top of the editor
    * viewport and scroll the preview pane to the corresponding element.
    *
-   * Problem 4 fix: no artificial offsets — symmetric in both directions.
-   * Problem 5 fix: uses pixel-precise setScrollTop instead of revealLine.
+   * Uses a deduplicated, monotonic anchor map so that increasing editor
+   * lines always produce increasing preview scroll positions.  Falls back
+   * to proportional scrolling at the boundaries.
    */
   _scrollPreviewToEditorLine() {
     const previewPane = this.shadowRoot?.querySelector('.preview-pane');
@@ -1880,26 +2436,58 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
 
     const modifiedEditor = this._editor.getModifiedEditor();
     const scrollTop = modifiedEditor.getScrollTop();
+    const scrollHeight = modifiedEditor.getScrollHeight();
+    const clientHeight = modifiedEditor.getLayoutInfo().height;
+
+    // Edge case: if editor content fits without scrollbar, nothing to sync
+    if (scrollHeight <= clientHeight) return;
+
     const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
     const topLine = Math.floor(scrollTop / lineHeight) + 1;
 
-    const anchors = _getPreviewAnchors(previewPane);
+    const rawAnchors = _getPreviewAnchors(previewPane);
+    if (rawAnchors.length === 0) return;
+
+    // Deduplicate: keep only the first element for each source line, and
+    // ensure offsetTop is monotonically non-decreasing.  Interpolated
+    // line numbers from Phase 4 can produce runs of identical line values
+    // with wildly different offsets (nested containers), which makes the
+    // editor→preview mapping non-monotonic and causes jumps.
+    const anchors = [];
+    let lastLine = -1;
+    let lastOffset = -1;
+    for (const a of rawAnchors) {
+      if (a.line === lastLine) continue;          // skip duplicate lines
+      if (a.offsetTop < lastOffset) continue;     // skip non-monotonic offsets
+      anchors.push(a);
+      lastLine = a.line;
+      lastOffset = a.offsetTop;
+    }
     if (anchors.length === 0) return;
 
-    // Find the anchor at or just before topLine
-    let target = anchors[0];
-    for (const a of anchors) {
-      if (a.line <= topLine) target = a;
-      else break;
+    // Binary search for the anchor at or just before topLine
+    let lo = 0, hi = anchors.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (anchors[mid].line <= topLine) lo = mid;
+      else hi = mid - 1;
     }
 
-    // Interpolate between this anchor and the next for smooth scrolling
-    const idx = anchors.indexOf(target);
-    const next = anchors[idx + 1];
-    let scrollTarget = target.offsetTop;
+    const target = anchors[lo];
+    const next = lo + 1 < anchors.length ? anchors[lo + 1] : null;
+
+    let scrollTarget;
     if (next && next.line > target.line) {
-      const fraction = (topLine - target.line) / (next.line - target.line);
-      scrollTarget += fraction * (next.offsetTop - target.offsetTop);
+      const fraction = Math.min(1, Math.max(0,
+        (topLine - target.line) / (next.line - target.line)
+      ));
+      scrollTarget = target.offsetTop + fraction * (next.offsetTop - target.offsetTop);
+    } else {
+      // Past the last anchor — use proportional scrolling to the end
+      // of the preview pane so we reach the bottom smoothly.
+      const maxPreviewScroll = previewPane.scrollHeight - previewPane.clientHeight;
+      const editorFraction = scrollTop / (scrollHeight - clientHeight);
+      scrollTarget = editorFraction * maxPreviewScroll;
     }
 
     previewPane.scrollTop = scrollTarget;
@@ -1908,6 +2496,9 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   /**
    * Preview → Editor: find which data-source-line element is at the top of
    * the preview viewport and scroll the editor to that line.
+   *
+   * Uses the same deduplication / monotonicity filtering as the forward
+   * direction so the mapping is consistent in both directions.
    */
   _scrollEditorToPreviewLine() {
     if (!this._editor) return;
@@ -1920,28 +2511,57 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._scrollLockTimer = setTimeout(() => { this._scrollLock = null; }, 120);
 
     const scrollTop = previewPane.scrollTop;
-    const anchors = _getPreviewAnchors(previewPane);
+    const maxPreviewScroll = previewPane.scrollHeight - previewPane.clientHeight;
+
+    const rawAnchors = _getPreviewAnchors(previewPane);
+    if (rawAnchors.length === 0) return;
+
+    // Deduplicate and enforce monotonicity (same logic as forward direction)
+    const anchors = [];
+    let lastLine = -1;
+    let lastOffset = -1;
+    for (const a of rawAnchors) {
+      if (a.line === lastLine) continue;
+      if (a.offsetTop < lastOffset) continue;
+      anchors.push(a);
+      lastLine = a.line;
+      lastOffset = a.offsetTop;
+    }
     if (anchors.length === 0) return;
 
-    // Find the anchor at or just before current scroll position
-    let target = anchors[0];
-    for (const a of anchors) {
-      if (a.offsetTop <= scrollTop) target = a;
-      else break;
-    }
-
-    // Interpolate for sub-anchor precision
-    const idx = anchors.indexOf(target);
-    const next = anchors[idx + 1];
-    let targetLine = target.line;
-    if (next && next.offsetTop > target.offsetTop) {
-      const fraction = (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop);
-      targetLine += fraction * (next.line - target.line);
-    }
-
-    // Problem 5 fix: pixel-precise positioning instead of revealLine
     const modifiedEditor = this._editor.getModifiedEditor();
     const lineHeight = modifiedEditor.getOption(monaco.editor.EditorOption.lineHeight);
+    const scrollHeight = modifiedEditor.getScrollHeight();
+    const clientHeight = modifiedEditor.getLayoutInfo().height;
+
+    // Binary search for the anchor at or just before scrollTop (by offset)
+    let lo = 0, hi = anchors.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (anchors[mid].offsetTop <= scrollTop) lo = mid;
+      else hi = mid - 1;
+    }
+
+    const target = anchors[lo];
+    const next = lo + 1 < anchors.length ? anchors[lo + 1] : null;
+
+    let targetLine;
+    if (next && next.offsetTop > target.offsetTop) {
+      const fraction = Math.min(1, Math.max(0,
+        (scrollTop - target.offsetTop) / (next.offsetTop - target.offsetTop)
+      ));
+      targetLine = target.line + fraction * (next.line - target.line);
+    } else {
+      // Past the last anchor — proportional fallback
+      if (maxPreviewScroll > 0) {
+        const previewFraction = scrollTop / maxPreviewScroll;
+        const maxEditorScroll = scrollHeight - clientHeight;
+        modifiedEditor.setScrollTop(previewFraction * maxEditorScroll);
+        return;
+      }
+      targetLine = target.line;
+    }
+
     modifiedEditor.setScrollTop((targetLine - 1) * lineHeight);
   }
 
@@ -1951,7 +2571,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const hasFiles = this._files.length > 0;
     const file = hasFiles && this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
     const isDirty = file ? this._dirtySet.has(file.path) : false;
-    const showPreviewBtn = file && this._isMarkdownFile(file.path);
+    const showPreviewBtn = file && this._isPreviewableFile(file.path);
 
     if (this._previewMode && file) {
       return html`
