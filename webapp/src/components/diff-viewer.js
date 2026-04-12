@@ -19,6 +19,7 @@ import { theme, scrollbarStyles } from '../styles/theme.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import { renderMarkdown, renderMarkdownWithSourceMap } from '../utils/markdown.js';
 import katex from 'katex';
+import katexCssText from 'katex/dist/katex.min.css?raw';
 import * as monaco from 'monaco-editor';
 
 // === Register MATLAB language with Monarch tokenizer ===
@@ -646,6 +647,22 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     const { path, searchText, line } = opts;
     if (!path) return;
 
+    // Guard against concurrent openFile calls for the same path —
+    // a second call while the first is still fetching/creating the
+    // editor can corrupt Monaco state and freeze the UI.
+    if (this._openingPath === path) return;
+    this._openingPath = path;
+
+    try {
+      await this._openFileInner(opts);
+    } finally {
+      this._openingPath = null;
+    }
+  }
+
+  async _openFileInner(opts) {
+    const { path, searchText, line } = opts;
+
     // Store virtual content if provided (for URL content viewing, etc.)
     if (opts.virtualContent != null) {
       this._virtualContents[path] = opts.virtualContent;
@@ -665,7 +682,11 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // if the file is already active, skip _showEditor to avoid
       // recreating models (which resets scroll and cancels Delayers).
       if (!wasActive) {
-        this._showEditor();
+        try {
+          this._showEditor();
+        } catch (e) {
+          console.error('Failed to show editor for', path, e);
+        }
       }
       if (line != null) {
         this._scrollToLine(line);
@@ -720,7 +741,15 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     this._activeIndex = this._files.length - 1;
 
     await this.updateComplete;
-    this._showEditor();
+    try {
+      this._showEditor();
+    } catch (e) {
+      console.error('Failed to create editor for', path, e);
+      // Remove the file we just added so we don't leave a broken tab
+      this._files = this._files.filter(f => f.path !== path);
+      this._activeIndex = Math.min(this._activeIndex, this._files.length - 1);
+      return;
+    }
 
     // Scroll after diff computation finishes — scrolling immediately gets
     // overwritten by the async diff layout that resets the viewport.
@@ -975,41 +1004,55 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
     }
 
     if (!this.rpcConnected) return null;
+
+    let original = '';
+    let modified = '';
+    let is_new = false;
+    let is_read_only = false;
+    let headResult = null;
+    let workResult = null;
+
+    // Each RPC call is wrapped in its own try/catch so a failure in one
+    // (e.g. file doesn't exist in HEAD for new files) doesn't prevent
+    // the other from loading.
     try {
-      // Try to get HEAD version for diff
-      let original = '';
-      let modified = '';
-      let is_new = false;
-      let is_read_only = false;
-
-      const headResult = await this.rpcExtract('Repo.get_file_content', path, 'HEAD');
-      const workResult = await this.rpcExtract('Repo.get_file_content', path);
-
-      if (headResult?.error && workResult?.error) {
-        console.warn('File not found:', path);
-        return null;
-      }
-
-      if (headResult?.error) {
-        // New file — no HEAD version
-        is_new = true;
-        original = '';
-        modified = workResult?.content ?? workResult ?? '';
-      } else if (workResult?.error) {
-        // Deleted file
-        original = headResult?.content ?? headResult ?? '';
-        modified = '';
-        is_read_only = true;
-      } else {
-        original = headResult?.content ?? headResult ?? '';
-        modified = workResult?.content ?? workResult ?? '';
-      }
-
-      return { original, modified, is_new, is_read_only };
+      headResult = await this.rpcExtract('Repo.get_file_content', path, 'HEAD');
     } catch (e) {
-      console.warn('Failed to fetch file content:', path, e);
+      // HEAD version unavailable — file is new or not tracked
+      headResult = { error: e.message || String(e) };
+    }
+
+    try {
+      workResult = await this.rpcExtract('Repo.get_file_content', path);
+    } catch (e) {
+      // Working copy unavailable
+      workResult = { error: e.message || String(e) };
+    }
+
+    const headError = headResult?.error || headResult === null;
+    const workError = workResult?.error || workResult === null;
+
+    if (headError && workError) {
+      console.warn('File not found:', path);
       return null;
     }
+
+    if (headError) {
+      // New file — no HEAD version
+      is_new = true;
+      original = '';
+      modified = String(workResult?.content ?? workResult ?? '');
+    } else if (workError) {
+      // Deleted file
+      original = String(headResult?.content ?? headResult ?? '');
+      modified = '';
+      is_read_only = true;
+    } else {
+      original = String(headResult?.content ?? headResult ?? '');
+      modified = String(workResult?.content ?? workResult ?? '');
+    }
+
+    return { original, modified, is_new, is_read_only };
   }
 
   // === Editor Management ===
@@ -1108,15 +1151,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       this._editor.getModifiedEditor().onDidChangeModelContent(() => {
         this._checkDirty();
         if (this._previewMode) {
-          // For TeX files, don't compile on every keystroke — too expensive.
-          // Instead, debounce with a longer delay.
+          // TeX files only recompile on save (Ctrl+S) — too expensive per-keystroke.
           const activeFile = this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-          if (activeFile && this._isTexFile(activeFile.path)) {
-            clearTimeout(this._texPreviewTimer);
-            this._texPreviewTimer = setTimeout(() => this._updatePreview(), 2000);
-          } else {
-            this._updatePreview();
-          }
+          if (activeFile && this._isTexFile(activeFile.path)) return;
+          this._updatePreview();
         }
       });
     }
@@ -1288,6 +1326,16 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       const clone = style.cloneNode(true);
       clone.setAttribute('data-monaco-injected', 'true');
       shadowRoot.appendChild(clone);
+    }
+
+    // Inject KaTeX CSS for TeX preview math rendering inside the shadow DOM.
+    // Without this, KaTeX's fraction/superscript/subscript layout spans
+    // have no styling and render as flat inline text.
+    if (!shadowRoot.querySelector('[data-katex-css]')) {
+      const katexStyle = document.createElement('style');
+      katexStyle.setAttribute('data-katex-css', 'true');
+      katexStyle.textContent = katexCssText;
+      shadowRoot.appendChild(katexStyle);
     }
   }
 
@@ -2007,8 +2055,25 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
   _renderTexMathWithKatex(htmlStr) {
     if (!htmlStr) return htmlStr;
     try {
-      // Phase 1: Remove make4ht alt-text spans/divs that duplicate
-      // the math content as plain text BEFORE processing delimiters.
+      // Phase 1: Remove make4ht wrapper elements that would trap our
+      // sentinel comments inside an extra nesting level.
+
+      // 1a: Unwrap mathjax-env / mathjax-equation / mathjax-inline wrappers.
+      // make4ht emits:  <div class='mathjax-env mathjax-equation'>\begin{equation}...\end{equation}</div>
+      //            and: <span class='mathjax-inline'>\(...\)</span>
+      // We replace the wrapper with just its inner content so the math
+      // delimiters sit at the same DOM level as surrounding prose.
+      // Handle both single and double quoted class attributes.
+      htmlStr = htmlStr.replace(
+        /<div\s+class=['"][^'"]*mathjax-env[^'"]*['"]>([\s\S]*?)<\/div>/g,
+        '$1'
+      );
+      htmlStr = htmlStr.replace(
+        /<span\s+class=['"][^'"]*mathjax-inline[^'"]*['"]>([\s\S]*?)<\/span>/g,
+        '$1'
+      );
+
+      // 1b: Remove explicit alt-text spans/divs
       htmlStr = htmlStr.replace(
         /<span\s+class="(?:math-display|MathJax_Preview)"[^>]*>[\s\S]*?<\/span>/g,
         ''
@@ -2031,7 +2096,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
           } else if (env === 'gather' || env === 'gather*') {
             katexTex = `\\begin{gathered}${katexTex}\\end{gathered}`;
           }
-          return `<div class="math-display katex-rendered">${katex.renderToString(katexTex, { displayMode: true, throwOnError: false })}</div>`;
+          return `<div class="math-display katex-rendered">${katex.renderToString(katexTex, { displayMode: true, throwOnError: false })}</div><!--katex-end-->`;
         } catch (_) {
           return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
         }
@@ -2040,7 +2105,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Display math: \[...\]
       htmlStr = htmlStr.replace(/\\\[([\s\S]*?)\\\]/g, (_match, tex) => {
         try {
-          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div><!--katex-end-->`;
         } catch (_) {
           return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
         }
@@ -2049,7 +2114,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Display math: $$...$$
       htmlStr = htmlStr.replace(/\$\$([\s\S]*?)\$\$/g, (_match, tex) => {
         try {
-          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div>`;
+          return `<div class="math-display katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: true, throwOnError: false })}</div><!--katex-end-->`;
         } catch (_) {
           return `<div class="math-display"><code>${this._escapePreviewHtml(tex)}</code></div>`;
         }
@@ -2058,7 +2123,7 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Inline math: \(...\)
       htmlStr = htmlStr.replace(/\\\(([\s\S]*?)\\\)/g, (_match, tex) => {
         try {
-          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span><!--katex-end-->`;
         } catch (_) {
           return `<code>${this._escapePreviewHtml(tex)}</code>`;
         }
@@ -2067,18 +2132,26 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       // Inline math: $...$  (single dollar, non-greedy, no spaces around $)
       htmlStr = htmlStr.replace(/(?<![\\$])\$([^\s$](?:[^$]*[^\s$])?)\$(?!\$)/g, (_match, tex) => {
         try {
-          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span>`;
+          return `<span class="katex-rendered">${katex.renderToString(this._cleanTexForKatex(tex), { displayMode: false, throwOnError: false })}</span><!--katex-end-->`;
         } catch (_) {
           return `<code>${this._escapePreviewHtml(tex)}</code>`;
         }
       });
 
       // Phase 3: Remove alt-text fallbacks placed adjacent to rendered math.
-      // After KaTeX rendering, orphan text between a closing katex-rendered
-      // tag and the next HTML tag is likely a plain-text duplicate.
+      // After KaTeX rendering, make4ht emits plain-text duplicates of the
+      // math content (e.g. "H(z) = X(z)Y(z)" after a rendered \frac).
+      // These appear as text nodes between the closing </div> of the
+      // katex-rendered block and the next HTML element.
+
+      // 3a: Strip any non-trivial text immediately after a katex-rendered
+      // closing tag. Use a greedy match to capture the entire alt-text
+      // line, not just a fragment.
       htmlStr = htmlStr.replace(
-        /(<\/(?:span|div)>)(\s*(?:<br\s*\/?>)?\s*)([^<]{2,}?)(\s*<)/g,
-        (_match, closeTag, ws1, text, openTag) => {
+        /(<\/div>\s*(?:<\/div>)?\s*)(?:<br\s*\/?>)?\s*([^<]{2,})(\s*<)/g,
+        (_match, closeTag, text, openTag) => {
+          // Only strip if preceded by katex-rendered content and the text
+          // looks like flattened math (contains math-like characters)
           const looksLikeMath = /[=+\-−×÷<>≤≥|∣(){}^_,0-9]/.test(text)
             && !/\.\s+[A-Z]/.test(text);
           if (looksLikeMath) {
@@ -2088,7 +2161,14 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
         }
       );
 
-      // Strip text containing \label after rendered display math
+      // 3b: More targeted: after a katex-rendered div specifically, strip
+      // ALL trailing text nodes — they are always alt-text artifacts.
+      htmlStr = htmlStr.replace(
+        /(class="[^"]*katex-rendered[^"]*"[^>]*>[\s\S]*?<\/div>)\s*(?:<br\s*\/?>)?\s*([^<]{2,?})\s*(?=<)/g,
+        '$1'
+      );
+
+      // 3c: Strip text containing \label after rendered display math
       htmlStr = htmlStr.replace(
         /(<\/div>)\s*(?:<br\s*\/?>)?\s*([^<]{5,}\\label[^<]*)/g,
         '$1'

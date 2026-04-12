@@ -1,0 +1,99 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\title{Test Document for TeX Preview}
+\author{AC⚡DC Test Suite}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Basic Equations}
+
+The quadratic formula is
+\begin{equation}
+x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+\label{eq:quadratic}
+\end{equation}
+where $a \neq 0$.
+
+\section{Inline Math}
+
+Consider a function $f(x) = x^2 + 2x + 1$ defined on $\mathbb{R}$.
+The derivative is $f'(x) = 2x + 2$ and the integral is
+$\int f(x)\,dx = \frac{x^3}{3} + x^2 + x + C$.
+
+\section{Display Math Variants}
+
+Using bracket delimiters:
+\[
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+\]
+
+Using dollar-dollar delimiters:
+$$
+\prod_{i=1}^{n} x_i = x_1 \cdot x_2 \cdots x_n
+$$
+
+\section{Environments}
+
+An aligned environment:
+\begin{align}
+\nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0} \\
+\nabla \cdot \mathbf{B} &= 0 \\
+\nabla \times \mathbf{E} &= -\frac{\partial \mathbf{B}}{\partial t} \\
+\nabla \times \mathbf{B} &= \mu_0 \mathbf{J} + \mu_0 \varepsilon_0 \frac{\partial \mathbf{E}}{\partial t}
+\end{align}
+
+A gather environment:
+\begin{gather}
+E = mc^2 \\
+F = ma \\
+PV = nRT
+\end{gather}
+
+\section{Fractions and Subscripts}
+
+A transfer function:
+\begin{equation}
+H(z) = \frac{Y(z)}{X(z)} = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{a_0 + a_1 z^{-1} + a_2 z^{-2}}
+\label{eq:transfer}
+\end{equation}
+
+Nested fractions:
+\begin{equation}
+\cfrac{1}{1 + \cfrac{1}{1 + \cfrac{1}{1 + x}}}
+\end{equation}
+
+\section{Matrices}
+
+\begin{equation}
+\mathbf{A} = \begin{pmatrix}
+a_{11} & a_{12} & a_{13} \\
+a_{21} & a_{22} & a_{23} \\
+a_{31} & a_{32} & a_{33}
+\end{pmatrix}
+\end{equation}
+
+\section{Greek Letters and Operators}
+
+The Fourier transform: $\hat{f}(\xi) = \int_{-\infty}^{\infty} f(x) e^{-2\pi i x \xi}\,dx$.
+
+Common operators: $\sin\theta$, $\cos\theta$, $\tan\theta$, $\log_2 n$, $\lim_{x \to 0}$.
+
+\section{Lists}
+
+\begin{itemize}
+  \item First item with math: $\alpha + \beta = \gamma$
+  \item Second item with equation reference
+  \item Third item: $\forall x \in \mathbb{R}, \exists y > x$
+\end{itemize}
+
+\begin{enumerate}
+  \item Ordered item one
+  \item Ordered item two with $\sum_{k=0}^{n} k = \frac{n(n+1)}{2}$
+  \item Ordered item three
+\end{enumerate}
+
+\end{document}
