@@ -2008,6 +2008,10 @@ export class AcDiffViewer extends RpcMixin(LitElement) {
       processed = this._injectTexSourceLines(processed, content);
       this._previewContent = processed;
       this.requestUpdate();
+      // After DOM update, resync preview scroll position with the editor
+      this.updateComplete.then(() => {
+        requestAnimationFrame(() => this._scrollPreviewToEditorLine());
+      });
     } catch (e) {
       console.error('TeX preview failed:', e);
       this._previewContent = `<p style="color: var(--accent-red);">Preview error: ${this._escapePreviewHtml(e.message || String(e))}</p>`;
