@@ -240,11 +240,12 @@ For `.tex` and `.latex` files, the same **Preview** button activates a live TeX 
 ### Compilation Pipeline
 
 1. The diff viewer sends the current editor content to `LLMService.compile_tex_preview(content, file_path)` via RPC
-2. The server writes content to a temp `.tex` file and runs `make4ht` with `mathjax` option
-3. The resulting HTML body is extracted, assets (images, CSS) are inlined as data URIs
-4. make4ht alt-text fallbacks are stripped server-side (`_clean_mathjax_output`)
-5. The client renders math delimiters (`\(...\)`, `\[...\]`, `\begin{equation}...`) with KaTeX
-6. Remaining alt-text duplicates are stripped client-side (`_renderTexMathWithKatex`)
+2. The server prepends `\nonstopmode` before `\documentclass` (so the TeX engine never pauses for user input on errors) and writes the content to a temp `.tex` file
+3. `make4ht` runs with `mathjax` option, `stdin=DEVNULL` (prevents hangs if TeX prompts for input), and a 30-second timeout
+4. The resulting HTML body is extracted, assets (images, CSS) are inlined as data URIs
+5. make4ht alt-text fallbacks are stripped server-side (`_clean_mathjax_output`)
+6. The client renders math delimiters (`\(...\)`, `\[...\]`, `\begin{equation}...`) with KaTeX
+7. Remaining alt-text duplicates are stripped client-side (`_renderTexMathWithKatex`)
 
 ### make4ht Configuration
 
@@ -263,13 +264,13 @@ This tells TeX4ht to emit raw LaTeX math delimiters instead of converting equati
 The `_renderTexMathWithKatex` method processes make4ht HTML output in three phases:
 
 1. **Phase 1: Strip alt-text elements** — Remove `<span class="MathJax_Preview">` and similar elements that make4ht emits as plain-text fallbacks alongside the delimited math
-2. **Phase 2: Render delimiters** — Process math delimiters in priority order:
+2. **Phase 2: Render delimiters** — Process math delimiters in priority order. Each replacement appends a `<!--katex-end-->` sentinel comment after the rendered output:
    - `\begin{equation}...\end{equation}` (and `align`, `gather`, `multline`, `eqnarray`) → KaTeX display math
    - `\[...\]` → KaTeX display math
    - `$$...$$` → KaTeX display math
    - `\(...\)` → KaTeX inline math
    - `$...$` → KaTeX inline math
-3. **Phase 3: Strip orphan alt-text** — Remove bare text nodes between rendered math elements and the next HTML tag that look like flattened math duplicates
+3. **Phase 3: Strip orphan alt-text** — Using the `<!--katex-end-->` sentinels as reliable anchors, strip all bare text nodes between a sentinel and the next HTML tag (these are always make4ht plain-text duplicates). The sentinels are then removed. This avoids fragile regex matching through KaTeX's complex HTML output
 
 The `_cleanTexForKatex` helper reverses HTML entity escaping (`&lt;` → `<`, `&gt;` → `>`, `&amp;` → `&`) that make4ht applies inside math regions before passing to KaTeX. It also strips unsupported commands (`\label`, `\tag`, `\nonumber`, `\notag`).
 
@@ -283,9 +284,9 @@ The `_cleanTexForKatex` helper reverses HTML entity escaping (`&lt;` → `<`, `&
 - Inline alt-text after `\)` delimiters (plain-text renderings like "hm+1 = filter(am,bm,hm)")
 - Display alt-text after `\]` and `\end{...}` delimiters
 
-### Debounced Compilation
+### Save-Triggered Compilation
 
-TeX compilation is expensive (spawns `make4ht` subprocess). Unlike Markdown preview which updates on every keystroke, TeX preview debounces with a 2-second timer. Saving the file (`Ctrl+S`) triggers an immediate recompile.
+TeX compilation is expensive (spawns `make4ht` subprocess). Unlike Markdown preview which updates on every keystroke, TeX preview only recompiles when the file is saved (`Ctrl+S`). Keystrokes do not trigger recompilation — the preview holds its last-compiled output until the next save.
 
 ### Scroll Synchronization
 

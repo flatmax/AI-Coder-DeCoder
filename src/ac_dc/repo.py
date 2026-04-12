@@ -72,10 +72,15 @@ class Repo:
         try:
             if version:
                 try:
-                    content = self._run_git("show", f"{version}:{path}")
-                    return {"content": content}
-                except subprocess.CalledProcessError:
-                    return {"content": "", "error": f"File not in {version}"}
+                    result = subprocess.run(
+                        ["git", "-C", str(self._root), "show", f"{version}:{path}"],
+                        capture_output=True, text=True, check=False, timeout=30,
+                    )
+                    if result.returncode != 0:
+                        return {"content": "", "error": f"File not in {version}"}
+                    return {"content": result.stdout}
+                except subprocess.TimeoutExpired:
+                    return {"content": "", "error": "Git command timed out"}
             resolved = self._resolve_path(path)
             if not resolved.exists():
                 return {"error": "File not found"}
@@ -250,8 +255,18 @@ class Repo:
             pass  # proceed without config — will use default (image) math
 
         try:
-            # Write TeX source
+            # Write TeX source — prepend \nonstopmode so the TeX engine
+            # never pauses for user input on errors (which would hang
+            # the subprocess until the timeout expires).
             with open(tex_path, "w", encoding="utf-8") as f:
+                if '\\documentclass' in content:
+                    content = content.replace(
+                        '\\documentclass',
+                        '\\nonstopmode\n\\documentclass',
+                        1,
+                    )
+                else:
+                    content = '\\nonstopmode\n' + content
                 f.write(content)
 
             # Run make4ht with HTML5 output + mathjax math rendering
@@ -288,6 +303,7 @@ class Repo:
                     timeout=30,
                     cwd=tmp_dir,
                     env=env,
+                    stdin=subprocess.DEVNULL,
                 )
             except subprocess.TimeoutExpired:
                 return {"error": "TeX compilation timed out (30s limit)"}
