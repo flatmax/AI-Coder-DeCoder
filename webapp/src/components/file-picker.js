@@ -537,11 +537,14 @@ export class AcFilePicker extends RpcMixin(LitElement) {
       // Auto-select changed files
       const changed = new Set([...this._modified, ...this._staged, ...this._untracked, ...this._deleted]);
       if (!this._initialAutoSelect) {
-        // First load: select all changed files
+        // First load: merge changed files with any server-provided selection
+        // (selectedFiles may already be populated from get_current_state)
         this._initialAutoSelect = true;
         this._previousChanged = new Set(changed);
-        if (changed.size > 0) {
-          this.selectedFiles = new Set(changed);
+        if (changed.size > 0 || this.selectedFiles.size > 0) {
+          const merged = new Set(this.selectedFiles);
+          for (const p of changed) merged.add(p);
+          this.selectedFiles = merged;
           this._autoExpandChanged(changed);
           this._notifySelection();
         }
