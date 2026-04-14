@@ -2,7 +2,7 @@
 
 ## Overview
 
-AC⚡DC can execute multiple LLM agents in parallel to accelerate large tasks. A planner decomposes a user request into independent sub-tasks, each agent executes its sub-task, and an assessor reviews the combined result via git diff. The cycle repeats until the task is complete or the user intervenes.
+AC⚡DC can execute multiple LLM agents in parallel to accelerate large tasks. A planner decomposes a user request into independent sub-tasks, each agent executes its sub-task, and an assessor reviews the combined result via reverse diff. The cycle repeats until the task is complete or the user intervenes.
 
 ## Core Principle: Anchor-Based Non-Overlapping Edits
 
@@ -18,8 +18,8 @@ If an agent's edit fails validation (anchor not found, or anchor became ambiguou
 User Request
      │
      ▼
-Planner (1 LLM call)
-  Input: user request + symbol map + connected components
+Planner (1 LLM call — uses planner.md system prompt)
+  Input: user request + symbol map + file context
   Output: N sub-tasks, each specifying work units
           (classes, functions, doc sections to create/modify)
      │
@@ -28,31 +28,35 @@ Planner (1 LLM call)
      └──── Agent C (thread) ──→ edits applied to repo
               │
               ▼  (all agents complete)
-         git diff (working tree vs HEAD)
+         Assess: reverse diff + changed files in context
               │
+              ├── edit clashes / failures → re-execute failed tasks
               ▼
-         Assessor (1 LLM call)
-           Input: original plan + unified diff + symbol map
-           Output: {complete, needs_fix, run_tests}
+         Assessor (1 LLM call — uses assessor.md system prompt)
+           Input: original plan + reverse diff + symbol map
+           Output: {complete, needs_replan}
               │
               ├── complete → present to user for review/commit
-              ├── needs_fix → feed back into planner → repeat
-              └── run_tests → execute → feed results back → repeat
+              └── needs_replan → user runs tests (if needed)
+                   → feed results back to planner → repeat
 ```
 
 ### Planner
 
-A single LLM call that receives:
+The planner is the existing single-agent LLM approach with a dedicated system prompt (`config/planner.md`). It receives:
 - The user's request.
 - The symbol map (compact structural view of the codebase).
-- Connected component data from the reference index (which file/symbol clusters are independent).
+- The document index (in document mode).
+- Selected file context.
 
-It outputs a structured task list. Each task specifies:
+The LLM reads the symbol map and reference information to determine which work units are independent. No local graph algorithm is required — the symbol map already exposes imports, call sites, and cross-references in a compact format that the LLM can reason about directly to make pragmatic decomposition decisions.
+
+The planner outputs a structured task list. Each task specifies:
 - A natural language description of the sub-task.
 - The work units (classes, functions, doc sections) the agent should create or modify.
 - Read context: which files/symbols the agent needs to see but not edit.
 
-The planner does not need to assign disjoint file sets. It assigns independent work units. The reference index's connected component analysis informs this: symbols in different components have no cross-references by definition, making them safe to edit in parallel.
+The planner does not need to assign disjoint file sets. It assigns independent work units. The LLM identifies clusters of symbols with no cross-references, making them safe to edit in parallel.
 
 ### Agents
 
@@ -69,45 +73,68 @@ If two agents happen to write to the same file, the anchor-based edit protocol h
 
 The one requirement is **I/O serialisation**: the physical read → find-anchor → replace → write cycle for a single file must be atomic. A per-file mutex in `apply_edits_to_repo` ensures two threads never simultaneously write the same file. This lock is held for microseconds (string search + file write) and has no impact on agent parallelism — agents generate edits concurrently, only the final disk write is serialised.
 
+#### ContextManager Independence
+
+Each agent's `ContextManager` must operate correctly while other agents concurrently modify the repo and symbol index:
+- **Own conversation state**: Each agent has its own history, token counts, and file context. No shared mutable conversation state.
+- **Symbol map refresh**: The symbol index is re-indexed for changed files between execution rounds (not during). Within a single round, all agents read a consistent snapshot.
+- **File content reads**: Agents read file content at call time. If another agent has written to a file the current agent is reading, it sees the updated content. This is acceptable — agents target independent work units, so reading a co-modified file means seeing completed work from another agent, not a half-written state (the per-file mutex guarantees atomic writes).
+- **No shared cache tiers**: Each agent's stability tracker is independent. Cache tiering is per-agent for the duration of parallel execution.
+
 ### Assessor
+
+The assessor is the existing single-agent LLM approach with a dedicated system prompt (`config/assessor.md`). It uses a **forward diff** (`git diff HEAD`) — showing what was added and changed relative to HEAD. Forward diffs are a better fit than the reverse diffs used in code review mode because the assessor's task is plan verification ("was the requested work produced?"), not change evaluation ("should this be reverted?"). A forward diff directly shows what each agent contributed, making it straightforward to check completeness against the plan.
 
 After all agents complete, the assessor receives:
 - The original user request and planner decomposition.
-- A `git diff HEAD` showing all changes made by all agents.
-- The updated symbol map (re-indexed after edits).
+- A forward diff showing all changes made by all agents.
+- Changed files in context (these are in context by default, as with normal operation).
+- The symbol map (already present in context) and document indexes (if in document mode).
 
 The assessor determines:
 - **Complete**: All sub-tasks achieved. Present to user for manual review and commit.
-- **Needs fix**: Some edits failed or are incomplete. Generate corrective tasks and feed back to the planner for another iteration.
-- **Run tests**: Changes look correct but need validation. Execute test suite, feed results (pass/fail with error output) back to the planner.
+- **Needs replan**: Some tasks are incomplete or semantically inconsistent. Feed back to the planner for another iteration.
 
-### Iteration
+### Iteration Loop
 
-The flow is a control loop, not a pipeline:
-
-```
-plan → execute all agents → assess diff →
-  ├── done (user reviews and commits manually)
-  ├── replan (some tasks failed/incomplete) → execute again
-  └── run tests → feed failures back → replan
-```
-
-Each iteration starts from ground truth: the actual state of files on disk as reported by `git diff`. No agent's potentially stale understanding of the codebase carries forward — the assessor sees what actually changed.
-
-## Symbol Map as Planner Input
-
-The planner needs to understand codebase structure to decompose tasks. The symbol map already provides this in a compact, LLM-readable format. The reference index adds:
-- **Connected components**: clusters of files linked by imports/call-sites, disconnected from other clusters. Symbols in different components can be edited in parallel with zero risk of semantic conflict.
-- **File reference counts**: how many other files depend on a given file. High-ref-count files are riskier to modify in parallel.
-
-Example cluster format for the planner prompt:
+The iteration loop has two levels — a fast inner loop for mechanical failures and an outer loop for semantic issues:
 
 ```
-# Independent clusters (no cross-references between clusters)
-Cluster 1: parser.py, cache.py, tests/test_parser.py
-Cluster 2: ui.js, theme.js, components/dialog.js  
-Cluster 3: doc_convert.py, tests/test_doc_convert.py
+plan → execute all agents →
+  ├── edit clashes / anchor failures? → re-execute failed tasks (inner loop)
+  ▼
+assess reverse diff →
+  ├── complete → present to user for review/commit
+  └── needs_replan →
+       ├── user runs tests, gathers results (if needed)
+       └── feed results + assessment back to planner → repeat (outer loop)
 ```
+
+**Inner loop (re-execute):** After all agents complete, if any edits failed due to anchor clashes or ambiguity, re-execute only the failed tasks. The re-executed agents see the current file state (with successful edits from other agents already applied). This loop handles mechanical edit conflicts without LLM re-planning overhead.
+
+**Outer loop (replan):** The assessor reviews the reverse diff and determines whether the combined result is semantically correct. If not, the user may optionally run tests and gather results. The assessment and any test output feed back to the planner for a new decomposition. Each outer iteration starts from ground truth: the actual state of files on disk.
+
+The user drives test execution — the system does not automatically run tests. This keeps the user in control and avoids assumptions about test infrastructure.
+
+## Planner System Prompt (`config/planner.md`)
+
+The planner uses a dedicated system prompt that instructs the LLM to:
+- Read the symbol map to identify independent work units.
+- Decompose the user request into N sub-tasks with explicit work unit assignments.
+- Specify read context for each agent (files to see but not edit).
+- Output a structured format (parseable task list).
+
+This is a new config file alongside the existing `system.md`, `review.md`, etc. It follows the same config directory conventions (user-editable, version-aware upgrade).
+
+## Assessor System Prompt (`config/assessor.md`)
+
+The assessor uses a dedicated system prompt that instructs the LLM to:
+- Read the forward diff to see what each agent produced.
+- Compare the changes against the original plan.
+- Identify semantic conflicts, missing implementations, or broken interfaces.
+- Output a structured verdict: complete or needs_replan with specific issues.
+
+This mirrors the existing `review.md` pattern — the assessor is essentially a review-mode LLM call with a different focus (plan completion rather than code quality).
 
 ## Transport: Single WebSocket
 
@@ -131,15 +158,15 @@ Git branches and worktrees are unnecessary because:
 The hardest class of conflict is semantic: Agent A changes a function's return type while Agent B (independently, in parallel) writes code calling that function with the old return type. Both agents' edits succeed textually, but the combined result is broken.
 
 Detection approaches, in order of reliability:
-1. **Test execution**: Run the project's test suite after the assessment step. Test failures feed back into the planner.
-2. **LLM review of cross-boundary interfaces**: The assessor examines the diff specifically at call sites that cross agent boundaries (identified via the reference index).
-3. **Type checking**: If the project has a type checker (mypy, tsc), run it after edits.
+1. **Test execution**: The user runs the project's test suite after the assessment step. Test failures feed back into the planner.
+2. **LLM review of cross-boundary interfaces**: The assessor examines the reverse diff specifically at call sites that cross agent boundaries (identified via the reference index in the symbol map).
+3. **Type checking**: If the project has a type checker (mypy, tsc), the user runs it after edits and feeds results back.
 
-The reference index identifies exactly which call sites cross the boundary between agents' work units, allowing the assessor to focus its review on the highest-risk interfaces rather than reviewing the entire diff.
+The symbol map exposes which call sites cross the boundary between agents' work units, allowing the assessor to focus its review on the highest-risk interfaces rather than reviewing the entire diff.
 
 ## Re-Indexing Between Iterations
 
-After all agents in one iteration complete and before the assessor runs, the symbol index is re-indexed for changed files. Tree-sitter re-indexing of individual files takes milliseconds, so this is negligible overhead. The assessor and any subsequent planner iteration see an accurate, current symbol map.
+Re-indexing happens through the existing mechanism — the symbol index and document index are refreshed for changed files as part of normal operation before each LLM call. No special parallel-agent re-indexing logic is needed. The assessor and any subsequent planner iteration automatically see an accurate, current symbol map because the standard pre-request refresh runs before their LLM calls.
 
 ## When to Use Agent Mode
 
