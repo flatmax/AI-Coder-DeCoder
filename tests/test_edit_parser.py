@@ -38,9 +38,8 @@ That should fix the issue.
         blocks = parse_edit_blocks(text)
         assert len(blocks) == 1
         assert blocks[0].file_path == "src/math.py"
-        assert blocks[0].anchor_lines == ["def multiply(a, b):"]
-        assert blocks[0].old_only == ["    return a + b  # BUG"]
-        assert blocks[0].new_only == ["    return a * b"]
+        assert blocks[0].old_lines == ["def multiply(a, b):", "    return a + b  # BUG"]
+        assert blocks[0].new_lines == ["def multiply(a, b):", "    return a * b"]
 
     def test_create_file(self):
         """Create file (empty EDIT section)."""
@@ -70,9 +69,8 @@ import sys
 """
         blocks = parse_edit_blocks(text)
         assert len(blocks) == 1
-        assert blocks[0].anchor_lines == ["import os"]
-        assert blocks[0].old_only == []
-        assert blocks[0].new_only == ["import sys"]
+        assert blocks[0].old_lines == ["import os"]
+        assert blocks[0].new_lines == ["import os", "import sys"]
 
     def test_delete_lines(self):
         """Delete lines (lines in EDIT absent from REPL)."""
@@ -89,9 +87,8 @@ import sys
 """
         blocks = parse_edit_blocks(text)
         assert len(blocks) == 1
-        assert blocks[0].anchor_lines == ["import os"]
-        assert blocks[0].old_only == ["import deprecated_module", "import sys"]
-        assert blocks[0].new_only == ["import sys"]
+        assert blocks[0].old_lines == ["import os", "import deprecated_module", "import sys"]
+        assert blocks[0].new_lines == ["import os", "import sys"]
 
     def test_multiple_blocks(self):
         """Multiple blocks from one response."""
@@ -150,14 +147,11 @@ class TestValidation:
     """Edit block validation tests."""
 
     def test_valid_edit_passes(self):
-        """Valid edit passes (anchor found, old text matches)."""
+        """Valid edit passes (old text found, unique match)."""
         block = EditBlock(
             file_path="test.py",
             old_lines=["def foo():", "    return 1"],
             new_lines=["def foo():", "    return 2"],
-            anchor_lines=["def foo():"],
-            old_only=["    return 1"],
-            new_only=["    return 2"],
         )
         content = "import os\n\ndef foo():\n    return 1\n\ndef bar():\n    pass"
         valid, error, error_type = validate_edit(block, content)
@@ -165,15 +159,12 @@ class TestValidation:
         assert error == ""
         assert error_type == ""
 
-    def test_anchor_not_found(self):
-        """Anchor not found returns error."""
+    def test_old_text_not_found(self):
+        """Old text not found returns error."""
         block = EditBlock(
             file_path="test.py",
             old_lines=["def nonexistent():"],
             new_lines=["def renamed():"],
-            anchor_lines=["def nonexistent():"],
-            old_only=[],
-            new_only=[],
         )
         content = "def foo():\n    pass"
         valid, error, error_type = validate_edit(block, content)
@@ -187,9 +178,6 @@ class TestValidation:
             file_path="test.py",
             old_lines=["    pass"],
             new_lines=["    return None"],
-            anchor_lines=["    pass"],
-            old_only=[],
-            new_only=[],
         )
         content = "def a():\n    pass\n\ndef b():\n    pass"
         valid, error, error_type = validate_edit(block, content)
@@ -203,9 +191,6 @@ class TestValidation:
             file_path="new.py",
             old_lines=[],
             new_lines=["print('hello')"],
-            anchor_lines=[],
-            old_only=[],
-            new_only=["print('hello')"],
             is_create=True,
         )
         valid, error, error_type = validate_edit(block, None)
@@ -218,9 +203,6 @@ class TestValidation:
             file_path="test.py",
             old_lines=["def foo():  ", "    return 1"],
             new_lines=["def foo():  ", "    return 2"],
-            anchor_lines=["def foo():  "],
-            old_only=["    return 1"],
-            new_only=["    return 2"],
         )
         content = "def foo():\n    return 1"
         valid, error, error_type = validate_edit(block, content)
@@ -237,9 +219,6 @@ class TestApplication:
             file_path="test.py",
             old_lines=["def foo():", "    return 1"],
             new_lines=["def foo():", "    return 2"],
-            anchor_lines=["def foo():"],
-            old_only=["    return 1"],
-            new_only=["    return 2"],
         )
         content = "import os\n\ndef foo():\n    return 1\n\ndef bar():\n    pass"
         new_content, result = apply_edit(block, content)
@@ -254,9 +233,6 @@ class TestApplication:
             file_path="new.py",
             old_lines=[],
             new_lines=["print('hello')"],
-            anchor_lines=[],
-            old_only=[],
-            new_only=["print('hello')"],
             is_create=True,
         )
         new_content, result = apply_edit(block, None)
@@ -264,14 +240,11 @@ class TestApplication:
         assert new_content == "print('hello')"
 
     def test_insert_adds_line(self):
-        """Insert adds line after anchor."""
+        """Insert adds line after context."""
         block = EditBlock(
             file_path="test.py",
             old_lines=["import os"],
             new_lines=["import os", "import sys"],
-            anchor_lines=["import os"],
-            old_only=[],
-            new_only=["import sys"],
         )
         content = "import os\n\ndef main():\n    pass"
         new_content, result = apply_edit(block, content)
@@ -284,9 +257,6 @@ class TestApplication:
             file_path="test.py",
             old_lines=["nonexistent"],
             new_lines=["replacement"],
-            anchor_lines=["nonexistent"],
-            old_only=[],
-            new_only=[],
         )
         content = "actual content"
         new_content, result = apply_edit(block, content)
@@ -302,9 +272,6 @@ class TestApplication:
             file_path="test.py",
             old_lines=["def foo():", "    return 1"],
             new_lines=["def foo():", "    return 2"],
-            anchor_lines=["def foo():"],
-            old_only=["    return 1"],
-            new_only=["    return 2"],
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.APPLIED
@@ -316,9 +283,6 @@ class TestApplication:
             file_path="deep/nested/new.py",
             old_lines=[],
             new_lines=["content"],
-            anchor_lines=[],
-            old_only=[],
-            new_only=["content"],
             is_create=True,
         )
         results = apply_edits_to_repo([block], str(tmp_path))
@@ -334,9 +298,6 @@ class TestApplication:
             file_path="test.py",
             old_lines=["def foo():", "    return 1"],
             new_lines=["def foo():", "    return 2"],
-            anchor_lines=["def foo():"],
-            old_only=["    return 1"],
-            new_only=["    return 2"],
         )
         results = apply_edits_to_repo([block], str(tmp_path), dry_run=True)
         assert results[0].status == EditStatus.VALIDATED
@@ -349,9 +310,6 @@ class TestApplication:
             file_path="../../../etc/passwd",
             old_lines=["root"],
             new_lines=["hacked"],
-            anchor_lines=["root"],
-            old_only=[],
-            new_only=[],
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.SKIPPED
@@ -366,9 +324,6 @@ class TestApplication:
             file_path="data.bin",
             old_lines=["text"],
             new_lines=["new"],
-            anchor_lines=["text"],
-            old_only=[],
-            new_only=[],
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.SKIPPED
@@ -380,9 +335,6 @@ class TestApplication:
             file_path="nonexistent.py",
             old_lines=["code"],
             new_lines=["new code"],
-            anchor_lines=["code"],
-            old_only=[],
-            new_only=[],
         )
         results = apply_edits_to_repo([block], str(tmp_path))
         assert results[0].status == EditStatus.FAILED
@@ -398,17 +350,11 @@ class TestApplication:
                 file_path="test.py",
                 old_lines=["a = 1"],
                 new_lines=["a = 10"],
-                anchor_lines=[],
-                old_only=["a = 1"],
-                new_only=["a = 10"],
             ),
             EditBlock(
                 file_path="test.py",
                 old_lines=["c = 3"],
                 new_lines=["c = 30"],
-                anchor_lines=[],
-                old_only=["c = 3"],
-                new_only=["c = 30"],
             ),
         ]
         results = apply_edits_to_repo(blocks, str(tmp_path))
