@@ -305,8 +305,9 @@ Individual file symbol blocks can be generated independently. A stable hash of a
 
 ### Multi-File
 1. Index each file (cache-aware)
-2. Resolve cross-file call targets
-3. Build reference index
+2. Remove stale entries — files in `_all_symbols` whose path is not in the current `file_list` are deleted from memory and their cache entries invalidated. This handles files deleted from disk or removed from `git ls-files` between requests
+3. Resolve cross-file call targets
+4. Build reference index
 
 ## LSP Queries
 

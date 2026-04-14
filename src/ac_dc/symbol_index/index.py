@@ -118,9 +118,24 @@ class SymbolIndex:
 
         for path in file_list:
             try:
-                self.index_file(path)
+                result = self.index_file(path)
+                # index_file returns None if file doesn't exist on disk —
+                # remove any previously cached entry (handles files still
+                # in git ls-files but deleted from disk before git rm)
+                if result is None and path in self._all_symbols:
+                    del self._all_symbols[path]
+                    self._cache.invalidate(path)
+                    logger.debug(f"Removed deleted file from symbol index: {path}")
             except Exception as e:
                 logger.warning(f"Failed to index {path}: {e}")
+
+        # Remove stale entries for files no longer in the repo file list
+        current_files = set(file_list)
+        stale = [p for p in self._all_symbols if p not in current_files]
+        for p in stale:
+            del self._all_symbols[p]
+            self._cache.invalidate(p)
+            logger.debug(f"Removed stale symbol entry: {p}")
 
         # Build reference index
         self._ref_index.build(self._all_symbols)

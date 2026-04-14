@@ -238,6 +238,10 @@ At the start of each update cycle, `_broken_tiers` and `_changes` are cleared â€
 ### Phase 0: Remove Stale Items
 Check tracked items against current repo files. Remove `file:`, `symbol:`, and `doc:` items whose underlying file path no longer exists in the repo.
 
+**Index cleanup (prerequisite):** Before the tracker runs stale removal, the indexes themselves (`_all_symbols`, `_all_outlines`) are pruned of files no longer in the repo file list. This prevents stale index entries from re-creating tracker items during Phase 1's `process_active_items` pass. Without this, a deleted file's index entry would survive `remove_stale` only to be re-added as a new active item moments later.
+
+**FileContext cleanup:** Files in `FileContext` that no longer exist on disk are removed during the file sync step before streaming and before context breakdown computation. The selected files list (`_selected_files`) is also pruned of deleted files at `set_selected_files` time and defensively during breakdown computation. This ensures deleted files cannot linger in context or appear in the HUD.
+
 ### Phase 1: Process Active Items
 For each item in the active items list:
 1. Compute content hash

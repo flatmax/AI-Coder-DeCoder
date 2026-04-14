@@ -161,6 +161,24 @@ class DocIndex:
 
         needs_enrichment = self._extract_outlines(doc_files, total, progress_callback)
 
+        # Remove stale entries for files no longer in the repo
+        # This catches both: (1) files removed from the doc file list entirely,
+        # and (2) files still in the list but deleted from disk (git ls-files
+        # still lists them but they don't exist — _extract_outlines skips them
+        # via abs_path.exists() but doesn't remove old entries)
+        current_files = set(doc_files)
+        stale = [p for p in self._all_outlines if p not in current_files]
+        for p in stale:
+            del self._all_outlines[p]
+            self._cache.invalidate(p)
+            logger.debug(f"Removed stale doc entry: {p}")
+        # Also remove entries for files in the list but missing from disk
+        for path in doc_files:
+            if path in self._all_outlines and not (self._root / path).exists():
+                del self._all_outlines[path]
+                self._cache.invalidate(path)
+                logger.debug(f"Removed deleted file from doc index: {path}")
+
         logger.info(
             f"Structure extraction complete: {len(needs_enrichment)} files need enrichment, "
             f"{total - len(needs_enrichment)} cached"
