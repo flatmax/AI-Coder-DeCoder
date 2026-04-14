@@ -114,11 +114,9 @@ Read after the backend layer each component visualizes. Frontend only — no bac
 
 ### Layer 7: Future Architecture
 
-Target design for the next major version.
-
 | Spec | Description |
 |------|-------------|
-| [State Synchronization](7-future/state_synchronization.md) | Python-as-authority principle, round-trip rule, broadcast coverage for all shared state |
+| [Parallel Agents](7-future/parallel_agents.md) | Planner/agent/assessor architecture for parallel LLM task execution |
 
 ### Consolidated References
 
