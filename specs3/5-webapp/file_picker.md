@@ -91,7 +91,7 @@ Rename, new file, and new directory operations render an **inline text input** i
 
 ## Auto-Selection
 
-On first load, auto-select modified/staged/untracked/deleted files. Auto-expand directories containing changed files.
+On first load, auto-select modified/staged/untracked/deleted files **merged with any server-provided selection**. The picker's `selectedFiles` may already be populated from `get_current_state()` (e.g. after a browser refresh while the server is still running) — auto-selection unions changed files into the existing set rather than replacing it. Auto-expand directories containing changed files.
 
 A `_initialAutoSelect` guard ensures this runs exactly once per component lifetime — subsequent tree reloads (after commits, resets, review entry) do not re-trigger auto-selection. The auto-expansion walks each changed file's path segments and adds all ancestor directories to the expanded set.
 

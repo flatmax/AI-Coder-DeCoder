@@ -10,7 +10,7 @@ license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
-    "litellm>=1.0.0",
+    "litellm>=1.83.9",
     "tiktoken>=0.5.0",
     "tree-sitter>=0.21.0",
     "tree-sitter-python>=0.21.0",

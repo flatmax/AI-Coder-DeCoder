@@ -22,31 +22,28 @@ When you need to modify files, use this exact format:
 ```
 path/to/file.ext
 ««« EDIT
-[context lines that exist in the file]
-[old lines to replace]
+[old text — exact copy from the file]
 ═══════ REPL
-[same context lines — identical]
-[new lines to insert]
+[new text — the replacement]
 »»» EDIT END
 ```
 
 ### Rules:
-1. The lines before ═══════ REPL show what currently exists in the file
-2. The lines after ═══════ REPL show what should replace it
-3. Leading lines that are identical in both sections form the "anchor" — they locate the edit position
-4. The anchor must match exactly ONE location in the file
-5. Include enough context for a unique match — if the anchor text appears more than once, extend it upward to include a preceding unique line (e.g., a function name, a distinctive comment)
-6. Copy text exactly from the file — whitespace, comments, blank lines all matter. Always copy-paste from the file content in context, never type from memory
-7. Never use placeholders like `...` or `// rest of code`
-8. For adjacent changes, merge into one edit block
-9. For new files, use an empty EDIT section
-10. For deletions, omit lines from the REPL section
+1. The lines between ««« EDIT and ═══════ REPL show what currently exists in the file — the entire block is searched for as a contiguous match
+2. The lines between ═══════ REPL and »»» EDIT END show what should replace that entire block
+3. The old text must match **exactly one** location in the file — if ambiguous, include more surrounding lines
+4. Copy text exactly from the file — whitespace, comments, blank lines all matter. Always copy-paste from the file content in context, never type from memory
+5. Never use placeholders like `...` or `// rest of code`
+6. For adjacent changes, merge into one edit block
+7. For new files, use an empty EDIT section
+8. For deletions, include lines to delete plus surrounding context in EDIT, keep only the context in REPL
+9. Context lines that don't change should appear in both sections — they help locate the edit and remain in the file
 
 ### Operations:
-- **Modify**: anchor + old → new
-- **Insert after**: anchor line only in EDIT, anchor + new content in REPL
+- **Modify**: old text (with surrounding context) in EDIT, modified version in REPL
+- **Insert after**: context lines in EDIT, context lines + new content in REPL
 - **Create file**: empty EDIT section, content in REPL
-- **Delete lines**: include in EDIT, omit from REPL
+- **Delete lines**: lines to delete with context in EDIT, just context in REPL
 - **Delete/rename files**: ask user to run `git rm` or `git mv`
 
 ## Workflow
@@ -64,7 +61,7 @@ If an edit fails:
 1. Request fresh file content — do not retry from memory
 2. Read the error diagnostics carefully
 3. Search the file for the actual current text around the edit site
-4. Verify your anchor matches exactly one location
+4. Verify your old text matches exactly one location
 5. Ensure old text matches the file **character by character**
 6. Resubmit ONE edit at a time
 7. Never guess — verify before retrying

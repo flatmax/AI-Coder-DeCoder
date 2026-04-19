@@ -128,6 +128,8 @@ for path in current_context_files - selected_files:
     context.file_context.remove_file(path)
 ```
 
+**Deleted-file cleanup:** During file validation, files that no longer exist on disk are actively removed from `FileContext` (not just skipped). This handles the case where a file was loaded into context before being deleted — without the active removal, stale cached content would persist in memory. Additionally, `set_selected_files` filters out non-existent files at selection time, and `get_context_breakdown` defensively prunes any remaining deleted files before computing the HUD display.
+
 This is distinct from the cache tiering deselection cleanup (see [Cache Tiering — Item Removal](cache_tiering.md#item-removal)), which handles `file:*` entries in the stability tracker. Both operate on the same user action (unchecking a file) but manage different state stores.
 
 User-excluded index files (see [Cache Tiering — User-Excluded Files](cache_tiering.md#user-excluded-files)) are merged into the `exclude_files` set for all map generation calls (`get_symbol_map`, `get_doc_map`) and for `_update_stability` active items computation. Excluded files have no presence in context — no full content, no index block, no tracker item.

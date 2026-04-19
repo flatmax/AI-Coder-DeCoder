@@ -5,10 +5,14 @@ and applies changes. Format:
 
     path/to/file.ext
     ««« EDIT
-    [context + old lines]
+    [old text - exact copy from file]
     ═══════ REPL
-    [context + new lines]
+    [new text - replacement]
     »»» EDIT END
+
+The entire EDIT section is matched against the file to locate the edit site.
+The entire REPL section replaces it. No separate anchor computation is needed;
+the old text block itself serves as a unique locator.
 """
 
 import logging
@@ -57,9 +61,6 @@ class EditBlock:
     file_path: str
     old_lines: list = field(default_factory=list)
     new_lines: list = field(default_factory=list)
-    anchor_lines: list = field(default_factory=list)
-    old_only: list = field(default_factory=list)
-    new_only: list = field(default_factory=list)
     is_create: bool = False
 
 
@@ -151,61 +152,33 @@ def parse_edit_blocks(text):
 
 
 def _build_edit_block(file_path, old_lines, new_lines):
-    """Build an EditBlock with computed anchor."""
-    # Compute common prefix (anchor)
-    anchor = []
-    min_len = min(len(old_lines), len(new_lines))
-    for i in range(min_len):
-        if old_lines[i] == new_lines[i]:
-            anchor.append(old_lines[i])
-        else:
-            break
-
-    old_only = old_lines[len(anchor):]
-    new_only = new_lines[len(anchor):]
+    """Build an EditBlock from parsed sections."""
     is_create = len(old_lines) == 0
 
     return EditBlock(
         file_path=file_path,
         old_lines=old_lines,
         new_lines=new_lines,
-        anchor_lines=anchor,
-        old_only=old_only,
-        new_only=new_only,
         is_create=is_create,
     )
 
 
-def _find_anchor(file_content, anchor_lines, old_only=None):
-    """Find the anchor position in file content.
+def _find_old_text(file_content, old_lines):
+    """Find the old text block in file content.
 
+    Searches for the entire old_lines as a contiguous block in the file.
     Returns (line_index, match_count) or (-1, 0) if not found.
     """
+    if not old_lines:
+        return 0, 1  # Empty old = start of file (create/insert at top)
+
     file_lines = file_content.split("\n")
-
-    if not anchor_lines:
-        # No anchor — search for the old_only lines directly
-        if not old_only:
-            return 0, 1  # Empty anchor + empty old = start of file (create/insert)
-        search_lines = old_only
-        matches = []
-        for i in range(len(file_lines) - len(search_lines) + 1):
-            candidate = "\n".join(file_lines[i:i + len(search_lines)])
-            if candidate == "\n".join(search_lines):
-                matches.append(i)
-        if len(matches) == 1:
-            return matches[0], 1
-        elif len(matches) == 0:
-            return -1, 0
-        else:
-            return matches[0], len(matches)
-
-    anchor_text = "\n".join(anchor_lines)
+    search_text = "\n".join(old_lines)
     matches = []
 
-    for i in range(len(file_lines) - len(anchor_lines) + 1):
-        candidate = "\n".join(file_lines[i:i + len(anchor_lines)])
-        if candidate == anchor_text:
+    for i in range(len(file_lines) - len(old_lines) + 1):
+        candidate = "\n".join(file_lines[i:i + len(old_lines)])
+        if candidate == search_text:
             matches.append(i)
 
     if len(matches) == 1:
@@ -216,49 +189,49 @@ def _find_anchor(file_content, anchor_lines, old_only=None):
         return matches[0], len(matches)
 
 
-def _diagnose_failure(file_content, anchor_lines, old_only):
+def _diagnose_failure(file_content, old_lines):
     """Provide diagnostics for a failed edit."""
     file_lines = file_content.split("\n")
 
-    if anchor_lines:
-        first_anchor = anchor_lines[0].strip()
+    if old_lines:
+        first_line = old_lines[0].strip()
         for i, line in enumerate(file_lines):
-            if first_anchor and first_anchor in line.strip():
+            if first_line and first_line in line.strip():
                 # Check if it's a whitespace issue
-                if line != anchor_lines[0]:
-                    return f"Whitespace mismatch at line {i+1}: expected {repr(anchor_lines[0])}, found {repr(line)}"
+                if line != old_lines[0]:
+                    return f"Whitespace mismatch at line {i+1}: expected {repr(old_lines[0])}, found {repr(line)}"
+                # Check if subsequent lines match
+                match = True
+                for j, old_line in enumerate(old_lines[1:], 1):
+                    if i + j >= len(file_lines) or file_lines[i + j] != old_line:
+                        match = False
+                        break
+                if not match:
+                    return f"Partial match at line {i+1}, but subsequent lines differ"
                 return f"Near match at line {i+1}, but subsequent lines differ"
 
-    if old_only:
-        first_old = old_only[0].strip()
-        for i, line in enumerate(file_lines):
-            if first_old and first_old in line.strip():
-                return f"Old text partially found at line {i+1}"
-
-    return "Anchor not found in file"
+    return "Old text not found in file"
 
 
 def _check_already_applied(block, file_content):
     """Check if an edit's new content is already present in the file.
 
-    Returns True if the new_lines (anchor + new_only) can be found in
+    Returns True if the new_lines can be found as a contiguous block in
     the file, suggesting the edit was already applied in a prior request.
     """
     if not block.new_lines:
         return False
 
-    # Search for the full new content (anchor + new_only) in the file
     new_text = "\n".join(block.new_lines)
     if not new_text.strip():
         return False
 
     file_lines = file_content.split("\n")
-    search_lines = block.new_lines
-    if len(search_lines) > len(file_lines):
+    if len(block.new_lines) > len(file_lines):
         return False
 
-    for i in range(len(file_lines) - len(search_lines) + 1):
-        candidate = "\n".join(file_lines[i:i + len(search_lines)])
+    for i in range(len(file_lines) - len(block.new_lines) + 1):
+        candidate = "\n".join(file_lines[i:i + len(block.new_lines)])
         if candidate == new_text:
             return True
 
@@ -276,33 +249,18 @@ def validate_edit(block, file_content):
     if file_content is None:
         return False, "File not found", ErrorType.FILE_NOT_FOUND.value
 
-    # Find anchor
-    anchor_idx, match_count = _find_anchor(file_content, block.anchor_lines, block.old_only)
+    # Find the entire old text block in the file
+    match_idx, match_count = _find_old_text(file_content, block.old_lines)
 
     if match_count == 0:
         # Check if the edit was already applied (new content already present)
         if _check_already_applied(block, file_content):
             return False, "already_applied", ""
-        diag = _diagnose_failure(file_content, block.anchor_lines, block.old_only)
-        return False, f"Anchor not found: {diag}", ErrorType.ANCHOR_NOT_FOUND.value
+        diag = _diagnose_failure(file_content, block.old_lines)
+        return False, f"Old text not found: {diag}", ErrorType.ANCHOR_NOT_FOUND.value
 
     if match_count > 1:
-        return False, f"Ambiguous anchor: {match_count} matches found", ErrorType.AMBIGUOUS_ANCHOR.value
-
-    # Verify old text at anchored position
-    if block.old_only:
-        file_lines = file_content.split("\n")
-        old_start = anchor_idx + len(block.anchor_lines)
-        old_end = old_start + len(block.old_only)
-
-        if old_end > len(file_lines):
-            return False, "Old text extends past end of file", ErrorType.OLD_TEXT_MISMATCH.value
-
-        file_old = "\n".join(file_lines[old_start:old_end])
-        expected_old = "\n".join(block.old_only)
-
-        if file_old != expected_old:
-            return False, f"Old text mismatch at line {old_start + 1}", ErrorType.OLD_TEXT_MISMATCH.value
+        return False, f"Ambiguous match: {match_count} locations found. Include more context lines for a unique match", ErrorType.AMBIGUOUS_ANCHOR.value
 
     return True, "", ""
 
@@ -344,22 +302,20 @@ def apply_edit(block, file_content):
         )
 
     file_lines = file_content.split("\n")
-    anchor_idx, _ = _find_anchor(file_content, block.anchor_lines, block.old_only)
+    match_idx, _ = _find_old_text(file_content, block.old_lines)
 
-    # Replace old with new
-    old_start = anchor_idx + len(block.anchor_lines)
-    old_end = old_start + len(block.old_only)
+    # Replace old block with new block
+    old_end = match_idx + len(block.old_lines)
 
     new_file_lines = (
-        file_lines[:anchor_idx]
-        + block.anchor_lines
-        + block.new_only
+        file_lines[:match_idx]
+        + block.new_lines
         + file_lines[old_end:]
     )
 
     # Compute preview
-    old_text = "\n".join(block.old_only) if block.old_only else ""
-    new_text = "\n".join(block.new_only) if block.new_only else ""
+    old_text = "\n".join(block.old_lines)
+    new_text = "\n".join(block.new_lines)
 
     return "\n".join(new_file_lines), EditResult(
         file_path=block.file_path,

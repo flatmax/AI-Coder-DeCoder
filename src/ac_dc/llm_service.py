@@ -483,10 +483,14 @@ class LLMService:
 
         Broadcasts filesChanged to all clients so collaborators see
         the updated file selection in their file picker.
+        Silently drops files that no longer exist on disk.
         """
         restricted = self._check_localhost_only()
         if restricted:
             return restricted
+        # Filter out files that no longer exist on disk
+        if self._repo:
+            files = [f for f in files if self._repo.file_exists(f)]
         self._selected_files = list(files)
 
         # Broadcast to all clients so collaborators' file pickers sync
@@ -1465,6 +1469,8 @@ class LLMService:
                     continue
                 if self._repo and not self._repo.file_exists(path):
                     invalid_files.append(path)
+                    # Remove from context if previously loaded (file deleted from disk)
+                    self._context.file_context.remove_file(path)
                     continue
                 self._context.file_context.add_file(path)
 
@@ -2634,6 +2640,12 @@ class LLMService:
                 if path not in current_context_files:
                     if not self._repo.is_binary_file(path) and self._repo.file_exists(path):
                         self._context.file_context.add_file(path)
+            # Remove files that no longer exist on disk (deleted after selection)
+            for path in list(self._context.file_context.get_files()):
+                if not self._repo.file_exists(path):
+                    self._context.file_context.remove_file(path)
+            # Also prune deleted files from the selected list itself
+            self._selected_files = [f for f in self._selected_files if self._repo.file_exists(f)]
 
         counter = self._context.counter
 

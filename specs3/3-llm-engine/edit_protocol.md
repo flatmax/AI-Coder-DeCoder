@@ -2,7 +2,7 @@
 
 ## Overview
 
-The LLM proposes file changes using a structured edit block format. Each block contains an **anchor** (context lines that uniquely locate the edit site) and **old/new** sections defining the replacement. Blocks are parsed from the streaming response, validated against file content, and applied sequentially.
+The LLM proposes file changes using a structured edit block format. Each block contains **old text** (exact copy from the file, searched as a contiguous block) and **new text** (its complete replacement). Blocks are parsed from the streaming response, validated against file content, and applied sequentially.
 
 ## Edit Block Format
 
@@ -11,11 +11,9 @@ The LLM proposes file changes using a structured edit block format. Each block c
 ```
 path/to/file.ext
 ««« EDIT
-[context lines]
-[old lines to replace]
+[old text — exact copy from the file]
 ═══════ REPL
-[context lines — identical to above]
-[new lines]
+[new text — the replacement]
 »»» EDIT END
 ```
 
@@ -23,12 +21,12 @@ path/to/file.ext
 
 The block has two sections separated by `═══════ REPL`:
 
-1. **EDIT section** (between `««« EDIT` and `═══════ REPL`): Contains the old text as it currently exists in the file
-2. **REPL section** (between `═══════ REPL` and `»»» EDIT END`): Contains the new text to substitute
+1. **EDIT section** (between `««« EDIT` and `═══════ REPL`): Contains the old text as it currently exists in the file — searched as a contiguous block to locate the edit site
+2. **REPL section** (between `═══════ REPL` and `»»» EDIT END`): Contains the new text that replaces the entire matched block
 
-### The Common Prefix (Anchor)
+### How Matching Works
 
-The parser computes the **common prefix** — the leading lines that are identical in both sections. This prefix acts as an **anchor** to locate the edit position in the file. The remaining (non-common) lines are the actual old→new substitution.
+The entire EDIT section is searched for in the file as a contiguous block of lines. When exactly one match is found, the REPL section replaces it completely.
 
 Example:
 
@@ -44,22 +42,22 @@ def multiply(a, b):
 ```
 
 Here:
-- Common prefix (anchor): `def multiply(a, b):` — used to find the location
-- Old (to remove): `    return a + b  # BUG`
-- New (to insert): `    return a * b`
+- Old text (to find): `def multiply(a, b):` + `    return a + b  # BUG`
+- New text (replacement): `def multiply(a, b):` + `    return a * b`
+- The unchanged line `def multiply(a, b):` appears in both sections — it helps uniquely locate the edit and remains in the file after replacement
 
-### Why Anchors Matter
+### Why Uniqueness Matters
 
-The anchor must match **exactly one** location in the file. If the file has duplicate sections, more context lines are needed to disambiguate. Zero matches → fail. Multiple matches → fail (ambiguous).
+The old text block must match **exactly one** location in the file. If the file has duplicate sections, more surrounding context lines should be included in both EDIT and REPL sections to disambiguate. Zero matches → fail. Multiple matches → fail (ambiguous).
 
 ## Operations
 
 | Operation | Technique |
 |-----------|-----------|
-| Modify code | Anchor + old lines → new lines |
-| Insert after | Single anchor line + new content in REPL |
+| Modify code | Old text with context in EDIT, modified version in REPL |
+| Insert after | Context line(s) in EDIT, context + new lines in REPL |
 | Create file | Empty EDIT section, content only in REPL |
-| Delete lines | Include lines in EDIT, omit from REPL |
+| Delete lines | Lines to delete with context in EDIT, just context in REPL |
 | Delete file | Not via edit blocks — suggest `git rm` |
 | Rename file | Not via edit blocks — suggest `git mv` |
 
@@ -102,12 +100,12 @@ import sys
 
 ## Multiple Edits to the Same File
 
-Applied **sequentially**, top to bottom. After edit A, edit B's anchor must match the file **after** A. Adjacent/overlapping edits should be **merged into one block**.
+Applied **sequentially**, top to bottom. After edit A, edit B's old text must match the file **after** A. Adjacent/overlapping edits should be **merged into one block**.
 
 ### Why Merging Matters
 
 ```
-# WRONG — second edit fails because first changed the anchor
+# WRONG — second edit fails because first changed the old text
 
 src/app.py
 ««« EDIT
@@ -185,20 +183,19 @@ During streaming, partially received blocks are tracked. The parser maintains st
 
 1. **File exists?** — for modifications, not creates
 2. **Not binary?** — null byte check in first 8KB
-3. **Anchor found?** — common prefix must match exactly one location
-4. **Old text matches?** — non-common lines match at anchored position
+3. **Old text found?** — entire EDIT section must match exactly one contiguous block in the file
 
 ### Ambiguity Detection
 
-- **Zero matches** → FAILED
-- **Multiple matches** → FAILED (ambiguous)
-- **Exactly one** → proceed to old-text verification
+- **Zero matches** → FAILED (old text not found)
+- **Multiple matches** → FAILED (ambiguous — include more context)
+- **Exactly one** → proceed
 
 ### Failure Diagnostics
 
 - **Whitespace mismatch** — tabs vs spaces, trailing whitespace
-- **Near match** — content with slight differences (reports closest line)
-- **Not found** — anchor doesn't exist in file
+- **Partial match** — first line found but subsequent lines differ
+- **Not found** — old text not found in file
 
 ## Application
 
@@ -213,10 +210,10 @@ During streaming, partially received blocks are tracked. The parser maintains st
 |--------|---------|
 | Applied | Written to disk |
 | Validated | Dry-run passed |
-| Failed | Anchor not found, ambiguous, or old text mismatch |
+| Failed | Old text not found or ambiguous match |
 | Skipped | Binary file or pre-condition failed |
 | Not In Context | File was not in the active context; edit deferred (see below) |
-| Already Applied | New content already present in file (idempotent). Detected by searching the file for the full `new_lines` (anchor + new_only) as a contiguous block — if found, the edit was already applied in a prior request |
+| Already Applied | New content already present in file (idempotent). Detected by searching the file for the full `new_lines` as a contiguous block — if found, the edit was already applied in a prior request |
 
 Each result includes:
 
@@ -233,9 +230,8 @@ Non-success results carry an `error_type` string classifying the failure:
 
 | Error Type | Trigger |
 |------------|---------|
-| `anchor_not_found` | Zero matches for anchor text in file |
-| `ambiguous_anchor` | Multiple matches for anchor text |
-| `old_text_mismatch` | Anchor found but old lines don't match file content |
+| `anchor_not_found` | Old text block not found in file |
+| `ambiguous_anchor` | Old text block matches multiple locations |
 | `file_not_found` | File does not exist on disk (or cannot be read) |
 | `write_error` | File validated but write to disk failed (OS error) |
 | `validation_error` | Pre-condition failure: path traversal blocked, binary file |
@@ -244,7 +240,7 @@ The `error_type` is serialized alongside `status` and `message` in the `edit_res
 
 ### Not-In-Context Edit Handling
 
-When the LLM produces edit blocks for files that are not in the active file context (not selected in the file picker), the edits are **not attempted**. The LLM wrote these edits based on the symbol map alone, without seeing the full file content — anchors are likely wrong and edit quality is unreliable even if anchors happen to match.
+When the LLM produces edit blocks for files that are not in the active file context (not selected in the file picker), the edits are **not attempted**. The LLM wrote these edits based on the symbol map alone, without seeing the full file content — old text is likely wrong and edit quality is unreliable even if matches happen to succeed.
 
 Instead, the system:
 
@@ -257,7 +253,7 @@ Instead, the system:
 
 The user then sends a follow-up and the LLM regenerates the edit blocks with full file content in context.
 
-**Auto-populated retry prompt:** When not-in-context edits are detected, the system auto-populates the chat textarea with a retry prompt naming the added files (e.g., "The file helpers.js has been added to context. Please retry the edit for: ..."). The prompt is not auto-sent — the user reviews and sends when ready. This parallels the ambiguous anchor retry prompt behavior.
+**Auto-populated retry prompt:** When not-in-context edits are detected, the system auto-populates the chat textarea with a retry prompt naming the added files (e.g., "The file helpers.js has been added to context. Please retry the edit for: ..."). The prompt is not auto-sent — the user reviews and sends when ready. This parallels the ambiguous match retry prompt behavior.
 
 #### Why Not Auto-Retry
 
@@ -280,32 +276,31 @@ A file is "in context" if it is in the current selected files list (`_selected_f
 ## Key Principles
 
 1. **Copy-paste from file** — never type from memory
-2. **Context in BOTH sections** identically
-3. **Enough context** for unique match
-4. **Exact match** — whitespace, blanks, comments matter
-5. **No placeholders** (`...`, `// rest of code`)
-6. **Verify anchor exists** by searching file first
-7. **No file moves/renames/deletes** — ask user to run `git mv` or `git rm`
+2. **Include enough unchanged context lines** in both sections for a unique match
+3. **Exact match** — whitespace, blanks, comments matter
+4. **No placeholders** (`...`, `// rest of code`)
+5. **Ensure old text block matches exactly one location**
+6. **No file moves/renames/deletes** — ask user to run `git mv` or `git rm`
 
 ## Partial Failure
 
-Edits applied sequentially — earlier successes remain on disk and staged in git. No rollback. Failed edit details (file path, error, diagnostics) visible to AI in subsequent exchanges for retry with corrected anchors.
+Edits applied sequentially — earlier successes remain on disk and staged in git. No rollback. Failed edit details (file path, error, diagnostics) visible to AI in subsequent exchanges for retry with corrected old text.
 
-## Ambiguous Anchor Retry Prompt
+## Ambiguous Match Retry Prompt
 
-When one or more edits fail due to **ambiguous anchors** (the anchor text matched multiple locations in the file), the system auto-populates the chat input with a retry prompt — but does **not** auto-send it. The user reviews and sends when ready.
+When one or more edits fail due to **ambiguous matches** (the old text block matched multiple locations in the file), the system auto-populates the chat input with a retry prompt — but does **not** auto-send it. The user reviews and sends when ready.
 
 ### Behavior
 
-1. **Detection**: On `streamComplete`, the frontend inspects `edit_results` for entries with status `failed` and message containing `"Ambiguous anchor"`
-2. **Prompt construction**: A retry prompt is composed listing each ambiguous failure with file path and error detail, instructing the LLM to use more unique context lines
+1. **Detection**: On `streamComplete`, the frontend inspects `edit_results` for entries with status `failed` and message containing `"Ambiguous match"`
+2. **Prompt construction**: A retry prompt is composed listing each ambiguous failure with file path and error detail, instructing the LLM to include more surrounding context lines
 3. **Auto-populate input**: The prompt text is placed into the chat textarea and auto-resized, but not sent
 4. **User control**: The user can review, edit, or discard the prompt before sending. They may also add additional instructions or context
 
 ### Retry Prompt Template
 
 ```
-Some edits failed due to ambiguous anchors (the context lines matched multiple locations in the file). Please retry these edits with more unique anchor context — include a distinctive preceding line (like a function name, class definition, or unique comment) to disambiguate:
+Some edits failed because the old text matched multiple locations in the file. Please retry with more surrounding context lines to make the match unique:
 
 - {file_path}: {error_message}
 - {file_path}: {error_message}
@@ -337,35 +332,13 @@ When one or more edit blocks have non-success status (`failed`, `skipped`, or `n
 
 When all edits succeed, no failure section is rendered — only aggregate counts appear.
 
-When ambiguous anchor or old-text-mismatch failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
+When ambiguous match failures are present, the edit summary banner includes a note: *"A retry prompt has been prepared in the input below."* This draws attention to the auto-populated input without being intrusive.
 
-## Old Text Mismatch Retry Prompt
+## Edit Failure Retry Prompt
 
-When one or more edits fail due to **old text mismatch** (the anchor was found but the subsequent old lines don't match the actual file content) and the target file is **already in the active context** (present in `selectedFiles`), the system auto-populates the chat input with a retry prompt — but does **not** auto-send it.
+When edits fail on in-context files (whether old text not found or ambiguous), the system may auto-populate a retry prompt. For `anchor_not_found` failures on in-context files, the prompt reminds the LLM to re-read the file content from context and copy-paste the exact text. For `ambiguous_anchor` failures, the dedicated ambiguous retry prompt (above) takes priority.
 
-This addresses the most common LLM editing mistake: the model "remembers" file content incorrectly instead of copying from the actual file in context. The retry prompt explicitly reminds the LLM to re-read the file content character by character.
-
-### Behavior
-
-1. **Detection**: On `streamComplete`, the frontend inspects `edit_results` for entries with status `failed` and message containing `"Old text mismatch"` where the file path is in `selectedFiles`
-2. **Prompt construction**: A retry prompt is composed listing each mismatch failure with file path and error detail, reminding the LLM that the file is already in context
-3. **Auto-populate input**: The prompt text is placed into the chat textarea and auto-resized, but not sent
-4. **User control**: The user can review, edit, or discard the prompt before sending
-
-### Retry Prompt Template
-
-```
-The following edit(s) failed because the old text didn't match the actual file content. The file(s) are already in your context — please re-read them carefully and retry with the correct text:
-
-- {file_path}: {error_message}
-- {file_path}: {error_message}
-```
-
-### Scope
-
-- Only **in-context** mismatch failures trigger this prompt. Mismatch failures on files that were auto-added (not-in-context) are covered by the not-in-context retry prompt instead
-- **Anchor-not-found** failures do not trigger this prompt — they indicate the anchor text doesn't exist in the file at all, which is a different class of problem
-- **Ambiguous anchor** failures have their own retry prompt (see above) and take priority — when both ambiguous and mismatch failures occur in the same response, only the ambiguous retry prompt is shown (the `else if` branch means mismatch is only checked when no ambiguous failures exist)
+Note: The `old_text_mismatch` error type is no longer produced — all failures are either `anchor_not_found` (old text not found, including whitespace issues) or `ambiguous_anchor`. The `OLD_TEXT_MISMATCH` enum value remains in the code for backward compatibility but will never be returned.
 
 ## Shell Command Detection
 
@@ -380,25 +353,25 @@ Returns a list of command strings. Empty lines inside code blocks are skipped.
 ## Testing
 
 ### Parsing
-- Basic edit block extraction from prose text (file path, anchor, old/new lines)
+- Basic edit block extraction from prose text (file path, old/new lines)
 - Create file (empty EDIT section)
-- Insert after (anchor-only EDIT, new lines in REPL)
+- Insert after (context lines in EDIT, context + new lines in REPL)
 - Delete lines (lines in EDIT absent from REPL)
 - Multiple blocks from one response
 - Single filename without path separator recognized
 - Comment-prefixed lines not treated as file paths
 
 ### Validation
-- Valid edit passes (anchor found, old text matches) — `error_type` is empty
-- Anchor not found returns error with `error_type: anchor_not_found`
+- Valid edit passes (old text found, unique match) — `error_type` is empty
+- Old text not found returns error with `error_type: anchor_not_found`
 - Ambiguous match (multiple locations) returns error with `error_type: ambiguous_anchor`
 - Create blocks always valid — `error_type` is empty
-- Whitespace mismatch diagnosed with `error_type: anchor_not_found`
+- Whitespace mismatch in old text diagnosed with `error_type: anchor_not_found`
 
 ### Application
 - Basic replacement preserves surrounding content
 - Create writes new file
-- Insert adds line after anchor
+- Insert adds line after context
 - Failed apply returns original content unchanged
 - Repo application writes to disk, status = APPLIED
 - Create makes parent directories
@@ -416,20 +389,16 @@ Returns a list of command strings. Empty lines inside code blocks are skipped.
 - Mixed response: in-context edits applied, not-in-context edits deferred, both reported in results
 - The files_auto_added field in streamComplete lists the auto-added file paths
 
-### Ambiguous Anchor Retry
-- Ambiguous anchor failures (multiple matches) auto-populate retry prompt in chat input
+### Ambiguous Match Retry
+- Ambiguous match failures (multiple matches) auto-populate retry prompt in chat input
 - Prompt lists each affected file path and match count
-- Prompt instructs LLM to include more distinctive context lines (function names, unique comments)
+- Prompt instructs LLM to include more surrounding context lines for a unique match
 - Prompt is not auto-sent — user reviews and sends manually
 - Edit summary banner notes the prepared retry prompt
 - Only ambiguous failures trigger this; anchor-not-found does not
 
-### Old Text Mismatch Retry
-- Old-text-mismatch failures on in-context files auto-populate retry prompt in chat input
-- Prompt lists each affected file path and error detail
+### Edit Failure Retry
+- Edit failures on in-context files (old text not found) may auto-populate retry prompt in chat input
 - Prompt instructs LLM to re-read file content from context before retrying
 - Prompt is not auto-sent — user reviews and sends manually
-- Edit summary banner notes the prepared retry prompt
-- Only in-context mismatch failures trigger this; not-in-context files are covered by the auto-add prompt
-- Anchor-not-found failures do not trigger this prompt
-- When both ambiguous and mismatch failures occur, only the ambiguous prompt is shown (ambiguous takes priority via else-if)
+- The `old_text_mismatch` error type is no longer produced — all failures are `anchor_not_found` or `ambiguous_anchor`
