@@ -87,9 +87,29 @@ FileSymbols:
 
 ### Grammar Acquisition
 
-Tree-sitter grammars are provided via individual `tree-sitter-{language}` pip packages. The parser imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object. If a package is not installed, that language is silently unavailable.
+Tree-sitter grammars are provided via individual `tree-sitter-{language}` pip packages. The parser imports each `tree_sitter_{language}` package and calls its `language()` function to get a `tree_sitter.Language` object, then wraps it: `tree_sitter.Language(mod.language())`. If a package is not installed, that language is silently unavailable.
+
+Python wheel package names:
+
+| Language | Wheel Package | Module Name | Getter Function |
+|----------|---------------|-------------|-----------------|
+| Python | `tree-sitter-python` | `tree_sitter_python` | `language()` |
+| JavaScript | `tree-sitter-javascript` | `tree_sitter_javascript` | `language()` |
+| TypeScript | `tree-sitter-typescript` | `tree_sitter_typescript` | `language_typescript()` ⚠ |
+| C | `tree-sitter-c` | `tree_sitter_c` | `language()` |
+| C++ | `tree-sitter-cpp` | `tree_sitter_cpp` | `language()` |
+
+**TypeScript quirk:** The `tree-sitter-typescript` package ships two grammars (TypeScript and TSX) and exposes `language_typescript()` and `language_tsx()` functions — it does **not** expose a plain `language()` function. The loader must probe both names:
+
+```python
+lang_func = getattr(mod, "language_typescript", None) or getattr(mod, "language", None)
+```
+
+This is the only language where the function name differs. Implementers searching for `language()` on TypeScript will fail silently.
 
 The parser is a singleton. Language initialization runs once on first use. If some packages are installed and others are not, the parser operates with partial language support — there is no retry mechanism.
+
+The underlying `tree_sitter` Python binding requires `tree-sitter >= 0.21` for the `Language(callable)` wrapping API. Earlier versions required pre-built shared libraries.
 
 ### Regex-Based Extractors (No Tree-Sitter)
 

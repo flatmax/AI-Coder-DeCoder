@@ -4,6 +4,47 @@
 
 File navigation uses a **2D spatial grid** rather than tabs or a linear history stack. Every file-open action creates a new node adjacent to the current node on a 2D grid. Alt+Arrow keys traverse the grid spatially — left, right, up, down — opening the target file in the diff viewer or SVG viewer as appropriate. A fullscreen HUD overlay appears while Alt is held, showing the grid structure and the user's position within it.
 
+## Constants
+
+The navigation grid behavior is driven by two direction-priority arrays and a small set of sizing/timing constants. These are exported at module scope in `file-nav.js`:
+
+```js
+// Spatial layout
+const GRID_SPACING_X = 180;   // horizontal px between cell centers
+const GRID_SPACING_Y = 100;   // vertical px between cell centers
+const NODE_WIDTH = 150;        // px — rendered node card width
+const NODE_HEIGHT = 48;        // px — rendered node card height
+const NODE_RADIUS = 8;         // px — corner radius for node cards
+
+// Animation / timing
+const FADE_DURATION = 150;     // ms — HUD fade-out on Alt release
+const UNDO_TIMEOUT = 3000;     // ms — replacement undo toast lifetime
+
+// Placement priority — direction to try first when adding a new neighbor
+const PLACEMENT_ORDER = ['right', 'up', 'down', 'left'];
+
+// Replacement priority — reverse order used when all 4 neighbors are occupied
+// and tie-breaking is needed among equal-travel-count candidates.
+const REPLACEMENT_ORDER = ['left', 'down', 'up', 'right'];
+```
+
+`PLACEMENT_ORDER` and `REPLACEMENT_ORDER` are **exact inverses** of each other. The placement order prefers `right` (natural reading direction), and replacement ties break toward `left` (the least-preferred placement direction), so the grid tends to grow rightward and shrink leftward under pressure. The ordering is intentional and affects user-visible behavior — changing the arrays will change which neighbors get replaced first in pathological cases.
+
+### Direction Offsets
+
+Each direction maps to a grid-cell offset:
+
+```js
+const DIR_OFFSET = {
+  right: { dx: 1, dy: 0 },
+  left:  { dx: -1, dy: 0 },
+  up:    { dx: 0, dy: -1 },
+  down:  { dx: 0, dy: 1 },
+};
+```
+
+Y increases downward (screen convention), so `up` has `dy: -1` and `down` has `dy: +1`. Traversal and wrapping logic depends on these signs.
+
 ## Grid Model
 
 ### Nodes
@@ -93,11 +134,12 @@ If all 4 adjacent cells are occupied, the [Replacement When Surrounded](#replace
 
 When all 4 adjacent cells around the current node are occupied and a new file is opened:
 
-1. Among the 4 neighbors, find the one with the **lowest travel count** (from the current node to that neighbor)
-2. If tied, prefer replacing in reverse priority order: left → down → up → right (i.e., the least-preferred direction is replaced first)
-3. **Remove** the chosen neighbor node from the grid (clear it and all its travel counts)
-4. Place the new node in the freed cell
-5. Show an undo toast in the HUD (see [Replacement Undo](#replacement-undo))
+1. Iterate `REPLACEMENT_ORDER` (`['left', 'down', 'up', 'right']`) and find the neighbor with the **lowest travel count** from the current node. Because iteration order is fixed, ties break toward the first-listed direction (i.e. `left` wins over `down`, which wins over `up`, which wins over `right`)
+2. **Remove** the chosen neighbor node from the grid (clear it and all its travel counts)
+3. Place the new node in the freed cell
+4. Show an undo toast in the HUD (see [Replacement Undo](#replacement-undo))
+
+The tie-break order is deliberately the reverse of `PLACEMENT_ORDER` — since new nodes prefer to be placed `right`, the replacement path prefers to evict from `left` first. This keeps right-side neighbors (the most recently-added ones in a typical flow) stable under pressure.
 
 Note: removing a neighbor may create disconnected subgraphs if the removed node was the only path to other nodes. This is acceptable (see [Disconnected Subgraphs](#disconnected-subgraphs)).
 
@@ -334,7 +376,19 @@ A LitElement component that manages the grid state and renders the HUD overlay.
 
 | Event | Detail | Description |
 |-------|--------|-------------|
-| `navigate-file` | `{ path }` | When a node becomes current (Alt+Arrow or HUD click) |
+| `navigate-file` | `{ path, _fromNav: true }` | When a node becomes current (Alt+Arrow or HUD click). The `_fromNav` flag prevents the app shell from re-registering this navigation in the grid (which would create a duplicate or reuse node) |
+
+### Event Detail Flags
+
+The `navigate-file` event carries optional underscore-prefixed flags that modify app-shell behavior:
+
+| Flag | Effect |
+|------|--------|
+| `_fromNav: true` | The event originated from the file navigation grid itself. App shell skips `fileNav.openFile(path)` — the grid has already updated its state |
+| `_refresh: true` | The event is a programmatic refresh (e.g. post-edit reload). App shell skips grid registration so no new node is created |
+| `_remote: true` | The event originated from a `navigateFile` broadcast by another collab client. App shell does not re-broadcast to the server, preventing echo loops |
+
+These flags are read by the app shell's `_onNavigateFile` handler. The grid component never reads them — it only sets `_fromNav` on its own dispatches. |
 
 ### Integration with App Shell
 

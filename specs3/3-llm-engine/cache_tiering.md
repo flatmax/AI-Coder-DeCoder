@@ -240,6 +240,22 @@ Check tracked items against current repo files. Remove `file:`, `symbol:`, and `
 
 **Index cleanup (prerequisite):** Before the tracker runs stale removal, the indexes themselves (`_all_symbols`, `_all_outlines`) are pruned of files no longer in the repo file list. This prevents stale index entries from re-creating tracker items during Phase 1's `process_active_items` pass. Without this, a deleted file's index entry would survive `remove_stale` only to be re-added as a new active item moments later.
 
+**Required ordering:** The cleanup must run in this exact sequence per cycle:
+
+1. **Prune `_all_symbols` / `_all_outlines`** — inside `SymbolIndex.index_repo()` and `DocIndex.index_repo()` respectively. Both methods compute `current_files = set(file_list)`, then delete any key in `_all_symbols` / `_all_outlines` not in that set. Cache entries for removed files are also invalidated (`cache.invalidate(path)`).
+2. **Build `active_items` for `_update_stability()`** — iterate `_all_symbols` / `_all_outlines` to construct `symbol:` / `doc:` entries. Because step 1 already removed deleted files, the iteration does not produce entries for them.
+3. **Call `stability_tracker.update(active_items, existing_files=repo.get_flat_file_list())`** — which invokes Phase 0 (`remove_stale`), then Phase 1 (`process_active_items`), etc.
+
+The `existing_files` argument passed to the tracker is the current repo file list — the same list used in step 1 to prune the indexes. Both the index pruning and the tracker's stale removal use this authoritative list, ensuring they agree on which files exist.
+
+**Why the ordering matters:** If step 2 runs before step 1 (i.e., `active_items` is built from stale `_all_symbols`), the active items list contains entries for deleted files. The tracker's Phase 0 removes the old tier entries, but Phase 1's `process_active_items` immediately re-creates them at tier `ACTIVE` with `N=0`. The deleted files churn through the tracker indefinitely, showing up as new active items on every request, never stabilizing, and polluting the cache viewer. The symptom looks like "stale cache entries keep reappearing" even though `remove_stale` is running correctly — the bug is actually in the upstream index not being pruned before the active items list is constructed.
+
+**Code locations:**
+- `SymbolIndex.index_repo()` — pruning block at the end, after `file_list` iteration, before `self._ref_index.build(...)`
+- `DocIndex.index_repo()` — pruning block after `_extract_outlines()` returns, before `_enrich_files()` runs
+- `LLMService._stream_chat()` — calls `index_repo()` first, then later builds `active_items` and calls `_update_stability()`
+- `LLMService._update_stability()` — builds `active_items` from `_all_symbols` / `_all_outlines`, calls `tracker.update()`
+
 **FileContext cleanup:** Files in `FileContext` that no longer exist on disk are removed during the file sync step before streaming and before context breakdown computation. The selected files list (`_selected_files`) is also pruned of deleted files at `set_selected_files` time and defensively during breakdown computation. This ensures deleted files cannot linger in context or appear in the HUD.
 
 ### Phase 1: Process Active Items

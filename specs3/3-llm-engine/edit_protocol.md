@@ -4,14 +4,7 @@
 
 The LLM proposes file changes using a structured edit block format. Each block contains **old text** (exact copy from the file, searched as a contiguous block) and **new text** (its complete replacement). Blocks are parsed from the streaming response, validated against file content, and applied sequentially.
 
-## Edit Block Format
-
-### Structure
-
-```
-path/to/file.ext
-««« EDIT
-[old text — exact copy from the file]
+[new text — the replacement]
 ═══════ REPL
 [new text — the replacement]
 »»» EDIT END
@@ -174,6 +167,20 @@ A line is considered a file path if it meets these criteria (< 200 chars, not em
 5. **Known extensionless filenames** — `Makefile`, `Dockerfile`, `Vagrantfile`, `Gemfile`, `Rakefile`, `Procfile`, `Brewfile`, `Justfile`
 
 The path must appear on the line **immediately before** `««« EDIT` (with nothing else between except blank lines that cause a state reset).
+
+#### Frontend vs Backend Divergence
+
+The frontend segmenter (`edit-blocks.js`) and the backend parser (`edit_parser.py`) each have their own `_is_file_path()` implementations. They are intentionally **not identical**:
+
+| Rule | Backend | Frontend |
+|------|---------|----------|
+| Comment prefixes excluded | ✅ | ✅ |
+| Paths with `/` or `\` | ✅ | ✅ |
+| Filename with extension regex | ✅ | ✅ |
+| Dotfile without extension regex | ✅ | ✅ |
+| Extensionless `Makefile`/`Dockerfile`/etc. | ✅ | ❌ (not recognized) |
+
+The frontend is simpler because its job is display-only: if it occasionally fails to render a `Makefile` edit as a visual block, the block still applies correctly on the backend. The divergence is deliberate — don't treat it as a bug to fix.
 
 ### Streaming Considerations
 

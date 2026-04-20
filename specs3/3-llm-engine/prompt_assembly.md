@@ -10,6 +10,41 @@ The assembly system supports two modes:
 
 The streaming handler uses tiered assembly, passing a `tiered_content` dict built from the stability tracker's tier assignments (see [Tiered Assembly Data Flow](#tiered-assembly-data-flow) below).
 
+### Fallback to Flat Assembly
+
+`_build_tiered_content()` returns `None` when the stability tracker has not yet been initialized (`_stability_initialized` is `False`). The streaming handler uses this return value as the signal to fall back to flat assembly:
+
+```python
+tiered_content = self._build_tiered_content(
+    symbol_map=symbol_map,
+    symbol_legend=symbol_legend,
+)
+
+if tiered_content:
+    # ... tier exclusion recomputation ...
+    assembled = self._context.assemble_tiered_messages(
+        user_prompt=augmented_message,
+        images=images if images else None,
+        symbol_map=symbol_map,
+        symbol_legend=symbol_legend,
+        doc_legend=doc_legend,
+        file_tree=file_tree,
+        tiered_content=tiered_content,
+    )
+else:
+    assembled = self._context.assemble_messages(
+        user_prompt=augmented_message,
+        images=images if images else None,
+        symbol_map=symbol_map,
+        symbol_legend=symbol_legend,
+        file_tree=file_tree,
+    )
+```
+
+**None is the contract, not an empty dict.** An empty `tiered_content = {}` must not be used to signal "use flat assembly" — `assemble_tiered_messages` with an empty dict produces a message array with `cache_control` on the system message and no content, which would waste a cache breakpoint on every request before tier initialization completes. The explicit `None` check makes the two code paths cleanly disjoint.
+
+**When does this fall-through actually fire?** In practice, only during a narrow window at startup: after `deferred_init=True` construction but before `_try_initialize_stability()` completes. In the fast-path startup this window closes during Phase 2 before the first user interaction is possible. If stability initialization fails entirely (e.g., no symbol index, no repo), the fallback persists for the lifetime of the session — which is acceptable because the model still gets correct content, just without cache breakpoints. A reimplementation that always calls `assemble_tiered_messages` with an empty `tiered_content` would produce wrong `cache_control` placement on these early requests (marking content as cacheable when the prompt is too short to actually hit a cache breakpoint), silently eating cache-write token costs without ever earning a cache-read benefit.
+
 ## System Prompt
 
 ### Assembly
@@ -277,6 +312,12 @@ The `cache_control` marker wraps content as:
 ```
 
 Providers typically allow 4 breakpoints per request. Blocks under the provider minimum (e.g., 1024 tokens) won't actually be cached.
+
+### No Extra Headers Needed
+
+**litellm does not require any special `extra_headers` argument for Anthropic prompt caching.** When the model is an Anthropic or Bedrock Claude model, litellm automatically forwards the `cache_control: {"type": "ephemeral"}` markers on content blocks to the provider. The `anthropic-beta: prompt-caching-2024-07-31` header used to be required but is now enabled by default across litellm's Anthropic and Bedrock adapters.
+
+Implementers migrating from raw Anthropic SDK code may waste time searching for the right header — just pass the `cache_control` markers and let litellm handle provider-specific dispatch. The only requirement is that the model name is correctly recognized (`anthropic/*`, `bedrock/*.claude-*`, etc.).
 
 ## History Placement
 

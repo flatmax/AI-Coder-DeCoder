@@ -159,9 +159,55 @@ Runs in a thread pool to avoid blocking the async event loop:
 
 ### Chunk Delivery
 
-Each chunk carries the **full accumulated content** (not deltas). Dropped or reordered chunks are harmless — latest content wins. Chunks are fire-and-forget RPC calls. Server→browser calls use `ClassName.method` format (e.g., `AcApp.streamChunk`), matching the class name registered via `addClass` on the browser side.
+Each chunk carries the **full accumulated content** (not deltas), not deltas. This is a deliberate design choice with two benefits:
 
-The streaming handler captures the main event loop reference (`self._main_loop = asyncio.get_event_loop()`) before launching the worker thread. The worker thread uses `asyncio.run_coroutine_threadsafe(callback, self._main_loop)` to schedule chunk callbacks on the event loop thread — this is required because the worker runs in a `ThreadPoolExecutor` and cannot `await` coroutines directly.
+1. **Dropped/reordered chunks are harmless** — the latest chunk always contains a superset of prior content, so rendering the most recent chunk produces correct output regardless of delivery order or gaps.
+2. **Reconnection is simple** — a reconnecting client that missed chunks just waits for the next one; no delta replay protocol needed.
+
+The cost is O(n²) bandwidth for the stream (each chunk re-sends everything), but chunks arrive faster than the LLM generates (~50 tok/s), so the marginal overhead is negligible.
+
+Chunks are fire-and-forget RPC calls. Server→browser calls use `ClassName.method` format (e.g., `AcApp.streamChunk`), matching the class name registered via `addClass` on the browser side.
+
+### Worker Thread → Event Loop Bridge
+
+The streaming handler captures the main event loop reference **before** spawning the worker thread:
+
+```python
+self._main_loop = asyncio.get_event_loop()
+await loop.run_in_executor(self._executor, _stream_sync)
+```
+
+Inside `_stream_sync`, the worker cannot `await` coroutines directly (it's running in a `ThreadPoolExecutor` thread with no event loop). It must use `run_coroutine_threadsafe` to schedule work on the main loop:
+
+```python
+def _stream_sync():
+    for chunk in response:
+        if self._chunk_callback:
+            asyncio.run_coroutine_threadsafe(
+                self._chunk_callback(request_id, full_content),
+                loop,   # captured main event loop
+            )
+```
+
+**Critical:** `loop` here is the captured `self._main_loop`, not `asyncio.get_event_loop()` inside the worker (which would fail or return a new loop). The reference must be captured on the event loop thread before the worker starts.
+
+**Capture location rule:** The loop reference must be captured **inside `chat_streaming()` (the RPC entry point), on the event loop thread, before launching the background streaming task**. Specifically:
+
+```python
+async def chat_streaming(self, request_id, message, files=None, images=None):
+    # ... guards ...
+    self._main_loop = asyncio.get_event_loop()   # <-- capture here
+    asyncio.ensure_future(
+        self._stream_chat(request_id, message, files or [], images or [])
+    )
+    return {"status": "started"}
+```
+
+Then `_stream_chat` reads `self._main_loop` when it needs to schedule callbacks. The capture must not happen inside `_stream_chat` itself if `_stream_chat` is launched via `asyncio.ensure_future()` — by the time it runs, the RPC entry is gone from the stack but the loop is still correct. Capturing at the RPC entry makes the dependency explicit and eliminates any ambiguity about which loop to use. Never call `asyncio.get_event_loop()` inside a `run_in_executor` worker — it will either fail (recent Python) or return an unusable loop.
+
+### Chunk Coalescing (Frontend)
+
+Chunks are coalesced per animation frame via `requestAnimationFrame`. A pending chunk variable stores the latest content; the rAF callback reads and clears it before updating `_streamingContent`. This avoids re-rendering faster than 60 Hz even when chunks arrive every few milliseconds.
 
 ### Client Chunk Processing
 
@@ -397,6 +443,39 @@ The enrichment queue is stashed in the `streamComplete` result dict under a `_`-
 ## Commit Background Task Guard
 
 The `commit_all` method uses a `_committing` boolean guard to prevent concurrent commits. The guard is set `True` before launching the background task and cleared in a `finally` block. The current `session_id` is captured **synchronously before launching the background task** — this prevents a race where `_restore_last_session()` during a concurrent server restart could replace `_session_id`, causing the commit event to be persisted to the wrong session.
+
+### Session ID Parameter-Passing Pattern
+
+The session ID must be passed as a **function argument** to the background task, not read from `self._session_id` inside the task:
+
+```python
+async def commit_all(self):
+    if self._committing:
+        return {"error": "A commit is already in progress"}
+    self._committing = True
+
+    # Capture session ID NOW, on the event loop thread, before launching.
+    # Do NOT read self._session_id inside the background task — by then
+    # it may have been replaced by _restore_last_session() on reconnect.
+    session_id = self._session_id
+
+    asyncio.ensure_future(self._commit_all_background(session_id))
+    return {"status": "started"}
+
+async def _commit_all_background(self, session_id):
+    # Use the parameter, never self._session_id, for persisting events
+    ...
+    if self._history_store:
+        self._history_store.append_message(
+            session_id=session_id,  # captured value, not self._session_id
+            role="user",
+            content=event_text,
+        )
+```
+
+This pattern applies to any long-running background task whose completion action depends on session state. The rule is: **capture session-scoped mutable state as local variables at task-launch time, pass them as parameters, and never read `self.*` inside the task for anything that can be replaced concurrently**.
+
+The `_committing` flag is the exception — it's a guard, not session state, and must be cleared in a `finally` block inside the background task so concurrent guard checks in `commit_all` see the release.
 
 ## Token Usage Extraction
 

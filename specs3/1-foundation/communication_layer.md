@@ -47,6 +47,8 @@ await server.start()
 
 `CollabServer` extends `JRPCServer` with connection admission logic — see [Collaboration](../4-features/collaboration.md). `add_class()` introspects the instance and exposes all public methods as `ClassName.method_name` RPC endpoints. No base class or decorator needed. Underscore-prefixed methods are not exposed.
 
+**RPC prefix derivation:** `add_class(instance)` takes a single argument and derives the RPC namespace from `type(instance).__name__` — the **Python class name**, not the variable name. So `server.add_class(llm_service)` where `llm_service` is an instance of `LLMService` produces RPC endpoints like `LLMService.chat_streaming`, not `llm_service.chat_streaming`. The variable name is irrelevant. This differs from the browser side's `addClass(this, 'AcApp')` which takes an explicit namespace string as the second argument. Implementers who pass a second argument to the server-side `add_class()` will either get an error or silently override the derived name — the codebase never passes a second argument.
+
 **Calling the browser from Python:**
 
 jrpc-oo injects `get_call()` on registered instances. The returned proxy uses bracket notation:
@@ -83,6 +85,27 @@ The `*args` splat handles this variance, but callers must match the browser meth
 **Event callback sharing:** The `_event_callback` function is wired to both `LLMService` and `DocConvert` in `main.py`. DocConvert uses it to send `docConvertProgress` events to the browser during file conversion. Both services share the same callback mechanism — the callback dispatches to `AcApp.{event_name}(...)` regardless of which service triggered it.
 
 **Response envelope:** All jrpc-oo return values are wrapped as `{ "remote_id": return_value }`. Extract the actual value from the single key. In practice, many server→browser calls are fire-and-forget notifications where the browser returns `true` as an acknowledgement and the Python side just awaits without inspecting the result.
+
+**Multi-remote envelopes:** When using `this.call` (broadcast) with multiple connected remotes, the response contains one key per remote: `{ uuid1: val1, uuid2: val2 }`. Components must take `Object.keys(result)[0]` to pick any single value — read operations return identical data across remotes (shared server state).
+
+**`rpcExtract` extraction rule:** The helper takes the **first and only** key from a single-key response object, or the first key from a multi-key response when broadcast is in play. The implementation is:
+
+```javascript
+async rpcExtract(method, ...args) {
+    const result = await this.call[method](...args);
+    if (result && typeof result === 'object') {
+        const keys = Object.keys(result);
+        if (keys.length === 1) return result[keys[0]];
+    }
+    return result;
+}
+```
+
+Note that this returns the raw `result` unchanged when it has multiple keys. Callers that expect multi-remote broadcasts (rare in practice — most reads happen via single-session state) must manually pick `Object.values(result)[0]` themselves. The common case is a single admitted client where the result always has exactly one key.
+
+**Avoid `this.server['method']`** — it throws "More than one remote has this RPC" when more than one remote exposes the same method. The codebase uses `this.call` exclusively. The `rpcExtract` helper in `RpcMixin` does the single-key extraction automatically.
+
+**Class registration name:** `addClass(this, 'AcApp')` — the second argument is the namespace string used by callers (`AcApp.streamChunk(...)`), not derived from the class name. This must match exactly across the server and client call sites.
 
 ### Browser Side (JavaScript)
 
@@ -440,6 +463,28 @@ Three top-level service classes, registered via `add_class()`:
 - Connection loss triggers reconnection with exponential backoff (1s, 2s, 4s, 8s, max 15s)
 - Reconnection uses `serverChanged()` (jrpc-oo's WebSocket re-establishment method)
 
+### Restricted Operations (Collaboration)
+
+When collaboration mode is active and a non-localhost participant calls a restricted RPC method, the method returns a specific error shape rather than raising an exception:
+
+```python
+{"error": "restricted", "reason": "Participants cannot perform this action"}
+```
+
+This is implemented via a `_check_localhost_only()` helper on each service class (`LLMService`, `Repo`, `Settings`, `DocConvert`). Each mutating RPC method calls the helper at entry and returns its result immediately if non-None:
+
+```python
+def some_mutating_method(self, ...):
+    restricted = self._check_localhost_only()
+    if restricted:
+        return restricted
+    # ... normal logic
+```
+
+The helper reads the caller's localhost status from the shared `Collab` instance (see [Collaboration](../4-features/collaboration.md)). When no collab instance is attached (single-user mode), the helper returns None and all operations are permitted.
+
+Frontend components using `RpcMixin` track a `_canMutate` flag (synchronized from `SharedRpc.canMutate()`) that controls UI affordances — buttons for restricted actions are hidden or disabled rather than showing error toasts on every click.
+
 ## Server Initialization Pseudocode
 
 The following shows how services are constructed and registered in `main.py`. The startup is split into two phases: a **fast phase** that gets the WebSocket server running and the browser connected, and a **deferred phase** that performs heavy initialization with progress reporting.
@@ -458,10 +503,19 @@ llm_service = LLMService(
     config_manager=config,
     repo=repo,
     symbol_index=None,
-    deferred_init=True,       # skip session restore, stability init
+    deferred_init=True,       # skip stability init and auto-restore
 )
 
-# 3. Register with RPC server
+# 3. Restore last session BEFORE starting the WebSocket server.
+#    This must happen synchronously before server.start() so that
+#    get_current_state() returns previous session messages the instant
+#    the first browser connects — not after the heavy-init phase finishes.
+#    Despite deferred_init=True skipping it in the constructor, we invoke
+#    it explicitly here. complete_deferred_init() (called later in Phase 2)
+#    will NOT re-run session restore.
+llm_service._restore_last_session()
+
+# 4. Register with RPC server
 #    With --collab: CollabServer gates connections via admission, binds 0.0.0.0
 #    Without --collab: plain JRPCServer, binds 127.0.0.1 (localhost only)
 if collab_enabled:
@@ -475,11 +529,12 @@ server.add_class(llm_service)
 server.add_class(settings)
 server.add_class(doc_convert)
 
-# 4. Wire up callbacks (chunk_callback, event_callback on LLMService and DocConvert)
-# 5. Start server — WebSocket now accepting connections
+# 5. Wire up callbacks (chunk_callback, event_callback on LLMService and DocConvert)
+# 6. Start server — WebSocket now accepting connections
+#    First browser connect will return restored history immediately.
 await server.start()
 
-# 6. Open browser immediately — user sees startup overlay
+# 7. Open browser immediately — user sees startup overlay
 webbrowser.open(url)
 ```
 

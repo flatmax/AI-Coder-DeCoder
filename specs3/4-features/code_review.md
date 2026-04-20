@@ -97,6 +97,40 @@ If any step in the entry sequence fails (e.g., checkout conflict, invalid commit
 
 The server clears `selected_files` to an empty list during `start_review()`, independently of the frontend's file selection reset. This ensures that even if the frontend event handling races or fails, the server-side state is clean — preventing stale file selections from before the review from inadvertently including diffs in the first message.
 
+**Defense-in-depth clearing on both sides:**
+
+The review entry clears the selection in **two places** for reliability:
+
+1. **Server-side** (authoritative): `LLMService.start_review()` assigns `self._selected_files = []` directly — a plain list assignment, not a call to `set_selected_files()`. This runs synchronously inside the RPC method **before** returning the result dict to the browser:
+
+   ```python
+   async def start_review(self, branch, base_commit):
+       # ... checkout, soft reset, symbol index rebuild ...
+
+       # Store review state on self
+       self._review_active = True
+       self._review_branch = branch
+       # ... other review fields ...
+
+       # Clear file selection so review starts with a clean slate —
+       # prevents stale selections from before review including all diffs
+       self._selected_files = []
+
+       return {
+           "status": "review_active",
+           "branch": branch,
+           # ... etc
+       }
+   ```
+
+2. **Frontend-side** (responsive): When the `review-started` event reaches `<ac-files-tab>`, its `_onReviewStarted` handler resets its own `_selectedFiles` array, the file picker's `selectedFiles` Set, and the chat panel's `selectedFiles` array — all via direct property assignment followed by `requestUpdate()`, using the same direct-update pattern as other selection-changing operations (see [File Picker — Direct Update Pattern](../5-webapp/file_picker.md#direct-update-pattern-architectural)).
+
+**Why both?** The server-side clear is authoritative — if the frontend's event handler fails or races, the next chat request will see an empty `_selected_files` on the server regardless. The frontend clear is about UI responsiveness — if the user sees the review banner appear but the file picker still shows checkboxes from the pre-review state, they might send a message before realizing the selection is stale. Clearing both sides eliminates both failure modes.
+
+**Why direct assignment instead of `set_selected_files([])`?** `set_selected_files` broadcasts a `filesChanged` event to all clients. Broadcasting during `start_review` is unnecessary because the review entry itself triggers a full state refresh on all clients (via the `review-started` event and its downstream handlers, which already reset selection). Calling `set_selected_files` would produce a redundant broadcast and a brief window where the picker receives an empty-selection update before receiving the review-started notification — visually the picker would flash empty, then show the review banner. Direct assignment avoids this.
+
+**Do not call `set_selected_files` for the review clear.** Implementers who "clean up" the code by routing through the public setter will introduce the flash and the redundant broadcast.
+
 If the process crashes during review mode, the user can manually restore with:
 ```
 git checkout {original_branch}
