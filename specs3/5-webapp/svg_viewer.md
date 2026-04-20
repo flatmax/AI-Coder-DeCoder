@@ -186,8 +186,101 @@ Selection handles are rendered as a dedicated SVG `<g>` group overlaid on the se
 - **Vertex handles**: Small circles at each vertex for point editing (polyline, polygon)
 - **Path handles**: Circles at each command endpoint, with dotted lines to control points for cubic/quadratic curves
 - Handle radius scales inversely with zoom level to maintain a consistent screen size
-- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
-- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation (`element.getCTM()` composed with `svg.getCTM().inverse()`) so overlays align with the visually-rendered element position regardless of nesting
+- Handle positions account for ancestor `<g>` transforms via a `localToSvgRoot` coordinate transformation so overlays align with the visually-rendered element position regardless of nesting
+
+### Coordinate Math Details
+
+SVG editing requires translating between three coordinate systems:
+1. **Screen coordinates** — raw `clientX`/`clientY` from pointer events
+2. **SVG root coordinates** — the viewBox coordinate space of the root `<svg>`
+3. **Element-local coordinates** — the coordinate space inside an element's parent `<g>` transforms
+
+Without precise translation, handles drift from their visual positions when elements are inside transformed groups, and drags produce jitter when zoomed.
+
+#### Screen → SVG
+
+```js
+_screenToSvg(screenX, screenY) {
+  const ctm = this._svg.getScreenCTM();
+  if (!ctm) return { x: screenX, y: screenY };
+  const pt = this._svg.createSVGPoint();
+  pt.x = screenX;
+  pt.y = screenY;
+  return pt.matrixTransform(ctm.inverse());
+}
+```
+
+`getScreenCTM()` returns the composed transform from the SVG's internal viewBox space to screen pixels. Inverting it converts pointer events into viewBox units. This is the foundation for all drag math.
+
+#### Element-local → SVG root
+
+```js
+_localToSvgRoot(el, lx, ly) {
+  const ctm = el.getCTM();            // local → screen
+  const svgCtm = this._svg.getCTM();  // svg root → screen
+  const m = svgCtm.inverse().multiply(ctm);  // local → svg root
+  return { x: m.a*lx + m.c*ly + m.e, y: m.b*lx + m.d*ly + m.f };
+}
+```
+
+Used when rendering handle overlays: the element's bounding box is in its own local coordinate space (relative to ancestor `<g>` transforms), but handles are placed in the root SVG. The composed matrix accounts for every `translate()`, `scale()`, and `rotate()` on ancestor groups.
+
+#### Handle Size Constancy
+
+Handles should appear at ~6 pixels on screen regardless of zoom. Since SVG coordinates scale with the viewBox, handle radius in SVG units must scale inversely:
+
+```js
+_screenDistToSvgDist(screenDist) {
+  const a = this._screenToSvg(0, 0);
+  const b = this._screenToSvg(screenDist, 0);
+  return Math.abs(b.x - a.x);
+}
+
+_getHandleRadius() {
+  return this._screenDistToSvgDist(HANDLE_RADIUS);  // HANDLE_RADIUS = 6 screen px
+}
+```
+
+This is called every frame during handle render — the computation is cheap (two CTM multiplies) and ensures handles stay the same size on screen when the user zooms.
+
+#### Hit-Test Exclusion
+
+Handle elements and the marquee rectangle must be ignored by `_hitTest` (finding the SVG element under the pointer):
+
+- All handle overlays are marked with class `HANDLE_CLASS` (constant: `"svg-editor-handle"`)
+- The handle group has id `HANDLE_GROUP_ID` (constant: `"svg-editor-handles"`)
+- `_hitTest` uses `elementsFromPoint` and skips any element with the handle class, the handle group id, or the root SVG itself
+- Tags that never participate in editing are also filtered: `defs`, `style`, `metadata`, `title`, `desc`, `filter`, `lineargradient`, `radialgradient`, `clippath`, `mask`, `marker`, `pattern`, `symbol`
+
+Without this filtering, clicking a handle would re-hit-test to the underlying element and start a drag on that element instead of the handle.
+
+#### preserveAspectRatio="none" on the Editable SVG
+
+When the right-panel SVG is injected, it's given `preserveAspectRatio="none"` explicitly. Without this override, the browser applies `xMidYMid meet` (the default) on top of whatever viewBox `SvgEditor` sets — producing a double-fitted display where the editor's viewBox changes don't match what the user sees. Disabling browser-side aspect handling makes the SVG viewBox the single source of truth for what's visible, and `SvgEditor`'s `fitContent()` / `setViewBox()` fully controls sizing and centering.
+
+The left (read-only) panel keeps the default aspect ratio preservation — `svg-pan-zoom` manages its viewport via internal transform groups rather than viewBox manipulation, so browser aspect fitting is harmless there.
+
+#### Path Command Parsing
+
+Path editing requires parsing the `d` attribute into editable command objects. The parser handles all SVG path commands — M, L, H, V, C, S, Q, T, A, Z — in both absolute (uppercase) and relative (lowercase) forms. Each parsed command has `{cmd, args: [numbers...]}` shape.
+
+Control point extraction walks the command list, tracking the current pen position (absolute coordinates) and extracting draggable points:
+
+| Command | Extracted Points |
+|---------|-----------------|
+| M, L | endpoint |
+| H | endpoint (Y inherited from pen) |
+| V | endpoint (X inherited from pen) |
+| Q | control point + endpoint |
+| C | two control points + endpoint |
+| S | control point + endpoint (first control inferred from previous command) |
+| T | endpoint only (control inferred) |
+| A | endpoint (arc parameters not draggable) |
+| Z | no point (closes to subpath start) |
+
+For relative commands, the parser converts to absolute coordinates for display but preserves relative offsets in the serialized output. When a handle is dragged, the delta is applied to the original relative arg values so the overall path shape is preserved.
+
+Serialization (`_serializePathData`) rounds to 3 decimal places and joins commands with spaces. This is ~150 lines of code that must be implemented carefully — off-by-one errors in arg indexing produce visually-broken but syntactically-valid paths.
 
 ### Interaction Model
 
@@ -285,7 +378,30 @@ SVG content cannot be rendered via Lit templates (Lit doesn't natively handle ra
    - For the editable (right) panel, `preserveAspectRatio="none"` is set so `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform
 4. `svg-pan-zoom` is initialized on the injected SVG elements via `requestAnimationFrame`
 
-**Injection deduplication:** A generation counter (`_injectGeneration`) guards against duplicate injection. Both `updated()` (Lit lifecycle) and `openFile()` can trigger `_injectSvgContent()` for the same file; the counter ensures only the latest invocation proceeds — earlier invocations that are still in-flight (waiting on `requestAnimationFrame`) bail out when they see the counter has advanced.
+**Injection deduplication (detailed):** The counter is incremented at the start of every `_injectSvgContent()` call. Each call captures the counter value as `gen` in local scope. Before any async work (`requestAnimationFrame` callbacks, delayed pan-zoom initialization), the callback checks `gen !== this._injectGeneration` and bails out if a newer call has started:
+
+```js
+_injectSvgContent() {
+  if (this._injectGeneration == null) this._injectGeneration = 0;
+  const gen = ++this._injectGeneration;
+
+  // ... synchronous DOM injection ...
+
+  requestAnimationFrame(() => {
+    if (gen !== this._injectGeneration) return;  // superseded — bail
+    this._initLeftPanZoom();
+    // more rAF callbacks each guarded the same way
+    requestAnimationFrame(() => {
+      if (gen !== this._injectGeneration) return;
+      this._fitAll();
+    });
+  });
+}
+```
+
+Without this guard, a rapid sequence of `openFile()` calls would initialize pan-zoom instances on stale SVG content (since `innerHTML` was already replaced by the later call), leaving broken interaction state.
+
+The same pattern is used in the diff viewer's `_showEditor()` for Monaco editor creation guards — see [Diff Viewer — Concurrent openFile Guard](diff_viewer.md#concurrent-openfile-guard).
 
 **Authored viewBox preservation**: Both panels prefer the SVG's authored `viewBox` attribute over a `getBBox()`-derived one. SVGs with `<defs>` containing font glyphs, clip paths, or symbol definitions often have elements with very small coordinate systems (e.g., 0–1 font units) that pollute `getBBox()` results, causing content to appear shrunken. The authored viewBox is trusted as the correct viewport. `getBBox()` is only used as a fallback when no viewBox attribute exists — in that case a 3% margin is added around the computed bounding box. For the right panel, `preserveAspectRatio="none"` is set so that `SvgEditor` has full control over viewBox-based fitting without the browser applying an additional transform.
 
@@ -409,11 +525,30 @@ The context menu is positioned at the click point relative to the diff container
 
 The "Copy as PNG" feature renders the current SVG to a high-quality PNG image:
 
-1. **Parse dimensions** — reads `viewBox` or `width`/`height` attributes to determine intrinsic size
-2. **Scale for quality** — scales up to 2×–4× (capped at 4096px on the longest side) for crisp output
-3. **Render to canvas** — creates an offscreen `<canvas>`, draws a white background, then renders the SVG via an `Image` element loaded from a Blob URL
+1. **Parse dimensions** — reads `viewBox` or `width`/`height` attributes to determine intrinsic size (defaults to 1920×1080 when unparseable)
+2. **Scale for quality** — scales up to 2×–4× (capped at 4096px on the longest side) for crisp output. Small SVGs (max dimension < 1024px) use up to 4× scale; larger SVGs use up to 2×
+3. **Render to canvas** — creates an offscreen `<canvas>`, draws a white background (SVGs often have transparent backgrounds), then renders the SVG via an `Image` element loaded from a Blob URL
 4. **Clipboard write** — passes a `Promise<Blob>` (not a resolved Blob) to `ClipboardItem` to preserve the user-gesture context across async operations
-5. **Download fallback** — if `navigator.clipboard.write` is unavailable or fails, downloads the PNG file instead
+5. **Download fallback** — if `navigator.clipboard.write` is unavailable or fails, downloads the PNG file via a synthesized `<a download>` link. The download filename strips `.svg` from the file path's basename and appends `.png` (e.g. `architecture.svg` → `architecture.png`)
+
+### User Feedback
+
+Success and failure are communicated via a toast event dispatched from the viewer:
+
+```js
+this.dispatchEvent(new CustomEvent('show-toast', {
+  bubbles: true, composed: true,
+  detail: { message: 'Image copied to clipboard', type: 'info' },
+}));
+```
+
+The app shell (or parent component) catches `show-toast` events and renders them in the global toast system. Messages:
+
+| Outcome | Toast message |
+|---------|--------------|
+| Clipboard write succeeded | `Image copied to clipboard` |
+| Clipboard write failed, download succeeded | `Image downloaded as PNG` |
+| Both clipboard and download failed | `Failed to copy image` or `Failed to create image` |
 
 Available via two paths:
 - **Context menu**: right-click → "Copy as PNG"

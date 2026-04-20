@@ -138,6 +138,50 @@ When a stale tab becomes visible (via `onTabVisible()`), it clears the stale fla
 
 Ctrl+Shift+F captures `window.getSelection()` synchronously before focus change clears it. The dialog switches to the Files tab and calls `chatPanel.activateFileSearch(selection)`. Multi-line selections are ignored.
 
+**Synchronous capture is load-bearing.** The selection must be read as the very first operation in the keydown handler, before any asynchronous work (Lit property updates, `updateComplete.then(...)`, `requestAnimationFrame`, RPC calls). The reason is that the downstream work changes focus — switching tabs, focusing the search input — and the moment focus leaves the element containing the user's text selection, the browser clears `window.getSelection()`. Reading it from inside a `.then()` callback or `requestAnimationFrame` returns an empty string every time.
+
+```js
+_onKeyDown(e) {
+    if (e.ctrlKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+
+        // CRITICAL: read selection synchronously, before any async work.
+        // Once we start switching tabs below, focus moves and the selection
+        // is cleared — reading it later returns empty.
+        const sel = window.getSelection()?.toString()?.trim() || '';
+
+        this._switchTab('files');
+
+        // Use updateComplete to wait for the files tab to render
+        this.updateComplete.then(() => {
+            const filesTab = this.shadowRoot?.querySelector('ac-files-tab');
+            if (filesTab) {
+                const chatPanel = filesTab.shadowRoot?.querySelector('ac-chat-panel');
+                if (chatPanel) {
+                    // Pass the captured selection, NOT a fresh getSelection() call
+                    chatPanel.activateFileSearch(sel && !sel.includes('\n') ? sel : '');
+                }
+            }
+        });
+        return;
+    }
+    // ... other shortcuts
+}
+```
+
+**Why the multi-line check?** File search queries are single-line by design — matching across newlines makes no sense for file path / content search. If the user happens to have a multi-line selection highlighted (e.g., code they copied earlier), discard it and open the search empty rather than with garbage. The check is `sel.includes('\n')` and is applied at the activation call, not at capture time.
+
+**Why trim?** `window.getSelection().toString()` includes leading/trailing whitespace from whichever direction the user selected. Trimming normalizes it.
+
+**Common mistakes to avoid:**
+
+- Reading the selection inside `updateComplete.then()` — returns empty string
+- Calling `activateFileSearch()` which itself reads `window.getSelection()` — same problem, and couples the method to a specific caller assumption
+- Capturing on `keyup` instead of `keydown` — `keyup` fires late enough that focus may have already shifted
+- Storing the selection in a property and reading it later — works but adds state for no benefit; direct local variable is fine
+
+**Why `activateFileSearch(prefill)` takes the prefill as a parameter** rather than reading the selection itself: the caller (app shell) has the correct timing context. The chat panel cannot know when its caller captured the selection relative to focus changes. Making the parameter explicit puts responsibility at the right layer.
+
 ### Dragging & Resizing
 
 - Header drag with 5px threshold (under = click → toggle minimize)

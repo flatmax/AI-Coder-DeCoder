@@ -38,23 +38,67 @@ The LED replaces a traditional tab bar — multiple files are tracked internally
 
 Map of common extensions to language identifiers: `.js`→javascript, `.ts`→typescript, `.py`→python, `.json`→json, `.yaml`/`.yml`→yaml, `.html`→html, `.css`→css, `.md`→markdown, `.c`/`.h`→c, `.cpp`/`.hpp`→cpp, `.sh`/`.bash`→shell, `.m`→matlab, `.java`→java, `.rs`→rust, `.go`→go, `.rb`→ruby, `.php`→php, `.sql`→sql, `.toml`/`.ini`/`.cfg`→ini. Fallback: plaintext.
 
+### Monaco Worker Configuration
+
+Monaco's diff computation runs in a dedicated editor worker. Language services (JS/TS/JSON/CSS/HTML typings, validation) normally run in additional workers. This codebase uses a hybrid configuration:
+
+- **Editor worker** (`editorWorkerService` label) — a **real Worker** loaded from `monaco-editor/esm/vs/editor/editor.worker.js`. This is required for the diff editor to compute diffs; without it, the editor renders but shows no line-level change indicators.
+- **All other workers** — stubbed with no-op Blob workers created from `'self.onmessage = function() {}'`. This covers the language service workers (`ts`, `json`, `css`, `html`). Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
+
+The worker configuration must be installed **before any Monaco module imports that create editors**:
+
+```js
+self.MonacoEnvironment = {
+  getWorker(workerId, label) {
+    if (label === 'editorWorkerService') {
+      return new Worker(
+        new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url),
+        { type: 'module' }
+      );
+    }
+    const blob = new Blob(
+      ['self.onmessage = function() {}'],
+      { type: 'application/javascript' }
+    );
+    return new Worker(URL.createObjectURL(blob));
+  },
+};
+```
+
+Without this setup the editor crashes at construction time trying to spawn a missing worker, or silently fails diff computation. The no-op workers must reply to any message to prevent Monaco from hanging waiting for a response.
+
 ### MATLAB Syntax Highlighting
 
 MATLAB (`.m`) files use a custom Monarch tokenizer registered at module load time (before any editor instance is created) via `monaco.languages.register({ id: 'matlab' })` and `monaco.languages.setMonarchTokensProvider('matlab', {...})`. Since Monaco has no built-in MATLAB language, this registration must happen eagerly. The tokenizer handles:
 
-- **Keywords**: `break`, `case`, `catch`, `classdef`, `continue`, `else`, `elseif`, `end`, `for`, `function`, `if`, `methods`, `properties`, `return`, `switch`, `try`, `while`, `parfor`, `spmd`, etc.
-- **Builtins**: `abs`, `zeros`, `ones`, `eye`, `disp`, `fprintf`, `plot`, `figure`, `size`, `length`, `find`, `sort`, `struct`, `cell`, etc. (approximately 80 entries)
+- **Keywords**: `break`, `case`, `catch`, `classdef`, `continue`, `else`, `elseif`, `end`, `enumeration`, `events`, `for`, `function`, `global`, `if`, `methods`, `otherwise`, `parfor`, `persistent`, `properties`, `return`, `spmd`, `switch`, `try`, `while`
+- **Builtins**: `abs`, `all`, `any`, `ceil`, `cell`, `char`, `class`, `clear`, `close`, `deal`, `diag`, `disp`, `double`, `eig`, `eps`, `error`, `eval`, `exist`, `eye`, `false`, `fclose`, `feval`, `fft`, `figure`, `find`, `floor`, `fopen`, `fprintf`, `getfield`, `hold`, `ifft`, `imag`, `inf`, `int32`, `inv`, `ischar`, `isempty`, `isequal`, `isfield`, `isnan`, `isnumeric`, `length`, `linspace`, `logical`, `max`, `mean`, `min`, `mod`, `nan`, `nargin`, `nargout`, `norm`, `numel`, `ones`, `pi`, `plot`, `rand`, `randn`, `real`, `regexp`, `repmat`, `reshape`, `round`, `set`, `setfield`, `single`, `size`, `sort`, `sparse`, `sprintf`, `sqrt`, `squeeze`, `strcmp`, `struct`, `subplot`, `sum`, `title`, `true`, `uint8`, `uint32`, `varargin`, `varargout`, `warning`, `xlabel`, `ylabel`, `zeros` (approximately 80 entries)
 - **Comments**: Line comments (`%...`) and block comments (`%{...%}`)
 - **Strings**: Single-quoted (`'...'`) and double-quoted (`"..."`)
 - **Numbers**: Integer, float, scientific notation, complex (`i`/`j` suffix)
 - **Operators**: Arithmetic (`+`, `-`, `*`, `/`, `^`), element-wise (`.^`, `.*`, `./`), comparison (`==`, `~=`, `>=`), logical (`&`, `|`, `&&`, `||`)
 - **Transpose**: The `'` operator after identifiers/brackets is tokenized as an operator (not a string delimiter)
 
-The tokenizer is registered via `monaco.languages.register()` and `monaco.languages.setMonarchTokensProvider()` at module load time, before any editor is created.
+**Critical registration timing:** `monaco.languages.register()` and `setMonarchTokensProvider()` must run at **module load time** — as top-level statements in the module that imports `monaco-editor`, not inside a component lifecycle hook or editor creation path. If registration happens after any `monaco.editor.createDiffEditor()` call, existing editor instances will not apply the tokenizer to their `.m` files (they use the language provider registry captured at construction time). Registering MATLAB lazily on first `.m` file open is also unreliable — Monaco caches language lookups.
+
+The correct placement is as top-level statements immediately after the `monaco-editor` import in the diff viewer module, so registration is guaranteed to complete before any component can instantiate an editor.
 
 ### Worker-Safe Languages
 
 Monaco spawns dedicated web workers for certain languages (JS, TS, JSON, CSS, SCSS, LESS, HTML) to provide built-in language services. These workers may fail in certain build configurations. The `MonacoEnvironment.getWorker` function returns the real editor worker (needed for diff computation) but creates **no-op workers** for all language service requests. Backend LSP providers cover the features these workers would have provided (hover, completions, definitions).
+
+**Worker labels Monaco sends:** The factory dispatches on the `label` argument. Known labels include:
+
+| Label | Purpose | Handling |
+|-------|---------|----------|
+| `editorWorkerService` | Diff computation, text model sync | **Real worker** — required for diff editor to function |
+| `ts` / `typescript` | TypeScript language service | No-op |
+| `json` | JSON validation | No-op |
+| `css` / `scss` / `less` | CSS validation | No-op |
+| `html` | HTML validation | No-op |
+| (any other) | Future language services | No-op (default branch) |
+
+The no-op workers must respond to any message via `self.onmessage = function() {}` (which implicitly returns undefined). Returning nothing is sufficient because the language service stubs never send messages that expect replies — Monaco gracefully handles the absence of responses for language service calls.
 
 ### Floating Panel Labels
 
@@ -77,6 +121,38 @@ Monaco must render inside a Lit shadow DOM. Style injection has two phases:
 
 The re-sync approach (remove all + re-clone) prevents duplicate style accumulation when switching between files causes editor recreation. The observer is disconnected when the component is removed from the DOM.
 
+#### Why the Full Re-Sync Is Needed
+
+Monaco adds styles **synchronously during `monaco.editor.createDiffEditor()`** — inside the same call stack, before the constructor returns. If the shadow DOM only has an incremental `MutationObserver`, it misses these initial styles because the observer fires asynchronously (on the next microtask) and Monaco has already inserted the styles before that fires. The result: the editor appears unstyled until the first content change triggers a style re-evaluation.
+
+The full re-sync inside `_showEditor` runs **after** Monaco constructs, catching every style that was just added. Both mechanisms are necessary:
+- The full re-sync handles construction-time styles
+- The observer handles styles added later (e.g. when a new language grammar loads)
+
+#### Deduplication Marker
+
+Every cloned style/link carries a `data-monaco-injected="true"` attribute. This serves two purposes:
+- The full re-sync can find and remove all prior clones without touching styles added by other shadow DOM consumers
+- The observer's removal path can match removed head styles to their shadow clones by `textContent` without false positives from unrelated styles
+
+#### KaTeX CSS — Separate Injection
+
+The KaTeX stylesheet used by the TeX preview is **imported as a raw string via Vite's `?raw` loader** and injected separately into the shadow root (marked with `data-katex-css`). It is not present in `document.head` — importing it as a normal ES module side-effect would only add it to the shadow root of the component that imports it, not to `document.head`, so the style-cloning loop wouldn't find it. The raw-import pattern bypasses this by constructing the style element manually:
+
+```js
+import katexCssText from 'katex/dist/katex.min.css?raw';
+
+// in _syncAllStyles:
+if (!shadowRoot.querySelector('[data-katex-css]')) {
+  const style = document.createElement('style');
+  style.setAttribute('data-katex-css', 'true');
+  style.textContent = katexCssText;
+  shadowRoot.appendChild(style);
+}
+```
+
+Without this, KaTeX math in TeX preview renders as unstyled broken fragments (fractions flat, superscripts inline).
+
 ## File Management
 
 Multiple files can be open simultaneously, tracked internally as an ordered list. There is no visible tab bar — navigation between open files uses keyboard shortcuts only (Ctrl+PageDown, Ctrl+PageUp, Ctrl+W). The status LED in the top-right reflects the active file's state.
@@ -84,6 +160,28 @@ Multiple files can be open simultaneously, tracked internally as an ordered list
 ### Same-File Suppression
 
 When `openFile` is called for a file that is already the active file, the editor is not rebuilt — `_showEditor()` is skipped entirely. This avoids recreating Monaco models (which resets scroll position and cancels internal Delayers). If the file is open but not active, the tab is switched and the viewport is restored from the per-file viewport state map.
+
+### Concurrent openFile Guard
+
+`openFile` is async (it fetches file content) and can be invoked multiple times before the first call completes — e.g., a user rapidly clicking file mentions, or a search result click arriving while a previous navigation is still loading. Without protection, the second call's `_showEditor()` can interleave with the first's model creation, leaving Monaco in a half-initialized state that freezes the UI.
+
+A `_openingPath` instance field guards against this:
+
+```js
+async openFile(opts) {
+  const { path } = opts;
+  if (!path) return;
+  if (this._openingPath === path) return;   // drop duplicate in-flight
+  this._openingPath = path;
+  try {
+    await this._openFileInner(opts);
+  } finally {
+    this._openingPath = null;
+  }
+}
+```
+
+The guard only rejects concurrent calls for the **same** path. Opening a different file while another is still loading is allowed — the second call proceeds, and both run to completion independently. This is safe because each `_openFileInner` call produces its own file entry and activates its own tab by index; the only corruption scenario is two calls racing on the same file's Monaco setup.
 
 ### Adjacent Same-File Reuse
 
@@ -142,6 +240,31 @@ When the user Ctrl+clicks a symbol whose definition is in another file, Monaco's
 4. Return the current editor instance to satisfy Monaco's API contract
 
 This enables seamless Go-to-Definition across files without Monaco trying to create a new standalone editor instance.
+
+The patch is guarded by an `_editorServicePatched` flag on the viewer instance so the override is applied only once, even if the editor is disposed and recreated while switching files. Without this guard, repeated patching would chain override closures and eventually exhaust the call stack.
+
+**Flag placement rule:** The `_editorServicePatched` flag lives on **the component instance** (the `<ac-diff-viewer>` element), not on the editor instance or the service object:
+
+```js
+if (!this._editorServicePatched) {   // component-level flag
+    this._editorServicePatched = true;
+    const svc = modifiedEditor?._codeEditorService;
+    if (svc && typeof svc.openCodeEditor === 'function') {
+        const origOpen = svc.openCodeEditor.bind(svc);
+        svc.openCodeEditor = async (input, source, sideBySide) => {
+            // ... patched logic ...
+            return origOpen(input, source, sideBySide);
+        };
+    }
+}
+```
+
+The component-level flag is correct because:
+- Monaco may reuse the same `_codeEditorService` instance across editor recreations — an editor-level flag would repatch
+- A service-level flag would re-patch if the service is recreated, even though the component already captured the original `openCodeEditor` reference
+- The component outlives all editor instances it creates, so its flag is the stable fixed point
+
+Each re-patch would wrap the already-patched `openCodeEditor`, creating a chain of override closures that all call through to each other. Every Go-to-Definition would then traverse the chain, and enough file switches would overflow the call stack. A component-level flag prevents this entirely.
 
 ### Markdown Link Navigation
 
@@ -221,7 +344,9 @@ Markdown images with relative `src` paths are resolved against the current file'
 - **Resolve** relative paths (including `../` and `./`) against the markdown file's directory using `_normalizePath()`
 - **SVG files** are fetched as text via `Repo.get_file_content` and injected as `data:image/svg+xml;charset=utf-8,` URIs with URL-encoded content
 - **Binary images** (PNG, JPG, GIF, WebP, BMP, ICO) are fetched via `Repo.get_file_base64` which returns a ready-to-use `data:{mime};base64,{content}` URI
-- **Failed loads** degrade gracefully — the `alt` text is updated to show the error and the image is dimmed (`opacity: 0.4`)
+- **Failed loads** degrade gracefully — the `alt` attribute is set to `[Image not found: path]` (on RPC error) or `[Failed to load: path]` (on exception) and the image is dimmed (`opacity: 0.4`)
+
+Image resolution runs as a post-processing step after the preview renders — `_resolvePreviewImages()` queries all `<img>` tags in the preview pane and processes them in parallel. The method is triggered from `_updatePreview()` via `updateComplete.then(() => this._resolvePreviewImages())`.
 
 Images are styled with `max-width: 100%` to fit within the preview pane.
 
@@ -357,6 +482,8 @@ make4ht generates class names for TeX formatting (`cmr-17`, `cmbx-12`, `cmti-10`
 
 When clicking an edit block's goto icon (↗): open file, search for progressively shorter prefixes of the edit text, scroll to and highlight match (3-second highlight).
 
+The highlight is applied via Monaco's `deltaDecorations()` API with `isWholeLine: true`, `className: 'highlight-decoration'`, and an overview ruler marker (`color: '#4fc3f7', position: Full`). The previous highlight timer is cleared before applying a new highlight. After 3 seconds, the decorations are removed via `deltaDecorations(this._highlightDecorations, [])`.
+
 ### Diff Computation Readiness
 
 Monaco's diff editor computes diffs asynchronously after models are set. Any scroll positioning (viewport restore, search-text scroll, line scroll) must wait for the diff computation to finish — scrolling before the diff result arrives is overwritten by Monaco's layout pass. The viewer provides a `_waitForDiffReady()` helper that:
@@ -381,6 +508,8 @@ This is used by `openFile` (after initial content load), `_restorePerFileViewpor
 ### Virtual Files
 
 Files with a `virtual://` prefix are not fetched from the repository. Their content is passed directly via the `virtualContent` option and stored in an in-memory map (`_virtualContents`). Virtual files are always read-only with an empty original side. On `closeFile`, the virtual content entry is removed from the map.
+
+`_fetchFileContent()` short-circuits for virtual paths — if the path starts with `virtual://`, it returns `{original: '', modified: virtualContent}` from the `_virtualContents` map without making any RPC call. Falls back to `'(no content)'` if the map has no entry.
 
 Virtual files are used in two ways:
 - **URL content viewing** — fetched URL content displayed without creating actual files

@@ -156,6 +156,31 @@ When the LLM attempts to edit files that aren't in the active context, those fil
 
 Middle-click on any row inserts the path into chat input at cursor position (space-padded before and after). The browser's selection-buffer paste is suppressed via a `_suppressNextPaste` flag on the chat panel — middle-click sets the flag, and the chat panel's paste handler checks and clears it, calling `preventDefault()` to block the selection-buffer paste that the browser would otherwise fire immediately after.
 
+### Cross-Component Flag Contract
+
+The flag lives on the **chat panel instance**, not on the file picker or a shared state object. The picker dispatches an `insert-path` event; the files-tab routes it to the chat panel; the chat panel owns the textarea and the paste event, so it owns the flag.
+
+**Event flow:**
+
+1. User middle-clicks a row in `<ac-file-picker>`
+2. Picker dispatches bubbling `insert-path` CustomEvent with `{path}` in detail
+3. `<ac-files-tab>` catches the event in its `_onInsertPath` handler
+4. Files-tab queries its shadow DOM for the chat panel, then the chat panel's shadow DOM for the textarea
+5. Files-tab inserts the path at the cursor, dispatches a synthetic `input` event (so Lit reactive bindings update), repositions the cursor, **sets `chatPanel._suppressNextPaste = true` via direct property assignment**, and focuses the textarea
+6. The browser fires a `paste` event on the textarea (from middle-click's selection buffer)
+7. The chat panel's `_onPaste` handler checks the flag, clears it, and calls `preventDefault()` to block the duplicate paste
+
+**Critical rules:**
+
+- The flag must be set **before** `textarea.focus()` — once the textarea has focus, the browser may dispatch the paste immediately on the next event loop tick, and if the flag isn't set yet the paste handler won't suppress it
+- The flag is a plain instance property, not a reactive Lit property — it's a one-shot latch, never rendered
+- Both the middle-click insertion and the paste handler must run on the same element instance. Using a shared singleton or a window-level event would break across shadow DOM boundaries
+- The flag is cleared even when no paste arrives (set-and-forget), so a stray `preventDefault()` on the next real user paste is not possible — the flag is consumed by the very next paste event whether or not it was the middle-click paste
+
+**Why not just call `preventDefault()` on the middle-click's `auxclick` event?** The `auxclick` event fires before the paste, but the paste is a separate event dispatched by the browser's selection-buffer mechanism, not by the click. There's no synchronous way to cancel the deferred paste from the click handler. The flag pattern is the only reliable approach.
+
+**Why not dispatch a custom event from picker to chat panel directly?** The picker and chat panel are siblings under `<ac-files-tab>`, not in a parent-child relationship. Shadow DOM boundaries make direct sibling communication awkward — the files-tab is the natural coordinator since it already owns both components.
+
 ## Active File Highlight
 
 Row highlighted when file is open in diff viewer. The diff viewer dispatches `active-file-changed` with `{ path }` on tab switch/open/close. The app shell relays this to the dialog → files tab → file picker. The `.active-in-viewer` class applies a distinct background and left border accent, independent of selection state.
