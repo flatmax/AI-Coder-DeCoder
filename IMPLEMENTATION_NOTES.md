@@ -225,20 +225,29 @@ Known quirks documented in code:
 - **Grammar unavailability is silent** — debug log only for missing packages (expected case), warning log for installed-but-broken grammars (user install is in a confusing state).
 - **Singleton is a convenience, not a constraint** — tests construct isolated parsers via `TreeSitterParser()` when they need a clean cache per test.
 
-### 2.2 — Language extractors — **planned**
+### 2.2 — Language extractors — **in progress**
 
 Per-language extractor classes under `src/ac_dc/symbol_index/extractors/`. Each extractor walks a tree-sitter AST and produces a `FileSymbols`. Shared base class handles the common "walk children, recurse into classes" pattern; per-language subclasses override node-type handling.
 
 Order:
 
-1. `base.py` — `BaseExtractor` with the walk skeleton
-2. `python.py` — classes, functions (sync + async), methods, decorators (`@property`), instance vars from `self.x = ...` in `__init__`, imports (absolute + relative with level), top-level variables, call sites, parameters with defaults and type annotations
-3. `javascript.py` — classes with `extends`, methods (including getters/setters), async methods, top-level functions, `import`/`export` statements, call sites
-4. `typescript.py` — inherits from JavaScript; adds type annotations on parameters and return types
-5. `c.py` — structs, functions, `#include` as imports
-6. `cpp.py` — inherits from C; adds classes, namespaces
+1. **`base.py` — `BaseExtractor` — delivered.** Plumbing only: text decoding, range extraction, child lookup, tree walking. `tree_optional` flag for regex-based extractors.
+2. **`python.py` — `PythonExtractor` — delivered.** Classes, functions (sync + async), methods, decorators (`@property`), instance vars from `self.x = ...` in `__init__`, imports (absolute + relative with level, including aliased and wildcard), top-level variables (private skipped, dunders kept), call sites (with builtin filtering), parameters with defaults and type annotations. Comprehensive test suite in `tests/test_symbol_index_python_extractor.py` — 10 test classes covering every public behaviour of the extractor.
+3. `javascript.py` — **in progress.** Classes with `extends`, methods (including getters/setters), async methods, top-level functions, `import`/`export` statements, call sites.
+4. `typescript.py` — planned. Inherits from JavaScript; adds type annotations on parameters and return types.
+5. `c.py` — planned. Structs, functions, `#include` as imports.
+6. `cpp.py` — planned. Inherits from C; adds classes, namespaces.
 
 MATLAB deferred per user decision (see D1 context in earlier message).
+
+Notes from delivering the Python extractor:
+
+- `_children_by_field` helper was needed because tree-sitter's `child_by_field_name` returns only the first match, but `import_from_statement` assigns the same `name` field to multiple children (`from x import a, b`). Cursor walk collects them all.
+- Relative-import level counting uses the `import_prefix` node's byte length — one byte per dot. Cleaner than iterating children looking for dot tokens.
+- Async detection reads the first 5 bytes of the function node's source rather than iterating non-named children. The latter varies slightly across grammar versions.
+- Decorator handling peels `call` nodes to reach the underlying identifier or attribute — handles both `@foo` and `@foo(args)` uniformly.
+- Instance-var extraction only peeks inside methods named `__init__`. If the LLM later renames an init method to something else, we lose the annotation — acceptable tradeoff, matches specs3 behaviour.
+- **Wildcard imports** (`from X import *`) — the `wildcard_import` node is NOT assigned to the `name` field in tree-sitter-python's grammar. It appears as an unfielded direct child of `import_from_statement`. The extractor falls back to scanning direct children when the field-based pass finds no names. Caught during test run; fix is defensive (only fires when `names` is empty, so a future grammar version that moves `wildcard_import` under the `name` field won't cause double-append).
 
 ### 2.3 — Cache — **planned**
 
