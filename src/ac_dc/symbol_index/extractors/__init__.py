@@ -13,12 +13,14 @@ Governing spec: ``specs4/2-indexing/symbol-index.md#per-language-extractors``.
 """
 
 from ac_dc.symbol_index.extractors.base import BaseExtractor
+from ac_dc.symbol_index.extractors.c import CExtractor
 from ac_dc.symbol_index.extractors.javascript import JavaScriptExtractor
 from ac_dc.symbol_index.extractors.python import PythonExtractor
 from ac_dc.symbol_index.extractors.typescript import TypeScriptExtractor
 
 __all__ = [
     "BaseExtractor",
+    "CExtractor",
     "JavaScriptExtractor",
     "PythonExtractor",
     "TypeScriptExtractor",
