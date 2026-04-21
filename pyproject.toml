@@ -92,6 +92,14 @@ Issues = "https://github.com/flatmax/AI-Coder-DeCoder/issues"
 # Hatch build configuration
 # ---------------------------------------------------------------------------
 
+# Allow direct references (e.g. git+https) in project.dependencies.
+# Required because jrpc-oo is pulled from its upstream git repo per
+# IMPLEMENTATION_NOTES.md decision 8. Without this opt-in hatchling
+# refuses to build the package (PEP 621 treats direct references as
+# non-standard and requires explicit backend acknowledgement).
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build]
 # Sources live under src/ (src layout).
 packages = ["src/ac_dc"]
@@ -99,11 +107,16 @@ packages = ["src/ac_dc"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/ac_dc"]
 
-[tool.hatch.build.targets.wheel.force-include]
-# Ship the bundled webapp (populated by `npm run build` in webapp/) so that
-# `pip install ac-dc` works without a separate webapp build step.
-# Missing webapp/dist is tolerated in source-tree / development runs.
-"webapp/dist" = "ac_dc/webapp_dist"
+# NOTE on webapp bundling:
+# The final packaged wheel needs to ship webapp/dist/ at ac_dc/webapp_dist/
+# so pip-installed releases can serve the webapp without a separate npm build.
+# Hatchling's `force-include` fails loudly when the source path is missing,
+# which breaks `uv sync` in dev checkouts (webapp/dist only exists after
+# `npm run build`). Layer 6 (deployment) will wire this up properly — either
+# via a release-only config overlay, a pre-build hook that ensures webapp/dist
+# exists, or a conditional include. For now the wheel ships backend only,
+# which is correct for development and for the `ac-dc --dev`/`--preview`
+# modes that run Vite as a subprocess.
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -120,15 +133,21 @@ include = [
 # either error or silently read a stale value.
 
 # ---------------------------------------------------------------------------
-# uv configuration
+# Dependency groups (PEP 735)
 # ---------------------------------------------------------------------------
+#
+# uv's `[tool.uv].dev-dependencies` field is deprecated. The replacement
+# is the standard `[dependency-groups]` table defined in PEP 735, which
+# uv reads natively via `uv sync --group dev` (or automatically when no
+# explicit group is requested and a "dev" group exists).
+#
+# We duplicate the dev deps into both [project.optional-dependencies].dev
+# (for pip users: `pip install -e ".[dev]"`) and [dependency-groups].dev
+# (for uv users: `uv sync`). Keeping both means either toolchain works
+# without special flags.
 
-[tool.uv]
-# jrpc-oo is a git dependency — uv needs to be told it's allowed.
-# (Normally uv rejects non-PyPI dependencies unless explicitly acknowledged.)
-# The actual URL is in [project.dependencies]; this section just declares the
-# dev workflow preferences.
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
