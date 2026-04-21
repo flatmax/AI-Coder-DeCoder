@@ -209,6 +209,41 @@ Final test totals for Layer 1:
 - Python: run `uv run pytest` — all `tests/test_logging_setup.py`, `test_config.py`, `test_config_defaults.py`, `test_repo.py`, `test_rpc.py`, `test_package_metadata.py`, `test_cli.py` pass.
 - Webapp: run `cd webapp && npm test -- --run` — 3 test files, 61 tests, all pass.
 
+## Layer 2 — in progress
+
+### 2.1 — Parser + data model — **delivered**
+
+- `src/ac_dc/symbol_index/__init__.py` — package marker exporting the public surface (`Symbol`, `CallSite`, `Import`, `FileSymbols`, `Parameter`, `LANGUAGE_MAP`, `TreeSitterParser`, `language_for_file`).
+- `src/ac_dc/symbol_index/models.py` — plain dataclasses for the symbol data model. `Symbol`, `CallSite`, `Import`, `Parameter`, `FileSymbols`. `FileSymbols.all_symbols_flat` walks nested children. Range tuples are 0-indexed (tree-sitter native); callers add 1 at the UI boundary.
+- `src/ac_dc/symbol_index/parser.py` — `LanguageSpec` frozen dataclass + `LANGUAGE_MAP` registry for Python, JavaScript, TypeScript, C, C++. Extension → language reverse map built once at import. `language_for_file(path)` does the lookup with case-insensitive suffix matching. `TreeSitterParser` is a lazy-loading per-language cache — grammars load on first request, missing grammars cache `None` so repeated lookups don't re-probe. `instance()`/`reset_instance()` classmethods for shared-instance management. `parse(source, language)` and `parse_file(path)` convenience entry points. `available_languages()` / `is_available(name)` for introspection.
+- `tests/test_symbol_index_parser.py` — covers `LANGUAGE_MAP` structure (TypeScript quirk enforced — `language_typescript` probed first), `language_for_file` resolution (known extensions, case-insensitivity, unknown extensions, PathLike acceptance), singleton lifecycle, grammar loading (unknown language, missing grammar via monkeypatched `importlib.import_module`, None-caching, Language+Parser identity across calls, `available_languages` / `is_available`), integration (real grammars parse real snippets — Python, JavaScript, TypeScript, C, C++), `parse_file` (extension dispatch, unknown extension skips, missing file raises OSError, str paths), edge cases (empty source, invalid UTF-8 bytes don't crash, unknown-language parse returns None).
+
+Known quirks documented in code:
+
+- **TypeScript function name** — `tree_sitter_typescript` exposes `language_typescript()` and `language_tsx()`, NOT a plain `language()`. The probe order in `LANGUAGE_MAP` covers this; a future wheel adding a plain `language()` still works via the fallback.
+- **Extension collisions** — `.h` is claimed by C, not C++. Deliberate choice from specs4 — in mixed repos the C parser handles both and only C++-exclusive extensions route to the C++ grammar.
+- **Grammar unavailability is silent** — debug log only for missing packages (expected case), warning log for installed-but-broken grammars (user install is in a confusing state).
+- **Singleton is a convenience, not a constraint** — tests construct isolated parsers via `TreeSitterParser()` when they need a clean cache per test.
+
+### 2.2 — Language extractors — **planned**
+
+Per-language extractor classes under `src/ac_dc/symbol_index/extractors/`. Each extractor walks a tree-sitter AST and produces a `FileSymbols`. Shared base class handles the common "walk children, recurse into classes" pattern; per-language subclasses override node-type handling.
+
+Order:
+
+1. `base.py` — `BaseExtractor` with the walk skeleton
+2. `python.py` — classes, functions (sync + async), methods, decorators (`@property`), instance vars from `self.x = ...` in `__init__`, imports (absolute + relative with level), top-level variables, call sites, parameters with defaults and type annotations
+3. `javascript.py` — classes with `extends`, methods (including getters/setters), async methods, top-level functions, `import`/`export` statements, call sites
+4. `typescript.py` — inherits from JavaScript; adds type annotations on parameters and return types
+5. `c.py` — structs, functions, `#include` as imports
+6. `cpp.py` — inherits from C; adds classes, namespaces
+
+MATLAB deferred per user decision (see D1 context in earlier message).
+
+### 2.3 — Cache — **planned**
+
+`src/ac_dc/base_cache.py` — abstract `BaseCache` with mtime-based get/put/invalidate. `src/ac_dc/symbol_index/cache.py` — `SymbolCache(BaseCache)` storing `FileSymbols` in memory, keyed by path, invalidated on mtime change. Doc index will later extend the same base.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:
