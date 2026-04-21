@@ -5,15 +5,17 @@ produces a :class:`ac_dc.symbol_index.models.FileSymbols`. The
 base class handles plumbing (text decoding, range extraction,
 tree traversal); subclasses handle language-specific node types.
 
-Layer 2.2 delivers the Python / JS / TS / C / C++ extractors.
-MATLAB is deferred — it has no maintained tree-sitter grammar and
-would use the ``tree_optional = True`` regex-based fallback.
+Layer 2.2 is complete — Python, JavaScript, TypeScript, C, C++
+all have working extractors with comprehensive test suites.
+MATLAB is deferred — it has no maintained tree-sitter grammar
+and would use the ``tree_optional = True`` regex-based fallback.
 
 Governing spec: ``specs4/2-indexing/symbol-index.md#per-language-extractors``.
 """
 
 from ac_dc.symbol_index.extractors.base import BaseExtractor
 from ac_dc.symbol_index.extractors.c import CExtractor
+from ac_dc.symbol_index.extractors.cpp import CppExtractor
 from ac_dc.symbol_index.extractors.javascript import JavaScriptExtractor
 from ac_dc.symbol_index.extractors.python import PythonExtractor
 from ac_dc.symbol_index.extractors.typescript import TypeScriptExtractor
@@ -21,6 +23,7 @@ from ac_dc.symbol_index.extractors.typescript import TypeScriptExtractor
 __all__ = [
     "BaseExtractor",
     "CExtractor",
+    "CppExtractor",
     "JavaScriptExtractor",
     "PythonExtractor",
     "TypeScriptExtractor",
