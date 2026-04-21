@@ -1,0 +1,172 @@
+# AC-DC — AI Coder - DeCoder
+# Build configuration and dependencies.
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ac-dc"
+version = "0.0.0-dev"
+description = "AI Coder - DeCoder: AI-assisted code editing with a browser UI, stability-based prompt caching, and document-mode support."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Flatmax Pty Ltd" },
+]
+keywords = ["llm", "coding-assistant", "ai", "git", "editor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+]
+
+# Core runtime dependencies.
+# Optional integrations live under [project.optional-dependencies].
+dependencies = [
+    # LLM provider abstraction (unified API for Anthropic, Bedrock, OpenAI, etc.)
+    "litellm>=1.83,<1.84",
+    # Bidirectional JSON-RPC over WebSocket.
+    "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
+    # Tokenizer used by the token counter (all models use cl100k_base encoding).
+    "tiktoken>=0.7",
+    # Tree-sitter core plus grammars for supported languages.
+    "tree-sitter>=0.21",
+    "tree-sitter-python>=0.21",
+    "tree-sitter-javascript>=0.21",
+    "tree-sitter-typescript>=0.21",
+    "tree-sitter-c>=0.21",
+    "tree-sitter-cpp>=0.21",
+    # Web page main-content extraction for URL fetching.
+    "trafilatura>=1.12",
+]
+
+[project.optional-dependencies]
+# Document-mode extras: keyword enrichment, format conversion, PDF/SVG pipeline.
+# Users can `pip install "ac-dc[docs]"` or `uv sync --extra docs`.
+# Missing these packages produces visible, informative failure messages in the
+# UI (see IMPLEMENTATION_NOTES.md D1) — features are never silently hidden.
+docs = [
+    "keybert>=0.8",
+    "sentence-transformers>=3.0",
+    "scikit-learn>=1.3",
+    "huggingface_hub>=0.24",
+    "markitdown[all]>=0.0.1a3",
+    "python-pptx>=1.0",
+    "pymupdf>=1.24",
+    "openpyxl>=3.1",
+]
+
+# Developer tooling: test runner, linters.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+# Packaging: PyInstaller for single-file binary builds.
+build = [
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+# CLI entry point — resolves to `ac_dc.cli:main`.
+ac-dc = "ac_dc.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/flatmax/AI-Coder-DeCoder"
+Repository = "https://github.com/flatmax/AI-Coder-DeCoder"
+Issues = "https://github.com/flatmax/AI-Coder-DeCoder/issues"
+
+# ---------------------------------------------------------------------------
+# Hatch build configuration
+# ---------------------------------------------------------------------------
+
+[tool.hatch.build]
+# Sources live under src/ (src layout).
+packages = ["src/ac_dc"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ac_dc"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Ship the bundled webapp (populated by `npm run build` in webapp/) so that
+# `pip install ac-dc` works without a separate webapp build step.
+# Missing webapp/dist is tolerated in source-tree / development runs.
+"webapp/dist" = "ac_dc/webapp_dist"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ac_dc",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+# Version is declared statically in [project] above. We don't use
+# [tool.hatch.version] because our __version__ is computed at import
+# time from the baked VERSION file rather than assigned as a literal
+# — hatch's source-path version reader expects the latter and would
+# either error or silently read a stale value.
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+
+[tool.uv]
+# jrpc-oo is a git dependency — uv needs to be told it's allowed.
+# (Normally uv rejects non-PyPI dependencies unless explicitly acknowledged.)
+# The actual URL is in [project.dependencies]; this section just declares the
+# dev workflow preferences.
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::DeprecationWarning:tree_sitter.*",
+]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Keep the default rule set small during early development.
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line too long — formatter handles; ignore for now
+    "B008",  # function call in default arg — legitimate for some patterns
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # `assert False` in tests is fine (use raise AssertionError elsewhere)

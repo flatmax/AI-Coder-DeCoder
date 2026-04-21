@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <!--
+      Title is overwritten at runtime from the repo name (see
+      specs4/5-webapp/shell.md#browser-tab-title). The static value
+      here is just a placeholder for the brief window before the
+      WebSocket state snapshot arrives.
+    -->
+    <title>AC-DC</title>
+    <style>
+      /*
+       * Minimal startup styles. The real stylesheet is inlined by Vite
+       * from the component tree; this block only covers the empty-body
+       * phase before main.js runs, so a user never sees a flash of
+       * unstyled content or a white background in a dark-mode terminal
+       * session.
+       */
+      :root {
+        color-scheme: dark;
+        --bg-primary: #0d1117;
+        --text-primary: #c9d1d9;
+        --accent-primary: #58a6ff;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        overflow: hidden;
+      }
+      #app {
+        height: 100%;
+      }
+      /*
+       * Boot splash — a centered mark shown while main.js loads and
+       * before the WebSocket connects. Replaced by the startup overlay
+       * once the app shell mounts.
+       */
+      .boot-splash {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        font-size: 8rem;
+        opacity: 0.18;
+        user-select: none;
+        letter-spacing: -0.05em;
+      }
+      .boot-splash .bolt {
+        color: var(--accent-primary);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="boot-splash"><span>AC</span><span class="bolt">⚡</span><span>DC</span></div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

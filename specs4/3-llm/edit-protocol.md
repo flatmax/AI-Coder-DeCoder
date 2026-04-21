@@ -6,12 +6,39 @@ The LLM proposes file changes using a structured edit block format. Each block c
 
 ## Block Structure
 
-- File path on a line
-- Start marker
-- Old text (exact copy from the file — the anchor)
-- Separator marker
-- New text (replacement)
-- End marker
+Each edit block has four literal marker lines bracketing two content sections:
+
+1. A line containing the file path (relative to repo root)
+2. Start marker: `🟧🟧🟧 EDIT`
+3. Old text — exact copy from the file (the anchor)
+4. Separator marker: `🟨🟨🟨 REPL`
+5. New text — the replacement content
+6. End marker: `🟩🟩🟩 END`
+
+### Delimiter Lines — Exact Form
+
+Each delimiter appears on its own line with nothing else on that line:
+
+- Start: `🟧🟧🟧 EDIT` — three orange squares (U+1F7E7), space, literal `EDIT`
+- Separator: `🟨🟨🟨 REPL` — three yellow squares (U+1F7E8), space, literal `REPL`
+- End: `🟩🟩🟩 END` — three green squares (U+1F7E9), space, literal `END`
+
+The emoji prefix varies by marker role (orange/yellow/green = start/middle/end) so a block is visually distinguishable from prose at any zoom and any theme. The color sequence also makes malformed blocks (missing separator, missing end) obvious during review.
+
+### Example
+
+```
+src/math.py
+🟧🟧🟧 EDIT
+def multiply(a, b):
+    return a + b  # BUG
+🟨🟨🟨 REPL
+def multiply(a, b):
+    return a * b
+🟩🟩🟩 END
+```
+
+The LLM must reproduce the marker characters exactly — no ASCII substitutions, no added punctuation, no translation. Parsers match on the literal byte sequences.
 
 ## How Matching Works
 

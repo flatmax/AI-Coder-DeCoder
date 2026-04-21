@@ -30,7 +30,7 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 
 ## Edits
 
-- **Edit block** — the LLM's structured proposal for a file change
+- **Edit block** — the LLM's structured proposal for a file change, bracketed by `🟧🟧🟧 EDIT` / `🟨🟨🟨 REPL` / `🟩🟩🟩 END` marker lines
 - **Anchor** — the old text in an edit block, searched exactly in the file
 - **Ambiguous anchor** — old text matching multiple locations in the file
 - **In-context edit** — edit targeting a file that is currently selected (full content in context)

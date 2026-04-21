@@ -1,0 +1,27 @@
+{
+  "name": "ac-dc-webapp",
+  "private": true,
+  "version": "0.0.0-dev",
+  "description": "AC-DC (AI Coder - DeCoder) browser frontend. Built with Vite + Lit.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@flatmax/jrpc-oo": "^1.2.2",
+    "lit": "^3.2.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0",
+    "jsdom": "^25.0.0",
+    "@vitest/ui": "^2.1.0"
+  }
+}

@@ -1,19 +1,30 @@
+# Python bytecode and build artefacts
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
 dist/
 build/
+
+# AC-DC runtime state (per-repo working directory)
 .ac-dc/
+
+# Node / webapp build output
+node_modules/
 webapp/node_modules/
 webapp/dist/
-node_modules/
-.env
-*.log
+
+# Environments
 .venv/
 venv/
-.aicoder
-**/uv.lock
+.env
+
+# Logs
+*.log
+
+# uv lockfiles — deferred until uv workflow is chosen
 uv.lock
+
+# Editor / tooling scratch directories
 .aicoder/
 safeZone/
