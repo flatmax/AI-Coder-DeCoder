@@ -10,9 +10,13 @@ Exposed via the ``ac-dc`` console script declared in pyproject.toml.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 from ac_dc import __version__
+from ac_dc.logging_setup import configure as configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -118,8 +122,14 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = _build_parser()
     # Parse (and validate) arguments — argparse will exit on --help/--version
-    # or on parse errors. The parsed namespace is unused in Layer 0.
-    parser.parse_args(argv)
+    # or on parse errors.
+    args = parser.parse_args(argv)
+    # Install logging before anything else that might want to log. The
+    # CLI itself does nothing yet beyond printing a banner, but the
+    # moment a Layer 1+ call path runs (config load, repo init), we
+    # want its warnings and errors on stderr.
+    configure_logging(verbose=args.verbose)
+    logger.debug("ac-dc invoked with args=%s", args)
     _print_banner()
     return 0
 
