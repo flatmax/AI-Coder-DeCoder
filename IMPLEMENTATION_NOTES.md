@@ -145,19 +145,10 @@ Delivered:
 
 `tests/test_config.py` — file resolution, upgrade flow, backup naming, accessor read-through, hot reload, snippet fallback chain, per-repo working dir creation.
 
-### 1.3 — Repository — **planned**
+### 1.3 — Repository — **delivered**
 
-`src/ac_dc/repo.py` — `Repo`:
-
-- File I/O with path-traversal rejection, binary detection (null bytes in first 8KB), per-path async write mutex (D10 contract)
-- Git staging, rename, delete, file tree with status, flat file list
-- Diff (staged, unstaged, to-branch), commit, reset, search (grep with regex/whole-word/ignore-case/context-lines)
-- Branch operations (current, list, list_all with remote dedup, is_clean, resolve_ref, commit_graph, commit_log, merge_base)
-- Review support (checkout_review_parent, setup_review_soft_reset, exit_review_mode, get_review_changed_files, get_review_file_diff, get_diff_to_branch)
-- TeX preview availability check only; `compile_tex_preview` lands in Layer 5/6
-- `get_file_base64` lands in Layer 1 (SVG viewer needs it early)
-
-`tests/test_repo.py` — throwaway git repos via `subprocess` + `tempfile`. No `pytest-git` dependency — subprocess-driven setup is simple and stable.
+- `src/ac_dc/repo.py` — `Repo` class wrapping a single git repository with per-path async write mutex (D10 contract), path-traversal rejection, binary detection, file I/O, git staging, rename, delete, file tree with status, flat file list, diffs (staged, unstaged, to-branch), commit, reset, search (grep with regex/whole-word/ignore-case/context-lines), branch operations (current, list, list_all with remote dedup, is_clean, resolve_ref, commit_graph, commit_log, merge_base), review support (checkout_review_parent, setup_review_soft_reset, exit_review_mode, get_review_changed_files, get_review_file_diff), TeX preview availability check, SVG-viewer base64 reader.
+- `tests/test_repo.py` — throwaway git repos via `subprocess` + `tmp_path`. No `pytest-git` dependency — subprocess-driven setup is simple and stable. Covers: constructor validation, path normalisation and traversal rejection (including symlink escape), binary detection, MIME inference, file read/write/create/delete (async), per-path write mutex (serial-for-same-path, parallel-for-different-path), staging, unstaging, discard (tracked restore, untracked delete), rename file and directory (tracked via `git mv`, untracked via filesystem), diffs, commit (stdin message, initial commit, reject empty), reset_hard (preserves untracked), search_commits (message + author union, SHA fast-path, branch filter), branch queries (current, detached, resolve_ref, list_branches, list_all_branches with remote dedup and bare-alias filter), is_clean (untracked ignored), commit graph (paginated, parents, has_more), commit log range, parent of commit, merge_base cascade, file tree and flat listing (porcelain parse, rename expansion, deleted files, diff stats merge, gitignore, nested dirs, path unquoting), search_files (fixed-string default, regex, whole-word, case sensitivity, context lines, match/context boundary semantics, dash-prefix safety), git subprocess helper (timeout, check mode, stdin input, cwd, missing binary), tool availability, review mode round-trip.
 
 ### 1.4 — RPC transport — **planned**
 
