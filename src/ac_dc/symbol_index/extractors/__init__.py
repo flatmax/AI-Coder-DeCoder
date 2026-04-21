@@ -13,6 +13,11 @@ Governing spec: ``specs4/2-indexing/symbol-index.md#per-language-extractors``.
 """
 
 from ac_dc.symbol_index.extractors.base import BaseExtractor
+from ac_dc.symbol_index.extractors.javascript import JavaScriptExtractor
 from ac_dc.symbol_index.extractors.python import PythonExtractor
 
-__all__ = ["BaseExtractor", "PythonExtractor"]
+__all__ = [
+    "BaseExtractor",
+    "JavaScriptExtractor",
+    "PythonExtractor",
+]
