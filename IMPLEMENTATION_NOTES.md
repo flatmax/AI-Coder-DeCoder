@@ -91,6 +91,33 @@ Direct git reference is authoritative until a PyPI release lands.
 
 Layer 0's CLI stub used `print(..., file=sys.stderr)` for its banner. The logging subsystem is now part of Layer 1 so the first code that actually wants to emit structured logs (config loading, repo init) can use the standard `logging` API.
 
+### D11 — jrpc-oo Python client: connect() runs the message loop inline
+
+**Problem:** `jrpc_oo.JRPCClient.connect()` does not return after establishing the WebSocket. It runs the message-receive loop (`async for message in self.ws:`) inline inside the `connect()` coroutine itself. So `await client.connect()` blocks until the socket closes — which for a long-lived session is "never".
+
+**Solution:** Do not await `connect()` directly. Launch it as a background task and wait for the `setup_done` hook (or equivalent `asyncio.Event` set in an override) before issuing RPC calls:
+
+```python
+class _ReadyClient(JRPCClient):
+    def __init__(self, server_uri):
+        super().__init__(server_uri=server_uri)
+        self.ready = asyncio.Event()
+    def setup_done(self):
+        super().setup_done()
+        self.ready.set()
+
+client = _ReadyClient(server_uri="ws://...")
+connect_task = asyncio.create_task(client.connect())
+await asyncio.wait_for(client.ready.wait(), timeout=5.0)
+# ... use client ...
+await client.disconnect()
+connect_task.cancel()
+```
+
+Cleanup: `disconnect()` closes the WebSocket (which exits the message loop and ends the task), then cancel the task as a belt-and-braces measure against pending-frame races.
+
+Relevant in Layer 6 when the startup sequence may want a Python-side client for health checks, and in any future integration test that exercises the full jrpc-oo round-trip. Tests that mock the inner server never hit this — only tests using the real `JRPCClient`.
+
 ### D10 — Architectural contracts preserved from day one
 
 `specs4/0-overview/implementation-guide.md#architectural-changes-from-specs3` lists changes in specs4 that are **contracts** — a reimplementer must preserve them even when specs3 describes an older pattern. Quick reference for Layer 1+ work:
@@ -150,19 +177,19 @@ Delivered:
 - `src/ac_dc/repo.py` — `Repo` class wrapping a single git repository with per-path async write mutex (D10 contract), path-traversal rejection, binary detection, file I/O, git staging, rename, delete, file tree with status, flat file list, diffs (staged, unstaged, to-branch), commit, reset, search (grep with regex/whole-word/ignore-case/context-lines), branch operations (current, list, list_all with remote dedup, is_clean, resolve_ref, commit_graph, commit_log, merge_base), review support (checkout_review_parent, setup_review_soft_reset, exit_review_mode, get_review_changed_files, get_review_file_diff), TeX preview availability check, SVG-viewer base64 reader.
 - `tests/test_repo.py` — throwaway git repos via `subprocess` + `tmp_path`. No `pytest-git` dependency — subprocess-driven setup is simple and stable. Covers: constructor validation, path normalisation and traversal rejection (including symlink escape), binary detection, MIME inference, file read/write/create/delete (async), per-path write mutex (serial-for-same-path, parallel-for-different-path), staging, unstaging, discard (tracked restore, untracked delete), rename file and directory (tracked via `git mv`, untracked via filesystem), diffs, commit (stdin message, initial commit, reject empty), reset_hard (preserves untracked), search_commits (message + author union, SHA fast-path, branch filter), branch queries (current, detached, resolve_ref, list_branches, list_all_branches with remote dedup and bare-alias filter), is_clean (untracked ignored), commit graph (paginated, parents, has_more), commit log range, parent of commit, merge_base cascade, file tree and flat listing (porcelain parse, rename expansion, deleted files, diff stats merge, gitignore, nested dirs, path unquoting), search_files (fixed-string default, regex, whole-word, case sensitivity, context lines, match/context boundary semantics, dash-prefix safety), git subprocess helper (timeout, check mode, stdin input, cwd, missing binary), tool availability, review mode round-trip.
 
-### 1.4 — RPC transport — **planned**
+### 1.4 — RPC transport — **Python side delivered; webapp side pending**
 
-`src/ac_dc/rpc.py` — jrpc-oo integration:
+Python side (delivered):
 
-- Port finding (scan from default, skip in-use ports)
-- Service class registration helpers
-- Placeholder `CollabServer` hook — real admission logic lives in Layer 4
-- Event-loop reference capture helper (the capture-at-entry rule from specs4/3-llm/streaming.md — worker threads must use the captured loop, never re-acquire from inside)
+- `src/ac_dc/rpc.py` — `find_available_port` (SO_REUSEADDR bind-probe, configurable host for future collab use), `EventLoopHandle` (capture-at-entry + threadsafe schedule per D10), `RpcServer` (composition wrapper around `jrpc_oo.JRPCServer` with a `_create_inner_server` factory hook for Layer 4's collab subclass).
+- `tests/test_rpc.py` — port scan (free/occupied/exhausted/range error/defaults/bad host), EventLoopHandle (capture + cross-thread schedule verified by thread-ID observation), RpcServer lifecycle (start/stop idempotence, flag transitions via mocked inner), add_service (namespace defaulting, ordering enforcement, allowed after stop), factory-hook override (proves collab's subclass pattern), full round-trip against a real `JRPCServer` + `jrpc_oo.JRPCClient` (echo, add via the `server` proxy).
+- Discovered and documented D11 — jrpc-oo's `JRPCClient.connect()` runs the WebSocket message loop inline, so callers must launch it as a background task and wait on the `setup_done` hook rather than awaiting the coroutine. Propagates to any Python-side client we write in later layers.
 
-`webapp/src/rpc.js` — `SharedRpc` singleton, `rpcExtract` envelope unwrap.
-`webapp/src/rpc-mixin.js` — `RpcMixin(LitElement)` — components receive ready notifications, defer first call to the next microtask.
+Webapp side (pending — next):
 
-Tests: `tests/test_rpc.py` (async round-trip against a stub service), `webapp/src/rpc.test.js`, `webapp/src/rpc-mixin.test.js`.
+- `webapp/src/rpc.js` — `SharedRpc` singleton, `rpcExtract` envelope unwrap.
+- `webapp/src/rpc-mixin.js` — `RpcMixin(LitElement)` — components receive ready notifications, defer first call to the next microtask.
+- `webapp/src/rpc.test.js`, `webapp/src/rpc-mixin.test.js`.
 
 ### Layer 1 deferrals
 
