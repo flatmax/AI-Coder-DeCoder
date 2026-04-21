@@ -211,12 +211,17 @@ class TestPathValidation:
         with pytest.raises(RepoError, match="Absolute"):
             repo._validate_rel_path("/etc/passwd")
 
-    @pytest.mark.skipif(
-        sys.platform != "win32",
-        reason="Windows drive-letter paths",
-    )
     def test_validate_rejects_windows_absolute_path(self, repo: Repo) -> None:
-        """C:\\ style drive paths are rejected."""
+        """C:\\ style drive paths are rejected on every platform.
+
+        This is a pure string-validation test — no filesystem
+        touch — so it runs regardless of the host OS. A config
+        file authored on Windows or a caller that forgot to
+        normalise path separators could pass a drive-letter
+        string through on Linux; the validator must reject it
+        with the same ``Absolute paths not accepted`` message
+        it uses for POSIX absolute paths.
+        """
         with pytest.raises(RepoError, match="Absolute"):
             repo._validate_rel_path("C:\\Windows\\notepad.exe")
 
