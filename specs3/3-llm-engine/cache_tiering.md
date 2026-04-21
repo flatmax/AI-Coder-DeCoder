@@ -121,6 +121,96 @@ Items demote to active (N = 0) when: content hash changes, or file appears in mo
 
 **Deselected file cleanup:** When a file is deselected, its `file:*` entry is removed from its tier during the stability update phase (`_update_stability`). The affected tier is marked as broken, triggering cascade rebalancing. Stale entries for files deleted from disk are separately cleaned up by `remove_stale()` in Phase 0.
 
+## Manual Cache Rebuild
+
+Users can trigger a full cache redistribution via the **Rebuild** button in the Cache sub-view of the Context tab (see [Viewers and Token HUD — Cache Sub-View](../5-webapp/viewers_and_hud.md#cache-sub-view)). The RPC endpoint is `LLMService.rebuild_cache()`.
+
+### Motivation
+
+Normal operation grows the ACTIVE tier with `file:*` entries as users select files, and those entries only graduate to L3 via the standard N ≥ 3 progression across multiple chat requests. When a user has selected many files at once (e.g., loading a large working set after startup), the ACTIVE tier can be dominated by full-content entries that take many request cycles to graduate. Rebuild is a one-shot disruptive operation that immediately redistributes all trackable content into cache tiers using the same clustering algorithm as initialization, giving the user control over cache layout without waiting for natural graduation.
+
+### What Rebuild Does
+
+Rebuild runs the following sequence atomically:
+
+1. **Preserve history entries** — all `history:*` entries are kept; everything else (`system:`, `symbol:`, `doc:`, `file:`, and any cross-ref entries) is wiped from the tracker
+2. **Mark all tiers broken** — ensures the next cascade cycle can freely rebalance
+3. **Load file content** — ensures `FileContext` has content for all selected files so real hashes and token counts can be computed
+4. **Re-initialize from reference graph** — calls `initialize_from_reference_graph()`, placing every indexed file as a `symbol:` (code mode) or `doc:` (document mode) entry across L0-L3 via the clustering algorithm described in § Initialization from Reference Graph
+5. **Measure tokens** — runs `_measure_tracker_tokens()` to fill in real token counts and signature hashes for the placed index entries
+6. **Swap selected files: `symbol:`/`doc:` → `file:`** — for each selected file found in the index, the `symbol:`/`doc:` entry is replaced by a `file:` entry **at the same tier** the index entry landed in, with the full file content, content-based hash, and real token count. This enforces the "a file never appears twice" invariant — selected files become full-content `file:` entries in cached tiers rather than landing in ACTIVE
+7. **Distribute orphan selected files** — selected files not present in the primary index (non-source files like `.md`, `.json`, images, or files the index couldn't parse) are distributed across L1/L2/L3 using greedy bin-packing by current tier token count. Without this step, orphans would default to ACTIVE and defeat the purpose of rebuild
+8. **Re-seed `system:prompt`** — placed into L0 with the same hash/token logic used at startup
+9. **Re-seed cross-reference items** — if cross-reference mode is active, `_enable_cross_reference()` is called to rebuild those entries
+10. **Piggyback history graduation** — since rebuild is already disrupting L3 by repopulating it, history entries graduate for free under the normal piggyback rule (§ History Graduation). The newest messages totalling up to `cache_target_tokens` stay in ACTIVE as the verbatim window; older messages graduate to L3 with `entry_n = 3`
+11. **Mark trackers as initialized** — sets `_stability_initialized = True` so subsequent chat requests skip the init path
+
+### What Rebuild Does NOT Do
+
+- **No call to `_update_stability()`** — the deterministic placement computed during rebuild IS the final state. Running `_update_stability()` would cascade and demote underfilled tiers, undoing the placement. The next real chat request runs `_update_stability()` normally and the rebuilt tiers behave identically to any other tier state
+- **No change to selected files** — the user's file selection (`_selected_files`) is untouched; only how those selections are tracked in tiers changes
+- **No change to session state** — history content, session ID, and review state are preserved
+- **No persistence** — like startup initialization, the rebuilt state lives only in memory and will be recomputed on next startup
+
+### Orphan File Handling
+
+In code mode, the primary index is `SymbolIndex._all_symbols`, which only contains source files the tree-sitter parsers recognize (`.py`, `.js`, `.c`, etc.). Selected markdown, JSON, config, and other non-source files are not in this index. Without special handling they would bypass tier placement entirely and land in ACTIVE. Rebuild's second-pass orphan distribution addresses this by placing them in L1/L2/L3 via the same greedy bin-packing used for clustered initialization, tracked by current tier token count so distribution stays balanced.
+
+In document mode the symmetric situation applies — `.py`, `.js`, etc. files selected alongside documents become orphans in the doc index and get the same treatment.
+
+### History Graduation Detail
+
+Rebuild is treated as a disruptive event equivalent to "L3 is already being rebuilt this cycle", matching the piggyback condition in § History Graduation. This lets rebuild preempt the normal `cache_target_tokens`-threshold wait and graduate history immediately. The verbatim window calculation walks newest → oldest, accumulating `count_message(msg)` tokens until the next message would exceed `cache_target_tokens`. Everything newer stays in ACTIVE; everything older graduates to L3.
+
+If `cache_target_tokens = 0` (history-stays-active-permanently mode), no history graduates regardless of rebuild.
+
+### Example
+
+After rebuild on a repo with 126 selected files (39 source, 87 non-source) and 67 history messages:
+
+```
+Tier init: 3 L0, 12 L1, 12 L2, 12 L3 (39 total, 27 orphans)
+Measured tokens for 36 tracker items
+Rebuild selected-file placement: 39 via index, 87 as orphans (not in symbol: index), 126 total placed
+Rebuild graduated 66 history messages to L3 (verbatim window: 1 most recent, ~251 tokens)
+Cache rebuild (code): 40 → 194 items | L0=4 L1=31 L2=48 L3=110 ACTIVE=1
+  file: entries distributed — L0=3 L1=31 L2=48 L3=44 ACTIVE=0
+```
+
+The single ACTIVE item is the most recent history message (the live verbatim window). All 126 selected files are in cached tiers, and all but one history message graduated to L3.
+
+### When to Use Rebuild
+
+- After selecting a large working set at the start of a session, to avoid many graduation cycles
+- After a mode switch that populated the tracker from an empty state
+- When the cache viewer shows most content in ACTIVE and the user wants to force re-distribution
+- For debugging tier placement — rebuild reproduces a fresh initialization state
+
+Rebuild is **not** needed during normal use — tiers evolve correctly through the standard stability cycle. It is a user-facing convenience, not a required maintenance step.
+
+### RPC Response
+
+`rebuild_cache()` returns:
+
+```pseudo
+{
+    status: "rebuilt",
+    mode: "code" | "doc",
+    items_before: int,           // tracker size before rebuild
+    items_after: int,            // tracker size after rebuild
+    files_distributed: int,      // total file: entries created
+    tier_counts: {L0, L1, L2, L3, ACTIVE},
+    file_tier_counts: {L0, L1, L2, L3, ACTIVE},
+    message: str,                // human-readable summary
+}
+```
+
+The frontend uses `message` for the toast notification and logs the tier counts. Errors return `{error: str}` with no side effects (rebuild is all-or-nothing — if `initialize_from_reference_graph` fails, the tracker is left in whatever intermediate state existed, which is acceptable because the next chat request's `_update_stability` will repair it).
+
+### Localhost-Only
+
+`rebuild_cache()` is restricted to the localhost host (checked via `_check_localhost_only()`). Remote collaborators cannot trigger a rebuild because it affects the shared LLM cache state for the entire session. The button does not appear in the Cache sub-view for non-localhost participants.
+
 ## Cross-Reference Mode
 
 A UI toggle lets the user add the *other* mode's index alongside the primary one:
@@ -334,3 +424,9 @@ When compaction runs, all `history:*` entries are purged from the tracker. Compa
 - History purge after compaction removes all `history:*` entries from tracker
 - Deselected `file:*` items removed during Phase 1 processing (not a separate phase); `symbol:*`/`doc:*` items persist
 - Multi-request sequences: new → active → graduate → promote → demote on edit → re-graduate
+- Rebuild preserves `history:*` entries but wipes all other tracker items before re-initializing
+- Rebuild swaps selected files' `symbol:`/`doc:` entries to `file:` entries at the same tier (no ACTIVE dumping)
+- Rebuild distributes orphan selected files (not in primary index) across L1/L2/L3 via token-load bin-packing
+- Rebuild graduates older history to L3 via piggyback, keeping only the most recent `cache_target_tokens` in ACTIVE
+- Rebuild does not call `_update_stability()` — deterministic placement is the final state
+- Rebuild is localhost-only; remote participants receive `{error: "restricted"}`
