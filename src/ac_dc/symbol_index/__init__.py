@@ -6,6 +6,7 @@ formatter, and orchestrator land in subsequent sub-layers.
 Governing spec: ``specs4/2-indexing/symbol-index.md``.
 """
 
+from ac_dc.symbol_index.cache import SymbolCache
 from ac_dc.symbol_index.models import (
     CallSite,
     FileSymbols,
@@ -24,6 +25,7 @@ __all__ = [
     "Import",
     "LANGUAGE_MAP",
     "Symbol",
+    "SymbolCache",
     "TreeSitterParser",
     "language_for_file",
 ]
