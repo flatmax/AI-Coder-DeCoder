@@ -3,6 +3,12 @@
 Two surfaces that consume the same backend context-breakdown data to show different perspectives on token usage and cache state: the **Context tab** (with Budget and Cache sub-views, persistent while visible) and the **Token HUD** (floating transient overlay triggered after each LLM response). Also covers the terminal HUD printed server-side after each response.
 ## Shared Backend
 Both the Context tab and the Token HUD call the same breakdown RPC. Shared capabilities:
+
+### Per-Context-Manager Breakdown
+
+The breakdown RPC reports on a single context manager. In single-agent operation this is the user-facing context manager — the only instance that exists. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) creates additional context managers; the breakdown RPC accepts an optional agent ID parameter to target a specific one, defaulting to the user-facing context when absent.
+
+The Context tab and Token HUD are display-only; they do not drive agent execution. UI decisions (show one aggregate HUD, show per-agent HUDs, or let the user select) are UI concerns deferred to the agent-mode implementation. The backend contract is already agent-ready — the breakdown dispatches by context manager identity, not by session global state.
 ### FileContext Sync Before Breakdown
 - Before computing the breakdown, the server synchronizes the in-memory file context with the current selected-files list
 - Removes files no longer selected, loads files newly selected

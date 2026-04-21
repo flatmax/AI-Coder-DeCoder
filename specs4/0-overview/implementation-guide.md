@@ -102,6 +102,82 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
 | Dependency quirks | `specs3/2-code-analysis/symbol_index.md` (tree-sitter TypeScript), `specs3/5-webapp/diff_viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
 
+## Architectural Changes from specs3
+
+specs4 deliberately changes several architectural positions from specs3. These are **behavioral contracts** in specs4 — a reimplementer must preserve them even when specs3 describes an older pattern at the concrete level. When specs3 and specs4 disagree on any of the points below, specs4 wins.
+
+Each change was made to enable a future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) without refactoring the foundation. All changes are zero-cost in single-agent operation — they add an invariant the existing code path already happens to satisfy.
+
+### Repository — Per-Path Write Mutex
+
+- **specs3 position:** Writes are implicitly single-threaded; no mutex described
+- **specs4 position:** The repository layer maintains an internal per-path mutex for write operations. Concurrent writes to different paths proceed in parallel; concurrent writes to the same path serialize
+- **See:** [repository.md — Per-Path Write Serialization](../1-foundation/repository.md#per-path-write-serialization)
+
+### Edit Pipeline — Re-Entrant
+
+- **specs3 position:** Apply pipeline described as sequential; no statement about concurrent invocation
+- **specs4 position:** The apply pipeline is safe to invoke concurrently for different edit-block batches. Per-file writes serialize via the repository's per-path mutex
+- **See:** [edit-protocol.md — Concurrent Invocation](../3-llm/edit-protocol.md#concurrent-invocation)
+
+### Context Manager — Multiple Instances Allowed
+
+- **specs3 position:** The context manager is described as the singular state holder for an LLM session
+- **specs4 position:** The context manager is not a singleton. Multiple instances may coexist under one LLM service; each owns its own history, file context, stability tracker, and prompt state
+- **See:** [context-model.md — Multiple Instances](../3-llm/context-model.md#multiple-instances)
+
+### Stability Tracker — Per-Context-Manager, Not Per-Mode
+
+- **specs3 position:** "Two independent tracker instances — one for code mode, one for document mode"
+- **specs4 position:** A tracker instance is owned by its context manager. Mode switching swaps between two trackers that the user-facing context manager points at. Additional context managers (e.g. parallel agents) each hold additional trackers. Tracker identity is scoped to the owning context manager, not to session-global mode state
+- **See:** [cache-tiering.md — Tracker Instance Scope](../3-llm/cache-tiering.md#tracker-instance-scope), [context-model.md — Stability Tracker Attachment](../3-llm/context-model.md#stability-tracker-attachment)
+
+### Single-Stream Guard — User-Initiated Only
+
+- **specs3 position:** "Only one LLM streaming request may be active at a time"
+- **specs4 position:** Only one **user-initiated** streaming request at a time. A user-initiated request may spawn additional internal streams (e.g. parallel agents) that share the parent's request ID as a prefix and are not blocked by the guard
+- **See:** [streaming.md — Multiple Agent Streams Under a Parent Request](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request), [rpc-transport.md — Concurrency](../1-foundation/rpc-transport.md#concurrency)
+
+### Chunk Routing — Keyed by Request ID
+
+- **specs3 position:** Passive-stream adoption described as a singleton flag; the chat panel tracks one passive stream at a time
+- **specs4 position:** Streaming state (content buffer, passive flag, streaming card) is keyed by request ID. Single-stream operation has at most one active key; multi-stream operation (parallel agents) produces N keyed states. Request IDs are the multiplexing primitive — the transport never assumes a singleton stream
+- **See:** [chat.md — Streaming State Keyed by Request ID](../5-webapp/chat.md#streaming-state-keyed-by-request-id), [streaming.md — Chunk Delivery Semantics](../3-llm/streaming.md#chunk-delivery-semantics)
+
+### Agent Conversations — Transient
+
+- **specs3 position:** No position (parallel agents described only as future work)
+- **specs4 position:** Agent conversations are never persisted to JSONL, never included in user-facing history, never counted toward compaction thresholds. Only the original user request and the final assessor synthesis or applied edits persist
+- **See:** [history.md — Scope: User-Facing History Only](../3-llm/history.md#scope-user-facing-history-only)
+
+### Indexes — Read-Only Snapshots Within a Request
+
+- **specs3 position:** Re-indexing timing described procedurally ("before each LLM call") without an explicit snapshot contract
+- **specs4 position:** Re-indexing happens only at request boundaries. Within the execution window of a single request, indexes are treated as read-only snapshots — symbol map queries, per-file block lookups, and reference graph queries all return consistent data. Background keyword enrichment never mutates the snapshot mid-request
+- **See:** [symbol-index.md — Snapshot Discipline](../2-indexing/symbol-index.md#snapshot-discipline), [document-index.md — Snapshot Discipline](../2-indexing/document-index.md#snapshot-discipline)
+
+### HUD and Context Tab — Per-Context-Manager Dispatch
+
+- **specs3 position:** Breakdown RPC implicitly reports on the single session context
+- **specs4 position:** Breakdown RPC targets a specific context manager, defaulting to the user-facing one. Single-agent operation looks identical to specs3 because there's only one context manager. Multi-agent operation can report per-agent breakdowns without transport-level changes
+- **See:** [viewers-hud.md — Per-Context-Manager Breakdown](../5-webapp/viewers-hud.md#per-context-manager-breakdown)
+
+### Summary Table
+
+| Area | specs3 | specs4 |
+|---|---|---|
+| Repository writes | Implicit single-threaded | Per-path mutex |
+| Edit apply pipeline | Sequential | Re-entrant, per-file serialization |
+| Context manager | Singular | Multiple instances allowed |
+| Stability tracker | Per-mode (two total) | Per-context-manager (N possible) |
+| Single-stream guard | Any LLM request | User-initiated requests only |
+| Chunk routing | Singleton passive flag | Keyed by request ID |
+| Agent conversations | Unspecified | Transient, not persisted |
+| Index mutation | Procedural timing | Read-only snapshots within a request |
+| HUD breakdown | Session-global | Per-context-manager |
+
+**What this means for the reimplementer:** The specs3 descriptions are accurate for the previous implementation's behavior, but the specs4 contracts are stricter. Implement the specs4 invariants from the start. They cost nothing in single-agent operation and mean the foundation does not need to be refactored when agent mode is added. Conversely, if you follow specs3 literally on these points, you will later discover the foundation layers need reshaping to support agent mode — exactly the situation specs4's abstraction raise was meant to prevent.
+
 ## Build Order Suggestion
 
 Bottom-up, matching specs4's layer numbering:

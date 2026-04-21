@@ -13,6 +13,14 @@ The context manager is the central state holder for an LLM session. It owns the 
 - Coordinate with the token counter, stability tracker, and history compactor
 - Enforce token budget via three layers of defense
 
+## Multiple Instances
+
+The LLM service owns one user-facing context manager per session. The context manager is not a singleton — the service may hold additional context manager instances for internal purposes.
+
+A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) creates one context manager per agent, each with its own conversation history, file context, and stability tracker. Agent context managers are siblings of the user-facing one; they share read-only access to the indexes and repository but never share mutable conversation state.
+
+The "active" context manager is the one feeding the user-facing prompt assembly. In single-agent operation this is the only instance. In parallel-agent mode, each agent's prompt assembly uses its own context manager.
+
 ## Mode Enum
 
 - Two modes: code (symbol index feeds context) and document (doc index feeds context)
@@ -137,6 +145,7 @@ Three layers of defense applied before and after LLM requests.
 - A setter allows attaching or replacing the stability tracker instance
 - Used during mode switching to swap between the code-mode tracker and the document-mode tracker
 - Each mode maintains an independent tracker instance; switching back preserves state
+- Each context manager holds its own tracker — trackers are per-context-manager, not per-mode. Mode switching happens to swap which of two trackers the user-facing context manager points at. Parallel-agent contexts each hold additional tracker instances, fully independent of the user-facing ones.
 
 ## Lifecycle
 
@@ -172,3 +181,4 @@ Three layers of defense applied before and after LLM requests.
 - System prompt swap is reversible — the original prompt is always restored on review exit or mode switch-back
 - Binary files are never loaded into file context
 - Path traversal attempts never produce a successful file context entry
+- Context manager instances do not share mutable state; multiple instances may coexist under one LLM service without interference

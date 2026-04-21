@@ -22,6 +22,14 @@ The chat panel renders conversation messages, handles streaming display, manages
 - When a chunk arrives with a request ID the client did not initiate, adopt the stream as passive
 - Sets current request ID and a passive-stream flag
 - On completion of a passive stream, prepend the user message from the result (since the passive client didn't add it optimistically)
+
+### Streaming State Keyed by Request ID
+
+Streaming state (current content buffer, passive flag, streaming card DOM node) is keyed by request ID, not held as a singleton. In single-stream operation, there is at most one active key at a time; the singleton-like behavior is an emergent property, not a structural assumption.
+
+A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) produces N concurrent streams under a parent user-request ID, each with a child ID. The chat panel renders N streaming cards, keyed by child ID. Chunk routing dispatches each chunk to its card by matching its request ID against the keyed state map.
+
+The transport never assumes a singleton stream — every chunk carries the exact ID of the stream it belongs to (see [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics)). The chat panel's routing layer is the frontend counterpart to that contract.
 ## Markdown Rendering
 - Dedicated Marked instance for chat, separate from the diff-viewer preview instance
 - Code renderer override — language label, copy button, syntax highlighting

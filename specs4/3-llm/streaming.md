@@ -15,8 +15,14 @@ The full lifecycle of a user message: UI submission → file validation → mess
 ## Server Guards
 
 - Reject if server is still initializing (deferred init not complete)
-- Reject if another stream is active (single active stream policy)
+- Reject if another **user-initiated** stream is active (single user-initiated stream policy)
 - Capture main event loop reference on the RPC entry thread, before launching background task
+
+### Multiple Agent Streams Under a Parent Request
+
+The single-stream guard gates user-initiated requests, not internal streams. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) spawns N internal LLM streams under a single user-initiated request. These internal streams share the parent's request ID as a prefix and are distinguished by child IDs (e.g. `{parent-id}-agent-0`). The guard does not block them because they are not user-initiated — they are internal machinery serving one user intent.
+
+Request IDs are the multiplexing primitive. All server-push events carry the exact ID of the stream they belong to. The transport never assumes a singleton stream.
 
 ## Background Task Overview
 
@@ -111,6 +117,7 @@ The full lifecycle of a user message: UI submission → file validation → mess
 - Dropped or reordered chunks are harmless — the latest chunk contains a superset of prior content
 - Reconnection is simple — no delta replay protocol needed
 - O(n²) bandwidth for the stream is acceptable since chunks arrive faster than the LLM generates
+- Each chunk carries the exact request ID of its stream; browser routing uses the ID to demultiplex when multiple streams are active concurrently (e.g. parallel agents)
 
 ## Worker Thread → Event Loop Bridge
 
@@ -230,7 +237,8 @@ Three reports printed after each response:
 
 ## Invariants
 
-- Only one active stream at a time
+- Only one user-initiated stream at a time; internal agent streams may coexist under a parent request ID
+- All server-push events carry the exact request ID of the stream they belong to — the transport never assumes a singleton stream
 - User message is persisted before LLM call begins — mid-stream crashes preserve user intent
 - Assistant message is persisted after LLM call completes — no partial assistant messages in history
 - The captured event loop reference is always usable from the worker thread

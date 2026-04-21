@@ -100,6 +100,14 @@ A tree-sitter based code analysis engine. Extracts classes, functions, variables
 - This handles files deleted from disk or removed from git tracking between requests
 - Must run before the stability tracker builds its active-items list, or deleted files will re-enter the tracker
 
+## Snapshot Discipline
+
+Re-indexing happens only at request boundaries — specifically, at the start of each streaming request before prompt assembly. Within the execution window of a single request, the index is treated as a **read-only snapshot**: symbol map queries, per-file block lookups, and reference graph queries all return consistent data.
+
+This matters for future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) — multiple agents executing within one user request share the same snapshot. Agents never see mid-execution re-indexing. Re-indexing between iterations (planner → agents → assessor → next planner) uses the standard request-boundary mechanism; no special parallel-agent logic is needed.
+
+The index is not thread-safe for concurrent writes. Only one re-indexing pass runs at a time, and it runs on the event loop thread (or in an executor with a barrier). Concurrent reads from multiple threads within the execution window are safe because the index is not being mutated during that window.
+
 ## LSP Queries
 
 - Hover — symbol signature, parameters, return type

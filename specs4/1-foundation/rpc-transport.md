@@ -56,7 +56,9 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 
 ## Concurrency
 
-- Only one LLM streaming request is active at a time (enforced by the LLM service)
+- Only one user-initiated LLM streaming request is active at a time (enforced by the LLM service)
+- A user-initiated request may spawn additional internal streams (e.g. parallel agents) that share the parent's request ID as a prefix and are distinguished by child IDs — these coexist under the parent request and are not blocked by the single-stream guard (see [streaming.md](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request))
+- Request IDs are the multiplexing primitive — the transport never assumes a singleton stream; every server-push event carries the exact ID of the stream it belongs to
 - Non-streaming calls are served concurrently
 - All state is global across connected clients; file selection and streaming are broadcast to all admitted remotes
 
@@ -69,6 +71,7 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 ## Invariants
 
 - Every server-push event reaches all admitted clients unless explicitly filtered
+- Every server-push event carries the exact request ID of the stream it belongs to; the transport never assumes a singleton stream
 - A captured event-loop reference is always usable from a worker thread
 - A reconnecting client never receives duplicate state that would double-apply history or selections
 - Methods on registered objects must return a value (server awaits every browser-side call)

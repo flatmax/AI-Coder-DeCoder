@@ -159,6 +159,14 @@ A document-oriented analog to the symbol index. Extracts structural outlines fro
 - Same N-value tracking, tier graduation, and cascade as code symbols
 - Documents change less frequently than code, so they tend to stabilize at higher tiers quickly
 
+## Snapshot Discipline
+
+Re-indexing happens only at request boundaries. Within the execution window of a single request, the document index is treated as a **read-only snapshot** — outline queries, per-file block lookups, and reference graph queries all return consistent data.
+
+Background keyword enrichment runs outside any request's execution window. A request that starts while enrichment is in progress sees whatever outlines are currently cached (enriched or unenriched); enrichment completions never mutate the snapshot mid-request.
+
+This matters for future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) — multiple agents within one user request share the same snapshot. Re-indexing between iterations uses the standard request-boundary mechanism.
+
 ## Invariants
 
 - A file's unchanged outline is never re-extracted

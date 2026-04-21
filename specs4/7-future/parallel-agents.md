@@ -2,6 +2,24 @@
 
 **Status: Not for implementation.** Speculative design for a future parallel LLM execution architecture. Described here for design continuity; do not implement as part of the initial clean-room build.
 
+## Foundation Requirements
+
+Several specs4 invariants exist specifically to make this future mode implementable without refactoring. A reimplementer building the initial single-agent system should verify these are preserved:
+
+| Invariant | Spec | Purpose |
+|---|---|---|
+| Per-path write mutex in the repository layer | [repository.md](../1-foundation/repository.md#per-path-write-serialization) | Serializes concurrent writes to the same file; zero cost in single-agent operation |
+| Apply pipeline is re-entrant | [edit-protocol.md](../3-llm/edit-protocol.md#concurrent-invocation) | Safe to invoke from N threads for different edit-block batches |
+| Context manager instances are independent | [context-model.md](../3-llm/context-model.md#multiple-instances) | Multiple coexisting instances share no mutable state |
+| Stability tracker is per-context-manager | [context-model.md](../3-llm/context-model.md#stability-tracker-attachment) | Trackers scope to their owning context manager, not to modes |
+| Single-stream guard gates user-initiated requests only | [streaming.md](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request) | Internal agent streams coexist under a parent request ID |
+| Request IDs are the multiplexing primitive | [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics) | All server-push events route by exact request ID |
+| Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
+| Agent conversations are transient | [history.md](../3-llm/history.md#scope-user-facing-history-only) | Never persisted to JSONL; only user-facing exchanges and final outputs persist |
+| Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
+
+None of these invariants cost anything in single-agent operation. Preserving them in the initial build means agent mode can be added later without refactoring the foundation layers.
+
 AC⚡DC could execute multiple LLM agents in parallel to accelerate large tasks. A planner decomposes a user request into independent sub-tasks, each agent executes its sub-task, and an assessor reviews the combined result. The cycle repeats until the task is complete or the user intervenes.
 
 ## Core Principle: Anchor-Based Non-Overlapping Edits

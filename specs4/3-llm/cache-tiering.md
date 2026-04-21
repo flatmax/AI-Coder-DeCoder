@@ -12,6 +12,14 @@ Stability-based tiering of prompt content to align with provider cache breakpoin
 - History messages — conversation pairs
 - URL content — fetched web pages, GitHub repos, documentation (design target; initial implementation may always include URLs in the uncached section)
 
+## Tracker Instance Scope
+
+A stability tracker instance is owned by its context manager, not shared globally across the session. Each context manager holds exactly one tracker; mode switching swaps between two tracker instances that the user-facing context manager alternates between (code-mode tracker and document-mode tracker), each preserving its own state.
+
+Tracker instances are never singletons. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) creates additional context managers for internal agents, each with its own independent tracker. Trackers do not communicate with each other — they scope to their owning context manager.
+
+This spec describes the behavior of a single tracker. Everything below applies independently to each tracker instance.
+
 ## Tier Structure
 
 - L0 — most stable — entry N high, terminal (no further promotion)

@@ -14,6 +14,12 @@ The repository layer wraps version control and file I/O. It is exposed to the br
 - Binary detection (null bytes in first 8KB)
 - Delete
 
+### Per-Path Write Serialization
+
+The repository layer maintains an internal per-path mutex for write operations. Concurrent writes to different paths proceed in parallel; concurrent writes to the same path are serialized. The physical read → modify → write cycle (used by the edit-apply pipeline) acquires the lock for its target path and releases it after the write completes.
+
+In single-agent operation, the lock is effectively never contended — only one agent writes at a time. The mutex exists so the repository layer's contract is safe for a future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) where N agents may generate edits concurrently. Implementing the lock now has zero cost in single-agent operation and unblocks the parallel case without refactoring the apply pipeline later.
+
 ## Git Staging
 
 - Stage files (git add)
@@ -97,3 +103,4 @@ The repository layer wraps version control and file I/O. It is exposed to the br
 - Binary files are never returned as text
 - File tree operations reflect the current git state without caching stale data
 - Rename operations preserve git history for tracked files
+- Writes to the same path are serialized via a per-path mutex; writes to different paths proceed in parallel

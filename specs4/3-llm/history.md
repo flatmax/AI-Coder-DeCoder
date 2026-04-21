@@ -10,6 +10,23 @@ Two coupled stores for conversation history: an in-memory working copy used for 
 - Lines that fail JSON parse on load are skipped with a warning (handles mid-write crashes)
 - In-memory store — the context manager's conversation history (see context-model)
 
+### Scope: User-Facing History Only
+
+The persistent store holds only user-facing conversation — exchanges between the user and the primary LLM. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) generates additional internal conversations between the planner, agents, and assessor. These internal exchanges are **transient** — never persisted to JSONL, never included in the user-facing history, never counted toward compaction thresholds.
+
+What does get persisted from agent mode:
+
+- The original user request (as a user message)
+- The final assessor synthesis and/or applied edits (as a system event message or assistant message)
+
+What does not get persisted:
+
+- Planner decomposition output
+- Per-agent conversation turns
+- Assessor intermediate reasoning
+
+Rationale — agent conversations are internal machinery serving one user intent. Persisting them would pollute the user's session history with scaffolding that is meaningless out of context and would inflate token counts on session reload. The user cares about what was accomplished, not how the agents coordinated.
+
 ## Message Schema
 
 - Unique message ID — timestamp + short random suffix

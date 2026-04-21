@@ -140,6 +140,12 @@ Each result includes: file path, status, human-readable message, machine-readabl
 - File tree refreshed on client
 - Results included in completion event
 
+## Concurrent Invocation
+
+The apply pipeline is safe to invoke concurrently for different edit-block batches. Per-file write serialization is provided by the repository layer's per-path mutex (see [repository.md](../1-foundation/repository.md#per-path-write-serialization)) — two concurrent batches targeting different files proceed in parallel; two targeting the same file serialize at the write step.
+
+In single-agent operation, only one apply pipeline invocation runs at a time. The re-entrancy guarantee exists so a future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) can invoke the pipeline from N threads concurrently without refactoring. The anchor-based validation model already handles the failure case naturally — if two agents' edits target overlapping text, one succeeds and the other fails with an ambiguous-anchor or anchor-not-found diagnostic, which feeds into the assessment step.
+
 ## Review Mode Read-Only
 
 - Review mode skips all edit application entirely
@@ -165,3 +171,4 @@ Each result includes: file path, status, human-readable message, machine-readabl
 - File modifications are confined to files within the repository root
 - A failed edit never partially writes — the file is left unchanged
 - Sequential edits on the same file preserve the order in which the LLM produced them
+- The apply pipeline is safe to invoke concurrently for different edit-block batches; per-file writes serialize via the repository's per-path mutex
