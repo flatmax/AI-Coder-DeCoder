@@ -18,12 +18,14 @@ from ac_dc.symbol_index.parser import (
     TreeSitterParser,
     language_for_file,
 )
+from ac_dc.symbol_index.reference_index import ReferenceIndex
 
 __all__ = [
     "CallSite",
     "FileSymbols",
     "Import",
     "LANGUAGE_MAP",
+    "ReferenceIndex",
     "Symbol",
     "SymbolCache",
     "TreeSitterParser",

@@ -306,11 +306,70 @@ Notes from delivering the C++ extractor:
 
 - **Using declarations discard scope when inside a namespace.** A `using foo::bar;` at file top level produces a file-level Import. The same declaration inside `namespace mymod { ... }` is namespace-scoped, not file-scoped — surfacing it as a file import would be misleading. `_populate_namespace_body` builds a synthetic `FileSymbols` to collect symbols via the top-level dispatcher, then only copies `.symbols` onto the parent namespace (discarding `.imports`). This is a deliberate correctness trade-off — the namespace contents are preserved, just the import-scope semantics are lost, which is better than the alternative.
 
-### 2.3 — Cache — **planned**
+### 2.3 — Cache — **delivered**
 
-`src/ac_dc/base_cache.py` — abstract `BaseCache` with mtime-based get/put/invalidate. `src/ac_dc/symbol_index/cache.py` — `SymbolCache(BaseCache)` storing `FileSymbols` in memory, keyed by path, invalidated on mtime change. Doc index will later extend the same base.
+- `src/ac_dc/base_cache.py` — `BaseCache[T]` generic abstract class. Mtime-based `get`/`put`/`invalidate`/`clear`, path normalisation matching `Repo._normalise_rel_path`, signature-hash accessor, hook points for subclasses (`_compute_signature_hash`, `_decorate_entry`, `_persist`, `_remove_persisted`, `_clear_persisted`, `_load_all`). Persistence hooks catch OSError and log — in-memory state is always authoritative even when disk writes fail.
+- `src/ac_dc/symbol_index/cache.py` — `SymbolCache(BaseCache[FileSymbols])`. In-memory only (tree-sitter re-parse is cheap). Overrides `_compute_signature_hash` to produce a SHA-256 digest over structural data: imports by module, symbols by name/kind/params/bases/return-type/async-flag/instance-vars, recursively including children. Excludes ranges, call sites, and file paths. Adds a `cached_files` alias for readability.
+- `tests/test_base_cache.py` — covers path normalisation, get/put round-trip, mtime mismatch handling, invalidate/clear, introspection (`cached_paths`, `has`, `get_signature_hash`), signature-hash subclass hook, persistence-hook contract (including OSError swallowing).
+- `tests/test_symbol_index_cache.py` — covers round-trip of real FileSymbols, hash shape (64-char hex, determinism), structural sensitivity (name/kind/params/type/vararg/bases/return-type/async/children/instance-vars/imports/ordering), structural insensitivity (ranges, call sites, import lines, import aliases), and the `cached_files` alias contract.
+- `src/ac_dc/symbol_index/__init__.py` updated to re-export `SymbolCache`.
 
-Next-session pickup: start with `BaseCache` in `src/ac_dc/base_cache.py`. The class is shared between the symbol index and the (later) document index, so it lives at the package root rather than inside `symbol_index/`. See specs4/2-indexing/symbol-index.md#caching and specs4/2-indexing/document-index.md#disk-persistence — the symbol cache is in-memory only (fast re-parse), the doc cache adds disk sidecars (expensive keyword enrichment). `BaseCache` should hide the storage mechanism from callers; subclasses override `_persist` / `_load` or stay in-memory by leaving them as no-ops.
+Notes from delivery:
+
+- The base class is generic over the entry type so subclasses get typed accessors. SymbolCache parameterises over `FileSymbols`; the future DocCache will parameterise over `DocOutline`.
+- Persistence hooks are no-ops by default. SymbolCache leaves them alone — tree-sitter re-parse is fast enough that session-scoped caching is sufficient. DocCache will override them because KeyBERT enrichment is expensive (~500ms per file) and worth persisting across restarts.
+- Signature hash explicitly excludes `range` tuples, call sites, and file paths. An unrelated edit earlier in the file shifts every following symbol's line number; if ranges were hashed, the tracker would demote every file on every edit. Call sites are body-level details that a refactor moving code between methods shouldn't flag as structural. File paths are already the cache key.
+- A failing-test check caught an initial over-zealous insensitivity rule — the first draft excluded import order from the hash. Reordered imports are genuinely a structural change (even if rare), and the compact formatter is order-sensitive. The test was corrected to assert order-sensitivity and the implementation matched.
+
+### 2.4 — Reference index — **delivered**
+
+- `src/ac_dc/symbol_index/reference_index.py` — `ReferenceIndex`. Builds a cross-file reference graph from pre-resolved `FileSymbols`. Queries: `references_to_symbol(name)` (call-site locations by symbol name), `files_referencing(path)` (distinct incoming referrers), `file_dependencies(path)` (distinct outgoing targets), `file_ref_count(path)` (weighted incoming reference count, sums call sites + imports), `bidirectional_edges()` (canonical `(lo, hi)` pairs that reference each other mutually), `connected_components()` (union-find over the bidirectional edges, isolated files appear as singletons).
+- `tests/test_symbol_index_reference_index.py` — 7 test classes covering empty inputs, call-site edges (including nested-symbol traversal via `all_symbols_flat`), import edges, rebuild idempotence, bidirectional edges (canonical ordering, mixed call/import satisfaction), connected components (singletons, pairs, transitive chains, one-way non-clustering), and `references_to_symbol` (empty for unknown, per-site granularity, returns copy not view).
+
+Design decisions pinned in the module docstring:
+
+- **Input is pre-resolved.** Call sites must carry `target_file`; imports must carry `resolved_target` (via setattr in Layer 2.4 tests; the Layer 2.5 resolver will populate the attribute directly). The index performs no resolution itself — keeps it single-purpose and lets the resolver evolve independently.
+- **Edges are weighted but the graph is collapsed.** Multiple references from A to B (several call sites, or an import plus calls) accumulate into one weighted edge. `file_ref_count` returns the total weight; `files_referencing` returns the distinct referrer set. Both are needed — the formatter wants the count for `←N` annotations, clustering wants the set.
+- **Same-file call sites populate the symbol-name index but not the file edge.** Without this, every file with internal calls would appear to reference itself, which would pollute the stability tracker's clustering pass.
+- **Bidirectional edges only, for clustering.** `connected_components` uses union-find over mutual references only. One-way references (A imports B, B doesn't touch A) aren't a strong enough signal to cluster on — clustering noise would hurt the tier tracker more than losing weak signals would.
+- **Isolated files appear as singleton components.** The orchestrator's clustering pass must see every file or newly-created files would never register in the tracker's init pass. The index records all input files in `_all_files` and treats missing-from-edges files as trivial components.
+- **Rebuild is fully idempotent.** All state (`_refs_to_symbol`, `_incoming`, `_outgoing`, `_all_files`) is reset at the start of `build()`. The orchestrator calls `build()` after every re-index pass; accumulating state across rebuilds would inflate counts and retain edges to deleted files.
+
+Deferred to Layer 2.5 (import resolver):
+
+- The index reads `getattr(imp, "resolved_target", None)` to tolerate pre-resolver Import objects. Once the resolver lands and sets the attribute during extraction post-processing, tests can drop the `_with_resolved_import` setattr helper.
+
+### 2.5 — Import resolver — **planned**
+- Builtin identifier filtering lives in the extractors (each per-language extractor has its own builtin set, already filtering call-site output before it reaches the reference index). No filter in the reference index itself — it trusts its input.
+
+`src/ac_dc/symbol_index/import_resolver.py` — maps import statements to repo-relative file paths.
+
+Per-language rules (from specs4/2-indexing/symbol-index.md#import-resolution):
+
+- Python — absolute paths, package `__init__.py`, relative paths with level-aware parent traversal
+- JavaScript/TypeScript — relative resolution with extension probing, `index.*` fallback for directories
+- C/C++ — `#include` search across repo
+
+Cache the resolution graph at the module level so repeated import queries are O(1). Invalidated when new files are detected.
+
+### 2.6 — Compact formatter — **planned**
+
+`src/ac_dc/base_formatter.py` — `BaseFormatter` with path-aliasing and reference-count integration.
+
+`src/ac_dc/symbol_index/compact_format.py` — `CompactFormatter(BaseFormatter)` for the context and LSP variants of the symbol map. The LSP variant adds 1-indexed line numbers to each symbol; the context variant omits them to save tokens.
+
+Headers, abbreviations, path aliases, ditto marks, test-file collapsing all per specs4/2-indexing/symbol-index.md#compact-format--symbol-map.
+
+### 2.7 — Orchestrator — **planned**
+
+`src/ac_dc/symbol_index/index.py` — `SymbolIndex` wires parser, extractors, cache, resolver, reference index, and formatter into a single entry point. Methods: `index_file`, `index_repo`, `get_symbol_map`, `get_file_symbol_block`, `get_legend`, `get_signature_hash`, LSP queries.
+
+Main coordination responsibilities:
+
+- Per-file pipeline — check cache, parse, extract, post-process, resolve imports, store
+- Multi-file pipeline — remove stale entries, resolve cross-file call targets, build reference index
+- Two formatter variants — context (no line numbers, default) and LSP (with line numbers)
+- File walker — scan repo for supported extensions, skip hidden/build/`.ac-dc/` directories
 
 ## Resumption protocol
 
