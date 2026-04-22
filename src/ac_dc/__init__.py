@@ -39,4 +39,21 @@ from ac_dc.token_counter import TokenCounter  # noqa: E402
 # reads more naturally as ``from ac_dc import ContextManager``.
 from ac_dc.context_manager import ContextManager, Mode  # noqa: E402
 
-__all__ = ["__version__", "ContextManager", "Mode", "TokenCounter"]
+# Stability tracker — cache tier assignment. Lightweight import;
+# commonly constructed at startup and attached to the context
+# manager.
+from ac_dc.stability_tracker import (  # noqa: E402
+    StabilityTracker,
+    Tier,
+    TrackedItem,
+)
+
+__all__ = [
+    "__version__",
+    "ContextManager",
+    "Mode",
+    "StabilityTracker",
+    "Tier",
+    "TokenCounter",
+    "TrackedItem",
+]

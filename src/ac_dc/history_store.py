@@ -234,8 +234,16 @@ class HistoryStore:
         hash_prefix = hashlib.sha256(
             data_uri.encode("utf-8")
         ).hexdigest()[:12]
-        epoch_ms = int(time.time() * 1000)
-        filename = f"{epoch_ms}-{hash_prefix}{ext}"
+        # Filename is purely content-addressed: same data URI →
+        # same filename, every time. An earlier draft prefixed
+        # the name with an epoch timestamp for chronological sort
+        # order, but that broke idempotence — every call produced
+        # a different filename, so the exists-check never matched
+        # a prior save and duplicates accumulated on disk. The
+        # test suite (test_duplicate_image_deduplicated) pins the
+        # one-file-per-content-hash contract; chronological order
+        # can be recovered from the filesystem mtime if needed.
+        filename = f"{hash_prefix}{ext}"
         path = self._images_dir / filename
 
         if path.exists():
