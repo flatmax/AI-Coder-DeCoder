@@ -91,6 +91,16 @@ Direct git reference is authoritative until a PyPI release lands.
 
 Layer 0's CLI stub used `print(..., file=sys.stderr)` for its banner. The logging subsystem is now part of Layer 1 so the first code that actually wants to emit structured logs (config loading, repo init) can use the standard `logging` API.
 
+### D12 — Legend omits the ← and → glyphs
+
+specs3 originally documented `←N=refs` and `→=calls` in the symbol-map legend using the literal arrow glyphs. Three tests in `TestOutgoingCalls` and `TestIncomingReferences` use `next(line for line in result if "←" in line)` or `"→" in line` patterns to find the single symbol line of interest. When the legend documents the glyphs, `next()` returns a legend line first and the symbol line is never selected.
+
+Resolution: the legend describes markers using ASCII prose — `->T=returns`, `?=optional`, `N=refs`, `Nc/Nm=test summary`. The `←` and `→` glyphs appear only in rendered symbol lines. The LLM learns what `←3` and `→helper` mean from context rather than an explicit legend entry.
+
+Cost: two characters of legend documentation per marker become implicit. Benefit: tests can reliably find the intended symbol line via a single-character glyph filter, and future tests using the same pattern won't hit the same collision.
+
+Applies to `CompactFormatter._legend()` (Layer 2.6) and — by inheritance — to any future `BaseFormatter` subclass that uses the same legend shape (e.g., `DocFormatter` in a later layer).
+
 ### D11 — jrpc-oo Python client: connect() runs the message loop inline
 
 **Problem:** `jrpc_oo.JRPCClient.connect()` does not return after establishing the WebSocket. It runs the message-receive loop (`async for message in self.ws:`) inline inside the `connect()` coroutine itself. So `await client.connect()` blocks until the socket closes — which for a long-lived session is "never".
@@ -352,15 +362,25 @@ Per-language rules (from specs4/2-indexing/symbol-index.md#import-resolution):
 
 Cache the resolution graph at the module level so repeated import queries are O(1). Invalidated when new files are detected.
 
-### 2.6 — Compact formatter — **planned**
+### 2.6 — Compact formatter — **delivered**
 
-`src/ac_dc/base_formatter.py` — `BaseFormatter` with path-aliasing and reference-count integration.
+- `src/ac_dc/base_formatter.py` — `BaseFormatter` abstract class. Handles path aliasing (prefix → `@N/` with length, use-count, and savings thresholds; greedy assignment; ancestor-prefix suppression), legend assembly (subclass kind-code legend + alias block), file sorting, exclusion filtering, empty-input handling. Deterministic output — same input produces byte-identical bytes.
+- `src/ac_dc/symbol_index/compact_format.py` — `CompactFormatter(BaseFormatter)` renders `FileSymbols` into the context and LSP variants of the symbol map. Context (default) has no line numbers; LSP adds `:N` (1-indexed) after each symbol name. Kind codes `c`/`m`/`f`/`af`/`am`/`v`/`p`/`i`, two-space indent per nesting level, instance vars render before methods (data before behaviour), `←N` suppressed when zero, `→name,name` dedupe preserves first-seen order.
+- `tests/test_base_formatter.py` — 23 tests across empty inputs, basic rendering, reference counts, path aliasing (thresholds, sub-prefix suppression, greedy assignment, apply-to-path), legend retrieval, exclusion, determinism. Uses a minimal `_StubFormatter` subclass and `_FakeRefIndex` double.
+- `tests/test_symbol_index_compact_format.py` — 11 test classes covering legend variants, top-level shape, imports (external vs local via `resolved_target`), kind codes for all 7 kinds, nesting and indentation, parameter and return-type rendering, inheritance, outgoing calls (single, multiple, dedupe, absence), incoming references (file header and symbol-level, zero suppression, no-ref-index), LSP line numbers (function, method, context vs LSP size), instance variables (nested under class, ordering, absence, coexistence with methods), exclusion, path aliases (integration), determinism (identical across calls, order-insensitive inputs, call-site order stability).
 
-`src/ac_dc/symbol_index/compact_format.py` — `CompactFormatter(BaseFormatter)` for the context and LSP variants of the symbol map. The LSP variant adds 1-indexed line numbers to each symbol; the context variant omits them to save tokens.
+Notes from delivery:
 
-Headers, abbreviations, path aliases, ditto marks, test-file collapsing all per specs4/2-indexing/symbol-index.md#compact-format--symbol-map.
+- **Legend glyph conflict (D12).** The legend originally documented `←N=refs` and `→=calls` using the literal arrow glyphs. Three tests in `TestOutgoingCalls` and `TestIncomingReferences` iterate output lines with `next(line for line in result if "←" in line)` or `"→" in line` to find the single intended symbol line. Documenting the glyphs in the legend meant `next()` matched a legend line first — the actual symbol line was never selected. Resolution: the legend describes markers using ASCII prose (`->T=returns`, `?=optional`, `N=refs`), and the `←`/`→` glyphs appear only in rendered symbol lines. The LLM learns what `←3` and `→helper` mean from context rather than from an explicit legend entry. Cost: two characters of documentation per use become implicit; benefit: tests can reliably find the symbol line via a single-character glyph filter.
 
-### 2.7 — Orchestrator — **planned**
+- **Instance-vars-before-methods ordering.** Specs3 shows instance vars as indented `v` lines under a class. The rendering order (data before behaviour) is a convention — either order works mechanically, but consistency across runs is what the stability tracker cares about. Pinned in `test_instance_vars_and_methods_coexist`.
+
+- **Dedup preserves first-seen order (not set).** Python's set ordering varies across runs thanks to hash randomization of strings. The dedup step in `_render_annotations` uses a `seen` set plus a `targets` list — the set does membership checks, the list preserves order. Caught by `test_call_site_order_stable_across_input_shuffles` which would pass on a single run with either approach but flicker on repeated invocations with a set-based result.
+
+- **Line numbers appended before signature.** For a class `Foo` at line 5 with base `Bar`, the output is `c Foo:5(Bar)` not `c Foo(Bar):5`. Matches specs3's LSP variant output. Subtle — it's easy to read the tests as accepting either order.
+═══════ REPL
+
+### 2.7 — Orchestrator — **next**
 
 `src/ac_dc/symbol_index/index.py` — `SymbolIndex` wires parser, extractors, cache, resolver, reference index, and formatter into a single entry point. Methods: `index_file`, `index_repo`, `get_symbol_map`, `get_file_symbol_block`, `get_legend`, `get_signature_hash`, LSP queries.
 
@@ -370,6 +390,8 @@ Main coordination responsibilities:
 - Multi-file pipeline — remove stale entries, resolve cross-file call targets, build reference index
 - Two formatter variants — context (no line numbers, default) and LSP (with line numbers)
 - File walker — scan repo for supported extensions, skip hidden/build/`.ac-dc/` directories
+
+Extractor selection dispatches on the `.language` class attribute each extractor declares (matches `LANGUAGE_MAP` keys). MATLAB remains deferred — the orchestrator must accommodate the `tree_optional = True` contract so when MATLAB lands it slots in without a structural change.
 
 ## Resumption protocol
 

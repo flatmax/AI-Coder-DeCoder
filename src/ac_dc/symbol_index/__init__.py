@@ -7,6 +7,7 @@ Governing spec: ``specs4/2-indexing/symbol-index.md``.
 """
 
 from ac_dc.symbol_index.cache import SymbolCache
+from ac_dc.symbol_index.compact_format import CompactFormatter
 from ac_dc.symbol_index.models import (
     CallSite,
     FileSymbols,
@@ -22,6 +23,7 @@ from ac_dc.symbol_index.reference_index import ReferenceIndex
 
 __all__ = [
     "CallSite",
+    "CompactFormatter",
     "FileSymbols",
     "Import",
     "LANGUAGE_MAP",
