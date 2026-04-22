@@ -165,6 +165,14 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+# Log-call captures show the content of every logger.* call that
+# happened during a failing test. Useful for diagnostics. We keep
+# them enabled but suppress the "Call stack:" trace each record
+# emits alongside — that trace is pytest's auto-indent output, not
+# a failure traceback, and it dominates the report without adding
+# information (the logger name + message already identifies the
+# emission site precisely enough).
+log_auto_indent = false
 filterwarnings = [
     "ignore::DeprecationWarning:pydantic.*",
     "ignore::DeprecationWarning:tree_sitter.*",
