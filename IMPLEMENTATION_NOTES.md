@@ -450,6 +450,40 @@ Open carried over for later sub-layers:
 - Auto-restore on startup (`_restore_last_session`) — lives on the LLM service (Layer 3.4), not the history store. The store just exposes `list_sessions` and `get_session_messages_for_context`; the service picks the newest and loads it.
 - History compaction invalidates stability tracker entries — that's the compactor's concern (Layer 3.5), not the store's.
 
+### 3.3 — File context — **delivered**
+
+- `src/ac_dc/file_context.py` — `FileContext` tracks files the user has selected for full-content inclusion in the LLM prompt. Maps repo-relative path → content string, maintains insertion order (Python dict since 3.7), enforces path normalisation (forward slashes, leading/trailing slashes stripped, parent-directory segments rejected). Operations: `add_file(path, content=None)` reads from disk when content omitted (via the Repo layer's `get_file_content` which already blocks traversal + rejects binary), `remove_file`, `get_files`, `get_content`, `has_file`, `clear`, `format_for_prompt` (fenced code blocks per path, no language tags — matches specs4/3-llm/prompt-assembly.md), `count_tokens(counter)`, `get_tokens_by_file(counter)` for the context-breakdown RPC.
+- Construction takes an optional `Repo` reference — if supplied, `add_file(path)` without an explicit content argument reads from disk via the Repo. If no Repo is attached, a content-less add raises `ValueError`. The split means tests can exercise the pure in-memory paths without constructing a full git repo, while production code uses the Repo path.
+- Binary/missing files propagate the Repo's `RepoError` — keeps the file context honest rather than silently inserting empty strings.
+- Path normalisation matches `Repo._normalise_rel_path` — keys are "forward-slash, no wrapping slashes, no `..` segments". The normalisation lives here rather than imported from Repo so `FileContext` can be constructed standalone for tests.
+- `tests/test_file_context.py` — 29 tests across 7 classes covering: construction (with/without Repo), add/remove/has (explicit content, disk read via mock Repo, missing-Repo error, normalisation, traversal rejection, idempotent re-add overwrites content), get_files (insertion order, returns copy), get_content (present/absent), clear, format_for_prompt (fenced-block shape, no language tag per specs4, path-then-fence layout, empty returns empty string, ordering), token counting (integration with TokenCounter, per-file and total, empty returns zero).
+
+Design points pinned by tests:
+
+- **Insertion order preserved.** Selection order matters for diff-stability of the prompt — if the user selects A then B, the working-files section renders A first. A re-add moves nothing (dict update semantics preserve original position); a remove-then-re-add moves the file to the end.
+- **Binary rejection delegates to Repo.** `FileContext` doesn't do its own binary detection — `Repo.get_file_content` already does it (null-byte scan in first 8KB). Keeps the responsibility in one place.
+- **`format_for_prompt` produces `path\n\`\`\`\n<content>\n\`\`\`` with no language tag.** specs4/3-llm/prompt-assembly.md#file-content-formatting is explicit: no language tag on the fence. Tests pin this with a regex-free substring check (`"\n```\n"` with no characters between the opening fence and the content).
+- **Tokens are computed on demand.** No caching — the token counter is cheap, and caching would mean invalidating on every file update.
+
+### 3.4 — Context manager — **planned**
+
+`src/ac_dc/context_manager.py` — `ContextManager` owns the in-memory conversation history (mutable list used for LLM requests), current system prompt (swappable for review/doc modes), URL context (optional list of URL content blocks), review context (optional string injected during review mode), and the `FileContext` instance. Coordinates with the token counter for budget decisions and eventually with the stability tracker and history compactor.
+
+Construction inputs per specs4/3-llm/context-model.md — model name, optional repo root, cache target tokens, optional compaction config, initial system prompt. Creates token counter, file context, and (if repo root is provided) a stability tracker reference holder.
+
+Key shapes to land in 3.4:
+- Conversation history (list of role/content dicts; system-event messages use `role="user"` + a flag)
+- System prompt setter/getter (review mode saves the original and restores on exit)
+- URL context set/clear
+- Review context set/clear
+- Mode enum (code vs doc) — just the toggle and a getter; index swap lives elsewhere
+- Token budget reporting (delegates to the counter + history)
+- Pre-request shedding (drops largest files when budget exceeded, with user-visible warning)
+- Stability-tracker attachment point (Layer 3.5 wires the tracker in)
+- History compactor attachment point (Layer 3.6 wires the compactor in)
+
+Non-goals for 3.4: prompt assembly (3.7), actual stability tracker (3.5), actual compactor (3.6). 3.4 is the plumbing spine the later sub-layers plug into.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:
