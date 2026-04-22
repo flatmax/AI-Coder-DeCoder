@@ -4,5 +4,6 @@
       "AWS_PROFILE": "bedrock-opus47"
   },
   "model": "bedrock/global.anthropic.claude-opus-4-7",
-  "smallerModel": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+  "smallerModel": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "maxOutputTokens": 128000
 }

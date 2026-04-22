@@ -91,6 +91,34 @@ def _extract_token_usage(response_or_chunk):
     return usage
 
 
+def _extract_finish_reason(chunk):
+    """Extract finish_reason from a streaming chunk or final response.
+
+    LiteLLM normalizes finish reasons to OpenAI-style strings:
+      - "stop"           — model finished naturally
+      - "length"         — hit max_tokens (response truncated)
+      - "tool_calls"     — model wants to call a tool
+      - "content_filter" — blocked by provider safety filter
+      - "end_turn"       — Anthropic passthrough (sometimes seen)
+
+    Returns None if no finish_reason is present (most streaming chunks
+    only carry finish_reason on the final chunk).
+    """
+    try:
+        choices = getattr(chunk, "choices", None)
+        if not choices and isinstance(chunk, dict):
+            choices = chunk.get("choices")
+        if not choices:
+            return None
+        first = choices[0]
+        reason = getattr(first, "finish_reason", None)
+        if reason is None and isinstance(first, dict):
+            reason = first.get("finish_reason")
+        return reason
+    except Exception:
+        return None
+
+
 class LLMService:
     """RPC service for LLM interactions.
 
@@ -1738,13 +1766,29 @@ class LLMService:
                 )
 
             # Stream LLM completion
-            full_content, was_cancelled, usage = await self._run_llm_stream(
+            full_content, was_cancelled, usage, finish_reason = await self._run_llm_stream(
                 request_id, assembled
             )
 
             if was_cancelled:
                 result["cancelled"] = True
                 full_content = full_content + "\n\n[stopped]" if full_content else "[stopped]"
+
+            # Surface the model's stop reason to the UI and logs.
+            # LiteLLM normalizes these to OpenAI-style values:
+            #   "stop" / "end_turn" — natural completion
+            #   "length"            — hit max_tokens (truncated!)
+            #   "tool_calls"        — model wants to call a tool
+            #   "content_filter"    — blocked by safety filter
+            if finish_reason:
+                result["finish_reason"] = finish_reason
+                if finish_reason not in ("stop", "end_turn"):
+                    logger.warning(
+                        f"LLM finish_reason={finish_reason!r} "
+                        f"(non-natural stop — response may be incomplete)"
+                    )
+                else:
+                    logger.info(f"LLM finish_reason={finish_reason!r}")
 
             # Add assistant response to context (user message already added above)
             self._context.add_message("assistant", full_content)
@@ -2004,22 +2048,34 @@ class LLMService:
     async def _run_llm_stream(self, request_id, messages):
         """Run LLM completion with streaming in a thread pool.
 
-        Returns (full_content, was_cancelled, usage).
+        Returns (full_content, was_cancelled, usage, finish_reason).
+
+        finish_reason is the LiteLLM-normalized stop reason from the
+        final chunk — typically "stop", "length", "tool_calls",
+        "content_filter", or None if the provider didn't report one.
         """
         full_content = ""
         was_cancelled = False
         usage = {}
+        finish_reason = None
 
         loop = self._main_loop
 
         def _stream_sync():
-            nonlocal full_content, was_cancelled, usage
+            nonlocal full_content, was_cancelled, usage, finish_reason
             try:
+                # Determine max output tokens: explicit config overrides
+                # model defaults; fall back to the counter's per-model ceiling.
+                max_output = self._config.max_output_tokens
+                if max_output is None:
+                    max_output = self._context.counter.max_output_tokens
+
                 response = litellm.completion(
                     model=self._config.model,
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
+                    max_tokens=max_output,
                 )
 
                 for chunk in response:
@@ -2053,12 +2109,18 @@ class LLMService:
                     if chunk_usage:
                         usage.update(chunk_usage)
 
+                    # Capture finish_reason — only the final chunk for a
+                    # choice carries it; earlier chunks report None.
+                    chunk_finish = _extract_finish_reason(chunk)
+                    if chunk_finish:
+                        finish_reason = chunk_finish
+
             except Exception as e:
                 logger.error(f"LLM stream error: {e}")
                 raise
 
         await loop.run_in_executor(self._executor, _stream_sync)
-        return full_content, was_cancelled, usage
+        return full_content, was_cancelled, usage, finish_reason
 
     def cancel_streaming(self, request_id):
         """Cancel an active stream."""

@@ -999,6 +999,26 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     .edit-summary .stat.fail { color: var(--accent-red); }
     .edit-summary .stat.skip { color: #f0a030; }
 
+    /* Finish reason badge */
+    .finish-reason {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      border: 1px solid var(--border-primary);
+    }
+    .finish-reason.natural {
+      color: var(--text-muted);
+      opacity: 0.6;
+    }
+    .finish-reason.warn {
+      color: var(--accent-red);
+      border-color: var(--accent-red);
+      background: rgba(255, 80, 80, 0.08);
+    }
+
     /* Individual failure listing */
     .edit-failures {
       margin-top: 8px;
@@ -1678,6 +1698,20 @@ export class AcChatPanel extends RpcMixin(LitElement) {
         editMeta.not_in_context = result.not_in_context || 0;
         if (result.files_auto_added) {
           editMeta.files_auto_added = result.files_auto_added;
+        }
+      }
+      // Capture LLM stop reason (LiteLLM-normalized)
+      if (result.finish_reason) {
+        editMeta.finish_reason = result.finish_reason;
+        // Surface non-natural stops as a toast so the user notices
+        const natural = result.finish_reason === 'stop' || result.finish_reason === 'end_turn';
+        if (!natural && !result.cancelled) {
+          const msg = result.finish_reason === 'length'
+            ? '⚠️ Response truncated — hit max_tokens'
+            : result.finish_reason === 'content_filter'
+              ? '⚠️ Response blocked by content filter'
+              : `⚠️ Stopped: ${result.finish_reason}`;
+          this._showToast(msg, 'error');
         }
       }
       // Add the assistant response with edit metadata
@@ -3117,6 +3151,30 @@ export class AcChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * Render a small badge showing the LLM stop reason for an assistant message.
+   * Subtle for natural stops, prominent for truncation / content filter / tool calls.
+   */
+  _renderFinishReason(msg) {
+    const reason = msg.finish_reason;
+    if (!reason) return nothing;
+    const natural = reason === 'stop' || reason === 'end_turn';
+    const labels = {
+      stop: '✓ stopped',
+      end_turn: '✓ end of turn',
+      length: '✂️ truncated (max_tokens)',
+      content_filter: '🚫 content filter',
+      tool_calls: '🔧 tool call requested',
+      function_call: '🔧 function call requested',
+    };
+    const label = labels[reason] || `⚠️ ${reason}`;
+    const title = natural
+      ? `Model finished naturally (finish_reason=${reason})`
+      : `Non-natural stop: finish_reason=${reason}. The response may be incomplete.`;
+    return html`<div class="finish-reason ${natural ? 'natural' : 'warn'}"
+                     title="${title}">${label}</div>`;
+  }
+
   _renderMsgActionsBottom(msg) {
     if (this.streamingActive) return nothing;
     const content = msg.content || '';
@@ -3289,6 +3347,7 @@ export class AcChatPanel extends RpcMixin(LitElement) {
           </div>
         ` : nothing}
         ${this._renderEditSummary(msg)}
+        ${this._renderFinishReason(msg)}
         ${this._renderMsgActionsBottom(msg)}
       </div>
     `;

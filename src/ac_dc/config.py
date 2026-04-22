@@ -255,6 +255,19 @@ class ConfigManager:
         return self._llm_config.get("cache_min_tokens", 1024)
 
     @property
+    def max_output_tokens(self):
+        """Maximum output tokens per LLM response.
+
+        Read from llm.json (`maxOutputTokens` or `max_output_tokens`).
+        Returns None if unset — caller should fall back to the model's
+        documented ceiling via TokenCounter.max_output_tokens.
+        """
+        val = self._llm_config.get("maxOutputTokens")
+        if val is None:
+            val = self._llm_config.get("max_output_tokens")
+        return val
+
+    @property
     def cache_buffer_multiplier(self):
         return self._llm_config.get("cache_buffer_multiplier", 1.1)
 

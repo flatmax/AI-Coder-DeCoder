@@ -83,12 +83,32 @@ class TokenCounter:
 
     @property
     def max_output_tokens(self):
-        """Maximum output tokens for the model."""
+        """Maximum output tokens for the model.
+
+        Per Anthropic's model overview (platform.claude.com/docs):
+          - Opus 4.7:   128k output
+          - Sonnet 4.6:  64k output
+          - Haiku 4.5:   64k output
+          - Older Claude 3.x: 8k
+        Used as the fallback when llm.json does not specify maxOutputTokens.
+        """
         model = self._model_name.lower()
         if "claude" in model:
-            return 8192
+            # Opus 4.5 / 4.6 / 4.7 — 128k output
+            if "opus" in model and ("4-5" in model or "4.5" in model
+                                     or "4-6" in model or "4.6" in model
+                                     or "4-7" in model or "4.7" in model):
+                return 128000
+            # Sonnet 4.5 / 4.6 — 64k output
+            if "sonnet" in model and ("4-5" in model or "4.5" in model
+                                       or "4-6" in model or "4.6" in model):
+                return 64000
+            # Haiku 4.5 — 64k output
+            if "haiku" in model and ("4-5" in model or "4.5" in model):
+                return 64000
+            return 8192  # older Claude 3.x
         if "gpt-4" in model:
-            return 4096
+            return 16384
         return 4096
 
     @property
