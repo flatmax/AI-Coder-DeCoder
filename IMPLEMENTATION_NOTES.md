@@ -406,6 +406,27 @@ Final test totals for Layer 2:
 - Python: `uv run pytest tests/test_symbol_index_*.py tests/test_base_cache.py tests/test_base_formatter.py` — all pass.
 - Full suite: `uv run pytest` — 968 tests passing across Layers 0–2.
 
+## Layer 3 — in progress
+
+### 3.1 — Token counter — **delivered**
+
+- `src/ac_dc/token_counter.py` — `TokenCounter` with model-aware limits (`max_input_tokens` hardcoded at 1M for all supported models per spec; `max_output_tokens` 8192 for Claude family, 4096 otherwise; `max_history_tokens` = input/16; `min_cacheable_tokens` 4096 for Opus 4.5/4.6 and Haiku 4.5, 1024 elsewhere). One tokenizer for all models — `cl100k_base` via `tiktoken`. Loader catches both missing-package and runtime-failure cases and falls back to a `len(text) // 4` estimate so packaged releases without tiktoken still produce monotonic budget estimates.
+- Counting surface — `count(value)` accepts strings, dicts (role/content messages), lists (of messages or content blocks), None, and arbitrary stringifiable types. Multimodal blocks dispatch by `type`: text counts the `text` field; image / image_url blocks use a flat 1000-token estimate (provider tokenisation varies too much — Anthropic by dimensions, OpenAI by tile count — and the counter doesn't have dimensions at hand). Unknown block types stringify rather than drop. `count_message(dict)` is a readability alias for `count(dict)`.
+- Re-exported from `ac_dc` package root so callers can write `from ac_dc import TokenCounter`. Lazy tiktoken import means the re-export costs nothing for callers that don't touch the class.
+- `tests/test_token_counter.py` — 29 tests across 7 classes covering model limits (Claude family detection, case-insensitive matching, defaults), string counting (empty, None, monotonicity, unicode), message counting (plain, alias equivalence, missing-field tolerance, empty dict), multimodal blocks (text, multiple text, image, image_url, bare string, unknown type, malformed), list shapes (list of messages, empty, list of strings), defensive paths (stringify int, nested lists), encoder fallback (missing encoder, monotonic fallback, fallback through message path, encoder throws mid-call), and instance independence (per-counter encoder references, independent limits, deterministic counts).
+
+Design points pinned by tests:
+
+- **Relative assertions, not exact.** Tests assert `long > short` rather than `long == 10` — pinning exact tiktoken output would couple tests to a specific tiktoken version. Cache-target computation downstream only cares about relative ordering anyway.
+- **Per-instance encoder.** D10 — no module-level singleton. `TestInstanceIndependence` pins this so a future refactor that introduces a shared registry breaks the test rather than silently cross-contaminating between context managers.
+- **Fallback monotonicity.** Char-count fallback uses `len // 4` — not as accurate as tiktoken but always monotonic. Budget decisions depend on monotonicity (longer input → no fewer tokens); exact values don't matter.
+- **Deterministic counts.** Stability tracker content hashing depends on token counts being stable across calls. Pinned by `test_counts_are_deterministic_across_calls`.
+
+Open carried over for later sub-layers:
+
+- Token usage extraction from provider responses (`cache_read_tokens`, `cache_write_tokens` under varying field names) — belongs to the streaming handler (Layer 3.6), not the counter.
+- Session totals accumulation — context-manager concern (Layer 3.2).
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:

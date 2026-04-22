@@ -24,3 +24,14 @@ def _read_version() -> str:
 __version__ = _read_version()
 
 __all__ = ["__version__"]
+
+
+# Token counter — cheap re-export so callers can write
+# ``from ac_dc import TokenCounter`` rather than knowing the
+# submodule path. The class is lightweight and has no heavy
+# imports at module load (tiktoken is loaded lazily inside the
+# constructor), so pulling it into ``__init__`` costs nothing
+# for callers that don't use it.
+from ac_dc.token_counter import TokenCounter  # noqa: E402
+
+__all__ = ["__version__", "TokenCounter"]
