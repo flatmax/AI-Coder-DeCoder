@@ -48,12 +48,26 @@ from ac_dc.stability_tracker import (  # noqa: E402
     TrackedItem,
 )
 
+# History compactor — summarises or truncates old history to
+# keep the conversation within a token budget. Construct with
+# a config manager, token counter, and an optional detector
+# callable (injected by the streaming handler to make the
+# actual LLM call).
+from ac_dc.history_compactor import (  # noqa: E402
+    CompactionResult,
+    HistoryCompactor,
+    TopicBoundary,
+)
+
 __all__ = [
     "__version__",
+    "CompactionResult",
     "ContextManager",
+    "HistoryCompactor",
     "Mode",
     "StabilityTracker",
     "Tier",
     "TokenCounter",
+    "TopicBoundary",
     "TrackedItem",
 ]

@@ -543,7 +543,40 @@ Open carried over for later sub-layers:
 - URL tier graduation — specs call for URLs to enter at L1 directly rather than graduating through active. The tracker currently treats `url:*` keys identically to other keys; direct-L1 entry is an orchestration-level concern (streaming handler puts `url:*` items in L1's active-items list with N=9, and the tracker's cascade handles them from there).
 - Token hash of formatted content vs raw data — specs note that symbol blocks use a signature hash derived from raw symbol data rather than formatted output (to avoid spurious hash mismatches when path aliases or exclude_files change). This is a streaming-handler concern; the tracker treats whatever hash it's given as opaque.
 
-### 3.6 — History compactor — **planned**
+### 3.6 — History compactor — **delivered**
+
+- `src/ac_dc/history_compactor.py` — `HistoryCompactor` with `TopicBoundary` (frozen) and `CompactionResult` (mutable) dataclasses. Constructor takes `config_manager` (read-through for `compaction_config`), `token_counter`, and optional `detect_topic_boundary` callable. Properties (`enabled`, `trigger_tokens`, `verbatim_window_tokens`, `summary_budget_tokens`, `min_verbatim_exchanges`) read live from `config_manager.compaction_config` on every access — hot-reloaded app.json values take effect on the next `should_compact` call without reconstruction.
+- `should_compact(history_tokens)` — threshold probe, False when disabled or trigger is zero or tokens below trigger. Inclusive (>=) threshold so a corpus at exactly the trigger compacts on the next turn.
+- `compact_history_if_needed(messages, already_checked=False)` — main entry point. Returns None when below trigger or empty. Otherwise: finds verbatim window start (token-based + count-based, earlier of the two), calls detector with exception protection, decides case (truncate when boundary is in/after verbatim AND confidence ≥ 0.5, summarize otherwise), builds result with min-verbatim safeguard (prepends earlier messages from before the cut when result has fewer user messages than threshold — at offset 2 for summarize, at offset 0 for truncate).
+- `apply_compaction(messages, result)` — convenience wrapper. Returns original on None or `case == "none"`; result.messages otherwise.
+- Detector injection pattern (option 2 confirmed by user): callable takes messages, returns `TopicBoundary`. Keeps the compactor testable without litellm mocking, keeps LLM-calling concerns at the streaming-handler layer (3.7 constructs the real detector as a closure over `config.get_compaction_prompt()` + `litellm.completion` + JSON parse + safe-default fallback). Parallel-agent-ready — each agent's compactor has its own detector callable, no shared LLM-calling singleton.
+- Safe defaults — detector is None, raises, or returns wrong shape → `_SAFE_BOUNDARY` (None index, zero confidence) → summarize case fires. Conservative: doing something (summarize-all) is better than doing nothing when over budget and detection fails.
+- Summary synthesis — when detector produces empty summary text, a generic placeholder fires ("The prior conversation covered earlier topics..."). The LLM's follow-up turns fill in specifics. Never emit an empty `[History Summary]` block.
+- Module-level constants — `_TRUNCATE_CONFIDENCE_THRESHOLD = 0.5`, `_SAFE_BOUNDARY`, `_GENERIC_SUMMARY_FALLBACK`. Named so a future tuning pass doesn't scatter magic numbers through the code.
+- Re-exported from `ac_dc` package root alongside `ContextManager`, `Mode`, `TokenCounter`, `StabilityTracker` — so callers can write `from ac_dc import HistoryCompactor, TopicBoundary, CompactionResult`.
+- `tests/test_history_compactor.py` — 8 test classes: `TestShouldCompact` (disabled, zero trigger, below/at trigger, live config reload), `TestCompactGating` (empty history, below trigger, already_checked skips probe), `TestTruncateCase` (cuts to boundary, preserves boundary metadata on result, min-verbatim safeguard prepends), `TestSummarizeCase` (no boundary falls through, low confidence falls through, boundary-before-verbatim falls through, summary pair shape, empty-summary fallback, safeguard inserts at offset 2), `TestDetectorFailure` (None detector, raising detector, wrong-shape return), `TestApplyCompaction` (None result, `case="none"`, truncate result), `TestVerbatimWindow` (short history all verbatim, monotonic window-shrink property).
+
+Design points pinned by tests:
+
+- **Live config reload is a contract, not an optimization.** `test_live_config_reload` mutates `config.compaction_config` mid-test and checks that the next `should_compact` reflects the change. Pinning this prevents a future refactor from caching config values at construction.
+- **Detector is never called unnecessarily.** `test_below_trigger_returns_none` uses a call-counting detector to prove the detector isn't invoked when the trigger gate is False. Matters for token cost — the detector does an LLM call.
+- **Safeguard ordering for summarize.** Specs3 is specific: summary → earlier context → verbatim window. Safeguard-prepended messages go at offset 2 (after the summary pair), not at offset 0. `test_summarize_safeguard_inserts_after_summary_pair` verifies the first two entries are the summary pair even when the safeguard triggers.
+- **Generic summary fallback is content, not empty.** When the detector returns empty summary text, the compactor synthesises a generic placeholder rather than emitting `[History Summary]\n` followed by nothing. The test checks the body after the header is non-empty.
+- **Monotonic verbatim shrink.** `test_token_based_window_shrinks_with_budget` asserts smaller window → fewer/equal messages. Property-level rather than exact counts — tiktoken-version-sensitive exact values aren't worth pinning.
+- **Defensive shape checking.** `test_detector_wrong_shape_falls_back` passes a dict where a TopicBoundary is expected. A future refactor that removes the `isinstance(result, TopicBoundary)` check would let the dict flow through and break the case-decision logic in unhelpful ways.
+
+Open carried over for later sub-layers:
+
+- **Frontend notification events.** The streaming handler (3.7) emits `compactionEvent` callbacks with stages `compacting`, `compacted`, `compaction_error` — that's a streaming-pipeline concern, not a compactor concern. The compactor just returns synchronously; the streaming handler wraps its call with event dispatch and tracker-purge.
+- **Stability tracker purge after compaction.** Specs3: "all `history:*` entries are purged from the tracker. Compacted messages re-enter as new active items with N = 0." The tracker's `purge_history()` method already exists (Layer 3.5); the streaming handler will call it after `context.set_history(compacted)`. Not a compactor concern.
+- **Real detector callable.** Belongs to 3.7 — constructs a closure over the smaller model name, the compaction prompt (`config.get_compaction_prompt()`), and `litellm.completion`, parses the JSON response, returns a `TopicBoundary`. Parallel-agent mode will construct N such closures, one per agent.
+
+### 3.7 — Streaming handler — **planned**
+
+- `src/ac_dc/llm_service.py` — the orchestration layer. `LLMService` class wires ContextManager + FileContext + HistoryStore + StabilityTracker + HistoryCompactor + SymbolIndex + Repo into a single entry point. Methods: `chat_streaming`, `cancel_streaming`, `get_current_state`, `set_selected_files`, `commit_all`, `reset_to_head`, `get_context_breakdown`, session management, etc.
+- Topic detector construction — closure over `config.get_compaction_prompt()` + `config.smaller_model` + litellm. Injected into HistoryCompactor at construction.
+- Event loop reference captured at RPC entry via `EventLoopHandle.capture()` (Layer 1.4). Worker thread uses the handle to schedule chunk callbacks.
+- Request ID generation + single-user-initiated-stream guard + keyed dispatch per D10.
 
 ## Resumption protocol
 
