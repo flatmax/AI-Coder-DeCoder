@@ -34,4 +34,9 @@ __all__ = ["__version__"]
 # for callers that don't use it.
 from ac_dc.token_counter import TokenCounter  # noqa: E402
 
-__all__ = ["__version__", "TokenCounter"]
+# Context manager — the central state holder for an LLM session.
+# Same rationale as TokenCounter: cheap import, commonly used,
+# reads more naturally as ``from ac_dc import ContextManager``.
+from ac_dc.context_manager import ContextManager, Mode  # noqa: E402
+
+__all__ = ["__version__", "ContextManager", "Mode", "TokenCounter"]

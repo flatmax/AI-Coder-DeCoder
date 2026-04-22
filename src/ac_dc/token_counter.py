@@ -224,6 +224,12 @@ class TokenCounter:
         Hardcoded at 1M for every currently supported model. A
         future smaller-context release would need a family check
         here; today the single value covers everything.
+
+        Exposed as a plain property (not a stored attribute) so
+        subclasses or tests can override it via the property
+        machinery — the pre-request shedding tests in Layer 3.4
+        rely on this to simulate budget pressure without
+        constructing artificially huge file contexts.
         """
         return _DEFAULT_MAX_INPUT_TOKENS
 

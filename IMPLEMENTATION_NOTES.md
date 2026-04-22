@@ -465,24 +465,48 @@ Design points pinned by tests:
 - **`format_for_prompt` produces `path\n\`\`\`\n<content>\n\`\`\`` with no language tag.** specs4/3-llm/prompt-assembly.md#file-content-formatting is explicit: no language tag on the fence. Tests pin this with a regex-free substring check (`"\n```\n"` with no characters between the opening fence and the content).
 - **Tokens are computed on demand.** No caching — the token counter is cheap, and caching would mean invalidating on every file update.
 
-### 3.4 — Context manager — **planned**
+### 3.4 — Context manager — **delivered**
 
-`src/ac_dc/context_manager.py` — `ContextManager` owns the in-memory conversation history (mutable list used for LLM requests), current system prompt (swappable for review/doc modes), URL context (optional list of URL content blocks), review context (optional string injected during review mode), and the `FileContext` instance. Coordinates with the token counter for budget decisions and eventually with the stability tracker and history compactor.
+- `src/ac_dc/context_manager.py` — `ContextManager` with `Mode` enum (`CODE` / `DOC`), conversation history operations (`add_message`, `add_exchange`, `get_history` returning a copy, `set_history` copying each entry, `clear_history`, `history_token_count`), system prompt management (`get_system_prompt`, `set_system_prompt`, `save_and_replace_system_prompt` / `restore_system_prompt` for review-mode entry/exit), URL context (`set_url_context` accepting `None` / empty list as clear, `clear_url_context`, `get_url_context` returning a copy), review context (`set_review_context` / `clear_review_context` / `get_review_context`), mode (`mode` property, `set_mode` accepting both `Mode` enum and string forms with unknown-value rejection), attachment points (`set_stability_tracker` / `stability_tracker` / `set_compactor` / `compactor`), and budget enforcement (`get_token_budget`, `get_compaction_status`, `emergency_truncate`, `estimate_request_tokens`, `shed_files_if_needed`).
+- `src/ac_dc/__init__.py` re-exports `ContextManager` and `Mode` alongside `TokenCounter` so callers can write `from ac_dc import ContextManager, Mode`.
+- `tests/test_context_manager.py` — 12 test classes across construction, mode, history basics, history + tracker interaction, system prompt, URL context, review context, attachment points, token budget, emergency truncation, and pre-request shedding. Uses `_FakeTracker` and two `_Compactor*` stubs (one takes tokens, one takes no args) to pin the defensive contract — both shapes are accepted since Layer 3.6's exact signature isn't frozen yet.
 
-Construction inputs per specs4/3-llm/context-model.md — model name, optional repo root, cache target tokens, optional compaction config, initial system prompt. Creates token counter, file context, and (if repo root is provided) a stability tracker reference holder.
+Design points pinned by tests:
 
-Key shapes to land in 3.4:
-- Conversation history (list of role/content dicts; system-event messages use `role="user"` + a flag)
-- System prompt setter/getter (review mode saves the original and restores on exit)
-- URL context set/clear
-- Review context set/clear
-- Mode enum (code vs doc) — just the toggle and a getter; index swap lives elsewhere
-- Token budget reporting (delegates to the counter + history)
-- Pre-request shedding (drops largest files when budget exceeded, with user-visible warning)
-- Stability-tracker attachment point (Layer 3.5 wires the tracker in)
-- History compactor attachment point (Layer 3.6 wires the compactor in)
+- **Attachment-point defensiveness.** `clear_history` invokes `tracker.purge_history()` via `getattr(..., None)` so a tracker without that method (or no tracker at all) is a silent no-op. Layer 3.5's tracker API isn't frozen; this keeps 3.4's tests from coupling to shape details.
+- **`should_compact` signature tolerance.** `_needs_compaction` tries `should_compact(tokens)` first, falls back to `should_compact()` on `TypeError`. Covered by both `_CompactorWithBoolCheck` (tokens arg) and `_CompactorNoArgs` (no args) tests.
+- **Plain `set_system_prompt` is non-saving.** Only `save_and_replace_system_prompt` populates the review-restore slot. Enforces "review mode opts in" — a stray `set_system_prompt` call during normal operation doesn't accidentally create a dangling saved state that a later `restore_system_prompt` would re-install.
+- **Double-save overwrites the saved slot with the most-recent original.** If a caller enters review, then enters doc mode while in review (edge case), then exits — they return to the most recent "original" state, not a stale pre-review copy. Pinned by `test_double_save_overwrites`.
+- **Empty / None clears for optional context.** `set_url_context(None)`, `set_url_context([])`, `set_review_context(None)`, `set_review_context("")` all clear the respective state. Avoids downstream assemblers having to filter empty blocks.
+- **Stored copies.** `set_history` copies each message dict; `set_url_context` copies the list; `compaction_config` is dict-copied at construction. Caller mutations to passed-in data never leak into stored state.
+- **Pre-request shedding uses `max_input_tokens * 0.90`.** Module constant `_SHED_THRESHOLD_FRACTION = 0.90`. The shedding loop computes per-file token counts fresh each iteration (cheap relative to the disk I/O already paid) and picks the largest file per iteration via `max(per_file.items(), key=lambda kv: kv[1])`.
+- **Fixed overhead in the estimate.** `_BUDGET_ESTIMATE_OVERHEAD = 500` tokens added to every `estimate_request_tokens` call — accounts for headers, legend, ack messages, streaming margin. The shedding decision is relative to `max_input_tokens`, so the exact value doesn't matter as long as it's positive.
+- **Emergency truncation exits at `trigger_tokens`, not 2×.** The method aims to get history back into the comfortable zone, not merely under the emergency ceiling. Zero trigger is a no-op (prevents stripping history when the caller hasn't configured compaction).
+- **`compaction_status` percent capped at 999.** UI display sanity — a pathological ratio shouldn't produce a four-digit percent.
 
-Non-goals for 3.4: prompt assembly (3.7), actual stability tracker (3.5), actual compactor (3.6). 3.4 is the plumbing spine the later sub-layers plug into.
+Notes from delivery:
+
+- **`TokenCounter.max_input_tokens` monkey-patch pattern in tests.** To force budget pressure without constructing an artificially huge file context, several shedding tests clamp the counter's input budget via the `_patch_max_input_tokens` context manager at the top of `tests/test_context_manager.py`. The helper captures the original `property` descriptor from `TokenCounter.__dict__`, installs a replacement for the duration of the `with` block, and restores the original on exit. An earlier attempt used a bare `del type(cm.counter).max_input_tokens` in a `finally` block — that silently stripped the class attribute entirely (because the assignment had replaced the descriptor without saving a copy), causing every subsequent test across the run to see `AttributeError` on what looked like a correctly-defined property. The save-and-restore pattern is mandatory for class-level monkey-patching of descriptors; tests that replicate this pattern elsewhere should use the same helper or follow the same discipline.
+
+- **`Mode` subclasses `str`.** Enum values are both strings and enum members, so `mode == "code"` works without unwrapping. The RPC layer receives mode as a plain string; having the enum be string-equivalent means downstream dispatch logic doesn't need to care whether it got `Mode.CODE` or `"code"`. The round-trip `Mode("code") → Mode.CODE` is how the string-form `set_mode("doc")` path is implemented, with unknown strings raising `ValueError`.
+
+- **History browser metadata forwarded via `**extra`.** Callers that want to attach `files`, `edit_results`, `image_refs` for the history browser pass them as keyword arguments to `add_message`. The context manager doesn't interpret these fields — just stores them on the dict for later retrieval. Matches specs4's asymmetry between context retrieval (role+content only) and browser retrieval (full metadata) — 3.4 is the context-retrieval side.
+
+### 3.5 — Stability tracker — **planned**
+
+`src/ac_dc/stability_tracker.py` — the tier system that drives prompt cache breakpoint placement. See specs4/3-llm/cache-tiering.md for the full algorithm:
+
+- `TrackedItem` dataclass — tier, N value, tokens, content hash, optional token-count override
+- `StabilityTracker` class with:
+  - `update(active_items, existing_files=...)` — the main driver: Phase 0 stale removal, Phase 1 active-items processing (hash comparison + N increment/reset), Phase 2 L3-graduate selection, Phase 3 cascade with anchoring, Phase 4 change logging
+  - Per-tier item storage keyed by the tracker key (`file:{path}`, `symbol:{path}`, `doc:{path}`, `history:{N}`, `system:prompt`, `url:{hash}`)
+  - `initialize_from_reference_graph(ref_index, files)` — startup seeding: L0 pre-fill, clustering via connected components, orphan distribution, post-seed token measurement
+  - Ripple cascade with threshold-aware anchoring (`_SHED_THRESHOLD_FRACTION`-style constants for entry N and promotion N per tier)
+  - `get_tier_items(tier)` / `get_signature_hash(key)` / `purge_history()` queries consumed by the context manager and prompt assembler
+
+Integration points for 3.4 already wired: `ContextManager.set_stability_tracker` attachment point, `clear_history` calls `purge_history` defensively, `get_token_budget` reads from the attached tracker when computing cached tier totals.
+
+Non-goals for 3.5: prompt assembly (3.7), history compaction (3.6 but coupled since compaction triggers `purge_history`), cross-reference mode (belongs to 3.5 but may land as a follow-up turn — the underlying key-prefix dispatch is already in the model).
 
 ## Resumption protocol
 
