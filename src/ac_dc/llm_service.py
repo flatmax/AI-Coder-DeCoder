@@ -628,6 +628,57 @@ class LLMService:
         self._stream_executor.shutdown(wait=False)
         self._aux_executor.shutdown(wait=False)
 
+    # ------------------------------------------------------------------
+    # Collaboration restriction enforcement
+    # ------------------------------------------------------------------
+
+    def _check_localhost_only(self) -> dict[str, Any] | None:
+        """Return a restricted-error dict when the caller is non-localhost.
+
+        Matches the pattern on :class:`Repo` — returns None when
+        the caller is allowed (no collab attached, or a localhost
+        caller), otherwise returns the specs4-mandated
+        ``{"error": "restricted", "reason": ...}`` shape. Mutating
+        RPC methods return this dict verbatim; the frontend's
+        RpcMixin surfaces it as a restricted error and hides the
+        UI affordance that triggered the call.
+
+        Fails closed — an exception from the collab check itself
+        is treated as a denial rather than silently allowing the
+        mutation. Better to reject a legitimate call than to let
+        an unauthenticated caller mutate state because the
+        identity check errored out.
+
+        The ``_collab`` attribute is set by ``main.py`` after
+        constructing the service, when collaboration mode is
+        active. In single-user operation it stays None and this
+        helper always returns None.
+        """
+        collab = getattr(self, "_collab", None)
+        if collab is None:
+            return None
+        try:
+            is_local = collab.is_caller_localhost()
+        except Exception as exc:
+            logger.warning(
+                "Collab localhost check raised: %s; denying",
+                exc,
+            )
+            return {
+                "error": "restricted",
+                "reason": (
+                    "Internal error checking caller identity"
+                ),
+            }
+        if is_local:
+            return None
+        return {
+            "error": "restricted",
+            "reason": (
+                "Participants cannot perform this action"
+            ),
+        }
+
     def _build_url_service(self) -> URLService:
         """Construct the URL service from config values.
 
@@ -780,6 +831,9 @@ class LLMService:
         form — frontend consumes the same fields regardless of
         whether it came from a fresh fetch or a cache hit.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         assert self._main_loop is not None
         loop = self._main_loop
         content = await loop.run_in_executor(
@@ -798,7 +852,7 @@ class LLMService:
         text: str,
         use_cache: bool = True,
         summarize: bool = True,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """Detect and fetch all URLs in text.
 
         Convenience wrapper for the frontend's "fetch all" button
@@ -808,6 +862,9 @@ class LLMService:
         Runs in the aux executor for the same reason as
         :meth:`fetch_url`.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         assert self._main_loop is not None
         loop = self._main_loop
         results = await loop.run_in_executor(
@@ -838,6 +895,9 @@ class LLMService:
         Used by the "refresh this URL" action on the chip UI —
         forces the next fetch to hit the network.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         return self._url_service.invalidate_url_cache(url)
 
     def remove_fetched_url(self, url: str) -> dict[str, Any]:
@@ -847,6 +907,9 @@ class LLMService:
         hit the cache. Used by the "remove from this conversation"
         action on the chip UI.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         return self._url_service.remove_fetched(url)
 
     def clear_url_cache(self) -> dict[str, Any]:
@@ -854,6 +917,9 @@ class LLMService:
 
         Used by the "clear URL cache" RPC in the settings UI.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         return self._url_service.clear_url_cache()
 
     # ------------------------------------------------------------------
@@ -953,6 +1019,9 @@ class LLMService:
         On any failure, attempts to roll back to a clean
         state (via exit_review_mode) and returns an error.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         # Basic validation.
         if self._repo is None:
             return {"error": "No repository attached."}
@@ -1119,6 +1188,9 @@ class LLMService:
         is still cleared so the user isn't stuck in the
         client-side review UI.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         if not self._review_active:
             return {"error": "Review mode is not active."}
         if self._repo is None:
@@ -1425,13 +1497,20 @@ class LLMService:
     # Public RPC — file selection
     # ------------------------------------------------------------------
 
-    def set_selected_files(self, files: list[str]) -> list[str]:
+    def set_selected_files(
+        self, files: list[str]
+    ) -> list[str] | dict[str, Any]:
         """Replace the selected-files list.
 
         Stored as a copy so caller mutations don't leak. Broadcast
         to all connected clients via ``filesChanged`` so each
-        client's picker updates. Returns the canonical list.
+        client's picker updates. Returns the canonical list on
+        success, or a restricted-error dict when the caller is a
+        non-localhost participant in collaboration mode.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         # Defensive: filter non-existent files when a repo is
         # attached. Matches the specs3 deleted-file cleanup rule —
         # the selection should never contain a phantom path.
@@ -1501,6 +1580,9 @@ class LLMService:
         meaningful today because the system prompt swap changes
         the LLM's behaviour.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         # Validate the mode string. Mode(mode) raises ValueError
         # on unknown inputs — we catch and return a clean RPC
         # error rather than propagating.
@@ -1596,6 +1678,9 @@ class LLMService:
         cross-ref content on the next request without needing
         a re-toggle.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         new_state = bool(enabled)
         if new_state == self._cross_ref_enabled:
             return {
@@ -1637,6 +1722,9 @@ class LLMService:
 
     def new_session(self) -> dict[str, Any]:
         """Start a fresh session — clear history, purge tracker."""
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         if self._history_store is not None:
             from ac_dc.history_store import HistoryStore
             self._session_id = HistoryStore.new_session_id()
@@ -1678,6 +1766,10 @@ class LLMService:
         # HERE, not inside the background task.
         self._main_loop = asyncio.get_event_loop()
 
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+
         if not self._init_complete:
             return {
                 "error": (
@@ -1714,6 +1806,9 @@ class LLMService:
         finally handler clears the active-request flag and fires
         streamComplete with cancelled=True.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         if request_id != self._active_user_request:
             return {
                 "error": (
@@ -2667,6 +2762,9 @@ class LLMService:
         the session ID and the commit event would persist to the
         wrong session.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         if self._committing:
             return {"error": "A commit is already in progress"}
         if self._repo is None:
@@ -2785,6 +2883,9 @@ class LLMService:
 
     def reset_to_head(self) -> dict[str, Any]:
         """Discard uncommitted changes, record a system event."""
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
         if self._repo is None:
             return {"error": "No repository attached"}
         try:

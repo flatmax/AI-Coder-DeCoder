@@ -436,3 +436,388 @@ class TestReadOperationsAllowed:
     ) -> None:
         repo._collab = _StubCollab(is_localhost=False)
         assert repo.is_clean() is True
+
+
+# =============================================================
+# LLMService restriction tests
+# =============================================================
+#
+# Same pattern as the Repo tests above — stub collab, two
+# scenarios per method (localhost allowed, non-localhost
+# rejected). We use a minimal LLMService construction that
+# avoids needing a real symbol index or history store.
+
+
+from ac_dc.config import ConfigManager
+from ac_dc.llm_service import LLMService
+
+
+@pytest.fixture
+def config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Isolate config directory per test."""
+    d = tmp_path / "config"
+    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(d))
+    return d
+
+
+@pytest.fixture
+def config(
+    config_dir: Path, repo_dir: Path
+) -> ConfigManager:
+    return ConfigManager(repo_root=repo_dir)
+
+
+@pytest.fixture
+def service(
+    config: ConfigManager, repo: Repo
+) -> LLMService:
+    """Minimal LLMService — no history store, no symbol index."""
+    return LLMService(config=config, repo=repo)
+
+
+# ---------------------------------------------------------------------------
+# LLMService — no-collab path
+# ---------------------------------------------------------------------------
+
+
+class TestLLMServiceNoCollab:
+    """Without collab attached, everything works normally."""
+
+    def test_check_returns_none_without_collab(
+        self, service: LLMService
+    ) -> None:
+        assert service._check_localhost_only() is None
+
+    def test_new_session_allowed(
+        self, service: LLMService
+    ) -> None:
+        # Default state — no collab, no restriction.
+        result = service.new_session()
+        assert "session_id" in result
+        assert "error" not in result
+
+
+# ---------------------------------------------------------------------------
+# LLMService — localhost caller allowed
+# ---------------------------------------------------------------------------
+
+
+class TestLLMServiceLocalhostAllowed:
+    """Localhost caller sees normal behaviour."""
+
+    def test_new_session(self, service: LLMService) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.new_session()
+        assert "session_id" in result
+
+    def test_set_selected_files(
+        self, service: LLMService, repo_dir: Path
+    ) -> None:
+        (repo_dir / "a.md").write_text("x")
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.set_selected_files(["a.md"])
+        # Normal path returns a list of the accepted paths.
+        assert result == ["a.md"]
+
+    def test_switch_mode(self, service: LLMService) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.switch_mode("doc")
+        assert result.get("mode") == "doc"
+
+    def test_set_cross_reference(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.set_cross_reference(True)
+        assert result.get("status") == "ok"
+        assert result.get("cross_ref_enabled") is True
+
+    def test_reset_to_head(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.reset_to_head()
+        assert result.get("status") == "ok"
+
+    def test_cancel_streaming_wrong_id_still_gated(
+        self, service: LLMService
+    ) -> None:
+        """Localhost caller, but request_id doesn't match — the
+        existing "not the active stream" error surfaces, not a
+        restriction error."""
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.cancel_streaming("bogus-id")
+        # Not restricted — the method got past the guard.
+        assert result.get("error") != "restricted"
+        assert "not the active stream" in result.get("error", "")
+
+    def test_invalidate_url_cache(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.invalidate_url_cache(
+            "https://example.com"
+        )
+        # URL service returns an ok shape even for unknown URLs.
+        assert result.get("error") != "restricted"
+
+    def test_clear_url_cache(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.clear_url_cache()
+        assert result.get("error") != "restricted"
+
+    def test_start_review_no_repo_guard_order(
+        self,
+        config: ConfigManager,
+    ) -> None:
+        """Localhost caller but no repo — gets the "no repo"
+        error (past the localhost check), proving the guard let
+        the call through."""
+        svc = LLMService(config=config, repo=None)
+        svc._collab = _StubCollab(is_localhost=True)
+        result = svc.start_review("feature", "abc123")
+        # Not restricted — the method got past the guard.
+        assert result.get("error") != "restricted"
+        assert "repository" in result.get("error", "").lower()
+
+    def test_end_review_not_active_guard_order(
+        self, service: LLMService
+    ) -> None:
+        """Localhost caller, review not active — gets the "not
+        active" error, proving the guard let the call through."""
+        service._collab = _StubCollab(is_localhost=True)
+        result = service.end_review()
+        assert result.get("error") != "restricted"
+        assert "not active" in result.get("error", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# LLMService — non-localhost caller rejected
+# ---------------------------------------------------------------------------
+
+
+class TestLLMServiceNonLocalhostRejected:
+    """Non-localhost caller gets the restricted-error shape.
+
+    Each test asserts:
+    1. The method returns the restricted-error dict
+    2. No side effect (state unchanged)
+    """
+
+    def test_new_session(self, service: LLMService) -> None:
+        original_session = service.get_current_state()["session_id"]
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.new_session()
+        _assert_restricted(result)
+        # Session ID unchanged.
+        assert service.get_current_state()["session_id"] == (
+            original_session
+        )
+
+    def test_set_selected_files(
+        self, service: LLMService, repo_dir: Path
+    ) -> None:
+        (repo_dir / "a.md").write_text("x")
+        original_selection = service.get_selected_files()
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.set_selected_files(["a.md"])
+        _assert_restricted(result)
+        # Selection unchanged.
+        assert service.get_selected_files() == original_selection
+
+    def test_switch_mode(self, service: LLMService) -> None:
+        original_mode = service.get_current_state()["mode"]
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.switch_mode("doc")
+        _assert_restricted(result)
+        # Mode unchanged.
+        assert service.get_current_state()["mode"] == original_mode
+
+    def test_set_cross_reference(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.set_cross_reference(True)
+        _assert_restricted(result)
+        # Flag unchanged.
+        assert service.get_current_state()[
+            "cross_ref_enabled"
+        ] is False
+
+    def test_cancel_streaming(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.cancel_streaming("anything")
+        _assert_restricted(result)
+
+    def test_reset_to_head(
+        self, service: LLMService, repo_dir: Path
+    ) -> None:
+        (repo_dir / "seed.md").write_text("dirty")
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.reset_to_head()
+        _assert_restricted(result)
+        # File still dirty — reset didn't fire.
+        assert (repo_dir / "seed.md").read_text() == "dirty"
+
+    def test_start_review(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.start_review("feature", "abc123")
+        _assert_restricted(result)
+        assert service._review_active is False
+
+    def test_end_review(
+        self, service: LLMService
+    ) -> None:
+        # Force review-active so the guard is what actually
+        # blocks (not the "not active" check).
+        service._review_active = True
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.end_review()
+        _assert_restricted(result)
+        # Review still active — exit didn't run.
+        assert service._review_active is True
+        # Clean up so fixtures don't bleed state.
+        service._review_active = False
+
+    def test_invalidate_url_cache(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.invalidate_url_cache(
+            "https://example.com"
+        )
+        _assert_restricted(result)
+
+    def test_remove_fetched_url(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.remove_fetched_url(
+            "https://example.com"
+        )
+        _assert_restricted(result)
+
+    def test_clear_url_cache(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.clear_url_cache()
+        _assert_restricted(result)
+
+    async def test_chat_streaming(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        _assert_restricted(result)
+        # No stream started.
+        assert service._active_user_request is None
+
+    async def test_commit_all(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = await service.commit_all()
+        _assert_restricted(result)
+        assert service._committing is False
+
+    async def test_fetch_url(
+        self, service: LLMService
+    ) -> None:
+        # Capture the loop the RPC would have otherwise
+        # captured — mimics what chat_streaming does.
+        service._main_loop = asyncio.get_event_loop()
+        service._collab = _StubCollab(is_localhost=False)
+        result = await service.fetch_url(
+            "https://example.com"
+        )
+        _assert_restricted(result)
+
+    async def test_detect_and_fetch(
+        self, service: LLMService
+    ) -> None:
+        service._main_loop = asyncio.get_event_loop()
+        service._collab = _StubCollab(is_localhost=False)
+        result = await service.detect_and_fetch(
+            "see https://example.com"
+        )
+        _assert_restricted(result)
+
+
+# ---------------------------------------------------------------------------
+# LLMService — read operations always allowed
+# ---------------------------------------------------------------------------
+
+
+class TestLLMServiceReadOpsAllowed:
+    """Read-only methods work for non-localhost callers."""
+
+    def test_get_current_state(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        state = service.get_current_state()
+        # Returns the state dict — not restricted.
+        assert "session_id" in state
+
+    def test_get_selected_files(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        # Returns empty list, not restricted dict.
+        assert service.get_selected_files() == []
+
+    def test_get_mode(self, service: LLMService) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.get_mode()
+        assert result.get("mode") == "code"
+
+    def test_get_review_state(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        state = service.get_review_state()
+        assert state.get("active") is False
+
+    def test_detect_urls(self, service: LLMService) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        result = service.detect_urls("no urls here")
+        assert result == []
+
+    def test_get_snippets(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _StubCollab(is_localhost=False)
+        # Returns a list, not a restricted dict.
+        snippets = service.get_snippets()
+        assert isinstance(snippets, list)
+
+
+# ---------------------------------------------------------------------------
+# LLMService — collab check failure fails closed
+# ---------------------------------------------------------------------------
+
+
+class TestLLMServiceCollabFailClosed:
+    """If the collab check raises, deny the call."""
+
+    def test_new_session_fails_closed(
+        self, service: LLMService
+    ) -> None:
+        service._collab = _RaisingCollab()
+        result = service.new_session()
+        _assert_restricted(result)
+
+
+# asyncio import for async restriction tests.
+import asyncio  # noqa: E402
