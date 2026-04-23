@@ -906,3 +906,344 @@ class TestStateSnapshot:
         state = service.get_current_state()
         state["selected_files"].append("fake.md")
         assert service.get_current_state()["selected_files"] == ["a.md"]
+
+
+# ---------------------------------------------------------------------------
+# _build_tiered_content — Layer 3.8 tier dispatch
+# ---------------------------------------------------------------------------
+
+
+class _FakeSymbolIndex:
+    """Minimal symbol index stub for tier-builder tests.
+
+    Exposes ``get_file_symbol_block(path)`` matching the real
+    interface. Returns pre-seeded blocks from an in-memory dict;
+    missing paths return None (matches the real index's behaviour
+    for unknown files).
+    """
+
+    def __init__(self, blocks: dict[str, str] | None = None) -> None:
+        self._blocks = dict(blocks or {})
+
+    def get_file_symbol_block(self, path: str) -> str | None:
+        return self._blocks.get(path)
+
+
+def _place_item(
+    tracker,
+    key: str,
+    tier_name: str,
+    content_hash: str = "h",
+    tokens: int = 10,
+) -> None:
+    """Helper: put an item directly into a tier on the tracker.
+
+    The tracker's public update() flow expects an active-items
+    dict and runs its own state machine. For testing the
+    tier-builder we just want items parked in specific tiers —
+    we construct TrackedItem directly and inject into the
+    tracker's internal map.
+
+    This is a white-box helper; the real cascade is tested in
+    test_stability_tracker.py.
+    """
+    from ac_dc.stability_tracker import Tier, TrackedItem
+
+    tier = Tier(tier_name)
+    tracker._items[key] = TrackedItem(
+        key=key,
+        tier=tier,
+        n_value=0,
+        content_hash=content_hash,
+        tokens=tokens,
+    )
+
+
+class TestBuildTieredContent:
+    """LLMService._build_tiered_content dispatches items by key prefix."""
+
+    def test_returns_none_when_tracker_empty(
+        self, service: LLMService
+    ) -> None:
+        """Empty tracker → None, signalling flat-assembly fallback."""
+        # Fresh service: tracker was just constructed, no items
+        # registered yet. This is the narrow startup window the
+        # spec calls out.
+        result = service._build_tiered_content()
+        assert result is None
+
+    def test_returns_dict_with_four_tiers(
+        self, service: LLMService
+    ) -> None:
+        """Non-empty tracker returns a dict with L0..L3 keys."""
+        _place_item(service._stability_tracker, "history:0", "L1")
+        # Need a history entry for the history: key to resolve
+        service._context.add_message("user", "hello")
+        result = service._build_tiered_content()
+        assert result is not None
+        assert set(result.keys()) == {"L0", "L1", "L2", "L3"}
+
+    def test_symbol_key_dispatches_to_symbol_index(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """symbol:{path} items fetch blocks from the symbol index."""
+        fake_index = _FakeSymbolIndex({
+            "src/foo.py": "symbol-block-for-foo",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
+        result = svc._build_tiered_content()
+        assert result is not None
+        assert "symbol-block-for-foo" in result["L1"]["symbols"]
+        # Not in other tiers.
+        assert result["L0"]["symbols"] == ""
+        assert result["L2"]["symbols"] == ""
+
+    def test_symbol_key_without_symbol_index_skipped(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """symbol:* items with no attached index are silently skipped."""
+        svc = LLMService(config=config, repo=repo, symbol_index=None)
+        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
+        result = svc._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["symbols"] == ""
+
+    def test_symbol_key_block_not_found_skipped(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """symbol:* items whose path returns None are omitted."""
+        fake_index = _FakeSymbolIndex({})  # no blocks
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(svc._stability_tracker, "symbol:src/bar.py", "L1")
+        result = svc._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["symbols"] == ""
+
+    def test_doc_key_is_skipped(
+        self, service: LLMService
+    ) -> None:
+        """doc:* items skipped pre-Layer-3.10 (doc index not landed)."""
+        _place_item(service._stability_tracker, "doc:README.md", "L1")
+        result = service._build_tiered_content()
+        assert result is not None
+        # doc: dispatched but produces no content and no
+        # graduated_files entry.
+        assert result["L1"]["symbols"] == ""
+        assert result["L1"]["files"] == ""
+        assert result["L1"]["graduated_files"] == []
+
+    def test_file_key_dispatches_to_file_context(
+        self, service: LLMService
+    ) -> None:
+        """file:{path} items fetch content from the file context."""
+        service._file_context.add_file("a.py", "A content")
+        _place_item(service._stability_tracker, "file:a.py", "L1")
+        result = service._build_tiered_content()
+        assert result is not None
+        assert "a.py" in result["L1"]["files"]
+        assert "A content" in result["L1"]["files"]
+        # graduated_files captures the path for active-exclusion.
+        assert "a.py" in result["L1"]["graduated_files"]
+
+    def test_file_key_not_in_file_context_skipped(
+        self, service: LLMService
+    ) -> None:
+        """file:* items whose path isn't loaded are omitted silently."""
+        _place_item(service._stability_tracker, "file:missing.py", "L1")
+        result = service._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["files"] == ""
+        assert result["L1"]["graduated_files"] == []
+
+    def test_history_key_dispatches_to_context(
+        self, service: LLMService
+    ) -> None:
+        """history:{N} items fetch messages from the context manager."""
+        service._context.add_message("user", "early u")
+        service._context.add_message("assistant", "early a")
+        _place_item(service._stability_tracker, "history:0", "L2")
+        _place_item(service._stability_tracker, "history:1", "L2")
+        result = service._build_tiered_content()
+        assert result is not None
+        l2_history = result["L2"]["history"]
+        assert len(l2_history) == 2
+        # Ordered by original index (0 before 1).
+        assert l2_history[0]["content"] == "early u"
+        assert l2_history[1]["content"] == "early a"
+        # Indices recorded for active-history exclusion.
+        assert result["L2"]["graduated_history_indices"] == [0, 1]
+
+    def test_history_key_out_of_range_skipped(
+        self, service: LLMService
+    ) -> None:
+        """history:{N} for an N past the history length is dropped."""
+        service._context.add_message("user", "only msg")
+        _place_item(service._stability_tracker, "history:5", "L1")
+        result = service._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["history"] == []
+        assert result["L1"]["graduated_history_indices"] == []
+
+    def test_history_key_non_numeric_skipped(
+        self, service: LLMService
+    ) -> None:
+        """A malformed history: key doesn't crash assembly."""
+        service._context.add_message("user", "x")
+        _place_item(
+            service._stability_tracker, "history:notanumber", "L1"
+        )
+        result = service._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["history"] == []
+
+    def test_system_key_skipped(
+        self, service: LLMService
+    ) -> None:
+        """system:* items are handled by the assembler, not the builder."""
+        _place_item(
+            service._stability_tracker, "system:prompt", "L0"
+        )
+        result = service._build_tiered_content()
+        assert result is not None
+        # No symbols, no files, no history for the system key.
+        assert result["L0"]["symbols"] == ""
+        assert result["L0"]["files"] == ""
+
+    def test_url_key_skipped(
+        self, service: LLMService
+    ) -> None:
+        """url:* items are deferred to Layer 4.1; currently skipped."""
+        _place_item(
+            service._stability_tracker, "url:abc123def456", "L1"
+        )
+        result = service._build_tiered_content()
+        assert result is not None
+        assert result["L1"]["files"] == ""
+
+    def test_active_tier_items_excluded(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Items in the active tier don't appear in any cached tier.
+
+        Active is for content rebuilt each request — it never
+        carries a cache-control marker, and its content is
+        rendered directly by the assembler (not via
+        tiered_content).
+        """
+        fake_index = _FakeSymbolIndex({
+            "src/foo.py": "symbol-block",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(
+            svc._stability_tracker,
+            "symbol:src/foo.py",
+            "active",
+        )
+        result = svc._build_tiered_content()
+        # Tracker has at least one item so result is non-None.
+        assert result is not None
+        # But no cached tier contains the symbol block.
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "symbol-block" not in result[tier]["symbols"]
+
+    def test_multiple_tiers_isolated(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Content in one tier doesn't bleed into adjacent tiers."""
+        fake_index = _FakeSymbolIndex({
+            "a.py": "block-A",
+            "b.py": "block-B",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbol:b.py", "L2")
+        result = svc._build_tiered_content()
+        assert result is not None
+        assert "block-A" in result["L1"]["symbols"]
+        assert "block-B" not in result["L1"]["symbols"]
+        assert "block-B" in result["L2"]["symbols"]
+        assert "block-A" not in result["L2"]["symbols"]
+
+    def test_symbol_blocks_joined_with_blank_lines(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Multiple symbol blocks in the same tier are separated."""
+        fake_index = _FakeSymbolIndex({
+            "a.py": "block-A",
+            "b.py": "block-B",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbol:b.py", "L1")
+        result = svc._build_tiered_content()
+        assert result is not None
+        # Blocks joined with a blank line separator.
+        assert "\n\n" in result["L1"]["symbols"]
+        assert "block-A" in result["L1"]["symbols"]
+        assert "block-B" in result["L1"]["symbols"]
+
+    def test_symbol_blocks_sorted_by_key_for_determinism(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Fragment ordering is deterministic (sorted by key)."""
+        fake_index = _FakeSymbolIndex({
+            "z.py": "block-Z",
+            "a.py": "block-A",
+            "m.py": "block-M",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        _place_item(svc._stability_tracker, "symbol:z.py", "L1")
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbol:m.py", "L1")
+        result = svc._build_tiered_content()
+        assert result is not None
+        text = result["L1"]["symbols"]
+        # Sorted by key: a.py → m.py → z.py.
+        assert text.index("block-A") < text.index("block-M")
+        assert text.index("block-M") < text.index("block-Z")
