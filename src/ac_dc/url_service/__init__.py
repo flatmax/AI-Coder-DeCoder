@@ -25,6 +25,7 @@ path.
 
 from __future__ import annotations
 
+from ac_dc.url_service.cache import URLCache
 from ac_dc.url_service.detection import (
     URLType,
     classify_url,
@@ -37,15 +38,26 @@ from ac_dc.url_service.fetchers import (
     fetch_web_page,
 )
 from ac_dc.url_service.models import GitHubInfo, URLContent
+from ac_dc.url_service.service import URLService
+from ac_dc.url_service.summarizer import (
+    SummaryType,
+    choose_summary_type,
+    summarize,
+)
 
 __all__ = [
     "GitHubInfo",
+    "SummaryType",
+    "URLCache",
     "URLContent",
+    "URLService",
     "URLType",
+    "choose_summary_type",
     "classify_url",
     "detect_urls",
     "display_name",
     "fetch_github_file",
     "fetch_github_repo",
     "fetch_web_page",
+    "summarize",
 ]
