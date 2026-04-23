@@ -1434,6 +1434,161 @@ describe('ChatPanel new-session button', () => {
 });
 
 // ---------------------------------------------------------------------------
+// History browser integration
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel history browser', () => {
+  it('renders the History button', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.history-button');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain('History');
+  });
+
+  it('History button is disabled when RPC is disconnected', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.history-button');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('History button is disabled during streaming', async () => {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.history-button');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('opens the modal on History button click', async () => {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Modal starts closed — ac-history-browser has no
+    // .backdrop rendered.
+    const browser = p.shadowRoot.querySelector(
+      'ac-history-browser',
+    );
+    expect(browser).toBeTruthy();
+    expect(browser.open).toBe(false);
+    p.shadowRoot.querySelector('.history-button').click();
+    await settle(p);
+    expect(browser.open).toBe(true);
+  });
+
+  it('closes the modal on close event from browser', async () => {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._historyOpen = true;
+    await settle(p);
+    const browser = p.shadowRoot.querySelector(
+      'ac-history-browser',
+    );
+    browser.dispatchEvent(
+      new CustomEvent('close', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(p);
+    expect(p._historyOpen).toBe(false);
+  });
+
+  it('closes the modal on session-loaded event', async () => {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._historyOpen = true;
+    await settle(p);
+    const browser = p.shadowRoot.querySelector(
+      'ac-history-browser',
+    );
+    browser.dispatchEvent(
+      new CustomEvent('session-loaded', {
+        detail: { session_id: 's1' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(p);
+    expect(p._historyOpen).toBe(false);
+  });
+
+  it('session-loaded event does not crash without session-changed follow-up', async () => {
+    // In normal operation, session-loaded is followed by
+    // the server's sessionChanged broadcast which replaces
+    // the message list. If the broadcast doesn't arrive
+    // (test scenario, or mocked backend), the chat panel
+    // shouldn't crash — it just stays with the old
+    // messages until the next update.
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'old message' }],
+    });
+    await settle(p);
+    p._historyOpen = true;
+    await settle(p);
+    const browser = p.shadowRoot.querySelector(
+      'ac-history-browser',
+    );
+    browser.dispatchEvent(
+      new CustomEvent('session-loaded', {
+        detail: { session_id: 's1' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(p);
+    // Modal closed; messages unchanged (until broadcast
+    // arrives).
+    expect(p._historyOpen).toBe(false);
+    expect(p.messages).toHaveLength(1);
+  });
+
+  it('does not open modal while streaming', async () => {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Try to open via method — gate at method level, not
+    // just disabled attribute.
+    p._onOpenHistory();
+    await settle(p);
+    expect(p._historyOpen).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Session changes
 // ---------------------------------------------------------------------------
 

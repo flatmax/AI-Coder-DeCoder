@@ -71,6 +71,7 @@ import {
 import { renderEditCard } from './edit-block-render.js';
 import { findFileMentions } from './file-mentions.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
+import './history-browser.js';
 
 /**
  * Generate a request ID matching the specs3 format so the
@@ -138,6 +139,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * Lit re-render rate is capped at ~60Hz.
      */
     _streamingContent: { type: String, state: true },
+    /**
+     * Whether the history browser modal is open. Toggled by
+     * the "History" button and by the modal's close/load
+     * events.
+     */
+    _historyOpen: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -521,6 +528,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._input = '';
     this._streaming = false;
     this._streamingContent = '';
+    this._historyOpen = false;
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -819,6 +827,44 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Open the history browser modal. Disabled while
+   * streaming for the same reason as new-session — a
+   * mid-stream session switch would leave the in-flight
+   * stream orphaned. Unlike new-session, the modal itself
+   * is harmless to open; the gate is on the "load" action
+   * inside the modal, which the user reaches intentionally.
+   * But we gate the opening too so the button state is
+   * consistent with new-session and there's no
+   * inconsistency if the user tries to load while streaming.
+   */
+  _onOpenHistory() {
+    if (this._streaming) return;
+    this._historyOpen = true;
+  }
+
+  /**
+   * Close event from the history browser. Just toggles our
+   * open state off; the modal handles its own cleanup.
+   */
+  _onHistoryClose() {
+    this._historyOpen = false;
+  }
+
+  /**
+   * Load-session event from the history browser. The server
+   * broadcasts `sessionChanged` independently (handled by
+   * `_onSessionChanged`), so this handler's only job is to
+   * close the modal — the message list is replaced via the
+   * broadcast path. Treating the local event as
+   * "user-initiated load succeeded" lets us distinguish it
+   * from a remote session change (where we wouldn't want
+   * to close anything).
+   */
+  _onHistorySessionLoaded() {
+    this._historyOpen = false;
+  }
+
   // ---------------------------------------------------------------
   // Input handling
   // ---------------------------------------------------------------
@@ -947,6 +993,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
             >
               ✨ New session
             </button>
+            <button
+              class="action-button history-button"
+              ?disabled=${!this.rpcConnected || this._streaming}
+              @click=${this._onOpenHistory}
+              aria-label="Open history browser"
+              title="Browse past sessions"
+            >
+              📜 History
+            </button>
           </div>
         </div>
         <div class="input-row">
@@ -978,6 +1033,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
               </button>`}
         </div>
       </div>
+      <ac-history-browser
+        ?open=${this._historyOpen}
+        @close=${this._onHistoryClose}
+        @session-loaded=${this._onHistorySessionLoaded}
+      ></ac-history-browser>
     `;
   }
 
