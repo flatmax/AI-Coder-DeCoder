@@ -64,6 +64,11 @@ import { LitElement, css, html } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { RpcMixin } from './rpc-mixin.js';
+import {
+  matchSegmentsToResults,
+  segmentResponse,
+} from './edit-blocks.js';
+import { renderEditCard } from './edit-block-render.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
 
 /**
@@ -309,6 +314,126 @@ export class ChatPanel extends RpcMixin(LitElement) {
       font-size: 0.8125rem;
       border-top: 1px solid rgba(248, 81, 73, 0.25);
     }
+
+    /* Edit blocks — visual cards for edits proposed by the
+     * assistant. Minimal styling here; Phase 2d adds the
+     * character-level diff highlighting. */
+    .assistant-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .edit-block-card {
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      background: rgba(13, 17, 23, 0.4);
+      overflow: hidden;
+      font-size: 0.875rem;
+    }
+    .edit-block-card.edit-status-applied {
+      border-color: rgba(126, 231, 135, 0.4);
+    }
+    .edit-block-card.edit-status-failed {
+      border-color: rgba(248, 81, 73, 0.45);
+    }
+    .edit-block-card.edit-status-skipped,
+    .edit-block-card.edit-status-not-in-context {
+      border-color: rgba(210, 153, 34, 0.4);
+    }
+    .edit-block-card.edit-status-pending,
+    .edit-block-card.edit-status-new {
+      border-color: rgba(88, 166, 255, 0.35);
+    }
+    .edit-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.75rem;
+      background: rgba(22, 27, 34, 0.7);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .edit-file-path {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      color: var(--accent-primary, #58a6ff);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .edit-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      flex-shrink: 0;
+      font-size: 0.75rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+      background: rgba(13, 17, 23, 0.6);
+    }
+    .edit-status-icon {
+      font-size: 0.875rem;
+    }
+    .edit-status-applied {
+      color: #7ee787;
+    }
+    .edit-status-failed {
+      color: #f85149;
+    }
+    .edit-status-skipped,
+    .edit-status-not-in-context {
+      color: #d29922;
+    }
+    .edit-status-pending,
+    .edit-status-new {
+      color: var(--accent-primary, #58a6ff);
+    }
+    .edit-status-unknown {
+      color: var(--text-secondary, #8b949e);
+    }
+    .edit-body {
+      display: flex;
+      flex-direction: column;
+    }
+    .edit-pane {
+      border-bottom: 1px solid rgba(240, 246, 252, 0.05);
+    }
+    .edit-pane:last-child {
+      border-bottom: none;
+    }
+    .edit-pane-label {
+      padding: 0.25rem 0.75rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary, #8b949e);
+      background: rgba(22, 27, 34, 0.4);
+    }
+    .edit-pane-old .edit-pane-label {
+      color: #f85149;
+    }
+    .edit-pane-new .edit-pane-label {
+      color: #7ee787;
+    }
+    .edit-pane-content {
+      margin: 0;
+      padding: 0.5rem 0.75rem;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      overflow-x: auto;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .edit-error-message {
+      padding: 0.4rem 0.75rem;
+      background: rgba(248, 81, 73, 0.08);
+      color: #f85149;
+      font-size: 0.8125rem;
+      border-top: 1px solid rgba(248, 81, 73, 0.15);
+    }
   `;
 
   constructor() {
@@ -416,10 +541,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Move the streaming content into the message list as a
     // finalised assistant message. Error responses surface as
     // a dedicated error message rather than assistant content.
+    // Attach edit_results so the renderer can pair each edit
+    // segment with its backend result (applied / failed /
+    // skipped / not_in_context) via matchSegmentsToResults.
     if (requestId === this._currentRequestId) {
       const finalContent =
         result?.response ?? this._streamingContent ?? '';
       const error = result?.error;
+      const editResults = Array.isArray(result?.edit_results)
+        ? result.edit_results
+        : undefined;
       this.messages = [
         ...this.messages,
         error
@@ -430,6 +561,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
           : {
               role: 'assistant',
               content: finalContent,
+              editResults,
             },
       ];
       this._streaming = false;
@@ -697,34 +829,107 @@ export class ChatPanel extends RpcMixin(LitElement) {
       : msg.role === 'user'
         ? 'You'
         : 'Assistant';
-    // User content is rendered verbatim (escaped) — the user
-    // typed what they typed, we don't re-interpret it as
-    // markdown. Assistant and system messages are
-    // markdown-rendered.
-    const contentHtml =
-      msg.role === 'user' && !msg.system_event
-        ? escapeHtml(msg.content)
-        : renderMarkdown(msg.content);
+    // User and system-event content is rendered as-is — users
+    // typed what they typed (escaped verbatim), system events
+    // come through markdown so the `**Committed** …` pattern
+    // renders correctly. Assistant content goes through the
+    // edit-block segmenter so edit blocks become visual cards
+    // instead of raw prose.
+    let bodyHtml;
+    if (msg.role === 'user' && !msg.system_event) {
+      bodyHtml = html`
+        <div class="md-content">${unsafeHTML(escapeHtml(msg.content))}</div>
+      `;
+    } else if (msg.role === 'assistant') {
+      bodyHtml = this._renderAssistantBody(msg.content, msg.editResults);
+    } else {
+      bodyHtml = html`
+        <div class="md-content">
+          ${unsafeHTML(renderMarkdown(msg.content))}
+        </div>
+      `;
+    }
     return html`
       <div class="message-card ${roleClass}">
         <div class="role-label">${roleLabel}</div>
-        <div class="md-content">${unsafeHTML(contentHtml)}</div>
+        ${bodyHtml}
       </div>
     `;
+  }
+
+  /**
+   * Render assistant message body as a mix of prose segments
+   * (through markdown) and edit-block segments (through the
+   * renderer). The parser handles code-fence stripping around
+   * edit blocks; prose segments are passed to marked as-is.
+   *
+   * Accepts an optional `editResults` array from the backend's
+   * stream-complete payload. The parser emits segments in
+   * source order; `matchSegmentsToResults` pairs them to
+   * backend results using the per-file index counter pattern
+   * (nth block for file X → nth result for file X).
+   *
+   * @param {string} content — assistant message text
+   * @param {Array<object> | undefined} editResults — from
+   *   stream-complete.result.edit_results, undefined while
+   *   streaming or for error messages
+   * @returns {import('lit').TemplateResult}
+   */
+  _renderAssistantBody(content, editResults) {
+    const segments = segmentResponse(content || '');
+    if (segments.length === 0) {
+      // Empty content — nothing to render. Happens briefly
+      // between stream start and first chunk.
+      return html`<div class="md-content"></div>`;
+    }
+    const matched = matchSegmentsToResults(
+      segments,
+      Array.isArray(editResults) ? editResults : [],
+    );
+    // Render each segment as its own DOM block. Edit cards
+    // and prose alternate; keeping them as siblings (rather
+    // than joining into one HTML string) lets Lit's diffing
+    // reconcile efficiently on chunk updates.
+    const parts = segments.map((seg, i) => {
+      if (seg.type === 'text') {
+        // Markdown-render prose. Empty text segments (can
+        // happen around fences) produce no visible output
+        // but occupy a DOM slot so Lit's keyed diff stays
+        // stable.
+        return html`
+          <div class="md-content">
+            ${unsafeHTML(renderMarkdown(seg.content))}
+          </div>
+        `;
+      }
+      // edit and edit-pending both go through renderEditCard.
+      // Pending segments resolve to the 'pending' status
+      // badge; completed segments use their matched result.
+      const cardHtml = renderEditCard(seg, matched[i] || null);
+      return html`${unsafeHTML(cardHtml)}`;
+    });
+    return html`<div class="assistant-body">${parts}</div>`;
   }
 
   _renderStreamingMessage() {
     // The streaming card uses the assistant role styling with
     // an accent-coloured border to distinguish it from settled
-    // messages. The blinking cursor makes it obvious the
-    // response is still arriving.
+    // messages. Content goes through the same segmenter as
+    // final messages so pending edit blocks show up as cards
+    // mid-stream. The blinking cursor sits after the body so
+    // it's visible regardless of whether the last segment is
+    // prose or an edit block in progress.
+    //
+    // editResults is undefined — the backend hasn't sent
+    // stream-complete yet, so every edit segment renders in
+    // its pending/in-flight state (pending status for
+    // incomplete blocks, `new` for create blocks with empty
+    // oldText, `pending` for modify blocks awaiting results).
     return html`
       <div class="message-card role-assistant streaming">
         <div class="role-label">Assistant</div>
-        <div class="md-content">
-          ${unsafeHTML(renderMarkdown(this._streamingContent))}
-          <span class="cursor"></span>
-        </div>
+        ${this._renderAssistantBody(this._streamingContent, undefined)}
+        <span class="cursor"></span>
       </div>
     `;
   }
