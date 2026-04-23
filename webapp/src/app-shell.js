@@ -24,6 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { JRPCClient } from '@flatmax/jrpc-oo/jrpc-client.js';
 
 import { SharedRpc } from './rpc.js';
+import './files-tab.js';
 
 /**
  * Read the WebSocket port from the URL, falling back to 18080.
@@ -161,8 +162,14 @@ export class AppShell extends JRPCClient {
     }
     .dialog-body {
       flex: 1;
-      overflow: auto;
-      padding: 1rem;
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .dialog-body > ac-files-tab {
+      flex: 1;
+      min-height: 0;
     }
     .tab-placeholder {
       opacity: 0.5;
@@ -595,16 +602,18 @@ export class AppShell extends JRPCClient {
   }
 
   _renderTab() {
-    // Phase 1 — all tabs are placeholders. Phase 2 wires files.
-    // Phase 3 wires context and settings.
+    // Phase 2c wires up the files tab. Context and settings
+    // remain placeholders until Phase 3.
+    if (this.activeTab === 'files') {
+      return html`<ac-files-tab></ac-files-tab>`;
+    }
     const labels = {
-      files: 'Chat',
       context: 'Context',
       settings: 'Settings',
     };
     return html`
       <div class="tab-placeholder">
-        ${labels[this.activeTab] || this.activeTab} tab — Phase 2 wires this up.
+        ${labels[this.activeTab] || this.activeTab} tab — Phase 3 wires this up.
       </div>
     `;
   }

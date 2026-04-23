@@ -1551,6 +1551,55 @@ Deferred to later sub-phases — explicit boundaries:
 
 Next up — Phase 2c: files tab orchestration — wires picker and chat panel together via the files-tab component. Selection sync, file tree RPC loading, file mention routing, git status badges.
 
+### 5.4 — Phase 2c Files tab orchestration — **delivered**
+
+Standalone orchestrator component that combines the file picker (2a) and chat panel (2b) in a single tab. Owns the authoritative selected-files state. Loads the file tree from `Repo.get_file_tree` on RPC-ready. Wires selection sync both directions: user actions in the picker → server via `LLMService.set_selected_files`; server broadcasts (`files-changed`) → picker via direct prop assignment. Reloads the tree on `files-modified`. Translates `file-clicked` from the picker into `navigate-file` window events that Phase 3 will consume.
+
+- `webapp/src/files-tab.js` — `FilesTab(RpcMixin(LitElement))`. Structure:
+  - Two-pane layout — picker pane on the left (fixed width with min/max constraints; draggable handle lands in Phase 3), chat pane fills the remaining space.
+  - Authoritative selection held as `this._selectedFiles: Set<string>`. NOT exposed as a reactive Lit property — reactive properties would trigger parent re-renders that reset child state (see architectural rationale below).
+  - Child references accessed via `this._picker()` / `this._chat()` shadow-DOM queries. Called on demand rather than cached in fields — Lit's template may recreate the children if the tab is unmounted and remounted.
+  - Default picker width of 280px. Tests don't exercise the resizer (Phase 3 work); the width is stable for now.
+- **Architectural contract preserved — DIRECT-UPDATE PATTERN (load-bearing).** When selection changes, the tab updates both `picker.selectedFiles` and `chat.selectedFiles` by direct assignment plus `requestUpdate()`, NOT via Lit's reactive template propagation. specs4/5-webapp/file-picker.md#direct-update-pattern-architectural documents why: changing a property on a parent triggers a full template re-render, which reassigns child component properties. For the chat panel, that would reset scroll position and disrupt in-flight streaming. For the picker, it would collapse interaction state (context menus when they land in 2d, inline inputs, focus). The pattern: update our own `_selectedFiles` Set (source of truth) → assign `picker.selectedFiles = new Set(...)` + requestUpdate → assign `chat.selectedFiles = [...]` + requestUpdate → notify server via RPC.
+- **Chat panel selection assignment is forward-looking.** The chat panel in Phase 2b doesn't yet consume `selectedFiles` — it will in Phase 2d for file-mention click toggling. Assigning now means 2d's work drops in without a refactor. The assignment is a no-op visually today; tests can observe it via `chat.selectedFiles`.
+- **Set-equality short-circuit.** `_applySelection` compares against the current set and returns early if unchanged. Prevents loopback: when we call `set_selected_files` and the server echoes back via `filesChanged`, applying the echo would re-trigger the server call — infinite loop. The short-circuit makes the server-broadcast handler safe to be noisy about its source (always apply, never round-trip).
+- **RPC dispatch target is `Repo.get_file_tree`, not `LLMService`.** The file tree is a Repo-layer concern, not an LLM service concern. specs3's RPC inventory had this as `Repo.get_file_tree` returning `{tree, modified, staged, untracked, deleted, diff_stats}`. Phase 2c uses only `tree`; Phase 2d's git status badges will consume the sibling arrays.
+- **Restricted-error surfacing via toast.** `LLMService.set_selected_files` returns `{error: "restricted", reason: ...}` for non-localhost callers in collab mode. The tab's optimistic update stays (the picker already toggled); the server's follow-up `filesChanged` broadcast restores the authoritative state for the offending client. Toast type is `warning` rather than `error` — the user wasn't deceived, they were stopped.
+- **RPC-reject handling.** Both `get_file_tree` and `set_selected_files` rejections surface as `error`-type toasts, matching the AppShell's toast layer expectations. Console logs accompany so debugging context is preserved.
+- **Event contract:**
+  - Listens on `window` for `files-changed` (server broadcast) and `files-modified` (commit/reset reload signal dispatched by the streaming handler or the commit RPC after mutation)
+  - Listens on itself for `selection-changed` (picker event, bubbles up) and `file-clicked` (picker event, bubbles up)
+  - Dispatches `navigate-file` on `window` for Phase 3's viewer
+  - Dispatches `ac-toast` on `window` for error/warning surfacing (AppShell's toast layer catches these)
+- **AppShell integration.** `app-shell.js` imports `./files-tab.js` and renders `<ac-files-tab>` when `activeTab === 'files'`. The dialog-body's CSS changed from `padding: 1rem` with `overflow: auto` to `display: flex; flex-direction: column; overflow: hidden` so the files tab can flex-grow to fill the container. The `.tab-placeholder` class retains its own padding for the remaining stub tabs (context, settings).
+
+- `webapp/src/files-tab.test.js` — 14 tests across 6 describe blocks:
+  - Initial state — picker and chat children render, `_treeLoaded` stays false until RPC is ready, RPC-ready triggers file-tree load with real tree data reaching the picker, rejection surfaces as error toast.
+  - Selection sync picker → server — checkbox click calls `set_selected_files` with the right array, internal state and picker prop both update, restricted-error surfaces as warning toast, RPC reject surfaces as error toast.
+  - Selection sync server → picker — `files-changed` broadcast applies to picker, no echo back to server (infinite-loop prevention), same-set broadcast short-circuits (no redundant prop reassignment — identity check on the picker's `selectedFiles` reference), malformed payloads tolerated without crash.
+  - File click → navigate-file — name click dispatches `navigate-file` with `{path}`, checkbox click doesn't, malformed event ignored.
+  - files-modified reload — event triggers re-fetch of the tree, reload errors surface as toast without unhandled rejection.
+  - Cleanup — window listeners removed on disconnect; `files-modified` after remove produces no reload.
+
+- Test infrastructure — uses the same `SharedRpc` fake proxy pattern as `chat-panel.test.js`. The `settle()` helper drains microtasks AND both children's `updateComplete` cycles so the full orchestration round-trip is observable.
+
+Design points pinned by tests:
+
+- **Reject broadcasts aren't echoed back.** `test_does_not_re_send_server_broadcast_back_to_server` proves the `notifyServer` flag on `_applySelection` isn't set when the source is the `files-changed` handler. Without this, the server's broadcast would trigger our `set_selected_files` call, which would trigger another broadcast, etc. The set-equality short-circuit provides a second line of defence, but the explicit flag is the primary one.
+- **Set-equality identity check.** `test_ignores_broadcasts_with_the_same_set` asserts `picker.selectedFiles` is reference-equal before and after a same-set broadcast. Catches regressions where a future refactor helpfully reassigns the set unconditionally, which would cost us a redundant picker re-render every time the server echoes.
+- **Malformed payloads don't crash.** `test_ignores_malformed_broadcast_payloads` exercises null, non-array, missing-field, and fully-null detail. A rogue broadcast from a future backend version (or a test artifact in collab mode) can't wedge the UI.
+- **Restricted errors don't block the optimistic update.** The picker's checkbox has already flipped by the time we hear back from the server. The warning toast tells the user what happened; the server's `filesChanged` broadcast (which WILL fire in collab mode) does the actual restore. Testing the full collab handshake belongs to a Phase 4 integration test; Phase 2c just proves the single-client restricted path surfaces the warning without wedging state.
+
+Not wired to advance scope further. The files-tab deliberately stops at navigation-event dispatch (`navigate-file`) without consuming it — Phase 3's viewer is the consumer. The @-filter bridge and middle-click path insertion are Phase 2d (they need chat-textarea work that doesn't exist yet).
+
+Deferred to later sub-phases:
+
+- Phase 2d: @-filter bridge between chat textarea and picker's `setFilter()`, middle-click path insertion with paste suppression, git status badges (picker rendering changes), branch badge at the root, context menu on picker rows, file-mention click toggling (uses the selectedFiles on the chat panel that this commit lays the groundwork for).
+- Phase 2e: file search integration (pruned tree + match overlay).
+- Phase 3: draggable resizer between picker and chat panes, localStorage persistence of pane widths, active-file highlight (needs viewer's `active-file-changed` event).
+
+Next up — Phase 2d: chat panel advanced features — edit block rendering with diff highlighting, file mentions, snippet drawer, session controls, input history, message action buttons. The @-filter bridge and middle-click path insertion also land here since they need the chat textarea side.
+
 ### 3.8 — Tiered prompt assembly — **delivered**
 
 Replaces the flat-only assembly from 3.7 with a structured tiered message array carrying cache-control markers at tier boundaries. The streaming handler dispatches to tiered assembly by default and falls back to flat when the tracker hasn't been initialised.
