@@ -145,7 +145,7 @@ _DEFAULT_EXTENSIONS: tuple[str, ...] = (
 # indexer refactorable-but-only-if-you-also-update-convert.
 _EXCLUDED_DIRS: frozenset[str] = frozenset({
     ".git",
-    ".ac-dc",
+    ".ac-dc4",
     "node_modules",
     "__pycache__",
     ".venv",

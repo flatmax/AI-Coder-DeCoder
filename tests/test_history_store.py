@@ -35,8 +35,8 @@ from ac_dc.history_store import HistoryStore, SessionSummary
 
 @pytest.fixture
 def ac_dc_dir(tmp_path: Path) -> Path:
-    """Return a fresh ``.ac-dc/`` directory for each test."""
-    d = tmp_path / ".ac-dc"
+    """Return a fresh ``.ac-dc4/`` directory for each test."""
+    d = tmp_path / ".ac-dc4"
     d.mkdir()
     return d
 

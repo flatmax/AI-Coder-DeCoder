@@ -378,7 +378,7 @@ class TestScanExclusions:
         assert paths == {"visible.docx"}
 
     def test_ac_dc_directory_excluded(self, doc_convert, scan_root):
-        _write_source(scan_root, ".ac-dc/history.docx", b"x")
+        _write_source(scan_root, ".ac-dc4/history.docx", b"x")
         _write_source(scan_root, "visible.docx", b"x")
         results = doc_convert.scan_convertible_files()
         assert {r["path"] for r in results} == {"visible.docx"}

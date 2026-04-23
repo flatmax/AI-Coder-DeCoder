@@ -1687,7 +1687,7 @@ class TestBranches:
         """Untracked files don't make the tree dirty — ``-uno`` is passed.
 
         Users run AC-DC in repos that routinely have editor scratch
-        files and ``.ac-dc/`` itself lives in the working tree.
+        files and ``.ac-dc4/`` itself lives in the working tree.
         Review-mode and doc-convert gating would be unusable if every
         untracked file tripped them.
         """

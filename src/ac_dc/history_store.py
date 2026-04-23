@@ -1,6 +1,6 @@
 """Persistent conversation history — append-only JSONL store.
 
-Stores one JSON record per line in ``.ac-dc/history.jsonl`` under
+Stores one JSON record per line in ``.ac-dc4/history.jsonl`` under
 the repo root. Each record captures one user or assistant message
 plus enough metadata to reconstruct the conversation on session
 load: role, content, timestamp, session ID, and optional fields
@@ -8,7 +8,7 @@ for files-in-context, files modified, edit results, and image
 references.
 
 Image data URIs pasted into messages are decoded and saved as
-separate files in ``.ac-dc/images/`` so the JSONL file itself
+separate files in ``.ac-dc4/images/`` so the JSONL file itself
 doesn't balloon with megabytes of base64 per image. The filename
 is ``{epoch_ms}-{sha256_prefix}.{ext}`` — deterministic per
 content, so re-pasting the same image produces one file on disk.

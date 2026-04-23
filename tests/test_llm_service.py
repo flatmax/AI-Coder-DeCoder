@@ -212,7 +212,7 @@ def config(config_dir: Path, repo_dir: Path) -> ConfigManager:
 
 @pytest.fixture
 def history_store(repo_dir: Path) -> HistoryStore:
-    ac_dc_dir = repo_dir / ".ac-dc"
+    ac_dc_dir = repo_dir / ".ac-dc4"
     ac_dc_dir.mkdir(exist_ok=True)
     return HistoryStore(ac_dc_dir)
 

@@ -10,7 +10,7 @@ Single class :class:`ConfigManager` owns:
   snippets, and the prompt markdown files.
 - Model-aware cache-target computation (min cacheable tokens vary by
   Claude family).
-- Per-repo ``.ac-dc/`` working directory creation and gitignore wiring.
+- Per-repo ``.ac-dc4/`` working directory creation and gitignore wiring.
 
 Governing specs: ``specs4/1-foundation/configuration.md`` and
 ``specs4/6-deployment/packaging.md``.
@@ -64,8 +64,12 @@ _USER_FILES = frozenset({
 _VERSION_MARKER = ".bundled_version"
 
 # Per-repo working directory name. Created under the repo root on
-# first run; added to .gitignore.
-_AC_DC_DIR = ".ac-dc"
+# first run; added to .gitignore. The `4` suffix is deliberate —
+# this reimplementation shares repositories with the previous
+# `.ac-dc/`-using implementation during the transition, and
+# colliding on the same directory name would corrupt both states.
+# See IMPLEMENTATION_NOTES.md for the rename rationale.
+_AC_DC_DIR = ".ac-dc4"
 
 
 # ---------------------------------------------------------------------------

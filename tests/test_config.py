@@ -479,26 +479,26 @@ def test_ac_dc_dir_not_created_without_repo(isolated_config_dir):
     assert cfg.ac_dc_dir is None
     assert cfg.repo_root is None
 def test_ac_dc_dir_created_with_repo(isolated_config_dir, repo_root):
-    """When repo_root is given, .ac-dc/ and .ac-dc/images/ are created."""
+    """When repo_root is given, .ac-dc4/ and .ac-dc4/images/ are created."""
     cfg = ConfigManager(repo_root=repo_root)
     assert cfg.repo_root == repo_root
-    assert cfg.ac_dc_dir == repo_root / ".ac-dc"
+    assert cfg.ac_dc_dir == repo_root / ".ac-dc4"
     assert cfg.ac_dc_dir.is_dir()
     assert (cfg.ac_dc_dir / "images").is_dir()
 def test_ac_dc_dir_creation_is_idempotent(isolated_config_dir, repo_root):
-    """Calling ConfigManager twice doesn't fail if .ac-dc/ already exists."""
+    """Calling ConfigManager twice doesn't fail if .ac-dc4/ already exists."""
     ConfigManager(repo_root=repo_root)
     # Add a file inside to prove it isn't re-created (which would delete it).
-    marker = repo_root / ".ac-dc" / "marker.txt"
+    marker = repo_root / ".ac-dc4" / "marker.txt"
     marker.write_text("preserve me", encoding="utf-8")
     ConfigManager(repo_root=repo_root)
     assert marker.read_text(encoding="utf-8") == "preserve me"
 def test_gitignore_created_when_absent(isolated_config_dir, repo_root):
-    """A fresh repo gets a .gitignore containing the .ac-dc/ entry."""
+    """A fresh repo gets a .gitignore containing the .ac-dc4/ entry."""
     assert not (repo_root / ".gitignore").exists()
     ConfigManager(repo_root=repo_root)
     gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
-    assert ".ac-dc/" in gitignore
+    assert ".ac-dc4/" in gitignore
 def test_gitignore_entry_appended_when_present(isolated_config_dir, repo_root):
     """Existing .gitignore gets the entry appended, existing content preserved."""
     gitignore = repo_root / ".gitignore"
@@ -507,24 +507,24 @@ def test_gitignore_entry_appended_when_present(isolated_config_dir, repo_root):
     content = gitignore.read_text(encoding="utf-8")
     assert "*.pyc" in content
     assert "__pycache__/" in content
-    assert ".ac-dc/" in content
+    assert ".ac-dc4/" in content
 def test_gitignore_not_duplicated(isolated_config_dir, repo_root):
-    """Running twice doesn't append .ac-dc/ twice."""
+    """Running twice doesn't append .ac-dc4/ twice."""
     ConfigManager(repo_root=repo_root)
     ConfigManager(repo_root=repo_root)
     content = (repo_root / ".gitignore").read_text(encoding="utf-8")
-    assert content.count(".ac-dc/") == 1
+    assert content.count(".ac-dc4/") == 1
 def test_gitignore_recognises_trailing_slashless_entry(
     isolated_config_dir, repo_root
 ):
-    """An existing '.ac-dc' entry (no slash) is recognised and not duplicated."""
+    """An existing '.ac-dc4' entry (no slash) is recognised and not duplicated."""
     gitignore = repo_root / ".gitignore"
-    gitignore.write_text(".ac-dc\n", encoding="utf-8")
+    gitignore.write_text(".ac-dc4\n", encoding="utf-8")
     ConfigManager(repo_root=repo_root)
     content = gitignore.read_text(encoding="utf-8")
-    # The original '.ac-dc' line remains; no new '.ac-dc/' line added.
-    assert ".ac-dc\n" in content
-    assert ".ac-dc/" not in content
+    # The original '.ac-dc4' line remains; no new '.ac-dc4/' line added.
+    assert ".ac-dc4\n" in content
+    assert ".ac-dc4/" not in content
 def test_gitignore_handles_missing_trailing_newline(
     isolated_config_dir, repo_root
 ):
@@ -536,7 +536,7 @@ def test_gitignore_handles_missing_trailing_newline(
     # Appended entry is on its own line.
     lines = content.splitlines()
     assert "*.pyc" in lines
-    assert ".ac-dc/" in lines
+    assert ".ac-dc4/" in lines
 # ---------------------------------------------------------------------------
 # Snippets — fallback chain and format support
 # ---------------------------------------------------------------------------
@@ -636,7 +636,7 @@ def test_get_snippets_per_repo_override_takes_precedence(
     """Per-repo snippets.json is consulted before the user config dir."""
     cfg = ConfigManager(repo_root=repo_root)
     # Write a per-repo override with distinctive content.
-    override_path = repo_root / ".ac-dc" / "snippets.json"
+    override_path = repo_root / ".ac-dc4" / "snippets.json"
     override = {
         "code": [
             {"icon": "REPO", "tooltip": "repo-specific", "message": "from repo"}
@@ -664,7 +664,7 @@ def test_get_snippets_per_repo_corrupt_falls_through(
     """
     cfg = ConfigManager(repo_root=repo_root)
     # Write garbage to the per-repo override.
-    override_path = repo_root / ".ac-dc" / "snippets.json"
+    override_path = repo_root / ".ac-dc4" / "snippets.json"
     override_path.write_text("{not valid json", encoding="utf-8")
     # User-config snippets still deliver defaults for code mode.
     result = cfg.get_snippets("code")
@@ -674,7 +674,7 @@ def test_get_snippets_per_repo_non_object_falls_through(
 ):
     """Per-repo snippets.json whose root is not an object falls through."""
     cfg = ConfigManager(repo_root=repo_root)
-    override_path = repo_root / ".ac-dc" / "snippets.json"
+    override_path = repo_root / ".ac-dc4" / "snippets.json"
     # Valid JSON, but the root is a list — snippets expect a dict.
     override_path.write_text("[]", encoding="utf-8")
     # Falls through to the bundled defaults.

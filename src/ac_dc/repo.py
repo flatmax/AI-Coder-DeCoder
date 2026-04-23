@@ -87,7 +87,7 @@ _GIT_TIMEOUT_SECONDS = 30
 # dependency would be awkward to reverse later.
 _TREE_EXCLUDED_DIRS = frozenset({
     ".git",
-    ".ac-dc",
+    ".ac-dc4",
     "node_modules",
     "__pycache__",
     ".venv",
