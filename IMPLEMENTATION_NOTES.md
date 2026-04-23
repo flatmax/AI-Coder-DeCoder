@@ -91,6 +91,27 @@ Direct git reference is authoritative until a PyPI release lands.
 
 Layer 0's CLI stub used `print(..., file=sys.stderr)` for its banner. The logging subsystem is now part of Layer 1 so the first code that actually wants to emit structured logs (config loading, repo init) can use the standard `logging` API.
 
+### D15 — vitest fake timers leave jsdom's requestAnimationFrame broken
+
+After a test suite uses `vi.useFakeTimers()` and restores via `vi.useRealTimers()`, subsequent tests that rely on `requestAnimationFrame` (directly, or via a `settle()` helper) hang indefinitely. The rAF callback never fires because vitest's timer shim leaves jsdom's rAF implementation in a broken state that `useRealTimers()` doesn't fully restore.
+
+**Symptom:** An individual test passes in isolation (via `-t` grep), but the full file hangs at the first rAF-using test that runs after a fake-timer test. The hang is always at 5000ms timeout in `new Promise((r) => requestAnimationFrame(r))`.
+
+**Workaround:** `settle()` helpers in webapp tests use `setTimeout(0)` instead of `requestAnimationFrame`. Two `setTimeout(0)` awaits plus bracketing `updateComplete` awaits drain Lit updates and microtasks reliably across the fake-timer / real-timer boundary.
+
+```js
+async function settle(panel) {
+  await panel.updateComplete;
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  await panel.updateComplete;
+}
+```
+
+**When it matters:** any test file mixing fake-timer describe blocks (debounce tests) with other tests using a `settle()` helper. The file-search test file (`webapp/src/chat-panel-file-search.test.js`) is the canonical example — 26 tests hang at the boundary between the stale-guard block (fake timers) and the overlay-rendering block (real timers) when `settle()` uses rAF. Swapping to `setTimeout(0)` fixed all 26 without changing test semantics.
+
+**Not worth fixing upstream:** vitest + jsdom + fake timers is a complex interaction; the setTimeout shim is a one-line workaround that keeps the tests fast and stable.
+
 ### D14 — URL display_name truncation keeps two extra content chars
 
 `display_name` truncates long URLs to `_DISPLAY_MAX_CHARS - 2` characters of content plus a three-char `...` suffix, producing a 41-char output for a 40-char budget. This is one character "over budget" compared to a naive `budget - 3` truncation.
@@ -1443,7 +1464,7 @@ Layer 5 (webapp) is the largest remaining surface. Delivering in sub-phases to k
 
 - **Phase 1 — Minimum viable shell** (delivered): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
 - **Phase 2 — Essential tabs** (delivered): Chat panel (send/receive/streaming/markdown/edit blocks/images/file mentions/retry prompts/compaction events/message action buttons), Files tab (file picker tree, selection sync), action bar with session controls.
-- **Phase 2e — Search and refinements** (in progress): message search (this commit), file search, history browser refinements, speech-to-text.
+- **Phase 2e — Search and refinements** (in progress): message search delivered, file search delivered with test coverage, speech-to-text delivered, history browser refinements remain.
 - **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, file navigation grid, TeX preview, Doc convert tab.
 
 ### 5.1 — Phase 1 Minimum viable shell — **delivered**
@@ -1551,6 +1572,22 @@ Deferred to later sub-phases — explicit boundaries:
 - Phase 2e: message search overlay, file search overlay, history browser modal, speech-to-text.
 
 Next up — Phase 2c: files tab orchestration — wires picker and chat panel together via the files-tab component. Selection sync, file tree RPC loading, file mention routing, git status badges.
+
+### 5.5 — Phase 2e.3 Speech-to-text — **delivered**
+
+Dedicated component wrapping the browser's Web Speech API with a microphone toggle button in the chat panel's action bar. Each final utterance fires a `transcript` event that the chat panel catches and inserts at the textarea's cursor position with auto-space separators. Errors surface as toasts via a `recognition-error` event.
+
+- `webapp/src/speech-to-text.js` — `SpeechToText` LitElement. Single reactive state property `_state` (`'inactive'` / `'listening'` / `'speaking'`) drives the LED styling. `_active` field tracks the user's toggle state separately from recognition state — a recognition session can be mid-cycle (listening, speaking, ended) while the toggle remains on.
+- **Continuous mode implemented via auto-restart loop, not the native flag.** Native `continuous=true` has inconsistent silence handling across browsers; the loop (`onend` → schedule restart in 150ms → new instance) gives predictable utterance boundaries. Fresh `SpeechRecognition` instance per cycle — some browsers misbehave when restarting a stopped instance.
+- **Browser support detection hides the host.** `_getRecognitionCtor()` probes `window.SpeechRecognition` then `window.webkitSpeechRecognition`. Returns null for Firefox, older browsers, jsdom. When null, `connectedCallback` sets `this.hidden = true` so the chat panel doesn't render an action-bar button that can never work. Also exposed as a static `SpeechToText.isSupported` getter for programmatic callers.
+- **Error classification.** `onerror` with `code === 'no-speech'` or `'aborted'` is silently ignored — these fire at utterance boundaries under `continuous=false` and during restart races. Any other error code stops the session, reverts `_state` to inactive, and dispatches `recognition-error` with the code. Missing error field defaults to `'unknown'` so the event shape is stable.
+- **Synchronous start() failure handled.** Some browsers throw from `start()` when permission is denied inline rather than firing an async error. Try/catch around the call catches these; behaves identically to an async error.
+- **Clean disconnect releases the microphone.** `_stopRecognition` clears all event handlers before calling `stop()` — critical because otherwise the cycle's `onend` fires during teardown and schedules a restart on a component that's about to be garbage-collected. Cleared handlers also prevent the auto-restart loop from resurrecting a session the user just toggled off.
+- **Chat panel integration** — `_onTranscript` inserts transcribed text at the textarea cursor position. Auto-space separators: prepend a space when the char before cursor is non-whitespace, append a space when the char after is non-whitespace. Pattern covers "dictating mid-sentence" and "appending to existing text". Cursor moves to the end of the inserted text so successive utterances continue naturally. `_onRecognitionError` translates error codes to human-readable messages (`not-allowed` → "Microphone access denied", `audio-capture` → "No microphone detected", etc.) and surfaces via toast.
+- `webapp/src/speech-to-text.test.js` — 35 tests across 7 describe blocks. Fake `SpeechRecognition` installed via `window.SpeechRecognition` assignment (jsdom has no built-in). Tests drive the lifecycle deterministically: browser support detection (null constructor hides host, webkit-only path, `isSupported` property), toggle (starts inactive, click creates instance with correct config, second click stops, programmatic `toggle()` matches click, active class + aria-pressed reflect state), LED transitions (inactive → listening on audiostart → speaking on speechstart → listening on speechend → inactive on stop), transcript events (final results dispatch, bubble across shadow DOM, interim results skipped, empty transcripts skipped, malformed results defensively handled, multiple final results fire multiple events), auto-restart (onend restarts session after delay, `no-speech` / `aborted` errors don't break the loop, stopping cancels pending restart), errors (real errors stop + dispatch, bubble across shadow DOM, synchronous start() failure caught, missing error field → "unknown"), cleanup (disconnect stops active session, no-op when inactive, restart timer cleared, handlers nulled before stop).
+- Test file demonstrates an important technique — the `FakeRecognition` class accumulates constructed instances in a static array, so tests can assert on the newest instance without guessing when restarts fire. Makes the auto-restart tests (which create multiple sessions in sequence) trivial to verify.
+
+Delivered test count: 867 total (up from 832 after file search), all 18 webapp test files passing.
 
 ### 5.4 — Phase 2c Files tab orchestration — **delivered**
 

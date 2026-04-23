@@ -81,6 +81,7 @@ import {
 import { findMessageMatches } from './message-search.js';
 import './history-browser.js';
 import './input-history.js';
+import './speech-to-text.js';
 
 /**
  * Generate a request ID matching the specs3 format so the
@@ -2288,6 +2289,68 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   /**
+   * Insert a transcribed speech segment at the
+   * textarea's cursor position. Adds space separators
+   * when adjacent text is non-whitespace so successive
+   * utterances don't jam together ("helloworld") and
+   * so dictation mid-sentence inserts cleanly.
+   *
+   * Per specs4/5-webapp/speech.md — existing input is
+   * preserved (never overwritten); cursor ends up
+   * after the inserted text so the next utterance
+   * continues naturally.
+   */
+  _onTranscript(event) {
+    const text = event.detail?.text;
+    if (typeof text !== 'string' || !text) return;
+    const ta = this.shadowRoot?.querySelector('.input-textarea');
+    if (!ta) {
+      this._input = `${this._input}${text}`;
+      return;
+    }
+    const before = ta.value.slice(0, ta.selectionStart);
+    const after = ta.value.slice(ta.selectionEnd);
+    // Auto-space: prepend a space if the char before the
+    // cursor is non-whitespace, append one if the char
+    // after is non-whitespace. Mid-word dictation ("I am
+    // goinghome") would otherwise be a garden-path
+    // parse problem for the reader.
+    const prefix =
+      before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const suffix =
+      after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+    const insertion = `${prefix}${text}${suffix}`;
+    const next = `${before}${insertion}${after}`;
+    this._input = next;
+    ta.value = next;
+    const cursor = before.length + insertion.length;
+    ta.setSelectionRange(cursor, cursor);
+    // Fire input event so auto-resize runs.
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  /**
+   * Surface a speech recognition error as a toast. The
+   * component has already reverted to inactive state by
+   * the time this fires.
+   */
+  _onRecognitionError(event) {
+    const errorCode = event.detail?.error || 'unknown';
+    // Translate common error codes to user-friendly
+    // messages. Unknown codes surface verbatim so
+    // unexpected issues are at least diagnosable.
+    const messages = {
+      'not-allowed': 'Microphone access denied',
+      'service-not-allowed': 'Speech service unavailable',
+      'audio-capture': 'No microphone detected',
+      network: 'Speech recognition network error',
+    };
+    const message =
+      messages[errorCode] || `Speech error: ${errorCode}`;
+    this._emitToast(message, 'warning');
+  }
+
+  /**
    * Extract raw text from a message for copy / paste
    * actions. Handles both string and multimodal-array
    * content shapes — the backend sends multimodal arrays
@@ -3236,6 +3299,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
             >
               ✂️ Snippets
             </button>
+            <ac-speech-to-text
+              @transcript=${this._onTranscript}
+              @recognition-error=${this._onRecognitionError}
+            ></ac-speech-to-text>
           </div>
           <div class="action-divider" aria-hidden="true"></div>
           ${this._renderSearchBar()}
