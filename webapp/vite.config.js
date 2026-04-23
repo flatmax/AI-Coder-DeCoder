@@ -28,7 +28,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   base: './',
   optimizeDeps: {
-    exclude: ['@flatmax/jrpc-oo'],
+    exclude: ['@flatmax/jrpc-oo', 'monaco-editor'],
   },
   build: {
     outDir: 'dist',

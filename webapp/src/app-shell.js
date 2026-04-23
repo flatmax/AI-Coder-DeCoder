@@ -311,6 +311,7 @@ export class AppShell extends JRPCClient {
     // Navigate-file routing. Bound so add/remove match.
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
   }
 
   connectedCallback() {
@@ -326,6 +327,16 @@ export class AppShell extends JRPCClient {
     // another collaborator opens a file). Extension-based
     // routing picks the right viewer.
     window.addEventListener('navigate-file', this._onNavigateFile);
+    // load-diff-panel comes from the history browser's
+    // context menu (Phase 2e.4). The diff viewer's
+    // loadPanel method does the actual ad-hoc
+    // comparison rendering; we route from here so the
+    // history browser doesn't need a direct diff viewer
+    // reference.
+    window.addEventListener(
+      'load-diff-panel',
+      this._onLoadDiffPanel,
+    );
   }
 
   disconnectedCallback() {
@@ -333,6 +344,10 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'navigate-file',
       this._onNavigateFile,
+    );
+    window.removeEventListener(
+      'load-diff-panel',
+      this._onLoadDiffPanel,
     );
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
@@ -585,6 +600,29 @@ export class AppShell extends JRPCClient {
         line: detail.line,
         searchText: detail.searchText,
       });
+    });
+  }
+
+  /**
+   * Route a `load-diff-panel` event to the diff viewer's
+   * loadPanel method. Dispatched by the history browser's
+   * context menu for ad-hoc comparison. Shows the diff
+   * viewer (switches active viewer if currently on SVG)
+   * so the user sees the result immediately.
+   */
+  _onLoadDiffPanel(event) {
+    const detail = event.detail || {};
+    const { content, panel, label } = detail;
+    if (typeof content !== 'string') return;
+    if (panel !== 'left' && panel !== 'right') return;
+    this._activeViewer = 'diff';
+    this.updateComplete.then(() => {
+      const viewer =
+        this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (!viewer || typeof viewer.loadPanel !== 'function') {
+        return;
+      }
+      viewer.loadPanel(content, panel, label);
     });
   }
 

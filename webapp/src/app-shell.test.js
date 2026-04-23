@@ -7,6 +7,11 @@
 // setupDone, remoteDisconnected, setupSkip, addClass, plus
 // `serverURI` and `call` properties.
 //
+// monaco-editor is also mocked because app-shell.js transitively
+// imports it via diff-viewer.js → monaco-setup.js. Without the
+// mock, Vite's import resolver can't resolve monaco-editor's
+// non-standard package exports in the test environment.
+//
 // Scope:
 //   - SharedRpc publishing on setupDone
 //   - SharedRpc cleared on remoteDisconnected
@@ -17,6 +22,22 @@
 //   - Server-push callbacks dispatch window events
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
+  const monaco = {
+    editor: {
+      createDiffEditor: vi.fn(),
+      createModel: vi.fn(),
+      OverviewRulerLane: { Full: 7 },
+    },
+    languages: {
+      register: vi.fn(),
+      setMonarchTokensProvider: vi.fn(),
+      getLanguages: vi.fn(() => []),
+    },
+  };
+  return { default: monaco, ...monaco };
+});
 
 import { SharedRpc } from './rpc.js';
 
