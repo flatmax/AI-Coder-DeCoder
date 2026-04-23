@@ -93,6 +93,129 @@ function generateRequestId() {
   return `${epoch}-${suffix}`;
 }
 
+/**
+ * Build a retry prompt for ambiguous-anchor edit failures.
+ *
+ * An ambiguous anchor means the LLM's old-text block matched
+ * multiple locations in the target file. The fix is to add
+ * more surrounding context so the match is unique. The prompt
+ * names each affected file with its error message so the LLM
+ * can see what it tried and why it failed.
+ *
+ * Returns null when there are no ambiguous failures in the
+ * results — caller treats null as "no prompt needed" and
+ * skips to the next case.
+ *
+ * @param {Array} editResults — from stream-complete result
+ * @returns {string | null}
+ */
+function buildAmbiguousRetryPrompt(editResults) {
+  const ambiguous = editResults.filter(
+    (r) => r && r.error_type === 'ambiguous_anchor',
+  );
+  if (ambiguous.length === 0) return null;
+  const lines = [
+    'Some edits failed because the old text matched multiple',
+    'locations in the file. Please retry with more surrounding',
+    'context lines to make the match unique:',
+    '',
+  ];
+  for (const r of ambiguous) {
+    const file = r.file || '(unknown file)';
+    const msg = r.message || 'Ambiguous match';
+    lines.push(`- ${file}: ${msg}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build a retry prompt for anchor-not-found failures on files
+ * that ARE currently in the active context.
+ *
+ * When a file is selected, its full content is in the LLM's
+ * context. If the LLM's old-text block still fails to match,
+ * the most likely cause is that the LLM didn't read the file
+ * content carefully — maybe it was summarising from memory
+ * rather than copying. The prompt explicitly reminds the LLM
+ * the file is available and asks it to re-read before
+ * retrying.
+ *
+ * Only fires for files in `selectedFiles` — failures on
+ * not-in-context files are handled by the not-in-context
+ * prompt path, which supersedes this one.
+ *
+ * Returns null when no in-context anchor-not-found failures
+ * exist.
+ *
+ * @param {Array} editResults — from stream-complete result
+ * @param {Array<string>} selectedFiles — active file selection
+ * @returns {string | null}
+ */
+function buildInContextMismatchRetryPrompt(
+  editResults,
+  selectedFiles,
+) {
+  const selectedSet = new Set(selectedFiles);
+  const mismatches = editResults.filter(
+    (r) =>
+      r &&
+      r.error_type === 'anchor_not_found' &&
+      selectedSet.has(r.file),
+  );
+  if (mismatches.length === 0) return null;
+  const lines = [
+    'The following edit(s) failed because the old text didn\'t',
+    'match the actual file content. The file(s) are already in',
+    'your context — please re-read them carefully and retry',
+    'with the correct text:',
+    '',
+  ];
+  for (const r of mismatches) {
+    const file = r.file || '(unknown file)';
+    const msg = r.message || 'Old text not found';
+    lines.push(`- ${file}: ${msg}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build a retry prompt for not-in-context auto-adds.
+ *
+ * When the LLM proposes edits for files that aren't in the
+ * current selection, the backend marks them NOT_IN_CONTEXT
+ * (without attempting) and auto-adds them to the selection
+ * so the next turn has their content. The prompt tells the
+ * LLM the files are now available and asks it to retry.
+ *
+ * Single-file and multi-file wording differ slightly for
+ * grammatical naturalness ("The file X has been added" vs
+ * "The files X, Y have been added").
+ *
+ * Returns null when `filesAutoAdded` is empty.
+ *
+ * @param {Array<string>} filesAutoAdded — from stream-complete
+ * @returns {string | null}
+ */
+function buildNotInContextRetryPrompt(filesAutoAdded) {
+  if (!Array.isArray(filesAutoAdded) || filesAutoAdded.length === 0) {
+    return null;
+  }
+  const files = filesAutoAdded.filter(
+    (f) => typeof f === 'string' && f,
+  );
+  if (files.length === 0) return null;
+  const isSingle = files.length === 1;
+  const subject = isSingle
+    ? `The file ${files[0]}`
+    : `The files ${files.join(', ')}`;
+  const verb = isSingle ? 'has' : 'have';
+  const target = isSingle ? 'the edit' : 'the edits';
+  return (
+    `${subject} ${verb} been added to context. ` +
+    `Please retry ${target} for: ${files.join(', ')}`
+  );
+}
+
 /** localStorage key for the snippet drawer's open/closed state. */
 const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
 
@@ -936,7 +1059,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Attach edit_results so the renderer can pair each edit
     // segment with its backend result (applied / failed /
     // skipped / not_in_context) via matchSegmentsToResults.
+    let wasOwnRequest = false;
     if (requestId === this._currentRequestId) {
+      wasOwnRequest = true;
       const finalContent =
         result?.response ?? this._streamingContent ?? '';
       const error = result?.error;
@@ -962,6 +1087,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
 
     this._streams.delete(requestId);
+
+    // After finalising, check whether the response warrants
+    // a retry prompt. Only fires for our own requests —
+    // passive streams from collaborators don't get retry
+    // prompts in our textarea. If a prompt IS populated,
+    // the textarea is focused so the user can review and
+    // send immediately.
+    if (wasOwnRequest && result && !result.error) {
+      this._maybePopulateRetryPrompt(result);
+    }
   }
 
   _onUserMessage(event) {
@@ -1267,6 +1402,89 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._currentRequestId = null;
       this._streams.clear();
     }
+  }
+
+  // ---------------------------------------------------------------
+  // Retry prompts
+  // ---------------------------------------------------------------
+
+  /**
+   * After a stream completes, inspect the result for
+   * conditions that warrant a retry prompt in the textarea.
+   * The prompt is populated but NOT sent — user reviews and
+   * decides.
+   *
+   * Three cases, in priority order (later cases win if
+   * multiple apply):
+   *
+   *   1. In-context mismatch — edits with anchor_not_found
+   *      on files that ARE in the current selection. LLM
+   *      has stale content; ask it to re-read and retry.
+   *   2. Ambiguous anchor — edits with ambiguous_anchor
+   *      error. Specific LLM mistake (not enough context
+   *      for a unique match); ask it to add more.
+   *   3. Not-in-context — files_auto_added is non-empty.
+   *      Those edits weren't attempted at all; the auto-add
+   *      made the files available for the next turn.
+   *
+   * The ordering matches specs3/edit_protocol.md —
+   * not-in-context runs last so it overwrites earlier
+   * prompts. This is acceptable per spec: "Note: may
+   * overwrite an earlier ambiguous-anchor prompt if both
+   * are present in the same response."
+   *
+   * If the user has already typed something in the textarea,
+   * we skip the population — don't clobber their typing.
+   */
+  _maybePopulateRetryPrompt(result) {
+    if (!result || typeof result !== 'object') return;
+    // User typed between stream end and this callback — leave
+    // their input alone. Tiny window but the courtesy matters.
+    if (this._input.trim() !== '') return;
+
+    const editResults = Array.isArray(result.edit_results)
+      ? result.edit_results
+      : [];
+    const filesAutoAdded = Array.isArray(result.files_auto_added)
+      ? result.files_auto_added
+      : [];
+
+    // Build each prompt independently; the last non-null
+    // wins. We could early-return after the highest-priority
+    // one, but building them is cheap and the explicit order
+    // makes the precedence rule obvious at read time.
+    const selectedFiles = Array.isArray(this.selectedFiles)
+      ? this.selectedFiles
+      : [];
+    let prompt = null;
+    const mismatch = buildInContextMismatchRetryPrompt(
+      editResults,
+      selectedFiles,
+    );
+    if (mismatch) prompt = mismatch;
+    const ambiguous = buildAmbiguousRetryPrompt(editResults);
+    if (ambiguous) prompt = ambiguous;
+    const notInContext = buildNotInContextRetryPrompt(
+      filesAutoAdded,
+    );
+    if (notInContext) prompt = notInContext;
+
+    if (!prompt) return;
+    this._input = prompt;
+    // Focus and size the textarea on the next tick so Lit
+    // has committed the value. Same pattern as
+    // _onHistorySelect.
+    this.updateComplete.then(() => {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (!ta) return;
+      ta.focus();
+      // Move cursor to end so the user can continue typing
+      // (e.g. to add context) without having to click or
+      // arrow over first.
+      ta.setSelectionRange(prompt.length, prompt.length);
+      ta.style.height = 'auto';
+      ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+    });
   }
 
   /**
@@ -2103,4 +2321,7 @@ export {
   _loadDrawerOpen,
   _saveDrawerOpen,
   _DRAWER_STORAGE_KEY,
+  buildAmbiguousRetryPrompt,
+  buildInContextMismatchRetryPrompt,
+  buildNotInContextRetryPrompt,
 };

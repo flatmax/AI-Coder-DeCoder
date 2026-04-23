@@ -28,6 +28,9 @@ import {
   _DRAWER_STORAGE_KEY,
   _loadDrawerOpen,
   _saveDrawerOpen,
+  buildAmbiguousRetryPrompt,
+  buildInContextMismatchRetryPrompt,
+  buildNotInContextRetryPrompt,
 } from './chat-panel.js';
 
 // ---------------------------------------------------------------------------
@@ -3074,5 +3077,531 @@ describe('ChatPanel multimodal session-changed', () => {
     });
     await settle(p);
     expect(p.messages[0].images).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry prompt builders (pure functions)
+// ---------------------------------------------------------------------------
+
+describe('buildAmbiguousRetryPrompt', () => {
+  it('returns null for empty results', () => {
+    expect(buildAmbiguousRetryPrompt([])).toBeNull();
+  });
+
+  it('returns null when no ambiguous failures present', () => {
+    const results = [
+      { file: 'a.py', status: 'applied' },
+      { file: 'b.py', status: 'failed', error_type: 'anchor_not_found' },
+    ];
+    expect(buildAmbiguousRetryPrompt(results)).toBeNull();
+  });
+
+  it('builds prompt for a single ambiguous failure', () => {
+    const results = [
+      {
+        file: 'src/foo.py',
+        status: 'failed',
+        error_type: 'ambiguous_anchor',
+        message: 'Ambiguous match (3 locations)',
+      },
+    ];
+    const prompt = buildAmbiguousRetryPrompt(results);
+    expect(prompt).toContain('retry with more surrounding');
+    expect(prompt).toContain('src/foo.py');
+    expect(prompt).toContain('Ambiguous match (3 locations)');
+  });
+
+  it('builds prompt with multiple failures', () => {
+    const results = [
+      {
+        file: 'a.py',
+        error_type: 'ambiguous_anchor',
+        message: 'match A',
+      },
+      {
+        file: 'b.py',
+        error_type: 'ambiguous_anchor',
+        message: 'match B',
+      },
+    ];
+    const prompt = buildAmbiguousRetryPrompt(results);
+    // Both files named.
+    expect(prompt).toContain('a.py');
+    expect(prompt).toContain('b.py');
+    // Both messages included.
+    expect(prompt).toContain('match A');
+    expect(prompt).toContain('match B');
+  });
+
+  it('ignores non-ambiguous entries mixed in', () => {
+    const results = [
+      { file: 'good.py', status: 'applied' },
+      {
+        file: 'bad.py',
+        error_type: 'ambiguous_anchor',
+        message: 'two matches',
+      },
+      {
+        file: 'other.py',
+        error_type: 'anchor_not_found',
+      },
+    ];
+    const prompt = buildAmbiguousRetryPrompt(results);
+    // Only bad.py appears.
+    expect(prompt).toContain('bad.py');
+    expect(prompt).not.toContain('good.py');
+    expect(prompt).not.toContain('other.py');
+  });
+
+  it('handles missing file and message fields defensively', () => {
+    const results = [
+      { error_type: 'ambiguous_anchor' },
+    ];
+    const prompt = buildAmbiguousRetryPrompt(results);
+    // Placeholder text for missing fields rather than
+    // undefined appearing in the prompt.
+    expect(prompt).toContain('(unknown file)');
+    expect(prompt).toContain('Ambiguous match');
+  });
+
+  it('skips null entries in the results array', () => {
+    // Defensive — malformed arrays from test fixtures
+    // shouldn't crash.
+    const results = [
+      null,
+      { error_type: 'ambiguous_anchor', file: 'a.py' },
+    ];
+    const prompt = buildAmbiguousRetryPrompt(results);
+    expect(prompt).toContain('a.py');
+  });
+});
+
+describe('buildInContextMismatchRetryPrompt', () => {
+  it('returns null when no anchor_not_found failures', () => {
+    const results = [
+      { file: 'a.py', status: 'applied' },
+      { file: 'b.py', error_type: 'ambiguous_anchor' },
+    ];
+    expect(
+      buildInContextMismatchRetryPrompt(results, ['a.py', 'b.py']),
+    ).toBeNull();
+  });
+
+  it('returns null when failures are on files NOT in context', () => {
+    // anchor_not_found on a file that isn't selected —
+    // the not-in-context path handles this, not us.
+    const results = [
+      {
+        file: 'not-selected.py',
+        error_type: 'anchor_not_found',
+      },
+    ];
+    expect(
+      buildInContextMismatchRetryPrompt(results, ['other.py']),
+    ).toBeNull();
+  });
+
+  it('builds prompt when in-context file has anchor_not_found', () => {
+    const results = [
+      {
+        file: 'selected.py',
+        error_type: 'anchor_not_found',
+        message: 'Old text not found',
+      },
+    ];
+    const prompt = buildInContextMismatchRetryPrompt(
+      results,
+      ['selected.py'],
+    );
+    expect(prompt).toContain('already in');
+    expect(prompt).toContain('selected.py');
+    expect(prompt).toContain('re-read');
+  });
+
+  it('distinguishes in-context from not-in-context in same result', () => {
+    // Two failures — one on a selected file, one not.
+    // Only the selected one appears in the prompt.
+    const results = [
+      {
+        file: 'selected.py',
+        error_type: 'anchor_not_found',
+        message: 'text missing',
+      },
+      {
+        file: 'other.py',
+        error_type: 'anchor_not_found',
+        message: 'text missing',
+      },
+    ];
+    const prompt = buildInContextMismatchRetryPrompt(
+      results,
+      ['selected.py'],
+    );
+    expect(prompt).toContain('selected.py');
+    expect(prompt).not.toContain('other.py');
+  });
+
+  it('empty selectedFiles means empty in-context set', () => {
+    const results = [
+      { file: 'a.py', error_type: 'anchor_not_found' },
+    ];
+    expect(
+      buildInContextMismatchRetryPrompt(results, []),
+    ).toBeNull();
+  });
+
+  it('ignores ambiguous-anchor failures', () => {
+    // anchor_not_found is the trigger; ambiguous is
+    // handled elsewhere.
+    const results = [
+      {
+        file: 'selected.py',
+        error_type: 'ambiguous_anchor',
+        message: 'two matches',
+      },
+    ];
+    expect(
+      buildInContextMismatchRetryPrompt(
+        results,
+        ['selected.py'],
+      ),
+    ).toBeNull();
+  });
+
+  it('handles missing message field defensively', () => {
+    const results = [
+      {
+        file: 'selected.py',
+        error_type: 'anchor_not_found',
+      },
+    ];
+    const prompt = buildInContextMismatchRetryPrompt(
+      results,
+      ['selected.py'],
+    );
+    // Placeholder rather than "undefined" in the text.
+    expect(prompt).toContain('Old text not found');
+  });
+});
+
+describe('buildNotInContextRetryPrompt', () => {
+  it('returns null when files_auto_added is empty', () => {
+    expect(buildNotInContextRetryPrompt([])).toBeNull();
+  });
+
+  it('returns null for non-array input', () => {
+    expect(buildNotInContextRetryPrompt(null)).toBeNull();
+    expect(buildNotInContextRetryPrompt(undefined)).toBeNull();
+  });
+
+  it('builds singular prompt for a single file', () => {
+    const prompt = buildNotInContextRetryPrompt(['src/foo.py']);
+    expect(prompt).toContain('The file src/foo.py');
+    expect(prompt).toContain('has been added');
+    expect(prompt).toContain('src/foo.py');
+  });
+
+  it('builds plural prompt for multiple files', () => {
+    const prompt = buildNotInContextRetryPrompt([
+      'a.py',
+      'b.py',
+      'c.py',
+    ]);
+    expect(prompt).toContain('The files a.py, b.py, c.py');
+    expect(prompt).toContain('have been added');
+  });
+
+  it('filters non-string and empty entries', () => {
+    const prompt = buildNotInContextRetryPrompt([
+      'real.py',
+      '',
+      null,
+      undefined,
+    ]);
+    expect(prompt).toContain('The file real.py');
+    // Returns singular form — only one real file.
+    expect(prompt).toContain('has been added');
+  });
+
+  it('returns null when filtered list ends up empty', () => {
+    expect(
+      buildNotInContextRetryPrompt(['', null, undefined]),
+    ).toBeNull();
+  });
+
+  it('uses correct verb form for single vs multiple', () => {
+    const single = buildNotInContextRetryPrompt(['a.py']);
+    expect(single).toContain(' has ');
+    expect(single).not.toContain(' have ');
+    const multi = buildNotInContextRetryPrompt(['a.py', 'b.py']);
+    expect(multi).toContain(' have ');
+    expect(multi).not.toContain(' has ');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry prompt integration (populate-on-stream-complete)
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel retry prompt population', () => {
+  async function sendAndGetId(panel, text = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = text;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('populates textarea with ambiguous retry prompt', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p, 'please edit');
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'editing now',
+        edit_results: [
+          {
+            file: 'a.py',
+            status: 'failed',
+            error_type: 'ambiguous_anchor',
+            message: 'Ambiguous match (2 locations)',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._input).toContain('a.py');
+    expect(p._input).toContain('retry with more surrounding');
+  });
+
+  it('populates textarea with not-in-context retry prompt', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'done',
+        edit_results: [],
+        files_auto_added: ['src/new.py'],
+      },
+    });
+    await settle(p);
+    expect(p._input).toContain('The file src/new.py');
+    expect(p._input).toContain('has been added');
+  });
+
+  it('not-in-context wins over ambiguous when both present', async () => {
+    // Specs3: "Note: may overwrite an earlier
+    // ambiguous-anchor prompt if both are present in the
+    // same response — acceptable." The last-wins ordering
+    // in _maybePopulateRetryPrompt enforces this.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'tried',
+        edit_results: [
+          {
+            file: 'a.py',
+            error_type: 'ambiguous_anchor',
+            message: 'two matches',
+          },
+        ],
+        files_auto_added: ['b.py'],
+      },
+    });
+    await settle(p);
+    // The not-in-context prompt text is present…
+    expect(p._input).toContain('The file b.py');
+    expect(p._input).toContain('has been added');
+    // …and the ambiguous prompt text is not.
+    expect(p._input).not.toContain('surrounding context');
+  });
+
+  it('in-context mismatch prompt fires for selected file anchor_not_found', async () => {
+    const p = mountPanel({
+      selectedFiles: ['src/selected.py'],
+    });
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'attempted',
+        edit_results: [
+          {
+            file: 'src/selected.py',
+            error_type: 'anchor_not_found',
+            message: 'Old text not found',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._input).toContain('already in');
+    expect(p._input).toContain('src/selected.py');
+    expect(p._input).toContain('re-read');
+  });
+
+  it('ambiguous prompt wins over in-context mismatch', async () => {
+    // Both apply — the priority ordering means ambiguous
+    // wins over in-context mismatch (but not over
+    // not-in-context). Pinning the order so a future
+    // refactor doesn't accidentally reshuffle.
+    const p = mountPanel({ selectedFiles: ['a.py'] });
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'attempted',
+        edit_results: [
+          {
+            file: 'a.py',
+            error_type: 'anchor_not_found',
+            message: 'not found',
+          },
+          {
+            file: 'b.py',
+            error_type: 'ambiguous_anchor',
+            message: 'two matches',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    // Ambiguous prompt shows — mentions b.py.
+    expect(p._input).toContain('b.py');
+    // Use a substring that doesn't straddle a newline.
+    // The prompt wraps "surrounding" at end of one line
+    // and "context" starts the next — `'retry with more
+    // surrounding'` sits entirely on one line.
+    expect(p._input).toContain('retry with more surrounding');
+    // In-context mismatch prompt does NOT show —
+    // "already in" is unique to that prompt.
+    expect(p._input).not.toContain('already in');
+  });
+
+  it('does not populate when all edits succeeded', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'all good',
+        edit_results: [
+          { file: 'a.py', status: 'applied' },
+          { file: 'b.py', status: 'applied' },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._input).toBe('');
+  });
+
+  it('does not populate when result has no edit_results', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'plain response' },
+    });
+    await settle(p);
+    expect(p._input).toBe('');
+  });
+
+  it('does not populate when stream completes with an error', async () => {
+    // Error responses short-circuit before the retry
+    // logic — we don't want to suggest retries when the
+    // whole request failed.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        error: 'server broke',
+        edit_results: [
+          {
+            file: 'a.py',
+            error_type: 'ambiguous_anchor',
+            message: 'two matches',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._input).toBe('');
+  });
+
+  it('does not clobber user-typed text', async () => {
+    // User typed something in the textarea between stream
+    // end and retry-prompt logic — we leave it alone.
+    // Tests this by pre-populating _input before the
+    // stream-complete event fires.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    // Simulate the user typing after send cleared input.
+    p._input = 'I was typing this';
+    await settle(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'done',
+        files_auto_added: ['auto.py'],
+      },
+    });
+    await settle(p);
+    expect(p._input).toBe('I was typing this');
+  });
+
+  it('does not populate for passive streams (other request IDs)', async () => {
+    // Retry prompts are our feedback for our own actions.
+    // A collaborator's stream shouldn't leave a prompt
+    // in our textarea.
+    const p = mountPanel();
+    await settle(p);
+    // No send — we're a passive observer.
+    pushEvent('stream-complete', {
+      requestId: 'other-client-id',
+      result: {
+        response: 'their response',
+        files_auto_added: ['their-file.py'],
+      },
+    });
+    await settle(p);
+    expect(p._input).toBe('');
+  });
+
+  it('focuses the textarea after populating', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'done',
+        files_auto_added: ['new.py'],
+      },
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    expect(p.shadowRoot.activeElement).toBe(ta);
+  });
+
+  it('positions cursor at end of populated text', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'done',
+        files_auto_added: ['new.py'],
+      },
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    expect(ta.selectionStart).toBe(p._input.length);
+    expect(ta.selectionEnd).toBe(p._input.length);
   });
 });
