@@ -231,6 +231,377 @@ describe('ChatPanel message rendering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Edit block rendering (integration with edit-blocks.js + edit-block-render.js)
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel edit block rendering', () => {
+  // Shared edit-block fixtures — literal marker bytes per D3.
+  const EDIT_MARK = '🟧🟧🟧 EDIT';
+  const REPL_MARK = '🟨🟨🟨 REPL';
+  const END_MARK = '🟩🟩🟩 END';
+
+  const simpleEditBlock = [
+    'src/foo.py',
+    EDIT_MARK,
+    'old line',
+    REPL_MARK,
+    'new line',
+    END_MARK,
+  ].join('\n');
+
+  const proseAndEdit = [
+    'Here is the change:',
+    '',
+    simpleEditBlock,
+    '',
+    'That should fix it.',
+  ].join('\n');
+
+  it('renders prose segments through markdown', async () => {
+    // Pin that prose outside the edit block still goes
+    // through marked — the segmenter splits content into
+    // prose and block parts, and prose must render as
+    // markdown (paragraphs, inline code, etc.) not as
+    // escaped text.
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: proseAndEdit },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector(
+      '.role-assistant',
+    );
+    // Prose paragraphs appear as rendered markdown <p> tags.
+    expect(card.querySelector('p')).toBeTruthy();
+    expect(card.textContent).toContain('Here is the change');
+    expect(card.textContent).toContain('That should fix it');
+  });
+
+  it('renders edit segment as edit-block-card', async () => {
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: simpleEditBlock },
+      ],
+    });
+    await settle(p);
+    const cards = p.shadowRoot.querySelectorAll(
+      '.edit-block-card',
+    );
+    expect(cards.length).toBe(1);
+    // File path appears in the header.
+    expect(cards[0].querySelector('.edit-file-path').textContent).toBe(
+      'src/foo.py',
+    );
+    // Old and new panes both present for a modify block.
+    expect(cards[0].querySelector('.edit-pane-old')).toBeTruthy();
+    expect(cards[0].querySelector('.edit-pane-new')).toBeTruthy();
+    // Content of each pane preserved.
+    const oldPane = cards[0].querySelector(
+      '.edit-pane-old .edit-pane-content',
+    );
+    const newPane = cards[0].querySelector(
+      '.edit-pane-new .edit-pane-content',
+    );
+    expect(oldPane.textContent).toBe('old line');
+    expect(newPane.textContent).toBe('new line');
+  });
+
+  it('renders message without editResults in pending state', async () => {
+    // Settled message without editResults (e.g., an error
+    // response or a message from before this feature landed)
+    // — edit cards render with the pending status badge.
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: simpleEditBlock },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.edit-block-card');
+    expect(card).toBeTruthy();
+    expect(card.classList.contains('edit-status-pending')).toBe(true);
+  });
+
+  it('applies backend result status to edit card', async () => {
+    // The whole point of pairing — an applied edit gets a
+    // green badge, a failed one gets a red badge, etc. Pin
+    // the two most common outcomes.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content: simpleEditBlock,
+          editResults: [
+            {
+              file: 'src/foo.py',
+              status: 'applied',
+              message: '',
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.edit-block-card');
+    expect(card.classList.contains('edit-status-applied')).toBe(true);
+    expect(card.classList.contains('edit-status-pending')).toBe(false);
+  });
+
+  it('renders failed edit with error message', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content: simpleEditBlock,
+          editResults: [
+            {
+              file: 'src/foo.py',
+              status: 'failed',
+              message: 'Anchor not unique',
+              error_type: 'ambiguous_anchor',
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.edit-block-card');
+    expect(card.classList.contains('edit-status-failed')).toBe(true);
+    const err = card.querySelector('.edit-error-message');
+    expect(err).toBeTruthy();
+    expect(err.textContent).toContain('Anchor not unique');
+  });
+
+  it('pairs multiple edits to same file in source order', async () => {
+    // Two edits to src/foo.py → the Nth block pairs with
+    // the Nth result for that file. Pinned explicitly
+    // because the per-file-index-counter pattern is load
+    // bearing and easy to regress.
+    const content = [simpleEditBlock, '', simpleEditBlock].join('\n');
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content,
+          editResults: [
+            {
+              file: 'src/foo.py',
+              status: 'applied',
+              message: 'first',
+            },
+            {
+              file: 'src/foo.py',
+              status: 'failed',
+              message: 'second',
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    const cards = p.shadowRoot.querySelectorAll('.edit-block-card');
+    expect(cards.length).toBe(2);
+    expect(cards[0].classList.contains('edit-status-applied')).toBe(true);
+    expect(cards[1].classList.contains('edit-status-failed')).toBe(true);
+    // Error message only on the failed one.
+    expect(cards[0].querySelector('.edit-error-message')).toBeNull();
+    expect(cards[1].querySelector('.edit-error-message')).toBeTruthy();
+  });
+
+  it('renders create block with NEW pane only', async () => {
+    // A create block has empty old-text. The renderer shows
+    // only the NEW pane and uses the `new` status for cards
+    // without a backend result.
+    const createBlock = [
+      'src/new.py',
+      EDIT_MARK,
+      REPL_MARK,
+      'print("hello")',
+      END_MARK,
+    ].join('\n');
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: createBlock },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.edit-block-card');
+    expect(card.classList.contains('edit-status-new')).toBe(true);
+    expect(card.querySelector('.edit-pane-old')).toBeNull();
+    expect(card.querySelector('.edit-pane-new')).toBeTruthy();
+    expect(
+      card.querySelector('.edit-pane-new .edit-pane-content')
+        .textContent,
+    ).toBe('print("hello")');
+  });
+
+  it('renders pending block during streaming', async () => {
+    // Partial edit block mid-stream renders as a card with
+    // the pending badge. The segmenter's edit-pending state
+    // flows through to renderEditCard which shows "pending"
+    // for segments with no final END marker yet.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Start a stream.
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    // Feed a chunk with a partial edit block.
+    const partial = [
+      'Here is the change:',
+      '',
+      'src/foo.py',
+      EDIT_MARK,
+      'old line one',
+      'old line t',
+    ].join('\n');
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: partial,
+    });
+    await settle(p);
+    // Streaming card contains the pending edit card.
+    const streaming = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    expect(streaming).toBeTruthy();
+    const card = streaming.querySelector('.edit-block-card');
+    expect(card).toBeTruthy();
+    expect(card.classList.contains('edit-status-pending')).toBe(true);
+    // Old pane shows the in-progress content.
+    expect(
+      card.querySelector('.edit-pane-old .edit-pane-content')
+        .textContent,
+    ).toBe('old line one\nold line t');
+  });
+
+  it('streaming cursor appears after the body', async () => {
+    // The cursor marks the streaming card as live. It needs
+    // to be after the body so it's visible even when the
+    // last segment is an edit card (not prose).
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: 'Working on it',
+    });
+    await settle(p);
+    const streaming = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    expect(streaming).toBeTruthy();
+    const cursor = streaming.querySelector('.cursor');
+    expect(cursor).toBeTruthy();
+  });
+
+  it('finalising a stream with editResults applies statuses', async () => {
+    // End-to-end: stream a response containing an edit
+    // block, then deliver stream-complete with edit_results.
+    // The settled message's card picks up the backend
+    // status.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: simpleEditBlock,
+    });
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: simpleEditBlock,
+        edit_results: [
+          {
+            file: 'src/foo.py',
+            status: 'applied',
+            message: '',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    // Streaming card gone; settled card shows applied
+    // status.
+    expect(
+      p.shadowRoot.querySelector('.message-card.streaming'),
+    ).toBeNull();
+    const card = p.shadowRoot.querySelector('.edit-block-card');
+    expect(card).toBeTruthy();
+    expect(card.classList.contains('edit-status-applied')).toBe(true);
+  });
+
+  it('user message with edit-block-shaped content renders as text', async () => {
+    // Users might paste an edit block as a quote or
+    // reference. User content must render escaped — never
+    // go through the segmenter — so the markers appear as
+    // literal text and nothing is mistaken for an edit.
+    const p = mountPanel({
+      messages: [
+        { role: 'user', content: simpleEditBlock },
+      ],
+    });
+    await settle(p);
+    const userCard = p.shadowRoot.querySelector('.role-user');
+    // No edit cards rendered inside a user message.
+    expect(userCard.querySelector('.edit-block-card')).toBeNull();
+    // The raw content (including markers) is visible as
+    // text.
+    expect(userCard.textContent).toContain('EDIT');
+    expect(userCard.textContent).toContain('REPL');
+    expect(userCard.textContent).toContain('END');
+  });
+
+  it('error message does not segment', async () => {
+    // Stream-complete with an error produces `**Error:**
+    // ...` as content. That shouldn't be run through the
+    // segmenter — it's a meta-message, not an LLM response.
+    // It just goes through markdown like any other
+    // assistant message without edit blocks.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content: '**Error:** something broke',
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.role-assistant');
+    // Bold markdown rendered.
+    expect(card.querySelector('strong')).toBeTruthy();
+    // No edit cards (there's no edit block in the content).
+    expect(card.querySelector('.edit-block-card')).toBeNull();
+  });
+
+  it('empty assistant content renders empty body without crashing', async () => {
+    // Defensive — a zero-length content (brief window
+    // between stream start and first chunk for settled
+    // messages) shouldn't crash the render.
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: '' },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.role-assistant');
+    expect(card).toBeTruthy();
+    // No edit cards.
+    expect(card.querySelector('.edit-block-card')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Send + streaming
 // ---------------------------------------------------------------------------
 
