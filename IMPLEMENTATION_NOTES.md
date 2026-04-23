@@ -1627,6 +1627,12 @@ Open carried over for later sub-layers:
 - **URL tier items.** `url:*` items are tracked as active items but the tier-builder doesn't yet render them. Layer 4.1 (URL service) will add the render path once the URL service exposes `get_url_content_by_hash` or an equivalent dispatch.
 - **Cross-reference mode activation.** `_assemble_tiered` passes `doc_legend=""` unconditionally. Layer 3.10 will thread the cross-ref state through to populate the second legend when the toggle is active. The assembly side already handles non-empty `doc_legend` correctly; the missing piece is just the service-level state.
 
+## Deferred cleanup
+
+Temporary scaffolding installed to keep a test/output path quiet, with the fix scheduled for a specific future phase. Grep `TODO(phase-` across the tree to find markers.
+
+- **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:

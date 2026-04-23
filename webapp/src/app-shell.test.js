@@ -131,6 +131,34 @@ describe('AppShell', () => {
   });
 
   describe('setupDone', () => {
+    // TODO(phase-2d): files-tab silencing — delete this
+    // beforeEach/afterEach pair when Phase 2d work adds proper
+    // RPC mocking for the files-tab inside app-shell tests.
+    //
+    // Context: mounting the shell renders <ac-files-tab> in the
+    // default tab. On setupDone(), the files-tab's onRpcReady
+    // fires and calls Repo.get_file_tree on whatever fake proxy
+    // these tests installed. That proxy doesn't expose
+    // get_file_tree (this describe block tests shell behavior,
+    // not files-tab behavior), so the files-tab's RPC call
+    // rejects and its error handler logs via console.error.
+    //
+    // The errors are genuine but out of scope for these tests.
+    // A scoped mock silences them without hiding real errors in
+    // other describe blocks. When Phase 2d expands these tests
+    // to cover files-tab interaction, the fake proxy will grow
+    // Repo.get_file_tree and this silence becomes redundant —
+    // grep for TODO(phase-2d) to find it.
+    let _consoleErrorSpy;
+    beforeEach(() => {
+      _consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+    });
+    afterEach(() => {
+      _consoleErrorSpy.mockRestore();
+    });
+
     it('publishes call proxy to SharedRpc on first connect', async () => {
       const shell = mountShell();
       shell.call = { 'Repo.get_file_content': vi.fn() };
