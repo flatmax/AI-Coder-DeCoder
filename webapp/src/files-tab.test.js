@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SharedRpc } from './rpc.js';
 import './files-tab.js';
+import { flattenTreePaths } from './files-tab.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -458,6 +459,403 @@ describe('FilesTab file click → navigate-file', () => {
     } finally {
       window.removeEventListener('navigate-file', listener);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// flattenTreePaths helper
+// ---------------------------------------------------------------------------
+
+describe('flattenTreePaths', () => {
+  it('empty / null / undefined input returns empty array', () => {
+    expect(flattenTreePaths(null)).toEqual([]);
+    expect(flattenTreePaths(undefined)).toEqual([]);
+    expect(flattenTreePaths({})).toEqual([]);
+  });
+
+  it('single file node produces single-element array', () => {
+    const tree = {
+      name: 'a.md',
+      path: 'a.md',
+      type: 'file',
+      lines: 5,
+    };
+    expect(flattenTreePaths(tree)).toEqual(['a.md']);
+  });
+
+  it('empty root dir produces empty array', () => {
+    const tree = {
+      name: 'repo',
+      path: '',
+      type: 'dir',
+      children: [],
+    };
+    expect(flattenTreePaths(tree)).toEqual([]);
+  });
+
+  it('flattens nested directories', () => {
+    const tree = {
+      name: 'repo',
+      path: '',
+      type: 'dir',
+      children: [
+        {
+          name: 'src',
+          path: 'src',
+          type: 'dir',
+          children: [
+            {
+              name: 'main.py',
+              path: 'src/main.py',
+              type: 'file',
+              lines: 10,
+            },
+            {
+              name: 'utils',
+              path: 'src/utils',
+              type: 'dir',
+              children: [
+                {
+                  name: 'helpers.py',
+                  path: 'src/utils/helpers.py',
+                  type: 'file',
+                  lines: 20,
+                },
+              ],
+            },
+          ],
+        },
+        {
+          name: 'README.md',
+          path: 'README.md',
+          type: 'file',
+          lines: 30,
+        },
+      ],
+    };
+    const result = flattenTreePaths(tree);
+    expect(result).toEqual([
+      'src/main.py',
+      'src/utils/helpers.py',
+      'README.md',
+    ]);
+  });
+
+  it('skips nodes without a path', () => {
+    // Defensive — a malformed tree with a file-type node
+    // missing its path shouldn't produce an undefined
+    // entry in the output.
+    const tree = {
+      type: 'dir',
+      children: [
+        { type: 'file', path: 'good.py' },
+        { type: 'file' }, // no path
+        { type: 'file', path: '' }, // empty path
+      ],
+    };
+    expect(flattenTreePaths(tree)).toEqual(['good.py']);
+  });
+
+  it('skips nodes without a type', () => {
+    const tree = {
+      type: 'dir',
+      children: [
+        { path: 'good.py', type: 'file' },
+        { path: 'no-type.py' }, // no type
+      ],
+    };
+    expect(flattenTreePaths(tree)).toEqual(['good.py']);
+  });
+
+  it('tolerates non-array children', () => {
+    const tree = {
+      type: 'dir',
+      children: 'not an array',
+    };
+    expect(flattenTreePaths(tree)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// repoFiles push to chat panel
+// ---------------------------------------------------------------------------
+
+describe('FilesTab repoFiles push', () => {
+  it('pushes flat file list to chat panel on tree load', async () => {
+    const getTree = vi.fn().mockResolvedValue(
+      fakeTreeResponse([
+        { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        {
+          name: 'src',
+          path: 'src',
+          type: 'dir',
+          children: [
+            {
+              name: 'main.py',
+              path: 'src/main.py',
+              type: 'file',
+              lines: 5,
+            },
+          ],
+        },
+      ]),
+    );
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    // Flat list reached the chat panel via direct
+    // assignment (not via Lit template propagation, which
+    // would reset the chat panel's internal state).
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    expect(chat.repoFiles).toEqual(['a.md', 'src/main.py']);
+  });
+
+  it('empty tree produces empty repoFiles', async () => {
+    const getTree = vi
+      .fn()
+      .mockResolvedValue(fakeTreeResponse([]));
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    expect(chat.repoFiles).toEqual([]);
+  });
+
+  it('updates repoFiles on tree reload', async () => {
+    // After a commit, `files-modified` triggers reload.
+    // The new file list should replace the old one.
+    let callCount = 0;
+    const getTree = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          ]),
+        );
+      }
+      return Promise.resolve(
+        fakeTreeResponse([
+          { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          { name: 'b.md', path: 'b.md', type: 'file', lines: 2 },
+        ]),
+      );
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    expect(chat.repoFiles).toEqual(['a.md']);
+    pushEvent('files-modified', {});
+    await settle(t);
+    expect(chat.repoFiles).toEqual(['a.md', 'b.md']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File mention click → toggle + navigate
+// ---------------------------------------------------------------------------
+
+describe('FilesTab file-mention-click handling', () => {
+  async function setupWithFiles() {
+    const getTree = vi.fn().mockResolvedValue(
+      fakeTreeResponse([
+        { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        { name: 'b.md', path: 'b.md', type: 'file', lines: 2 },
+      ]),
+    );
+    const setFiles = vi.fn().mockResolvedValue(['a.md']);
+    publishFakeRpc({
+      'Repo.get_file_tree': getTree,
+      'LLMService.set_selected_files': setFiles,
+    });
+    const t = mountTab();
+    await settle(t);
+    return { t, setFiles };
+  }
+
+  it('adds file to selection on mention click', async () => {
+    const { t, setFiles } = await setupWithFiles();
+    // Simulate the chat panel dispatching the event.
+    // The `@file-mention-click` binding in the files-tab
+    // template routes it to the handler.
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'a.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(t._selectedFiles.has('a.md')).toBe(true);
+    // Server notified with the new selection.
+    expect(setFiles).toHaveBeenCalledOnce();
+    expect(setFiles.mock.calls[0][0]).toEqual(['a.md']);
+    // Picker's prop updated via direct assignment.
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.selectedFiles.has('a.md')).toBe(true);
+  });
+
+  it('removes file from selection when mention clicked while selected', async () => {
+    // Toggle semantics — a mention click on a file
+    // already in the selection removes it. Matches
+    // specs4/5-webapp/file-picker.md's "File Mention
+    // Selection" contract.
+    const { t, setFiles } = await setupWithFiles();
+    // Pre-select a.md via an initial click.
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'a.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(t._selectedFiles.has('a.md')).toBe(true);
+    // Second click — should remove.
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'a.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(t._selectedFiles.has('a.md')).toBe(false);
+    // Server notified twice — once for add, once for
+    // remove with empty list.
+    expect(setFiles).toHaveBeenCalledTimes(2);
+    expect(setFiles.mock.calls[1][0]).toEqual([]);
+  });
+
+  it('dispatches navigate-file on add', async () => {
+    const { t } = await setupWithFiles();
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const chat = t.shadowRoot.querySelector('ac-chat-panel');
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: { path: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+      });
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('dispatches navigate-file on remove too', async () => {
+    // Per spec — navigation is independent of selection
+    // state. User clicked the mention; they want to see
+    // the file. Both add and remove cases open it.
+    const { t } = await setupWithFiles();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'a.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      // Second click — removes from selection.
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: { path: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+      });
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('ignores malformed events (no path)', async () => {
+    const { t, setFiles } = await setupWithFiles();
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const chat = t.shadowRoot.querySelector('ac-chat-panel');
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: {},
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: null,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: { path: '' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      chat.dispatchEvent(
+        new CustomEvent('file-mention-click', {
+          detail: { path: 42 },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(setFiles).not.toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+      expect(t._selectedFiles.size).toBe(0);
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('handles multiple distinct mention clicks', async () => {
+    const { t, setFiles } = await setupWithFiles();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'a.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path: 'b.md' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(t._selectedFiles.has('a.md')).toBe(true);
+    expect(t._selectedFiles.has('b.md')).toBe(true);
+    // Server saw both selections cumulatively.
+    expect(setFiles).toHaveBeenCalledTimes(2);
+    expect(setFiles.mock.calls[0][0]).toEqual(['a.md']);
+    expect(setFiles.mock.calls[1][0]).toEqual(['a.md', 'b.md']);
   });
 });
 

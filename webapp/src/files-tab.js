@@ -77,6 +77,40 @@ import './file-picker.js';
 import './chat-panel.js';
 
 /**
+ * Recursively flatten a file-tree node into a list of
+ * repo-relative file paths. Used to produce the flat list
+ * the chat panel needs for mention detection. Walks only
+ * file-type leaves; directories contribute nothing to the
+ * list themselves (their contents do).
+ *
+ * Defensive against malformed shapes — a node without a
+ * `type` or with a non-array `children` field is treated
+ * as empty. The file tree comes from `Repo.get_file_tree`
+ * which produces well-formed output, but the extra
+ * tolerance means a partial/missing tree doesn't crash
+ * the orchestrator.
+ *
+ * @param {object | null | undefined} node
+ * @returns {Array<string>}
+ */
+function flattenTreePaths(node) {
+  if (!node || typeof node !== 'object') return [];
+  const out = [];
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return;
+    if (n.type === 'file' && typeof n.path === 'string' && n.path) {
+      out.push(n.path);
+      return;
+    }
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) walk(child);
+    }
+  };
+  walk(node);
+  return out;
+}
+
+/**
  * Default tree stub used before the first RPC load. Lets the
  * picker render empty rather than showing a spinner while the
  * tree is en route — the picker's empty-state placeholder
@@ -160,11 +194,21 @@ export class FilesTab extends RpcMixin(LitElement) {
     // carries the most recent value across re-renders rather
     // than clobbering back to EMPTY_TREE.
     this._latestTree = EMPTY_TREE;
+    // Flat list of repo-relative file paths — derived from
+    // the loaded tree and pushed to the chat panel so it can
+    // detect file mentions in assistant output. Non-reactive
+    // because we push directly to the chat panel via property
+    // assignment (same pattern as `_selectedFiles`) rather
+    // than through Lit's template propagation, which would
+    // trigger full re-renders and reset scroll / streaming
+    // state in the chat panel.
+    this._repoFiles = [];
 
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
+    this._onFileMentionClick = this._onFileMentionClick.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -223,10 +267,20 @@ export class FilesTab extends RpcMixin(LitElement) {
     // template below binds `.tree` via a getter that reads
     // from `_latestTree`, which we update here.
     this._latestTree = tree?.tree || EMPTY_TREE;
+    // Derive the flat file list and push to the chat panel
+    // so file mentions in assistant output get wrapped. The
+    // chat panel's `repoFiles` prop short-circuits on empty
+    // input, so before the first load the cost is zero.
+    this._repoFiles = flattenTreePaths(this._latestTree);
     const picker = this._picker();
     if (picker) {
       picker.tree = this._latestTree;
       picker.requestUpdate();
+    }
+    const chat = this._chat();
+    if (chat) {
+      chat.repoFiles = this._repoFiles;
+      chat.requestUpdate();
     }
     this._treeLoaded = true;
   }
@@ -344,6 +398,48 @@ export class FilesTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Chat panel emits `file-mention-click` when the user
+   * clicks a `.file-mention` span inside a rendered
+   * assistant message. The event bubbles up through the
+   * shadow DOM boundary (composed: true) and reaches us
+   * via the `@file-mention-click` binding on `<ac-chat-panel>`
+   * in the template.
+   *
+   * Per specs4/5-webapp/file-picker.md "File Mention
+   * Selection": toggle the file's selection state AND
+   * navigate to it in the viewer. The two actions are
+   * independent — a user clicking a mention wants to see
+   * the file AND make it part of the next LLM request's
+   * context, regardless of whether they'd previously
+   * selected or deselected it.
+   */
+  _onFileMentionClick(event) {
+    const path = event.detail?.path;
+    if (typeof path !== 'string' || !path) return;
+    // Toggle — add if absent, remove if present. Goes
+    // through the same `_applySelection` path as a picker
+    // checkbox click, so the server is notified and the
+    // picker's prop is updated via the direct-update
+    // pattern.
+    const next = new Set(this._selectedFiles);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    this._applySelection(next, /* notifyServer */ true);
+    // Navigation is independent of selection state. Both
+    // add and remove cases open the file in the viewer —
+    // the user clicked the mention, they want to see it.
+    window.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: { path },
+        bubbles: false,
+      }),
+    );
+  }
+
   // ---------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------
@@ -393,10 +489,16 @@ export class FilesTab extends RpcMixin(LitElement) {
         ></ac-file-picker>
       </div>
       <div class="chat-pane">
-        <ac-chat-panel></ac-chat-panel>
+        <ac-chat-panel
+          @file-mention-click=${this._onFileMentionClick}
+        ></ac-chat-panel>
       </div>
     `;
   }
 }
 
 customElements.define('ac-files-tab', FilesTab);
+
+// Exported for unit tests. Production callers don't need
+// the helper — it runs internally during tree load.
+export { flattenTreePaths };
