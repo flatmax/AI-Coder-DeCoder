@@ -1506,6 +1506,51 @@ Phase 2a does NOT yet wire the picker into `main.js` or the shell. The component
 
 Next up — Phase 2b: chat panel (basic) — message rendering, input area, streaming display, markdown. No edit blocks or file mentions yet; those ride in Phase 2d.
 
+### 5.3 — Phase 2b Chat panel (basic) — **delivered**
+
+Standalone chat panel component. Message list, input area, streaming display, basic markdown rendering, Send/Stop button, RPC integration via RpcMixin. Listens for server-push events (stream-chunk, stream-complete, user-message, session-changed) dispatched on `window` by the AppShell.
+
+- `webapp/src/markdown.js` — thin wrapper around the `marked` library. Shared Marked instance configured with `breaks: true` (single newlines → `<br>`), `gfm: true` (tables, task lists), `silent: true` (degrade on bad input rather than throw). Exports `renderMarkdown(text)` (returns HTML string) and `escapeHtml(text)` (used for user messages which are rendered verbatim, not markdown-rendered). `try/catch` fallback in `renderMarkdown` produces escaped plain text if marked throws despite `silent: true` — defensive, shouldn't fire in practice.
+- `webapp/src/chat-panel.js` — `ChatPanel(RpcMixin(LitElement))`. Components:
+  - Messages list rendered as `.message-card` elements per-message, distinguished by role (`role-user`, `role-assistant`, `role-system`). User content rendered escaped verbatim; assistant + system-event content rendered as markdown.
+  - Streaming message card with accent-coloured border and blinking cursor appears below the settled messages when `_streaming === true`.
+  - Input area with auto-resizing textarea (max 12rem), Send button that becomes Stop during streaming, disconnected note when RPC isn't ready.
+  - Auto-scroll on state updates — passive scroll listener disengages at > 100px from bottom, re-engages at < 40px. Double-rAF wait pattern before measuring scrollHeight.
+- **Architectural contracts preserved (D10):**
+  - **Streaming state keyed by request ID.** `_streams` is a `Map<requestId, {...}>`. Single-agent operation has at most one entry. Parallel-agent mode will produce N keyed states under a parent ID. The map shape is load-bearing; don't flatten to a singleton.
+  - **Chunks carry full accumulated content, not deltas.** Chunk handler replaces `_streamingContent`, doesn't append. Test `uses full content, not delta accumulation` pins this by firing chunks out of order and asserting the last-seen content wins.
+  - **rAF coalescing.** `_pendingChunks` Map holds the latest-seen content per request ID. The rAF callback drains and applies to `_streamingContent`. Rapid-fire chunks between frames collapse into one Lit re-render. Test `applies the latest content on each animation frame` pins this.
+- **Request ID generation.** `generateRequestId()` exports for tests and future callers. Format: `{epoch_ms}-{6-char-alnum}` matching specs3.
+- **User-message echo handling.** When we're the sender (`_currentRequestId` is set), the server's userMessage broadcast is ignored — we already added the message optimistically in `_send`. When we're a passive observer (no in-flight request), we add the broadcast message to our list so the conversation stays in sync with the active client's activity. Phase 2d will expand this for passive stream adoption.
+- **Session-changed event.** Replaces the message list wholesale. Resets streaming state. Normalises incoming messages (strips backend metadata like `files`, `edit_results`, which Phase 2d will render).
+- **Cancellation.** Stop button calls `LLMService.cancel_streaming(requestId)`. The server's completion event is what actually cleans up local state (cancelled completion arrives with `result.cancelled = true`). Best-effort — if the cancel RPC fails (server already finished), local cleanup runs anyway so the UI doesn't wedge.
+- **Error handling.** `chat_streaming` rejection produces an assistant error message with the error text. `stream-complete` carrying `result.error` produces an error message. Both paths converge on the same error-rendered shape.
+- `webapp/src/markdown.test.js` — 17 tests: empty input, paragraph wrapping, code fences (fenced + inline), language class preservation, headings, bold/italic, `breaks: true` behaviour, GFM tables + task lists, HTML escaping in prose, malformed input resilience, escapeHtml direct coverage (five-char replacement, order-correctness for `&<>`, plain text pass-through, numeric stringification).
+- `webapp/src/chat-panel.test.js` — 31 tests across 10 describe blocks:
+  - `generateRequestId` — format + uniqueness
+  - Initial state — empty state, disconnected behaviour, RPC-connected state, send-button disabled when empty, enables on typing
+  - Message rendering — user vs assistant labels, user content escaped (not markdown-rendered), assistant content markdown-rendered, system-event distinct styling, code fences in assistant messages
+  - Send flow — optimistic user message add, RPC call with request ID, input cleared, streaming state flip, empty-input guard, already-streaming guard, RPC error → error message
+  - Streaming events — chunks render in assistant slot, other-request-id chunks ignored, stream-complete moves content to messages, falls back to last streaming content when `response` absent (cancelled streams), error in completion produces error message
+  - Chunk coalescing — latest-content wins per frame, full-content semantics (not delta accumulation)
+  - Cancel — calls cancel_streaming with active ID, recovers locally when cancel fails
+  - user-message event — ignored when we're sender, added when passive observer
+  - session-changed event — replaces list, clears for empty sessions, resets streaming state, preserves system_event flag
+  - Input handling — Enter sends, Shift+Enter doesn't, IME composition Enter doesn't
+  - Cleanup — event listeners removed on disconnect
+
+Marked added as a dependency — `"marked": "^14.1.0"`. No syntax highlighting library yet; code blocks render as plain `<pre><code>` with a `language-{lang}` class so Phase 2d can wire highlight.js without changing the chat panel's output shape.
+
+Not wired into `main.js` yet. The component self-registers via `customElements.define('ac-chat-panel', ...)` but no caller imports it. Phase 2c imports it from the `files-tab` component.
+
+Deferred to later sub-phases — explicit boundaries:
+
+- Phase 2c: @-filter bridge to file picker, middle-click path insertion.
+- Phase 2d: edit block rendering with diff highlighting, file mentions in rendered assistant output, images (paste/display/re-attach), session controls (new session, history browser), snippet drawer, input history (up-arrow recall), message action buttons, retry prompts, compaction event routing.
+- Phase 2e: message search overlay, file search overlay, history browser modal, speech-to-text.
+
+Next up — Phase 2c: files tab orchestration — wires picker and chat panel together via the files-tab component. Selection sync, file tree RPC loading, file mention routing, git status badges.
+
 ### 3.8 — Tiered prompt assembly — **delivered**
 
 Replaces the flat-only assembly from 3.7 with a structured tiered message array carrying cache-control markers at tier boundaries. The streaming handler dispatches to tiered assembly by default and falls back to flat when the tracker hasn't been initialised.

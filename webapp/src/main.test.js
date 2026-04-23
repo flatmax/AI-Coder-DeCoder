@@ -13,7 +13,7 @@
 // and specs4/1-foundation/rpc-transport.md calls out (port override
 // via query string, malformed input fallback).
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   getWebSocketPort,
@@ -57,25 +57,45 @@ describe('getWebSocketPort', () => {
   });
 
   it('falls back to the default for a non-numeric ?port', () => {
-    setLocation('/?port=not-a-number');
-    expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      setLocation('/?port=not-a-number');
+      expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('falls back to the default for ?port=0', () => {
     // Port 0 is technically "pick a free port" in OS APIs, never a
     // real WebSocket destination; treat it as invalid.
-    setLocation('/?port=0');
-    expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      setLocation('/?port=0');
+      expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('falls back to the default for a negative ?port', () => {
-    setLocation('/?port=-5');
-    expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      setLocation('/?port=-5');
+      expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('falls back to the default for an out-of-range ?port', () => {
-    setLocation('/?port=99999');
-    expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      setLocation('/?port=99999');
+      expect(getWebSocketPort()).toBe(DEFAULT_WS_PORT);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('falls back to the default for an empty ?port', () => {
