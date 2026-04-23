@@ -398,16 +398,39 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // fresh (don't carry over stale search, selection, etc.).
     if (changedProps.has('open')) {
       if (this.open) {
-        this._loadSessions();
+        // Defer the fetch to the next microtask so property
+        // mutations inside `_loadSessions` (loading flag,
+        // sessions array) happen OUTSIDE the update cycle.
+        // Setting reactive state inside `updated` triggers
+        // Lit's "change-in-update" warning and schedules a
+        // redundant update. The microtask hop separates the
+        // two phases cleanly.
+        Promise.resolve().then(() => {
+          // Re-check `open` — the user could have closed
+          // the modal in the microsecond between update
+          // and microtask. Without this guard we'd issue
+          // an RPC for a modal the user already dismissed.
+          if (this.open) this._loadSessions();
+        });
       } else {
         // Modal closed — reset local state. Preserve the
         // list so a quick close/open doesn't re-fetch;
-        // but clear search and selection.
-        this._searchQuery = '';
-        this._searchMode = false;
-        this._searchHits = [];
-        this._selectedSessionId = null;
-        this._selectedMessages = [];
+        // but clear search and selection. Defer to the
+        // next microtask so property writes happen outside
+        // the update cycle. The initial mount (open goes
+        // from undefined → false) also lands here; all
+        // five fields are already at their defaults so the
+        // microtask is effectively a no-op, but deferring
+        // means we never trigger the change-in-update
+        // warning.
+        Promise.resolve().then(() => {
+          if (this.open) return;
+          this._searchQuery = '';
+          this._searchMode = false;
+          this._searchHits = [];
+          this._selectedSessionId = null;
+          this._selectedMessages = [];
+        });
       }
     }
   }
@@ -425,10 +448,19 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       );
       this._sessions = Array.isArray(result) ? result : [];
     } catch (err) {
-      console.error(
-        '[history-browser] history_list_sessions failed',
-        err,
-      );
+      // "Method not found" means the test fixture or a
+      // stripped-down backend doesn't expose history. The
+      // empty-state placeholder already communicates this
+      // to the user; no error-level log needed. Any other
+      // failure (network, server error) is worth
+      // surfacing.
+      const message = err?.message || '';
+      if (!message.includes('method not found')) {
+        console.error(
+          '[history-browser] history_list_sessions failed',
+          err,
+        );
+      }
       this._sessions = [];
     } finally {
       this._loadingSessions = false;

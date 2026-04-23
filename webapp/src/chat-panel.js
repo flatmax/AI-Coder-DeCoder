@@ -85,6 +85,33 @@ function generateRequestId() {
   return `${epoch}-${suffix}`;
 }
 
+/** localStorage key for the snippet drawer's open/closed state. */
+const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
+
+/**
+ * Read the snippet drawer's persisted open state. Defaults to
+ * closed. Catches any localStorage access errors (private
+ * browsing, SecurityError on cross-origin iframes) so the chat
+ * panel still works when persistence isn't available.
+ */
+function _loadDrawerOpen() {
+  try {
+    return localStorage.getItem(_DRAWER_STORAGE_KEY) === 'true';
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Write the snippet drawer's open state to localStorage. */
+function _saveDrawerOpen(open) {
+  try {
+    localStorage.setItem(_DRAWER_STORAGE_KEY, open ? 'true' : 'false');
+  } catch (_) {
+    // Best-effort — failure is silent. The in-memory state
+    // wins for the current session either way.
+  }
+}
+
 /**
  * How close to the bottom counts as "still at the bottom". Scroll
  * events fire with sub-pixel offsets during smooth scrolling, so
@@ -145,6 +172,19 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * events.
      */
     _historyOpen: { type: Boolean, state: true },
+    /**
+     * Whether the snippet drawer is expanded. Persisted to
+     * localStorage under `ac-dc-snippet-drawer` — the drawer
+     * state survives browser refreshes.
+     */
+    _snippetDrawerOpen: { type: Boolean, state: true },
+    /**
+     * Snippets loaded from LLMService.get_snippets. Each is
+     * `{icon, tooltip, message}`. Empty until RPC ready or on
+     * fetch error. Reloaded on mode / review state changes
+     * since the server returns mode-aware snippets.
+     */
+    _snippets: { type: Array, state: true },
   };
 
   static styles = css`
@@ -323,6 +363,49 @@ export class ChatPanel extends RpcMixin(LitElement) {
     .action-button:disabled:hover {
       background: transparent;
       border-color: transparent;
+    }
+    .action-button.active {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      border-color: rgba(88, 166, 255, 0.3);
+    }
+    .snippet-drawer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      padding: 0.5rem 0;
+      margin-bottom: 0.5rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .snippet-empty {
+      padding: 0.25rem 0.5rem;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+      font-size: 0.8125rem;
+    }
+    .snippet-button {
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8125rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .snippet-button:hover {
+      background: rgba(240, 246, 252, 0.06);
+      border-color: rgba(240, 246, 252, 0.2);
+    }
+    .snippet-icon {
+      font-size: 0.9375rem;
+    }
+    .snippet-label {
+      color: var(--text-secondary, #8b949e);
     }
     .input-row {
       display: flex;
@@ -529,6 +612,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._streaming = false;
     this._streamingContent = '';
     this._historyOpen = false;
+    // Read drawer state eagerly — avoids a closed→open flicker
+    // on mount when the user had it open previously.
+    this._snippetDrawerOpen = _loadDrawerOpen();
+    this._snippets = [];
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -562,6 +649,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
     this._onMessagesClick = this._onMessagesClick.bind(this);
+    this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -574,6 +662,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    window.addEventListener('mode-changed', this._onModeOrReviewChanged);
+    window.addEventListener(
+      'review-started',
+      this._onModeOrReviewChanged,
+    );
+    window.addEventListener(
+      'review-ended',
+      this._onModeOrReviewChanged,
+    );
   }
 
   disconnectedCallback() {
@@ -581,11 +678,32 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener(
+      'mode-changed',
+      this._onModeOrReviewChanged,
+    );
+    window.removeEventListener(
+      'review-started',
+      this._onModeOrReviewChanged,
+    );
+    window.removeEventListener(
+      'review-ended',
+      this._onModeOrReviewChanged,
+    );
     if (this._rafHandle != null) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
     }
     super.disconnectedCallback();
+  }
+
+  onRpcReady() {
+    // Fetch snippets once the proxy is published. RpcMixin
+    // defers this hook to the next microtask so every
+    // sibling component has received the proxy before any
+    // of them issues requests — we're safe to call straight
+    // away.
+    this._loadSnippets();
   }
 
   updated(changedProps) {
@@ -706,6 +824,49 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._autoScroll = true;
   }
 
+  _onModeOrReviewChanged() {
+    // Mode or review state changed — snippets are mode-aware
+    // (code / doc / review), so refetch. The fetch is
+    // idempotent and cheap; a stray event that doesn't
+    // actually change the mode just re-sets the same list.
+    this._loadSnippets();
+  }
+
+  /**
+   * Fetch snippets from the server. Fire-and-forget; errors
+   * leave the snippet list unchanged (preserving any
+   * previously-loaded snippets) and log to console. The
+   * drawer renders a placeholder when the list is empty, so
+   * pre-load state and post-error state look the same from
+   * the user's perspective.
+   */
+  async _loadSnippets() {
+    if (!this.rpcConnected) return;
+    try {
+      const snippets = await this.rpcExtract(
+        'LLMService.get_snippets',
+      );
+      this._snippets = Array.isArray(snippets) ? snippets : [];
+    } catch (err) {
+      // Distinguish "method not on proxy" (expected when
+      // the backend is a stripped-down test fixture or an
+      // older server that doesn't expose snippets) from a
+      // real failure (network, server error). Only the
+      // latter is worth surfacing — the former is an
+      // expected degraded-mode condition, not an error.
+      // The drawer will show its empty-state placeholder
+      // so the UI communicates the situation without a
+      // console log.
+      const message = err?.message || '';
+      if (!message.includes('method not found')) {
+        console.error('[chat] get_snippets failed', err);
+      }
+      // Preserve whatever snippets we had — an in-flight
+      // refresh failing shouldn't wipe a list that was
+      // successfully loaded earlier.
+    }
+  }
+
   // ---------------------------------------------------------------
   // rAF coalescing
   // ---------------------------------------------------------------
@@ -751,6 +912,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._streaming = true;
     this._streamingContent = '';
     this._autoScroll = true;
+    // Auto-close the snippet drawer on send — users don't
+    // want it consuming vertical space during streaming,
+    // and the act of sending is a natural "I'm done
+    // composing" signal. Persist so it stays closed on
+    // reload.
+    if (this._snippetDrawerOpen) {
+      this._snippetDrawerOpen = false;
+      _saveDrawerOpen(false);
+    }
 
     try {
       await this.rpcExtract(
@@ -863,6 +1033,67 @@ export class ChatPanel extends RpcMixin(LitElement) {
    */
   _onHistorySessionLoaded() {
     this._historyOpen = false;
+  }
+
+  /**
+   * Toggle the snippet drawer open/closed. Persists the new
+   * state to localStorage so the drawer re-opens on the next
+   * mount if the user left it open. Doesn't require
+   * rpc-connected — the drawer can be opened to an empty
+   * state and will populate once RPC comes up.
+   */
+  _toggleSnippetDrawer() {
+    this._snippetDrawerOpen = !this._snippetDrawerOpen;
+    _saveDrawerOpen(this._snippetDrawerOpen);
+  }
+
+  /**
+   * Insert a snippet's message into the textarea at the
+   * current cursor position. If the textarea has a selection,
+   * the selection is replaced. Focuses the textarea after
+   * insertion so the user can continue typing directly.
+   *
+   * Accepts the whole snippet object (not just the message
+   * string) so the caller is the event handler — less
+   * template-level inline arrow functions, fewer allocations
+   * during render.
+   */
+  _insertSnippet(snippet) {
+    const message =
+      snippet && typeof snippet.message === 'string'
+        ? snippet.message
+        : '';
+    if (!message) return;
+    const ta = this.shadowRoot?.querySelector('.input-textarea');
+    if (!ta) {
+      // Defensive — the textarea should always exist when
+      // a snippet button is visible. Fall back to plain
+      // append so the click isn't lost.
+      this._input = `${this._input}${message}`;
+      return;
+    }
+    // Compute the new value and cursor position from the
+    // CURRENT textarea state (not `this._input`). If the
+    // user has been typing fast, `this._input` might lag
+    // by one input event; reading directly from the
+    // textarea is authoritative.
+    const before = ta.value.slice(0, ta.selectionStart);
+    const after = ta.value.slice(ta.selectionEnd);
+    const next = `${before}${message}${after}`;
+    this._input = next;
+    // Set the textarea value directly so the selection can
+    // be positioned right after the inserted text. Lit will
+    // also reflect `.value=${this._input}` on the next
+    // render; doing it here first keeps the cursor state
+    // accurate without waiting for updateComplete.
+    ta.value = next;
+    const cursor = before.length + message.length;
+    ta.setSelectionRange(cursor, cursor);
+    ta.focus();
+    // Fire an input event so the auto-resize logic runs.
+    // Without this, inserting a multi-line snippet doesn't
+    // grow the textarea until the next keystroke.
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   // ---------------------------------------------------------------
@@ -981,6 +1212,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
         : ''}
       <div class="input-area">
         <div class="action-bar" role="toolbar">
+          <div class="action-group">
+            <button
+              class="action-button snippet-drawer-button ${this
+                ._snippetDrawerOpen
+                ? 'active'
+                : ''}"
+              @click=${this._toggleSnippetDrawer}
+              aria-label=${this._snippetDrawerOpen
+                ? 'Close snippet drawer'
+                : 'Open snippet drawer'}
+              aria-expanded=${this._snippetDrawerOpen}
+              title="Quick-insert snippets"
+            >
+              ✂️ Snippets
+            </button>
+          </div>
           <div class="spacer"></div>
           <div class="action-divider" aria-hidden="true"></div>
           <div class="action-group">
@@ -1004,6 +1251,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
             </button>
           </div>
         </div>
+        ${this._snippetDrawerOpen
+          ? this._renderSnippetDrawer()
+          : ''}
         <div class="input-row">
           <textarea
             class="input-textarea"
@@ -1152,6 +1402,47 @@ export class ChatPanel extends RpcMixin(LitElement) {
     return html`<div class="assistant-body">${parts}</div>`;
   }
 
+  _renderSnippetDrawer() {
+    // Empty list (pre-load, post-error, or genuinely no
+    // snippets configured) shows a placeholder rather than
+    // an empty box. Opening the drawer is a deliberate
+    // action so showing nothing would be confusing.
+    if (this._snippets.length === 0) {
+      return html`
+        <div class="snippet-drawer" role="region"
+          aria-label="Snippet drawer">
+          <div class="snippet-empty">No snippets available</div>
+        </div>
+      `;
+    }
+    return html`
+      <div
+        class="snippet-drawer"
+        role="region"
+        aria-label="Snippet drawer"
+      >
+        ${this._snippets.map(
+          (snippet) => html`
+            <button
+              class="snippet-button"
+              title=${snippet.tooltip || snippet.message || ''}
+              aria-label=${snippet.tooltip ||
+              `Insert snippet: ${snippet.message || ''}`}
+              @click=${() => this._insertSnippet(snippet)}
+            >
+              <span class="snippet-icon">${snippet.icon || '✂'}</span>
+              ${snippet.tooltip
+                ? html`<span class="snippet-label"
+                    >${snippet.tooltip}</span
+                  >`
+                : ''}
+            </button>
+          `,
+        )}
+      </div>
+    `;
+  }
+
   _renderStreamingMessage() {
     // The streaming card uses the assistant role styling with
     // an accent-coloured border to distinguish it from settled
@@ -1182,4 +1473,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
 customElements.define('ac-chat-panel', ChatPanel);
 
-export { generateRequestId };
+export {
+  generateRequestId,
+  _loadDrawerOpen,
+  _saveDrawerOpen,
+  _DRAWER_STORAGE_KEY,
+};

@@ -22,7 +22,13 @@ import {
 
 import { SharedRpc } from './rpc.js';
 import './chat-panel.js';
-import { ChatPanel, generateRequestId } from './chat-panel.js';
+import {
+  ChatPanel,
+  generateRequestId,
+  _DRAWER_STORAGE_KEY,
+  _loadDrawerOpen,
+  _saveDrawerOpen,
+} from './chat-panel.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,6 +80,12 @@ afterEach(() => {
     if (p.isConnected) p.remove();
   }
   SharedRpc.reset();
+  try {
+    localStorage.removeItem(_DRAWER_STORAGE_KEY);
+  } catch (_) {
+    // Ignore — tests that run outside a localStorage-capable
+    // environment don't need the cleanup.
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1717,6 +1729,424 @@ describe('ChatPanel input handling', () => {
     );
     await p.updateComplete;
     expect(started).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Snippet drawer
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel snippet drawer', () => {
+  it('renders the Snippets toggle button', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.snippet-drawer-button');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain('Snippets');
+  });
+
+  it('drawer is closed by default', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(false);
+    const drawer = p.shadowRoot.querySelector('.snippet-drawer');
+    expect(drawer).toBeNull();
+  });
+
+  it('clicking the toggle opens the drawer', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+        { icon: '🔍', tooltip: 'Search', message: 'find this' },
+      ]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p.shadowRoot.querySelector('.snippet-drawer-button').click();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(true);
+    const drawer = p.shadowRoot.querySelector('.snippet-drawer');
+    expect(drawer).toBeTruthy();
+  });
+
+  it('clicking again closes the drawer', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.snippet-drawer-button');
+    btn.click();
+    await settle(p);
+    btn.click();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(false);
+    expect(
+      p.shadowRoot.querySelector('.snippet-drawer'),
+    ).toBeNull();
+  });
+
+  it('toggle does not require RPC to be connected', async () => {
+    // The drawer can be opened even before snippets load —
+    // it just shows an empty-state placeholder. This lets
+    // the user pre-open on page load while the WebSocket
+    // is still handshaking.
+    const p = mountPanel();
+    await settle(p);
+    p.shadowRoot.querySelector('.snippet-drawer-button').click();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(true);
+    // Empty-state placeholder appears.
+    const empty = p.shadowRoot.querySelector('.snippet-empty');
+    expect(empty).toBeTruthy();
+    expect(empty.textContent).toContain('No snippets');
+  });
+
+  it('active class reflects open state', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.snippet-drawer-button');
+    expect(btn.classList.contains('active')).toBe(false);
+    btn.click();
+    await settle(p);
+    expect(btn.classList.contains('active')).toBe(true);
+  });
+
+  it('loads snippets on RPC ready', async () => {
+    const getSnippets = vi.fn().mockResolvedValue([
+      { icon: '📝', tooltip: 'Note', message: 'take a note' },
+    ]);
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const p = mountPanel();
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledOnce();
+    expect(p._snippets).toHaveLength(1);
+    expect(p._snippets[0].message).toBe('take a note');
+  });
+
+  it('renders one button per snippet', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+        { icon: '🔍', tooltip: 'one', message: 'a' },
+        { icon: '📝', tooltip: 'two', message: 'b' },
+        { icon: '🏁', tooltip: 'three', message: 'c' },
+      ]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._snippetDrawerOpen = true;
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll('.snippet-button');
+    expect(buttons).toHaveLength(3);
+  });
+
+  it('empty snippet list shows placeholder when drawer opens', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._snippetDrawerOpen = true;
+    await settle(p);
+    const empty = p.shadowRoot.querySelector('.snippet-empty');
+    expect(empty).toBeTruthy();
+  });
+
+  it('RPC error preserves existing snippets', async () => {
+    // First load succeeds. Second load (via mode-changed)
+    // fails. The old snippets stay — an in-flight
+    // refresh failing shouldn't wipe a good list.
+    const getSnippets = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { icon: '✅', tooltip: 'ok', message: 'x' },
+      ])
+      .mockRejectedValueOnce(new Error('boom'));
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      expect(p._snippets).toHaveLength(1);
+      // Trigger a reload via mode-changed.
+      window.dispatchEvent(new CustomEvent('mode-changed'));
+      await settle(p);
+      // Snippets preserved.
+      expect(p._snippets).toHaveLength(1);
+      expect(p._snippets[0].message).toBe('x');
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('reloads snippets on mode-changed event', async () => {
+    const getSnippets = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const p = mountPanel();
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new CustomEvent('mode-changed'));
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads snippets on review-started event', async () => {
+    const getSnippets = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const p = mountPanel();
+    await settle(p);
+    window.dispatchEvent(new CustomEvent('review-started'));
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads snippets on review-ended event', async () => {
+    const getSnippets = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const p = mountPanel();
+    await settle(p);
+    window.dispatchEvent(new CustomEvent('review-ended'));
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reload on session-changed event', async () => {
+    // Snippets are repo-global, not session-scoped. Session
+    // changes shouldn't trigger a refetch.
+    const getSnippets = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    const p = mountPanel();
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(
+      new CustomEvent('session-changed', {
+        detail: { session_id: 's1', messages: [] },
+      }),
+    );
+    await settle(p);
+    expect(getSnippets).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ChatPanel snippet insertion', () => {
+  async function setupWithSnippets() {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+        { icon: '🔍', tooltip: 'Check', message: 'please check' },
+        { icon: '📝', tooltip: 'Note', message: 'note that' },
+      ]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._snippetDrawerOpen = true;
+    await settle(p);
+    return p;
+  }
+
+  it('clicking a snippet inserts its message into empty input', async () => {
+    const p = await setupWithSnippets();
+    const btn = p.shadowRoot.querySelectorAll('.snippet-button')[0];
+    btn.click();
+    await settle(p);
+    expect(p._input).toBe('please check');
+  });
+
+  it('inserts at cursor position when textarea has focus', async () => {
+    const p = await setupWithSnippets();
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // Type "hello world", place cursor between words.
+    ta.value = 'hello world';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(6, 6); // between "hello " and "world"
+    const btn = p.shadowRoot.querySelectorAll('.snippet-button')[0];
+    btn.click();
+    await settle(p);
+    expect(p._input).toBe('hello please checkworld');
+  });
+
+  it('replaces selection when one exists', async () => {
+    const p = await setupWithSnippets();
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'replace me please';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(8, 10); // select "me"
+    const btn = p.shadowRoot.querySelectorAll('.snippet-button')[0];
+    btn.click();
+    await settle(p);
+    expect(p._input).toBe('replace please check please');
+  });
+
+  it('positions cursor after the inserted text', async () => {
+    const p = await setupWithSnippets();
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'ab';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(1, 1); // between 'a' and 'b'
+    const btn = p.shadowRoot.querySelectorAll('.snippet-button')[0];
+    btn.click();
+    await settle(p);
+    // Inserted "please check" — cursor should be at
+    // position 1 ("a") + 12 (insert length) = 13.
+    expect(ta.selectionStart).toBe(13);
+    expect(ta.selectionEnd).toBe(13);
+  });
+
+  it('focuses the textarea after insertion', async () => {
+    const p = await setupWithSnippets();
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // Give focus to the snippet button so textarea isn't focused.
+    const btn = p.shadowRoot.querySelectorAll('.snippet-button')[0];
+    btn.focus();
+    btn.click();
+    await settle(p);
+    // After insertion, focus should be on the textarea.
+    expect(p.shadowRoot.activeElement).toBe(ta);
+  });
+
+  it('multiple clicks accumulate', async () => {
+    const p = await setupWithSnippets();
+    const buttons = p.shadowRoot.querySelectorAll('.snippet-button');
+    buttons[0].click();
+    await settle(p);
+    buttons[1].click();
+    await settle(p);
+    expect(p._input).toBe('please checknote that');
+  });
+
+  it('ignores snippets with empty message', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+        { icon: '🔍', tooltip: 'Empty', message: '' },
+      ]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._snippetDrawerOpen = true;
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.snippet-button');
+    btn.click();
+    await settle(p);
+    expect(p._input).toBe('');
+  });
+});
+
+describe('ChatPanel snippet drawer persistence', () => {
+  it('loads drawer state from localStorage', async () => {
+    // Seed localStorage before mounting — simulates reload.
+    _saveDrawerOpen(true);
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(true);
+  });
+
+  it('persists state when toggling open', async () => {
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p.shadowRoot.querySelector('.snippet-drawer-button').click();
+    await settle(p);
+    expect(_loadDrawerOpen()).toBe(true);
+  });
+
+  it('persists state when toggling closed', async () => {
+    _saveDrawerOpen(true);
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p.shadowRoot.querySelector('.snippet-drawer-button').click();
+    await settle(p);
+    expect(_loadDrawerOpen()).toBe(false);
+  });
+
+  it('defaults to closed when localStorage has no value', () => {
+    // Pre-check the loader returns false when nothing is
+    // stored (afterEach clears the key before each test).
+    expect(_loadDrawerOpen()).toBe(false);
+  });
+
+  it('defaults to closed for unrecognised localStorage value', () => {
+    // Defensive — a value that isn't 'true' should parse as
+    // false rather than anything weird.
+    localStorage.setItem(_DRAWER_STORAGE_KEY, 'maybe');
+    expect(_loadDrawerOpen()).toBe(false);
+  });
+});
+
+describe('ChatPanel snippet drawer close-on-send', () => {
+  it('auto-closes drawer when a message is sent', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'LLMService.chat_streaming': started,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Open drawer, type a message, send.
+    p._snippetDrawerOpen = true;
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'hello';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    p.shadowRoot.querySelector('.send-button').click();
+    await settle(p);
+    expect(p._snippetDrawerOpen).toBe(false);
+  });
+
+  it('persists closed state after auto-close', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'LLMService.chat_streaming': started,
+    });
+    _saveDrawerOpen(true);
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    expect(_loadDrawerOpen()).toBe(false);
+  });
+
+  it('does not touch drawer state if it was already closed', async () => {
+    // Defensive — a send when the drawer is closed shouldn't
+    // rewrite localStorage unnecessarily.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({
+      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'LLMService.chat_streaming': started,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Remove the storage key — pre-load-open is unset, and
+    // we want to verify no write happens on send.
+    localStorage.removeItem(_DRAWER_STORAGE_KEY);
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    // Still no entry in localStorage — the send path
+    // only writes when it actually toggled the state.
+    expect(localStorage.getItem(_DRAWER_STORAGE_KEY)).toBeNull();
   });
 });
 
