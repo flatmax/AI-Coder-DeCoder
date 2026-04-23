@@ -1,4 +1,12 @@
-// Unit tests for the Layer 0 webapp entry point.
+// Unit tests for the webapp URL helpers (port parsing, WebSocket
+// URI construction).
+//
+// Originally these were exported from main.js, but main.js now
+// imports app-shell.js (which pulls in jrpc-oo — whose UMD `JRPC`
+// global fails to initialise inside vitest's module loader).
+// Importing from ./url-helpers.js keeps this suite loadable without
+// the shell / jrpc-oo dependency chain. The helpers themselves are
+// unchanged.
 //
 // Scope — prove the two helpers behave correctly across the cases
 // specs4/4-features/collaboration.md calls out (LAN IP vs localhost)
@@ -7,7 +15,11 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 
-import { getWebSocketPort, getWebSocketURI, DEFAULT_WS_PORT } from './main.js';
+import {
+  getWebSocketPort,
+  getWebSocketURI,
+  DEFAULT_WS_PORT,
+} from './url-helpers.js';
 
 /**
  * vitest's jsdom environment provides a mutable window.location. We

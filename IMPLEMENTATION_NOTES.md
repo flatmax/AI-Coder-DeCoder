@@ -1055,6 +1055,52 @@ Notes from delivery:
 
 - **Background colour hardcoded white.** A theme-aware implementation would parse the slide master's `bg` XML. Keeping it white in A4 is acceptable because most presentations use white backgrounds, and users with dark-themed presentations will see dark text on white instead of dark text on dark (legible, if not visually faithful).
 
+#### Pass A5b — LibreOffice + PyMuPDF pipeline (primary pptx/odp path) (delivered)
+
+Completes the doc convert backend. pptx and odp route through `soffice --headless --convert-to pdf` to produce an intermediate PDF, which is then processed by the Pass A5a PyMuPDF pipeline. Output markdown lands next to the original source (not the temp PDF); provenance header records the original filename and hash. Graceful fallback to format-specific paths (python-pptx for `.pptx`, markitdown for `.odp`) when LibreOffice or PyMuPDF is missing, or when the soffice invocation fails for any reason.
+
+- `src/ac_dc/doc_convert.py` — changes:
+  - `_convert_via_pymupdf` gains three optional keyword-only parameters: `pdf_source` (open a different file than `source_abs`), `display_name` (override the provenance `source=` field), `hash_source` (override which file gets hashed). Defaults preserve the A5a behaviour for direct PDF callers. The parameters thread through `_process_pdf_document` and `_write_pdf_output` so the provenance header on the final markdown reflects the original pptx/odp rather than the intermediate PDF.
+  - New `_convert_via_libreoffice(root, source_abs, rel_path)` method. Pre-flight checks both deps (`shutil.which("soffice")` and `_probe_import("fitz")`). Any missing dep falls back to the format-specific path without subprocess launch. Runs `soffice --headless --convert-to pdf --outdir {tmpdir} {source}` with `_LIBREOFFICE_TIMEOUT_SECONDS = 120` timeout. Output PDF found by `{source_stem}.pdf` in the temp dir, with a fallback to `tmp_path.glob("*.pdf")` for locale variants. Routes the intermediate PDF through `_convert_via_pymupdf` with provenance overrides. Temp dir cleanup bounded by `TemporaryDirectory` context manager — guaranteed regardless of which branch exits.
+  - New `_libreoffice_fallback(root, source_abs, rel_path, reason)` method. Dispatches on source extension: `.pptx` → `_convert_via_python_pptx`; `.odp` → `_convert_via_markitdown`. Debug-logs the reason so operators can diagnose why the primary path was skipped.
+  - `_LIBREOFFICE_EXTENSIONS = frozenset({".pptx", ".odp"})` and `_LIBREOFFICE_TIMEOUT_SECONDS = 120` module constants.
+  - `_convert_one` dispatch updated — `_LIBREOFFICE_EXTENSIONS` checked before `_PPTX_EXTENSIONS`, so pptx routes to LibreOffice first when available. The `_PPTX_EXTENSIONS` branch is now only reached via `_libreoffice_fallback`.
+
+- `tests/test_doc_convert.py` — changes:
+  - Added `shutil` import.
+  - New `force_pptx_fallback` fixture — monkeypatches `ac_dc.doc_convert.shutil.which` to return None. Applied via `@pytest.mark.usefixtures("force_pptx_fallback")` on `TestPptxDispatch`, `TestPptxSlideFiles`, `TestPptxIndexMarkdown`, `TestPptxSvgContent`, `TestPptxOrphanCleanup`. These A4 fallback tests assert on python-pptx output format (`NN_slide.svg`, `## Slide N` headings), which is incompatible with the A5b primary path's output format (`NN_page.svg`, `## Page N` headings). The fixture forces them onto the fallback path regardless of whether LibreOffice is installed on the test machine.
+  - `TestPptxFailures` updated to use the same `shutil.which` monkeypatch pattern inline — two tests now bypass LibreOffice explicitly since they depend on the python-pptx fallback path's error behaviour.
+  - Four new test classes for A5b coverage:
+    - `TestLibreOfficeDispatch` — pptx and odp route to LibreOffice when soffice is on PATH. Uses subprocess mocking to verify the command arguments (`--headless`, `--convert-to pdf`, `--outdir`) and the source path.
+    - `TestLibreOfficeFallback` — six scenarios all fall back cleanly: no soffice (pptx → python-pptx, odp → markitdown), timeout, non-zero exit, missing output PDF, no PyMuPDF.
+    - `TestLibreOfficeProvenance` — provenance header records `source=deck.pptx` (not `source=deck.pdf`), hash is of the original file, output lands at `{source_dir}/{stem}.md`, scan classifies as `current` after conversion.
+    - `TestLibreOfficeEndToEnd` — single test that runs against real LibreOffice when installed (skipped otherwise). Ensures the mocked tests above aren't hiding a real-world issue with subprocess arg construction, output path resolution, or format compatibility.
+  - `test_mixed_batch_produces_per_file_results` reworked. Before A5a/b there were multiple supported-but-deferred extensions that produced `skipped` results, making "one success + one skip" a natural per-file-isolation test. After A5b every extension has a working path, so the test now pairs `ok.docx` (success) with `missing.docx` (pre-flight failure — file not found) to prove the same isolation invariant.
+
+Design points pinned by tests:
+
+- **LibreOffice runs before python-pptx for pptx.** Dispatch order matters — the `_LIBREOFFICE_EXTENSIONS` check precedes `_PPTX_EXTENSIONS` in `_convert_one`. Without this, pptx would always hit the fallback path even when LibreOffice is installed. Pinned by `test_pptx_routes_to_libreoffice_when_available` which asserts subprocess.run IS called when soffice is on PATH.
+
+- **Fallback is silent, not an error.** `_libreoffice_fallback` emits a debug log and routes to the format-specific path. The user gets conversion output (possibly lower-fidelity) rather than a failed conversion. Six fallback scenarios are tested — if any produced an error status when they should fall back, the test matrix catches it.
+
+- **Provenance overrides are critical for re-conversion.** `test_hash_reflects_original_source` pins that the hash recorded in the header is of the original `.pptx` bytes, not the intermediate PDF. LibreOffice timestamps vary across runs so byte-identical intermediate PDFs aren't guaranteed — hashing the intermediate would mean a stable source scans as `stale` on every re-run. Similarly, `test_header_uses_original_filename` pins `source=deck.pptx` so the scan's status classification lookup works (it derives the expected output location from `{source_stem}.md`).
+
+- **Output path stays anchored to the source.** `test_output_lands_next_to_original` writes `docs/deck.pptx` and verifies the output ends up at `docs/deck.md`, not in the temp dir. Straightforward but easy to break if `source_abs` is inadvertently replaced with `pdf_source` elsewhere in the pipeline.
+
+- **`TemporaryDirectory` cleanup covers every exit path.** Errors from `_convert_via_pymupdf` (corrupt intermediate PDF, write failure) still unwind through the `with tempfile.TemporaryDirectory(...)` context manager, so the temp dir is always removed. Not explicitly tested — the context manager guarantees this by construction.
+
+- **Real LibreOffice test guards against mock drift.** `test_real_libreoffice_converts_pptx` is skipped when soffice isn't on PATH, but when present it exercises the full subprocess invocation with real argument parsing. Catches regressions where a mocked test passes but the real soffice CLI expects different flag shapes (e.g., `--outdir=X` vs `--outdir X`).
+
+Notes from delivery:
+
+- **Test environment surprise.** Initial test run on a machine WITH LibreOffice installed revealed that 15 existing A4 tests failed because they were built against the python-pptx fallback output format. They asserted on filenames like `01_slide.svg` and headings like `## Slide 1`, both of which change when the PDF pipeline takes over (`01_page.svg`, `## Page 1`). The `force_pptx_fallback` fixture is the fix — preserves the A4 tests' intent while letting the A5b primary path be fully exercised by the new test classes.
+
+- **The `_mixed_batch_produces_per_file_results` test needed reshaping, not extension swapping.** The original test paired a `.docx` success with a `.pdf` "not yet supported" skip, proving that one file's failure doesn't abort the batch. A5a implemented `.pdf`, so the test switched to `.odp` for the skip side. A5b implemented `.odp` too, leaving no supported-but-deferred extension to use as the skip side. Rather than keep chasing deferred extensions, changed the test to use a missing file (pre-flight failure) — structurally equivalent per-file-isolation proof, but extension-agnostic so future additions won't break it again.
+
+- **`shutil.which` monkeypatched at the module level, not globally.** `monkeypatch.setattr("ac_dc.doc_convert.shutil.which", ...)` replaces the name in the doc_convert module's namespace only. Other modules that import `shutil.which` directly are unaffected. The RPC-inventory tests, for example, still see the real `shutil.which` even while `force_pptx_fallback` is active. Avoids cross-test contamination.
+
+Open — nothing carried over. Doc Convert backend is complete for the scope specs4/4-features/doc-convert.md covers. Frontend UI (the Doc Convert tab) lands with Layer 5.
+
 #### Pass A5a — PDF via PyMuPDF (direct, no LibreOffice) (delivered)
 
 Adds PDF support via PyMuPDF's hybrid text + SVG pipeline. Each page's text is extracted into markdown paragraphs; pages with raster images or significant vector drawings also get companion SVGs. Glyph elements are stripped from SVGs when text is already in markdown (avoids duplication). Embedded raster images are externalised from SVGs to separate files. This is the direct PDF path — Pass A5b will add the LibreOffice-based pptx/odp → PDF conversion on top of this pipeline.
@@ -1386,6 +1432,49 @@ Layer 3 (LLM engine) is complete. All of: token counter, history store, file con
 
 Final test totals for Layer 3:
 - Python: run `uv run pytest` — 1503 tests passing across Layers 0–3 (1501 before 3.10's 16 new tests, plus the shape-test and import-fix adjustments).
+
+## Layer 4 — complete
+
+Layer 4 (features) is complete. All of: URL content (detection + fetching + summarization + cache), images (absorbed into Layer 3.2), code review (git soft-reset state machine + review context injection), collaboration (CollabServer + admission flow + restriction enforcement on LLMService/Repo/Settings/DocConvert), Settings RPC service, and document conversion (markitdown + openpyxl + python-pptx + LibreOffice + PyMuPDF pipelines for seven extensions). Ready to proceed to Layer 5 (webapp — shell, chat, viewers, file picker, search, settings).
+
+## Layer 5 — in progress
+
+Layer 5 (webapp) is the largest remaining surface. Delivering in three phases to keep each commit coherent:
+
+- **Phase 1 — Minimum viable shell** (this commit): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
+- **Phase 2 — Essential tabs**: Chat panel (send/receive/streaming/markdown/edit blocks), Files tab (file picker tree, selection sync), action bar with session controls.
+- **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, history browser, search, file navigation grid, Speech-to-text, TeX preview, Doc convert tab.
+
+### 5.1 — Phase 1 Minimum viable shell — **delivered**
+
+- `webapp/src/app-shell.js` — `AppShell` class extending `JRPCClient`. Inherited `serverURI`/`call`/`remoteTimeout` properties from the parent; registers itself as `AcApp` via `addClass(this, 'AcApp')` in `connectedCallback` so the backend's server-push callbacks (streamChunk, streamComplete, compactionEvent, filesChanged, userMessage, commitResult, modeChanged, sessionChanged, navigateFile, docConvertProgress, admissionRequest, admissionResult, clientJoined, clientLeft, roleChanged) are all registered. Each callback translates the RPC call into a corresponding `window` `CustomEvent` dispatch. This decouples the shell from child-component subscriptions — Phase 2 components listen on `window` rather than reaching through the DOM to the shell.
+- Lifecycle hooks override `setupDone` (publishes `this.call` to `SharedRpc`, flips state to `connected`, shows "Reconnected" toast on subsequent connects), `remoteDisconnected` (clears SharedRpc, schedules exponential-backoff reconnect), and `setupSkip` (schedules reconnect on first-connect failure without wedging the startup overlay).
+- Startup overlay driven by `startupProgress(stage, message, percent)` RPC callback. Brand mark + progress bar + message. On `stage === 'ready'`, a 400ms delay lets the user see 100% before the CSS fade-out. Reconnects bypass the overlay entirely.
+- Reconnect schedule — `[1000, 2000, 4000, 8000, 15000]` ms capped, per specs4. Attempt counter increments across disconnects; reset to 0 on successful `setupDone`. Reconnect re-triggers by nulling + restoring `serverURI` (JRPCClient's setter tears down + reopens the socket).
+- Toast system — subscribes to `ac-toast` window events via `connectedCallback` / `disconnectedCallback`. 3-second auto-dismiss. Default type `info`; success/error/warning supported. Components dispatch via `window.dispatchEvent(new CustomEvent('ac-toast', {...}))` rather than calling a method on the shell directly.
+- Dialog stub — three tab buttons (Chat, Context, Settings). Each tab renders a placeholder. Phase 2 wires Chat; Phase 3 wires the others.
+- `webapp/src/main.js` updated to import `./app-shell.js` and mount `<ac-app-shell>` into the `#app` element, replacing the boot splash. Port-parse helpers retained for tests and exported.
+- `webapp/src/app-shell.test.js` — 21 tests covering initial state (connecting/overlay/default tab), `setupDone` (SharedRpc publish, state flip, first-connect overlay persistence, reconnect overlay dismissal + toast), `remoteDisconnected` (SharedRpc clear, state flip, reconnect scheduling — only when was-connected), `startupProgress` (stage/message/percent update, 0..100 clamping, ready delay-then-fade), reconnect backoff (attempt increment, 15s cap), toast system (window event subscription, auto-dismiss timing, no-message guard, default type, unsubscribe on disconnect), server-push callbacks (window event translation, navigateFile remote flag, filesChanged payload, jrpc-oo ack return value), tab switching.
+- Test strategy — `@flatmax/jrpc-oo/jrpc-client.js` is mocked via `vi.mock` with a minimal `JRPCClient` class that extends `HTMLElement` and exposes the hook points (setupDone, setupSkip, remoteDisconnected, addClass, serverURI, call). Avoids opening real WebSocket connections during test. Module-mocked import is registered before `app-shell.js` is imported — order matters for vitest's hoisting.
+
+Design points pinned by tests:
+
+- **SharedRpc lifecycle.** `setupDone` publishes, `remoteDisconnected` clears. Pinned so the microtask-deferred hooks in RpcMixin (Layer 1.4) fire correctly. Subsequent layers depend on this.
+- **First-connect vs reconnect overlay behaviour.** First connect keeps the overlay up until `stage === 'ready'` fires. Reconnect dismisses immediately. Pinned because specs4 is explicit — the user sees the progress bar only during initial startup, not during transient disconnects.
+- **Reconnect only when was-connected.** A connection attempt that fails before `setupDone` should NOT schedule a retry via `remoteDisconnected` — the setupSkip path handles that instead. Pinned by `does NOT schedule reconnect before first successful connect` which verifies no `_attemptReconnect` call after 20s of fake time.
+- **Window-event decoupling.** Every server-push callback dispatches a window event rather than holding a direct reference to a child component. Future components (chat panel, file picker, token HUD) listen independently and the shell doesn't need to know they exist.
+- **Remote-origin flag on navigateFile.** Collaboration echo-prevention — a broadcast-originated navigation must be distinguishable so the receiving client doesn't re-broadcast and create an infinite loop.
+
+Phase 1 does NOT include:
+
+- Chat panel, file picker, or any tab content (Phase 2)
+- Dialog dragging, resizing, minimizing, position persistence (Phase 3)
+- Viewer background routing (Phase 3)
+- File navigation grid, Alt+Arrow shortcuts (Phase 3)
+- Token HUD (Phase 3)
+- Global keyboard shortcuts beyond tab clicking (Phase 3)
+
+Next up — Phase 2: chat panel with streaming, files tab with file picker tree, selection sync between picker and chat.
 
 ### 3.8 — Tiered prompt assembly — **delivered**
 
