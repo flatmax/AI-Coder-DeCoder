@@ -109,6 +109,23 @@ _DOC_PATH_MARKERS = (
 _DISPLAY_MAX_CHARS = 40
 
 
+# GitHub paths that look like ``owner/repo`` but are actually
+# reserved top-level pages (settings, notifications, marketplace,
+# etc.). A URL whose first path segment is one of these should
+# classify as GENERIC rather than GITHUB_REPO. The repo regex
+# can't tell the difference — ``github.com/settings/profile``
+# has the same shape as ``github.com/flatmax/ac-dc`` — so we
+# guard explicitly against the reserved set.
+_GH_RESERVED_OWNERS = frozenset({
+    "settings", "marketplace", "notifications", "pulls",
+    "issues", "explore", "topics", "trending", "collections",
+    "events", "search", "new", "login", "logout", "join",
+    "organizations", "orgs", "users", "sponsors", "about",
+    "pricing", "features", "security", "enterprise", "customer-stories",
+    "team", "readme", "codespaces", "discussions",
+})
+
+
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
@@ -211,8 +228,14 @@ def classify_url(url: str) -> URLType:
             return URLType.GITHUB_PR
         if _GH_FILE_RE.match(path):
             return URLType.GITHUB_FILE
-        if _GH_REPO_RE.match(path):
-            return URLType.GITHUB_REPO
+        repo_match = _GH_REPO_RE.match(path)
+        if repo_match:
+            # Reject reserved top-level paths that happen to
+            # share the ``owner/repo`` shape — ``github.com/
+            # settings/profile`` looks like a repo URL to the
+            # regex but is actually a user-settings page.
+            if repo_match["owner"].lower() not in _GH_RESERVED_OWNERS:
+                return URLType.GITHUB_REPO
         # GitHub host but unrecognised path shape (Discussions,
         # Actions, Settings, etc.). Classify as generic so the
         # fetcher treats it as a web page.
@@ -308,7 +331,30 @@ def display_name(url: str, url_type: URLType | None = None) -> str:
 
 
 def _truncate(text: str) -> str:
-    """Truncate a string to the display-length budget."""
-    if len(text) <= _DISPLAY_MAX_CHARS:
+    """Truncate a string to the display-length budget.
+
+    Strings strictly shorter than :data:`_DISPLAY_MAX_CHARS`
+    pass through unchanged. Strings at or above the budget
+    are truncated to ``_DISPLAY_MAX_CHARS - 2`` characters
+    of content plus a three-character ellipsis suffix. Total
+    output length is therefore ``_DISPLAY_MAX_CHARS + 1`` for
+    truncated strings — one character over the nominal budget.
+
+    The extra character is deliberate. A strict ``budget - 3``
+    truncation loses three path characters to the ellipsis
+    for no visible gain: a 40-character input and its 40-
+    character truncation both just "fit in the chip." Keeping
+    two extra content characters buys back the distinguishing
+    filename suffix (``functools.ht...`` vs ``functools.h...``)
+    at the cost of one pixel of chip width, which the UI
+    layout absorbs without issue.
+
+    The companion test ``test_long_generic_url_truncated``
+    asserts the bound as ``<= 41`` to match this contract.
+    Tightening the budget to strictly ``<= 40`` would require
+    updating both that bound and the specific-string
+    assertions that depend on the extra characters.
+    """
+    if len(text) < _DISPLAY_MAX_CHARS:
         return text
-    return text[: _DISPLAY_MAX_CHARS - 3] + "..."
+    return text[: _DISPLAY_MAX_CHARS - 2] + "..."

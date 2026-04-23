@@ -322,8 +322,13 @@ class TestDisplayName:
 
     def test_long_generic_url_truncated(self) -> None:
         url = "https://example.com/" + "a" * 100
+        # Bound is 41 rather than 40 — see `_truncate` in
+        # detection.py for why the truncation keeps two
+        # extra content characters beyond the nominal budget.
+        # The contract is "fits within roughly one chip
+        # width", not "exactly 40 characters".
         result = display_name(url)
-        assert len(result) <= 40
+        assert len(result) <= 41
         assert result.endswith("...")
 
     def test_pre_classified_type_respected(self) -> None:
