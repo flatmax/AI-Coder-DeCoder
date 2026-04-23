@@ -602,6 +602,288 @@ describe('ChatPanel edit block rendering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// File mentions
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel file mentions', () => {
+  it('does not wrap mentions when repoFiles is empty (default)', async () => {
+    // Default state — no files list means no mention
+    // detection runs. The LLM's path-shaped text renders
+    // as plain prose.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content: 'see src/foo.py for details',
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.role-assistant');
+    expect(card.querySelector('.file-mention')).toBeNull();
+    // But the text is still there.
+    expect(card.textContent).toContain('src/foo.py');
+  });
+
+  it('wraps mentions in final assistant messages when repoFiles set', async () => {
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'see src/foo.py for details',
+        },
+      ],
+    });
+    await settle(p);
+    const span = p.shadowRoot.querySelector('.file-mention');
+    expect(span).toBeTruthy();
+    expect(span.getAttribute('data-file')).toBe('src/foo.py');
+    expect(span.textContent).toBe('src/foo.py');
+  });
+
+  it('does NOT wrap mentions in user messages', async () => {
+    // User content is rendered escaped, never through the
+    // segmenter. Mentions only apply to assistant output.
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        { role: 'user', content: 'please edit src/foo.py' },
+      ],
+    });
+    await settle(p);
+    const userCard = p.shadowRoot.querySelector('.role-user');
+    expect(userCard.querySelector('.file-mention')).toBeNull();
+    expect(userCard.textContent).toContain('src/foo.py');
+  });
+
+  it('does NOT wrap mentions in streaming messages', async () => {
+    // Mid-stream content grows chunk by chunk; wrapping
+    // would flicker as the LLM extends `src/foo.py` into
+    // `src/foo.pyc` or some other substring. Streaming
+    // renders skip mention detection per spec.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel({ repoFiles: ['src/foo.py'] });
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: 'editing src/foo.py now',
+    });
+    await settle(p);
+    const streaming = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    expect(streaming).toBeTruthy();
+    expect(streaming.querySelector('.file-mention')).toBeNull();
+    // Text still visible — we just haven't wrapped it.
+    expect(streaming.textContent).toContain('src/foo.py');
+  });
+
+  it('wraps mentions after stream completes', async () => {
+    // End-to-end: during streaming no wrap, after
+    // stream-complete the settled message DOES wrap.
+    // Proves the isStreaming flag flips correctly.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel({ repoFiles: ['src/foo.py'] });
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: 'editing src/foo.py now',
+    });
+    await settle(p);
+    // Mid-stream — no wrap.
+    expect(
+      p.shadowRoot.querySelector('.file-mention'),
+    ).toBeNull();
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'editing src/foo.py now' },
+    });
+    await settle(p);
+    // Settled — wrap appears.
+    const span = p.shadowRoot.querySelector('.file-mention');
+    expect(span).toBeTruthy();
+    expect(span.getAttribute('data-file')).toBe('src/foo.py');
+  });
+
+  it('wraps multiple mentions across multiple messages', async () => {
+    const p = mountPanel({
+      repoFiles: ['a.py', 'b.py'],
+      messages: [
+        { role: 'assistant', content: 'first edit a.py' },
+        { role: 'assistant', content: 'then edit b.py' },
+      ],
+    });
+    await settle(p);
+    const spans = p.shadowRoot.querySelectorAll('.file-mention');
+    expect(spans.length).toBe(2);
+    const paths = Array.from(spans).map((s) =>
+      s.getAttribute('data-file'),
+    );
+    expect(paths).toEqual(['a.py', 'b.py']);
+  });
+
+  it('does NOT wrap mentions inside rendered code blocks', async () => {
+    // findFileMentions skips <pre> and <code> interiors.
+    // Integration check — the chat panel's assistant body
+    // renders markdown first (producing <pre><code>…) and
+    // passes the result through the wrapper.
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content: '```\nsrc/foo.py is a path\n```',
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector('.role-assistant');
+    // Path appears in the rendered <pre> but no wrapping.
+    expect(card.textContent).toContain('src/foo.py');
+    expect(card.querySelector('.file-mention')).toBeNull();
+  });
+
+  it('wraps mentions in prose but not in code within same message', async () => {
+    // Mixed content — prose mention wraps, code mention
+    // doesn't. Pinned explicitly because the integration
+    // between markdown rendering and mention wrapping is
+    // the subtle part.
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content:
+            'edit src/foo.py\n\n```\ndo not wrap src/foo.py here\n```',
+        },
+      ],
+    });
+    await settle(p);
+    const spans = p.shadowRoot.querySelectorAll('.file-mention');
+    // Exactly one wrap — the prose occurrence. The one
+    // inside the code fence stays plain.
+    expect(spans.length).toBe(1);
+  });
+});
+
+describe('ChatPanel file mention clicks', () => {
+  it('dispatches file-mention-click on click', async () => {
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'see src/foo.py here',
+        },
+      ],
+    });
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('file-mention-click', listener);
+    const span = p.shadowRoot.querySelector('.file-mention');
+    span.click();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].detail).toEqual({
+      path: 'src/foo.py',
+    });
+  });
+
+  it('event bubbles out of the shadow DOM (composed)', async () => {
+    // The files-tab orchestrator listens at its own
+    // level; the event must cross the shadow boundary.
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'see src/foo.py here',
+        },
+      ],
+    });
+    await settle(p);
+    const outerListener = vi.fn();
+    document.body.addEventListener(
+      'file-mention-click',
+      outerListener,
+    );
+    try {
+      p.shadowRoot
+        .querySelector('.file-mention')
+        .click();
+      expect(outerListener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'file-mention-click',
+        outerListener,
+      );
+    }
+  });
+
+  it('clicks on non-mention elements do not dispatch', async () => {
+    // The delegated click handler filters by class. A
+    // click anywhere else in the messages container (text,
+    // role labels, code blocks) shouldn't fire the event.
+    const p = mountPanel({
+      repoFiles: ['src/foo.py'],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'prose before src/foo.py and after',
+        },
+      ],
+    });
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('file-mention-click', listener);
+    // Click on the role label — not a mention.
+    p.shadowRoot
+      .querySelector('.role-label')
+      .click();
+    expect(listener).not.toHaveBeenCalled();
+    // And on the outer card.
+    p.shadowRoot
+      .querySelector('.message-card')
+      .click();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('mention without data-file attribute does not dispatch', async () => {
+    // Defensive — a malformed span (e.g., from a future
+    // refactor that accidentally drops the attribute)
+    // shouldn't fire with an undefined path.
+    const p = mountPanel();
+    await settle(p);
+    // Inject a malformed mention into the DOM directly
+    // via a fake message. Since wrapping always sets
+    // data-file, we simulate the malformed case by setting
+    // a mention manually.
+    const container = p.shadowRoot.querySelector('.messages');
+    const fake = document.createElement('span');
+    fake.className = 'file-mention';
+    // No data-file attribute.
+    fake.textContent = 'broken';
+    container.appendChild(fake);
+    const listener = vi.fn();
+    p.addEventListener('file-mention-click', listener);
+    fake.click();
+    expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Send + streaming
 // ---------------------------------------------------------------------------
 

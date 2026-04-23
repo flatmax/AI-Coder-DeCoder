@@ -69,6 +69,7 @@ import {
   segmentResponse,
 } from './edit-blocks.js';
 import { renderEditCard } from './edit-block-render.js';
+import { findFileMentions } from './file-mentions.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
 
 /**
@@ -109,6 +110,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * Lit's default identity check triggers re-render.
      */
     messages: { type: Array },
+    /**
+     * Flat list of repo-relative file paths. The files-tab
+     * orchestrator pushes this down via direct assignment
+     * when the file tree loads (matching the selectedFiles
+     * pattern from Phase 2c). Assistant messages are
+     * post-processed to wrap matching substrings in
+     * clickable `.file-mention` spans; see
+     * `_renderAssistantBody`.
+     *
+     * Empty array (default) disables mention detection
+     * entirely — `findFileMentions` short-circuits on empty
+     * lists so the cost is nil until the files-tab wires
+     * up.
+     */
+    repoFiles: { type: Array },
     /** Current textarea content. Cleared on send. */
     _input: { type: String, state: true },
     /**
@@ -434,11 +450,28 @@ export class ChatPanel extends RpcMixin(LitElement) {
       font-size: 0.8125rem;
       border-top: 1px solid rgba(248, 81, 73, 0.15);
     }
+
+    /* File mentions — clickable path references inside
+     * assistant prose. Styled to look like a link without
+     * actually being one (no underline by default to keep
+     * prose readable; underline on hover for affordance). */
+    .file-mention {
+      color: var(--accent-primary, #58a6ff);
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 0 0.15rem;
+      transition: background 120ms ease;
+    }
+    .file-mention:hover {
+      background: rgba(88, 166, 255, 0.12);
+      text-decoration: underline;
+    }
   `;
 
   constructor() {
     super();
     this.messages = [];
+    this.repoFiles = [];
     this._input = '';
     this._streaming = false;
     this._streamingContent = '';
@@ -474,6 +507,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onUserMessage = this._onUserMessage.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
+    this._onMessagesClick = this._onMessagesClick.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -747,6 +781,38 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Single click listener on the messages container —
+   * event delegation for file mention clicks. Dispatches
+   * `file-mention-click` with `{path}` detail when a
+   * `.file-mention` element is clicked. The event bubbles
+   * up through the shadow DOM boundary (composed: true)
+   * so the files-tab orchestrator can listen at its level
+   * and toggle file selection.
+   *
+   * Delegation pattern rather than per-span handlers so
+   * lit-html's template diffing doesn't need to track
+   * handler attachment per span — the wrapped HTML comes
+   * from `unsafeHTML` and doesn't participate in Lit's
+   * event binding anyway.
+   */
+  _onMessagesClick(event) {
+    const target = event.target;
+    if (!target || !target.classList) return;
+    if (!target.classList.contains('file-mention')) return;
+    const path = target.getAttribute('data-file');
+    if (!path) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _scrollToBottom() {
     // Double rAF — wait for Lit's DOM commit, then one more
     // frame for browser layout to settle before measuring
@@ -775,6 +841,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
         role="log"
         aria-live="polite"
         @scroll=${this._onMessagesScroll}
+        @click=${this._onMessagesClick}
       >
         ${this.messages.length === 0 && !this._streaming
           ? html`<div class="empty-state">
@@ -841,7 +908,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
         <div class="md-content">${unsafeHTML(escapeHtml(msg.content))}</div>
       `;
     } else if (msg.role === 'assistant') {
-      bodyHtml = this._renderAssistantBody(msg.content, msg.editResults);
+      bodyHtml = this._renderAssistantBody(
+        msg.content,
+        msg.editResults,
+        false,
+      );
     } else {
       bodyHtml = html`
         <div class="md-content">
@@ -869,13 +940,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * backend results using the per-file index counter pattern
    * (nth block for file X → nth result for file X).
    *
+   * File mention detection runs on prose segments ONLY when
+   * `isStreaming` is false. Mid-stream content grows chunk
+   * by chunk; running mention detection on partial prose
+   * could wrap a path just as the LLM is about to extend it
+   * into a different word (`src/foo.py` becomes
+   * `src/foo.pyc` mid-stream). Keeping streaming renders
+   * mention-free avoids flicker and keeps the rAF hot path
+   * fast. Per specs4/5-webapp/chat.md — "On final render
+   * only".
+   *
    * @param {string} content — assistant message text
    * @param {Array<object> | undefined} editResults — from
    *   stream-complete.result.edit_results, undefined while
    *   streaming or for error messages
+   * @param {boolean} isStreaming — true when rendering the
+   *   in-flight streaming card, false for settled messages
    * @returns {import('lit').TemplateResult}
    */
-  _renderAssistantBody(content, editResults) {
+  _renderAssistantBody(content, editResults, isStreaming) {
     const segments = segmentResponse(content || '');
     if (segments.length === 0) {
       // Empty content — nothing to render. Happens briefly
@@ -890,16 +973,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // and prose alternate; keeping them as siblings (rather
     // than joining into one HTML string) lets Lit's diffing
     // reconcile efficiently on chunk updates.
+    const wrapMentions =
+      !isStreaming &&
+      Array.isArray(this.repoFiles) &&
+      this.repoFiles.length > 0;
     const parts = segments.map((seg, i) => {
       if (seg.type === 'text') {
         // Markdown-render prose. Empty text segments (can
         // happen around fences) produce no visible output
         // but occupy a DOM slot so Lit's keyed diff stays
         // stable.
+        let html_ = renderMarkdown(seg.content);
+        if (wrapMentions) {
+          html_ = findFileMentions(html_, this.repoFiles);
+        }
         return html`
-          <div class="md-content">
-            ${unsafeHTML(renderMarkdown(seg.content))}
-          </div>
+          <div class="md-content">${unsafeHTML(html_)}</div>
         `;
       }
       // edit and edit-pending both go through renderEditCard.
@@ -928,7 +1017,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     return html`
       <div class="message-card role-assistant streaming">
         <div class="role-label">Assistant</div>
-        ${this._renderAssistantBody(this._streamingContent, undefined)}
+        ${this._renderAssistantBody(
+          this._streamingContent,
+          undefined,
+          true,
+        )}
         <span class="cursor"></span>
       </div>
     `;
