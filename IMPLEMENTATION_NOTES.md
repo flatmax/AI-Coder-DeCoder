@@ -681,7 +681,54 @@ Open carried over for later sub-layers:
 
 ## Layer 3 — in progress (continued)
 
-Current status: 3.1–3.9 delivered. Next up is 3.10 (mode switching with index dispatch).
+Current status: 3.1–3.10 delivered. Layer 3 is feature-complete for single-agent operation. Layer 4 (features — URL content, images, code review, collaboration, doc convert) is next.
+
+### 3.10 — Mode switching — **delivered**
+
+Adds RPC endpoints and per-mode stability tracker state for switching between code and document mode. Cross-reference toggle is stubbed — doc index hasn't landed yet (Layer 2's doc-index sub-layer is deferred), so enabling cross-ref is currently a no-op that logs a warning. The switching plumbing itself is complete: system prompt swap, per-mode tracker with lazy doc-tracker construction, tracker state preservation across round-trips, system event recording in both stores, broadcast to collaborators.
+
+- `src/ac_dc/llm_service.py` — changes:
+  - Constructor restructures single `_stability_tracker` into `_trackers: dict[Mode, StabilityTracker]`. Code tracker constructed eagerly; doc tracker lazy-built on first switch. `_stability_tracker` kept as a live alias pointing at whichever tracker is active, so existing readers (streaming handler, tier builder) don't need to know about the dispatch.
+  - Added `_cross_ref_enabled: bool` field. Reset to False on every mode switch per specs4/3-llm/modes.md.
+  - `get_mode()` — returns `{mode, doc_index_ready, doc_index_building, cross_ref_ready, cross_ref_enabled}`. Readiness flags hardcoded False pending doc index.
+  - `switch_mode(mode: str)` — validates target (unknown → `{error: ...}`), idempotent on same mode (`{mode, message}` with no side effects), resets cross-ref flag, lazy-constructs target tracker, swaps prompt via non-saving `set_system_prompt` (not `save_and_replace` — that's review mode's contract), swaps tracker on context manager, updates mode flag, records system event in both context AND history store, broadcasts `modeChanged`.
+  - `set_cross_reference(enabled)` — idempotent flip (no-op broadcast suppression when already in target state), logs when enabled without doc index, broadcasts `modeChanged` with both mode and new cross-ref state.
+  - `get_current_state()` — added `cross_ref_enabled` field so reconnect restores the toggle state.
+- `tests/test_llm_service.py` — added 16 tests in a new `TestMode` class: `get_mode` default shape, state snapshot includes cross-ref, same-mode is pure no-op (no event, no broadcast), unknown mode rejected cleanly, code→doc changes mode, system prompt swap with round-trip (doc then back to code — both original prompts restored from config), tracker instance swap with context-manager attachment verified in lockstep, tracker state preserved across round-trip (`is` comparison — not reconstructed), lazy doc-tracker construction (Mode.DOC absent from `_trackers` until first switch), system event recorded in context, system event persisted to JSONL, modeChanged broadcast with new mode payload, cross-ref enable flips flag + broadcasts with both mode and state, cross-ref disable flips back, cross-ref idempotent (no broadcast when already in target state), cross-ref resets to False on every mode switch (tested in both directions).
+
+Design points pinned by tests:
+
+- **Same-mode switch is strictly idempotent.** Returns `{mode, message: "Already in X mode"}` without recording a system event, without broadcasting `modeChanged`, without touching the tracker. The frontend's mode-refresh auto-switch logic calls `switch_mode` redundantly on reconnect; if the call produced side effects every time, the conversation history would fill with spurious switch events. Pinned by `test_switch_to_same_mode_is_noop`.
+- **Plain `set_system_prompt` is the right primitive for mode switch.** Not `save_and_replace_system_prompt` — that's review mode's contract (save current, install new, restore-on-exit). Mode switches persist; there's no "restore the pre-mode-switch prompt" concept. Enforced by `test_switch_swaps_system_prompt` which verifies that switching doc→code re-installs the config's code prompt (not a saved slot).
+- **Tracker instance identity is preserved across round-trips.** `test_switch_preserves_tracker_state` uses `is` comparison to prove the original code-mode tracker instance is re-attached when switching back, not a freshly-constructed one. Matters for tier state — the code-mode tracker's item assignments and N values survive a detour through doc mode.
+- **Context manager's attached tracker updates in lockstep.** Not just `_stability_tracker` — `service._context.stability_tracker` must also point at the new instance, or the next stability update cycle runs against the wrong tracker. Pinned by `test_switch_swaps_stability_tracker`.
+- **System event persists to both stores.** In-memory (for immediate LLM visibility via `get_history`) AND the JSONL history store (for session-restore survival across server restart). Pinned by separate `test_switch_records_system_event_in_context` and `test_switch_records_system_event_in_history_store`.
+- **Cross-reference flag resets BEFORE tracker swap.** The reset applies to the current tracker, not the new one. Conceptually: "deactivating cross-ref on the tracker the user is leaving" matters if cross-ref deactivation ever grows side effects that need to apply to the tier items present at deactivation time.
+- **Cross-reference idempotence suppresses broadcasts.** `set_cross_reference(False)` when already False returns successfully but doesn't broadcast. Without this, every reconnect that re-sends the current cross-ref state via `set_cross_reference` would fire a spurious `modeChanged` event. Pinned by `test_set_cross_reference_idempotent`.
+- **Doc tracker lazy construction pattern.** `_trackers[Mode.CODE]` exists at construction; `_trackers[Mode.DOC]` only appears after the first `switch_mode("doc")`. Tested directly via `Mode.DOC not in service._trackers` before the switch, `Mode.DOC in service._trackers` after. Zero cost for sessions that stay in code mode.
+
+Notes from delivery:
+
+- **Two test failures caught by running the suite:** `test_snapshot_shape` in the existing `TestStateSnapshot` class had its expected keys frozen at 7 fields; adding `cross_ref_enabled` to the snapshot broke the equality check. Fix was a one-line addition to the expected set. Second failure: `test_switch_lazy_constructs_doc_tracker` referenced `Mode.DOC` without importing `Mode` at the top of the test file. Fix was adding `from ac_dc.context_manager import Mode` alongside the existing imports. Both failures surfaced during the first run — worth noting as a reminder that adding a field to a snapshot dict requires searching for every existing equality assertion on that dict's keys.
+
+- **Readiness flags reported as hardcoded False.** `doc_index_ready`, `doc_index_building`, and `cross_ref_ready` are all False in `get_mode()` because the doc index hasn't landed (deferred from Layer 2). The frontend spec says the cross-reference toggle should be always-available after startup — but we report `cross_ref_ready: False` anyway as a graceful escape hatch if we ever need the frontend to hide the toggle (e.g., in a minimal release without the doc index dependencies installed). Today the frontend ignores the field and just shows the toggle unconditionally.
+
+- **Cross-reference enable-without-doc-index is a log + no-op.** The specs4/3-llm/modes.md contract says enabling cross-ref adds the opposite index's items to the active tracker. With no doc index yet, there's nothing to add. The flag still flips (so when the doc index lands, existing `_cross_ref_enabled=True` state starts producing cross-ref content on the next request) and the broadcast still fires (so the frontend toggle visually responds), but no tracker items are created. When Layer 2's doc-index sub-layer lands, the enable branch gets a body that populates the tracker; disabling gets a body that removes cross-ref items from the active tracker.
+
+- **Backwards-compatible alias.** `_stability_tracker` is kept as a live alias pointing at the active mode's tracker. Alternative would have been routing every caller through a `_active_tracker()` method or `get_active_tracker()` property, but the alias is simpler and matches the single-tracker shape of 3.5–3.9 code paths. The swap happens in exactly one place (`switch_mode`); there's no risk of the alias drifting out of sync with `_trackers[current_mode]`.
+
+Open carried over for later sub-layers:
+
+- **Cross-reference tier population.** The enable branch of `set_cross_reference` is where Layer 2's doc-index will plug in. Concretely: when code mode + cross-ref enabled, the `_update_stability` pass will need to add `doc:{path}` entries for every doc-index file to the code-mode tracker's active items. Equivalent logic in reverse for doc mode + cross-ref. Tier assembly already dispatches by prefix (3.8) so the content flows through naturally once items exist in the tracker.
+- **Mode persistence across server restart.** The frontend already persists the current mode to localStorage (specs4/5-webapp/shell.md); the backend defaults to code mode on startup and follows the frontend's `switch_mode` call on reconnect. No server-side mode persistence is needed — if the user's frontend saves `doc` and the server starts in `code`, the reconnect's `switch_mode("doc")` brings them into sync. Tested indirectly via the idempotence guarantees; a dedicated round-trip test could land with Layer 5's shell work.
+- **Collaboration mode sync.** When collaboration mode is active (Layer 4.4), non-localhost clients cannot call `switch_mode` (the method is localhost-only per specs4 RPC inventory). The guard lives at the collab layer, not here. The `modeChanged` broadcast reaches all admitted clients so non-localhost participants passively follow the server's authoritative mode. No change needed at the LLMService layer.
+
+## Layer 3 — complete
+
+Layer 3 (LLM engine) is complete. All of: token counter, history store, file context, context manager with mode, stability tracker with per-mode scoping, history compactor with injected detector, streaming handler with full lifecycle, tiered prompt assembly, edit protocol with parser + pipeline, mode switching with cross-reference toggle. Ready to proceed to Layer 4 (features — URL content, images, code review, collaboration, doc convert).
+
+Final test totals for Layer 3:
+- Python: run `uv run pytest` — 1503 tests passing across Layers 0–3 (1501 before 3.10's 16 new tests, plus the shape-test and import-fix adjustments).
 
 ### 3.8 — Tiered prompt assembly — **delivered**
 
