@@ -732,6 +732,30 @@ Open carried over for later sub-layers:
 
 Current status: 3.1–3.10 delivered. Layer 3 is feature-complete for single-agent operation. Layer 4 (features — URL content, images, code review, collaboration, doc convert) is next.
 
+### 4.3 — Code review — **in progress**
+
+Delivered (this response): LLMService RPC surface and state management.
+
+- `_review_active` flag — was a Layer 3.9 stub returning False, now wired to `start_review`/`end_review`. `_build_completion_result` already gates edit application on this flag (pinned by `test_review_mode_skips_apply` in `TestStreamingWithEdits`), so review mode is read-only from the moment `start_review` succeeds.
+- `_review_state` dict holds branch / base_commit / branch_tip / parent / original_branch / commits / changed_files / stats / pre_change_symbol_map. Populated by `start_review`, cleared by `end_review`. Held as a dict so `get_review_state` returns a single shape without re-assembly.
+- `check_review_ready()` — clean-tree probe, returns `{clean, message?}`. Called by the review selector UI before rendering the commit graph so dirty-tree errors surface as inline feedback rather than failing mid-entry.
+- `start_review(branch, base_commit)` — full 9-step entry sequence. Key ordering: checkout merge-base → build pre-change symbol map (disk is at pre-change state) → soft-reset (disk moves to branch tip, HEAD stays at merge-base) → rebuild post-change symbol index. The pre-change map capture between steps is why the sequence exists — no other moment in the session has the disk at the pre-change state.
+- On any failure mid-sequence, `exit_review_mode` is called to roll back, and the error is surfaced. Review state isn't set until all steps succeed.
+- `end_review()` — reverses entry. Always clears review state (even on repo-level exit failure) so the user isn't stuck in review UI if git has trouble reattaching to the original branch. Surfaces the error separately via `{error, status: "partial"}`.
+- `get_review_state()` — returns a copy, with `pre_change_symbol_map` stripped (large, server-only consumption). Mutable sub-fields (commits, changed_files, stats) also defensively copied.
+- `get_review_file_diff(path)` — delegation to `Repo.get_review_file_diff` guarded by `_review_active`.
+- `get_commit_graph(limit, offset, include_remote)` — delegation to `Repo.get_commit_graph`. Exposed on LLMService so the browser drives the review selector via a single service rather than needing a Repo RPC registration.
+- `get_snippets()` — mode-and-review aware. Review mode → review snippets; doc mode → doc snippets; else code snippets. Frontend calls unconditionally; the RPC determines the right array.
+- System prompt swap via `ContextManager.save_and_replace_system_prompt` (saves current, installs review prompt). `end_review` calls `restore_system_prompt`.
+- File selection cleared on review entry (both `_selected_files` and `_file_context`), with a `filesChanged` broadcast so the picker updates. Defense-in-depth — the frontend also clears its own selection on the `review-started` event.
+- System event messages recorded in both context and history store on entry and exit.
+- `get_current_state` now includes `review_state` so reconnect restores the review UI.
+
+Still to deliver in 4.3:
+
+- Review context injection into `_stream_chat` before prompt assembly. Builds a review-context block with commit summary, pre-change symbol map, and reverse diffs for selected files; attaches via `context.set_review_context(...)`. The `ContextManager.assemble_tiered_messages` already renders a review-context pair between URL context and active files when the context is non-empty.
+- Test coverage — `TestReview` class in `test_llm_service.py` covering the full entry/exit lifecycle, clean-tree guard, concurrent-review rejection, state snapshot inclusion, review snippet selection, state cleared on end even if git exit fails.
+
 ### 4.2 — Image persistence — **delivered (absorbed into 3.2)**
 
 Layer 4.2's backend scope is fully delivered by the `HistoryStore` implementation in Layer 3.2 and the streaming handler's user-message persistence in 3.7. Nothing new to ship on the backend side.

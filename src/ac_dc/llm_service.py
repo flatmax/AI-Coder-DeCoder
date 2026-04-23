@@ -483,13 +483,29 @@ class LLMService:
             EditPipeline(repo) if repo is not None else None
         )
 
-        # Review-mode flag. Layer 3.9 stub — always False.
-        # Layer 4.3 (code review) wires entry/exit and the
-        # read-only guard that skips edit application while
-        # active. The flag lives here rather than on the context
-        # manager because the streaming handler is what gates
-        # the apply step, not the assembly layer.
+        # Review-mode flag — set by start_review, cleared by
+        # end_review. Gates edit application in _stream_chat
+        # (review mode is read-only — edits parse for UI
+        # display but are never applied).
         self._review_active = False
+
+        # Review state. Populated by start_review; cleared by
+        # end_review. All fields None when review is inactive.
+        # Held as a dict rather than individual attributes so
+        # get_review_state() can return it as a single shape
+        # without assembling.
+        self._review_state: dict[str, Any] = {
+            "active": False,
+            "branch": None,
+            "branch_tip": None,
+            "base_commit": None,
+            "parent_commit": None,
+            "original_branch": None,
+            "commits": [],
+            "changed_files": [],
+            "stats": {},
+            "pre_change_symbol_map": "",
+        }
 
         # Executors. Streaming gets its own pool so aux work doesn't
         # starve it. Aux pool handles commit-message generation and
@@ -716,7 +732,7 @@ class LLMService:
         Called by the browser on WebSocket connect. Returns the
         minimal set of fields needed to rebuild the UI — messages,
         selected files, streaming status, session ID, repo name,
-        init flag, mode, cross-reference state.
+        init flag, mode, cross-reference state, review state.
         """
         return {
             "messages": self._context.get_history(),
@@ -727,6 +743,7 @@ class LLMService:
             "init_complete": self._init_complete,
             "mode": self._context.mode.value,
             "cross_ref_enabled": self._cross_ref_enabled,
+            "review_state": self.get_review_state(),
         }
 
     # ------------------------------------------------------------------
@@ -838,6 +855,432 @@ class LLMService:
         Used by the "clear URL cache" RPC in the settings UI.
         """
         return self._url_service.clear_url_cache()
+
+    # ------------------------------------------------------------------
+    # Public RPC — code review mode
+    # ------------------------------------------------------------------
+    #
+    # Review mode presents a feature branch's changes as staged
+    # modifications via git soft reset. The file picker, diff
+    # viewer, and context engine all work unchanged — edits are
+    # disabled (read-only contract), the system prompt swaps to
+    # a review-focused variant, and a pre-change symbol map is
+    # injected so the LLM can compare pre- and post-change
+    # codebase topology.
+    #
+    # See specs4/4-features/code-review.md for the full git
+    # state machine.
+
+    def check_review_ready(self) -> dict[str, Any]:
+        """Return whether the working tree is clean enough for review.
+
+        Called by the review selector before rendering the git
+        graph — a dirty tree surfaces a clear error inline
+        rather than letting the user select a base commit that
+        would fail at start_review time.
+
+        Shape — ``{clean: bool, message?: str}``. Message is
+        only present when clean is False, explaining what the
+        user needs to do.
+        """
+        if self._repo is None:
+            return {
+                "clean": False,
+                "message": "No repository attached.",
+            }
+        if self._repo.is_clean():
+            return {"clean": True}
+        return {
+            "clean": False,
+            "message": (
+                "Working tree has uncommitted changes. "
+                "Commit, stash, or discard them before entering "
+                "review mode."
+            ),
+        }
+
+    def get_commit_graph(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        include_remote: bool = False,
+    ) -> dict[str, Any]:
+        """Return commit graph data for the review selector.
+
+        Thin delegation to the repo. Exposed here so the browser
+        can drive the selector via a single service class
+        rather than needing a separate Repo registration.
+        """
+        if self._repo is None:
+            return {"commits": [], "branches": [], "has_more": False}
+        return self._repo.get_commit_graph(
+            limit=limit,
+            offset=offset,
+            include_remote=include_remote,
+        )
+
+    def start_review(
+        self,
+        branch: str,
+        base_commit: str,
+    ) -> dict[str, Any]:
+        """Enter review mode for ``branch`` starting at ``base_commit``.
+
+        Runs the full entry sequence:
+
+        1. Clean-tree check (rejects if dirty)
+        2. Repo-level checkout_review_parent — computes the
+           merge-base, records the original branch, and
+           checks out the merge-base (disk at pre-change state)
+        3. Build pre-change symbol map (if a symbol index is
+           attached) — happens HERE, with disk at the
+           pre-change state
+        4. Repo-level setup_review_soft_reset — checks out the
+           branch tip by SHA, soft-resets to the merge-base
+           (all feature-branch changes now appear staged)
+        5. Get commit log + changed files + stats from the
+           repo, cache in _review_state
+        6. Rebuild the symbol index (disk now at the post-
+           change state — the current symbol map reflects
+           reviewed code)
+        7. Swap system prompt to the review variant
+        8. Clear file selection (review starts with no files
+           — user adds them deliberately via the picker or
+           via file mentions)
+        9. Mark review active, record a system event in
+           context and history
+
+        On any failure, attempts to roll back to a clean
+        state (via exit_review_mode) and returns an error.
+        """
+        # Basic validation.
+        if self._repo is None:
+            return {"error": "No repository attached."}
+        if self._review_active:
+            return {
+                "error": (
+                    "Review mode is already active. Exit the "
+                    "current review first."
+                )
+            }
+
+        # Step 1 — clean tree.
+        clean = self.check_review_ready()
+        if not clean["clean"]:
+            return {"error": clean.get("message", "Tree not clean")}
+
+        # Step 2 — checkout review parent (merge-base).
+        parent_result = self._repo.checkout_review_parent(
+            branch, base_commit
+        )
+        if "error" in parent_result:
+            return {"error": parent_result["error"]}
+
+        branch_tip = parent_result["branch_tip"]
+        parent_commit = parent_result["parent_commit"]
+        original_branch = parent_result["original_branch"]
+
+        # Step 3 — build pre-change symbol map. Disk is at the
+        # merge-base, so indexing now captures the pre-change
+        # state. Best-effort: if the symbol index isn't
+        # attached (tests without it, or deferred init not
+        # yet complete), skip this and proceed with an empty
+        # pre-change map.
+        pre_change_symbol_map = ""
+        if self._symbol_index is not None:
+            try:
+                file_list = self._repo.get_flat_file_list().split("\n")
+                file_list = [f for f in file_list if f]
+                self._symbol_index.index_repo(file_list)
+                pre_change_symbol_map = (
+                    self._symbol_index.get_symbol_map()
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Pre-change symbol map build failed: %s", exc
+                )
+
+        # Step 4 — setup soft reset. Disk moves to branch tip,
+        # HEAD stays at merge-base, all changes appear staged.
+        reset_result = self._repo.setup_review_soft_reset(
+            branch_tip, parent_commit
+        )
+        if "error" in reset_result:
+            # Partial state — try to recover.
+            self._repo.exit_review_mode(
+                branch_tip, original_branch
+            )
+            return {"error": reset_result["error"]}
+
+        # Step 5 — gather commits, changed files, stats.
+        try:
+            commits = self._repo.get_commit_log(
+                base=parent_commit,
+                head=branch_tip,
+                limit=100,
+            )
+            changed_files = self._repo.get_review_changed_files()
+            stats = self._compute_review_stats(
+                commits, changed_files
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to gather review metadata: %s", exc
+            )
+            self._repo.exit_review_mode(
+                branch_tip, original_branch
+            )
+            return {"error": f"Review setup failed: {exc}"}
+
+        # Step 6 — rebuild symbol index against post-change
+        # disk. Best-effort — same as step 3.
+        if self._symbol_index is not None:
+            try:
+                file_list = self._repo.get_flat_file_list().split("\n")
+                file_list = [f for f in file_list if f]
+                self._symbol_index.index_repo(file_list)
+            except Exception as exc:
+                logger.warning(
+                    "Post-change symbol index rebuild failed: %s",
+                    exc,
+                )
+
+        # Step 7 — swap system prompt. save_and_replace_system_prompt
+        # stashes the current prompt so end_review can restore it.
+        review_prompt = self._config.get_review_prompt()
+        self._context.save_and_replace_system_prompt(review_prompt)
+
+        # Step 8 — clear file selection. Defense in depth: we
+        # clear both _selected_files (authoritative server
+        # state) AND broadcast via filesChanged so the picker
+        # updates. The frontend also clears its own selection
+        # on the review-started event.
+        self._selected_files = []
+        self._file_context.clear()
+        self._broadcast_event("filesChanged", [])
+
+        # Store review state.
+        self._review_state = {
+            "active": True,
+            "branch": branch,
+            "branch_tip": branch_tip,
+            "base_commit": base_commit,
+            "parent_commit": parent_commit,
+            "original_branch": original_branch,
+            "commits": commits,
+            "changed_files": changed_files,
+            "stats": stats,
+            "pre_change_symbol_map": pre_change_symbol_map,
+        }
+        self._review_active = True
+
+        # Step 9 — system event.
+        event_text = (
+            f"Entered review mode for `{branch}` "
+            f"({len(commits)} commits, "
+            f"{stats.get('files_changed', 0)} files changed)."
+        )
+        self._context.add_message(
+            "user", event_text, system_event=True
+        )
+        if self._history_store is not None:
+            self._history_store.append_message(
+                session_id=self._session_id,
+                role="user",
+                content=event_text,
+                system_event=True,
+            )
+
+        return {
+            "status": "review_active",
+            "branch": branch,
+            "base_commit": base_commit,
+            "commits": commits,
+            "changed_files": changed_files,
+            "stats": stats,
+        }
+
+    def end_review(self) -> dict[str, Any]:
+        """Exit review mode, restoring the pre-review git state.
+
+        Runs the exit sequence:
+
+        1. Repo-level exit_review_mode — soft resets to branch
+           tip (disk unchanged), checks out the original branch
+        2. Rebuild the symbol index against the restored disk
+           state
+        3. Restore the original system prompt
+        4. Clear review state
+        5. Record a system event
+
+        If the repo-level exit fails (original branch was
+        deleted, etc.), HEAD remains detached at the branch
+        tip. The error is surfaced with guidance; review state
+        is still cleared so the user isn't stuck in the
+        client-side review UI.
+        """
+        if not self._review_active:
+            return {"error": "Review mode is not active."}
+        if self._repo is None:
+            return {"error": "No repository attached."}
+
+        branch_tip = self._review_state["branch_tip"]
+        original_branch = self._review_state["original_branch"]
+
+        # Step 1 — exit at the repo level.
+        exit_result = self._repo.exit_review_mode(
+            branch_tip, original_branch
+        )
+        exit_error = exit_result.get("error")
+
+        # Step 2 — rebuild symbol index. Best-effort even on
+        # partial failure.
+        if self._symbol_index is not None:
+            try:
+                file_list = self._repo.get_flat_file_list().split("\n")
+                file_list = [f for f in file_list if f]
+                self._symbol_index.index_repo(file_list)
+            except Exception as exc:
+                logger.warning(
+                    "Symbol index rebuild after review failed: %s",
+                    exc,
+                )
+
+        # Step 3 — restore system prompt.
+        self._context.restore_system_prompt()
+
+        # Step 4 — clear review state regardless of repo-level
+        # success. Leaving review_active=True after a failed
+        # exit would mean the user can't retry without manual
+        # intervention.
+        self._review_state = {
+            "active": False,
+            "branch": None,
+            "branch_tip": None,
+            "base_commit": None,
+            "parent_commit": None,
+            "original_branch": None,
+            "commits": [],
+            "changed_files": [],
+            "stats": {},
+            "pre_change_symbol_map": "",
+        }
+        self._review_active = False
+        # Clear review context that was injected into prompts.
+        self._context.clear_review_context()
+
+        # Step 5 — system event. Different phrasing depending
+        # on whether exit succeeded cleanly.
+        if exit_error:
+            event_text = (
+                f"Exited review mode with issues: {exit_error}"
+            )
+        else:
+            event_text = "Exited review mode."
+        self._context.add_message(
+            "user", event_text, system_event=True
+        )
+        if self._history_store is not None:
+            self._history_store.append_message(
+                session_id=self._session_id,
+                role="user",
+                content=event_text,
+                system_event=True,
+            )
+
+        if exit_error:
+            return {"error": exit_error, "status": "partial"}
+        return {"status": "restored"}
+
+    def get_review_state(self) -> dict[str, Any]:
+        """Return the current review state.
+
+        Exposed as an RPC so the browser can sync review-mode
+        UI on connect and after each state-changing operation
+        (start, end). Returns a copy — caller mutations don't
+        affect stored state.
+
+        The ``pre_change_symbol_map`` field is excluded from
+        the returned dict because it can be large (whole
+        repo's worth of text) and isn't needed by the
+        frontend — it's consumed server-side when assembling
+        the review context for LLM requests.
+        """
+        state = dict(self._review_state)
+        state.pop("pre_change_symbol_map", None)
+        # Defensive copies of mutable sub-fields.
+        state["commits"] = list(state.get("commits") or [])
+        state["changed_files"] = list(state.get("changed_files") or [])
+        state["stats"] = dict(state.get("stats") or {})
+        return state
+
+    def get_review_file_diff(self, path: str) -> dict[str, Any]:
+        """Return the reverse diff for a single file during review.
+
+        Thin delegation to the repo. The repo's
+        ``get_review_file_diff`` runs ``git diff --cached -- path``
+        which produces the staged-changes diff — matches
+        specs4's "reverse diff" semantics (shows what would
+        revert the file to the pre-review state).
+
+        Returns ``{path, diff}`` on success or
+        ``{error: ...}`` when review isn't active or the
+        path isn't valid.
+        """
+        if not self._review_active:
+            return {"error": "Review mode is not active."}
+        if self._repo is None:
+            return {"error": "No repository attached."}
+        try:
+            return self._repo.get_review_file_diff(path)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @staticmethod
+    def _compute_review_stats(
+        commits: list[dict[str, Any]],
+        changed_files: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Compute aggregate stats for the review state.
+
+        Returns counts used by the review status bar and the
+        LLM's review context header.
+        """
+        additions = sum(
+            int(f.get("additions", 0) or 0) for f in changed_files
+        )
+        deletions = sum(
+            int(f.get("deletions", 0) or 0) for f in changed_files
+        )
+        return {
+            "commit_count": len(commits),
+            "files_changed": len(changed_files),
+            "additions": additions,
+            "deletions": deletions,
+        }
+
+    # ------------------------------------------------------------------
+    # Public RPC — snippets
+    # ------------------------------------------------------------------
+
+    def get_snippets(self) -> list[dict[str, str]]:
+        """Return snippets appropriate for the current mode.
+
+        Priority:
+
+        1. Review mode active → review snippets
+        2. Document mode → doc snippets
+        3. Otherwise (code mode) → code snippets
+
+        The frontend calls this unconditionally on RPC ready,
+        on review state change, and on mode change — it doesn't
+        need to know which mode or state produced the result.
+        """
+        if self._review_active:
+            return self._config.get_snippets("review")
+        if self._context.mode == Mode.DOC:
+            return self._config.get_snippets("doc")
+        return self._config.get_snippets("code")
 
     # ------------------------------------------------------------------
     # Public RPC — file selection
