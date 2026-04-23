@@ -979,6 +979,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // collaborator's prompt) are ignored in Phase 2b; Phase 2d
     // will adopt them as passive streams.
     this._currentRequestId = null;
+    // The most recently completed request ID. Compaction events
+    // arrive asynchronously AFTER stream-complete, by which time
+    // `_currentRequestId` is already null. The compaction-event
+    // handler accepts events for either `_currentRequestId` (in
+    // the rare case compaction starts before stream-complete is
+    // fully processed) or `_lastRequestId` (the common case).
+    // Set inside `_onStreamComplete` for our own requests only;
+    // collaborator streams don't update this.
+    this._lastRequestId = null;
 
     // rAF coalescing state — `_pendingChunks` is
     // Map<requestId, content>. The rAF callback reads and
@@ -996,6 +1005,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onUserMessage = this._onUserMessage.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onCompactionEvent = this._onCompactionEvent.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
     this._onMessagesClick = this._onMessagesClick.bind(this);
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
@@ -1012,6 +1022,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    window.addEventListener(
+      'compaction-event',
+      this._onCompactionEvent,
+    );
     window.addEventListener('mode-changed', this._onModeOrReviewChanged);
     window.addEventListener(
       'review-started',
@@ -1028,6 +1042,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener(
+      'compaction-event',
+      this._onCompactionEvent,
+    );
     window.removeEventListener(
       'mode-changed',
       this._onModeOrReviewChanged,
@@ -1141,6 +1159,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._streaming = false;
       this._streamingContent = '';
       this._currentRequestId = null;
+      // Remember the completed request ID so post-completion
+      // events (compaction, URL fetches whose callbacks arrived
+      // late) can still be routed to this conversation. Kept
+      // as a separate field so it outlives the current-request
+      // reset above. Overwritten by each new stream-complete
+      // we own.
+      this._lastRequestId = requestId;
     }
 
     this._streams.delete(requestId);
@@ -1218,6 +1243,130 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // messages. A new session (empty messages) is a no-op;
     // a loaded session populates recall with prior prompts.
     this._seedInputHistory(msgs);
+  }
+
+  /**
+   * Handle a compaction / progress event from the server.
+   *
+   * These events arrive on the same channel as stream-chunk /
+   * stream-complete but carry a `stage` field in their payload
+   * identifying what's happening. The stages we care about:
+   *
+   *   - `url_fetch` — URL fetch started mid-stream. Show a
+   *     transient toast with the display name so the user
+   *     knows the delay is network-bound, not hung.
+   *   - `url_ready` — URL fetch completed. Brief success
+   *     toast.
+   *   - `compacting` — history compaction starting. Toast so
+   *     the user knows their older history is being
+   *     summarised.
+   *   - `compacted` — compaction done. Replace the message
+   *     list with the compacted messages the event carries;
+   *     success toast referencing the case (truncate /
+   *     summarize / none). The new list is authoritative —
+   *     everything before the compacted boundary is gone
+   *     from the client's view.
+   *   - `compaction_error` — compaction failed. Error toast;
+   *     messages unchanged. The backend's history is intact
+   *     too — this is a best-effort optimisation.
+   *
+   * Request ID filtering: compaction runs AFTER
+   * stream-complete has fired, so `_currentRequestId` is
+   * already null by the time compaction events arrive. We
+   * also accept events matching `_lastRequestId` (the most
+   * recently completed request) per specs3. Events for
+   * unknown request IDs are silently dropped — a late event
+   * from a cancelled or forgotten request shouldn't
+   * interfere with the current conversation.
+   *
+   * Doc enrichment stages (`doc_enrichment_*`) are ignored
+   * here. Per specs4/5-webapp/shell.md they drive a header
+   * progress bar, not a chat-panel toast. The spec is
+   * explicit: "Not rendered as toast — header progress bar
+   * handles these."
+   */
+  _onCompactionEvent(event) {
+    const { requestId, event: payload } = event.detail || {};
+    if (!payload || typeof payload !== 'object') return;
+    const stage = payload.stage;
+    if (!stage) return;
+    // Request ID filter — accept current and most-recent,
+    // drop anything else. Missing requestId is accepted
+    // too (some progress events may not carry one).
+    if (
+      requestId &&
+      requestId !== this._currentRequestId &&
+      requestId !== this._lastRequestId
+    ) {
+      return;
+    }
+    switch (stage) {
+      case 'url_fetch': {
+        // `url` is the display name — "github.com/owner/repo",
+        // "example.com/docs/foo", etc. Falls back to a
+        // generic label if the backend didn't include one.
+        const label = payload.url || 'URL';
+        this._emitToast(`Fetching ${label}…`, 'info');
+        return;
+      }
+      case 'url_ready': {
+        const label = payload.url || 'URL';
+        this._emitToast(`Fetched ${label}`, 'success');
+        return;
+      }
+      case 'compacting': {
+        this._emitToast('Compacting history…', 'info');
+        return;
+      }
+      case 'compacted': {
+        // Replace the message list with the compacted form.
+        // The backend's `case` field tells us what kind of
+        // compaction happened — truncate (dropped old
+        // messages), summarize (synthesised a summary for
+        // pre-window messages), or none (trigger tripped
+        // but nothing needed changing).
+        const newMessages = Array.isArray(payload.messages)
+          ? payload.messages
+          : null;
+        if (newMessages) {
+          this.messages = newMessages.map((m) => {
+            const normalized = normalizeMessageContent(m);
+            const images = Array.isArray(m.images)
+              ? m.images
+              : normalized.images;
+            return {
+              role: m.role,
+              content: normalized.content,
+              ...(images.length > 0 ? { images } : {}),
+              ...(m.system_event ? { system_event: true } : {}),
+            };
+          });
+        }
+        const caseName = payload.case;
+        const toastMsg =
+          caseName === 'truncate'
+            ? 'History truncated at topic boundary'
+            : caseName === 'summarize'
+              ? 'History summarised'
+              : 'History compaction complete';
+        this._emitToast(toastMsg, 'success');
+        return;
+      }
+      case 'compaction_error': {
+        // The error field is the backend's error string.
+        // Preserve it verbatim in the toast — debugging
+        // compaction requires knowing what went wrong.
+        const detail = payload.error || 'unknown error';
+        this._emitToast(`Compaction failed: ${detail}`, 'error');
+        return;
+      }
+      default:
+        // Unknown stage — silent drop. Doc enrichment
+        // stages fall through here (by design) and any
+        // future backend stage we haven't learned about
+        // is harmless to ignore.
+        return;
+    }
   }
 
   _onModeOrReviewChanged() {
