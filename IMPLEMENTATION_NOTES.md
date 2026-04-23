@@ -732,9 +732,9 @@ Open carried over for later sub-layers:
 
 Current status: 3.1–3.10 delivered. Layer 3 is feature-complete for single-agent operation. Layer 4 (features — URL content, images, code review, collaboration, doc convert) is next.
 
-### 4.3 — Code review — **in progress**
+### 4.3 — Code review — **delivered**
 
-Delivered (this response): LLMService RPC surface and state management.
+Delivered in three passes: LLMService RPC surface + state management, review context injection into `_stream_chat`, and the `TestReview` test class.
 
 - `_review_active` flag — was a Layer 3.9 stub returning False, now wired to `start_review`/`end_review`. `_build_completion_result` already gates edit application on this flag (pinned by `test_review_mode_skips_apply` in `TestStreamingWithEdits`), so review mode is read-only from the moment `start_review` succeeds.
 - `_review_state` dict holds branch / base_commit / branch_tip / parent / original_branch / commits / changed_files / stats / pre_change_symbol_map. Populated by `start_review`, cleared by `end_review`. Held as a dict so `get_review_state` returns a single shape without re-assembly.
@@ -751,10 +751,34 @@ Delivered (this response): LLMService RPC surface and state management.
 - System event messages recorded in both context and history store on entry and exit.
 - `get_current_state` now includes `review_state` so reconnect restores the review UI.
 
-Still to deliver in 4.3:
+Review context injection:
 
-- Review context injection into `_stream_chat` before prompt assembly. Builds a review-context block with commit summary, pre-change symbol map, and reverse diffs for selected files; attaches via `context.set_review_context(...)`. The `ContextManager.assemble_tiered_messages` already renders a review-context pair between URL context and active files when the context is non-empty.
-- Test coverage — `TestReview` class in `test_llm_service.py` covering the full entry/exit lifecycle, clean-tree guard, concurrent-review rejection, state snapshot inclusion, review snippet selection, state cleared on end even if git exit fails.
+- `_stream_chat` calls `_build_and_set_review_context()` before tiered-content building when `_review_active` is True. The helper constructs a block with four parts: (1) review summary (branch, merge-base → tip SHA, file/line stats), (2) commits list (ordered, each with short SHA + message first line + author + relative date), (3) pre-change symbol map under its own header, (4) reverse diffs for selected files that are also in the review's changed-files set.
+- Non-review requests clear any stale review context defensively. Normally `end_review` handles the clear, but the guard protects against a crashed exit that left stale state on the context manager.
+- Review context is re-built on every request so the reverse-diff set reflects the CURRENT file selection — if the user deselects a file mid-review, its diff drops from the next request's context.
+- `ContextManager.assemble_tiered_messages` already renders review context as a uncached user/assistant pair between URL context and active files (per specs4/3-llm/prompt-assembly.md). No changes needed to the assembler; the attach point is the existing `set_review_context`.
+
+Test coverage — `TestReview` class with 19 tests: clean-tree check (clean, dirty, no-repo), state snapshot integration (inactive default shape, included in `get_current_state`), start_review guards (no repo, dirty tree, concurrent), full entry/exit round-trip (system prompt swapped and restored, state populated and cleared, selection cleared, system events recorded in both stores, filesChanged broadcast), end_review guards (not-active, clears state even on git exit failure), diff fetch guards (active-required, no-repo), snippet dispatch (code default, review overrides doc, doc when doc-mode-without-review), commit graph delegation (with repo, without repo), return-value defensive copies (commits/changed_files/stats mutations don't affect stored state; pre_change_symbol_map stripped), streaming integration (review active → context attached with all four sections; non-review → stale context cleared).
+
+Design points pinned by tests:
+
+- **Review context re-built every request.** The helper is called from `_stream_chat` on every turn rather than once on entry. Pinned implicitly by `test_streaming_injects_review_context` — the selected-files-dependent part of the context (reverse diffs) wouldn't reflect mid-session selection changes if the build was one-shot. This matches specs4 — "Review context is re-injected on each message".
+
+- **Reverse diffs gated on selection intersection.** A file in the selected set but NOT in the review's changed_files contributes no diff (it wasn't touched by the feature branch; the user selected it for reference). A file in changed_files but NOT selected contributes no diff (user didn't opt it into the review focus). Both conditions must hold. The tier assembler handles the "selected reference file" case via normal working-files rendering.
+
+- **Pre-change symbol map optional.** When indexing fails on entry (or there's no symbol index), `pre_change_symbol_map` is an empty string and the section is omitted entirely from the context. The LLM still gets the commits and diffs — just not the topology-comparison affordance.
+
+- **State cleared even on exit failure.** `test_end_review_clears_state_even_on_exit_failure` monkeypatches the repo's `exit_review_mode` to fail, verifies `_review_active` and `_review_state` are still cleared. The frontend's review-mode UI would otherwise be stuck waiting for a successful exit that never arrives. Git-side recovery guidance surfaces via the partial-status error message; the review state machine moves on.
+
+- **Defensive copies everywhere.** `get_review_state` returns copies of `commits`, `changed_files`, `stats` (all mutable sub-fields). Caller mutations never leak back. Pinned by `test_review_state_returns_independent_copies`.
+
+- **`pre_change_symbol_map` never exposed via RPC.** The frontend doesn't need the server-side map (the frontend has its own) and the map can be large. Stripped at the `get_review_state` boundary, not even in the `review_state` field of `get_current_state`.
+
+Open carried over for later sub-layers:
+
+- **Frontend review selector UI.** The git graph selector with commit-node clicking, disambiguation popover, clean-tree gate rendering lands with Layer 5. The backend exposes everything the UI needs (`get_commit_graph`, `check_review_ready`, `start_review`, `end_review`, `get_review_state`, `get_review_file_diff`).
+- **Review status bar.** Layer 5's chat panel renders the slim status bar above the chat input showing branch / commits / file stats / diff inclusion count. Backend already provides the state.
+- **Review snippets config.** Already in `snippets.json` under the `"review"` key. The `get_snippets()` RPC dispatches to it when review is active.
 
 ### 4.2 — Image persistence — **delivered (absorbed into 3.2)**
 

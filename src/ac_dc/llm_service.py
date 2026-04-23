@@ -1259,6 +1259,145 @@ class LLMService:
             "deletions": deletions,
         }
 
+    def _build_and_set_review_context(self) -> None:
+        """Build the review context block and attach to context manager.
+
+        Called from ``_stream_chat`` on every request during
+        review mode. Rebuilds from scratch so the reverse-diff
+        set reflects the CURRENT file selection.
+
+        Block structure:
+
+        1. Review summary — branch, commit range, file/line stats
+        2. Commits list — ordered, each with short SHA + message +
+           author + relative date
+        3. Pre-change symbol map header + the cached map
+        4. Reverse diffs for every selected file that's also in
+           the review's changed file set — per-file diff fetched
+           via ``Repo.get_review_file_diff``
+
+        Unchanged files and files absent from the review's
+        changed-files list contribute no diff. A file can appear
+        in the selected set without being in the review
+        (e.g., the user selected it for reference but it wasn't
+        touched by the feature branch) — such files render as
+        full content in the active "Working Files" section via
+        the normal tier assembly, not here.
+        """
+        state = self._review_state
+        if not state.get("active") or self._repo is None:
+            return
+
+        parts: list[str] = []
+
+        # 1. Summary block.
+        branch = state.get("branch") or "(unknown)"
+        parent = (state.get("parent_commit") or "")[:7]
+        tip = (state.get("branch_tip") or "")[:7]
+        stats = state.get("stats") or {}
+        commit_count = stats.get("commit_count", 0)
+        files_changed = stats.get("files_changed", 0)
+        additions = stats.get("additions", 0)
+        deletions = stats.get("deletions", 0)
+        summary_line = (
+            f"## Review: {branch} (merge-base {parent} → {tip})\n"
+            f"{commit_count} commits, "
+            f"{files_changed} files changed, "
+            f"+{additions} -{deletions}"
+        )
+        parts.append(summary_line)
+
+        # 2. Commits list. Rendered oldest → newest in the
+        # order the repo returned them; we iterate in reverse
+        # so the newest commit appears first (matches how
+        # `git log` presents history and what the LLM expects
+        # to see at the top).
+        commits = state.get("commits") or []
+        if commits:
+            commit_lines = ["## Commits"]
+            for i, commit in enumerate(commits, start=1):
+                short = commit.get("short_sha") or (
+                    (commit.get("sha") or "")[:7]
+                )
+                msg = (
+                    (commit.get("message") or "")
+                    .split("\n", 1)[0]
+                )
+                author = commit.get("author") or "?"
+                date = (
+                    commit.get("relative_date")
+                    or commit.get("date")
+                    or ""
+                )
+                commit_lines.append(
+                    f"{i}. {short} {msg} ({author}, {date})"
+                )
+            parts.append("\n".join(commit_lines))
+
+        # 3. Pre-change symbol map. May be empty — indexing could
+        # have failed on entry, or the repo was empty at the
+        # merge-base. Emit the header unconditionally so the LLM
+        # sees the structural comparison affordance even when the
+        # map is missing.
+        pre_map = state.get("pre_change_symbol_map") or ""
+        if pre_map:
+            parts.append(
+                "## Pre-Change Symbol Map\n"
+                "Symbol map from the parent commit (before the "
+                "reviewed changes). Compare against the current "
+                "symbol map in the repository structure above.\n\n"
+                + pre_map
+            )
+
+        # 4. Reverse diffs for every selected file that's also
+        # in the review's changed-files set. Selected-but-
+        # unchanged files contribute no diff — they render as
+        # normal working files via the tier assembler.
+        changed_files_entries = state.get("changed_files") or []
+        changed_paths = {
+            f.get("path"): f for f in changed_files_entries
+            if f.get("path")
+        }
+        diff_blocks: list[str] = []
+        for path in self._selected_files:
+            if path not in changed_paths:
+                continue
+            try:
+                diff_result = self._repo.get_review_file_diff(path)
+            except Exception as exc:
+                logger.debug(
+                    "Review diff fetch failed for %s: %s",
+                    path, exc,
+                )
+                continue
+            diff_text = diff_result.get("diff") or ""
+            if not diff_text:
+                continue
+            entry = changed_paths[path]
+            add_ct = entry.get("additions", 0)
+            del_ct = entry.get("deletions", 0)
+            diff_blocks.append(
+                f"### {path} (+{add_ct} -{del_ct})\n"
+                "```diff\n"
+                f"{diff_text}"
+                "\n```"
+            )
+        if diff_blocks:
+            parts.append(
+                "## Reverse Diffs (selected files)\n"
+                "These diffs show what would revert each file "
+                "to the pre-review state. The full current "
+                "content is in the working files above.\n\n"
+                + "\n\n".join(diff_blocks)
+            )
+
+        # Install on the context manager. The tiered assembler
+        # renders this as a uncached user/assistant pair between
+        # URL context and active files (see
+        # specs4/3-llm/prompt-assembly.md).
+        review_text = "\n\n".join(parts)
+        self._context.set_review_context(review_text)
+
     # ------------------------------------------------------------------
     # Public RPC — snippets
     # ------------------------------------------------------------------
@@ -1636,6 +1775,25 @@ class LLMService:
             # sequentially via the aux executor so the event loop
             # stays free for WebSocket I/O during the fetch.
             await self._detect_and_fetch_urls(request_id, message)
+
+            # Review context injection. When review mode is
+            # active, build a block with the review summary,
+            # commit log, pre-change symbol map, and reverse
+            # diffs for selected files, and attach it via the
+            # context manager. Re-built on every request so the
+            # reverse-diff set reflects the CURRENT file
+            # selection (user may have added or removed files
+            # since the last turn). See
+            # specs4/4-features/code-review.md.
+            if self._review_active:
+                self._build_and_set_review_context()
+            else:
+                # Defensive: ensure review context is cleared
+                # when review mode isn't active. Normally
+                # end_review clears it, but this guard protects
+                # against a crashed exit that left stale
+                # context on the manager.
+                self._context.clear_review_context()
 
             # Assemble the message array. Tiered assembly is the
             # primary path — it returns None only when the
