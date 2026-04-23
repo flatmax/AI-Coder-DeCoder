@@ -46,6 +46,7 @@ import mimetypes
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,54 @@ class Repo:
         # of distinct paths would see the map grow unboundedly, but
         # in practice sessions touch a few hundred paths at most.
         self._write_locks: dict[str, asyncio.Lock] = {}
+        # Collaboration reference — set by main.py when collab mode
+        # is active, None otherwise. When None, every caller is
+        # treated as localhost (single-user operation). When set,
+        # mutating methods consult :meth:`Collab.is_caller_localhost`
+        # to enforce specs4/4-features/collaboration.md's
+        # "participants can browse but not mutate" policy.
+        self._collab: Any = None
+
+    def _check_localhost_only(self) -> dict[str, Any] | None:
+        """Return an error dict when the caller is non-localhost.
+
+        Returns None when the call is allowed (single-user mode, or
+        collaboration mode with a localhost caller). Returns the
+        specs4-mandated restriction error shape when the caller is
+        a non-localhost participant — mutating methods return this
+        dict verbatim to their RPC caller, the frontend's RpcMixin
+        surfaces it as a ``restricted`` error and hides the UI
+        affordance that triggered the call.
+
+        The error shape is ``{"error": "restricted", "reason": ...}``
+        — matches specs4/1-foundation/communication-layer.md#restricted-operations.
+        """
+        if self._collab is None:
+            return None
+        try:
+            is_local = self._collab.is_caller_localhost()
+        except Exception as exc:
+            # Defensive — if the collab check itself fails, fail
+            # closed. Better to reject a legitimate call than to
+            # silently allow a mutation from an unknown caller.
+            logger.warning(
+                "Collab localhost check raised: %s; denying",
+                exc,
+            )
+            return {
+                "error": "restricted",
+                "reason": (
+                    "Internal error checking caller identity"
+                ),
+            }
+        if is_local:
+            return None
+        return {
+            "error": "restricted",
+            "reason": (
+                "Participants cannot perform this action"
+            ),
+        }
 
     @property
     def root(self) -> Path:
@@ -597,6 +646,9 @@ class Repo:
             we bubble up with a clear message and let the RPC layer
             convert to an error response.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         absolute = self._validate_rel_path(path)
         lock = self._get_write_lock(path)
         async with lock:
@@ -640,6 +692,9 @@ class Repo:
             If the path is invalid, the file already exists, or the
             write fails.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         absolute = self._validate_rel_path(path)
         lock = self._get_write_lock(path)
         async with lock:
@@ -686,6 +741,9 @@ class Repo:
             If the path is invalid, the file doesn't exist, or the
             path refers to a directory.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         absolute = self._validate_rel_path(path)
         lock = self._get_write_lock(path)
         async with lock:
@@ -735,6 +793,9 @@ class Repo:
             whole batch than stage some files and leave others out
             — that's more predictable for the caller.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         if not paths:
             return {"status": "ok"}
         # Validate every path before invoking git. --literal-pathspecs
@@ -780,6 +841,9 @@ class Repo:
             changes, which isn't an error for our purposes (the
             operation still succeeded).
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         if not paths:
             return {"status": "ok"}
         validated = [self._normalise_rel_path(p) for p in paths]
@@ -828,6 +892,9 @@ class Repo:
         RepoError
             If any path is invalid.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         if not paths:
             return {"status": "ok"}
         # Validate everything first.
@@ -912,6 +979,9 @@ class Repo:
             If either path is invalid, the source doesn't exist or
             isn't a regular file, or the destination already exists.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         src_abs = self._validate_rel_path(old_path)
         dst_abs = self._validate_rel_path(new_path)
 
@@ -994,6 +1064,9 @@ class Repo:
             If either path is invalid, the source isn't an existing
             directory, or the destination already exists.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         src_abs = self._validate_rel_path(old_path)
         dst_abs = self._validate_rel_path(new_path)
 
@@ -1107,6 +1180,9 @@ class Repo:
         expressed as a single git call so large repos don't enumerate
         thousands of paths through Python.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         self._run_git(["add", "-A"], check=True)
         return {"status": "ok"}
 
@@ -1134,6 +1210,9 @@ class Repo:
             If the message is empty or the commit fails (nothing
             staged, hook rejection, etc.).
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         if not message or not message.strip():
             raise RepoError("Commit message must not be empty")
         # ``-F -`` reads the message from stdin. Safer than ``-m``
@@ -1157,6 +1236,9 @@ class Repo:
         The UI always confirms before calling this; the repo layer
         performs no additional confirmation.
         """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
         self._run_git(["reset", "--hard", "HEAD"], check=True)
         return {"status": "ok"}
 
