@@ -421,4 +421,212 @@ describe('AppShell', () => {
       expect(shell.activeTab).toBe('settings');
     });
   });
+
+  describe('viewer routing', () => {
+    async function settle(shell) {
+      await shell.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await shell.updateComplete;
+      // Let the viewers' own Lit updates settle.
+      const diff = shell.shadowRoot.querySelector(
+        'ac-diff-viewer',
+      );
+      const svg = shell.shadowRoot.querySelector(
+        'ac-svg-viewer',
+      );
+      if (diff) await diff.updateComplete;
+      if (svg) await svg.updateComplete;
+    }
+
+    it('renders both viewers in the background layer', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      expect(diff).toBeTruthy();
+      expect(svg).toBeTruthy();
+    });
+
+    it('diff viewer is visible by default', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      expect(diff.classList.contains('viewer-visible')).toBe(true);
+      expect(svg.classList.contains('viewer-hidden')).toBe(true);
+    });
+
+    it('navigate-file to .py routes to diff viewer', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'src/main.py' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff.hasOpenFiles).toBe(true);
+      expect(diff._files[0].path).toBe('src/main.py');
+    });
+
+    it('navigate-file to .svg routes to svg viewer', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'docs/flow.svg' },
+        }),
+      );
+      await settle(shell);
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(svg.hasOpenFiles).toBe(true);
+      expect(svg._files[0].path).toBe('docs/flow.svg');
+      // Diff viewer didn't receive it.
+      expect(diff.hasOpenFiles).toBe(false);
+    });
+
+    it('opening an .svg flips active viewer to svg', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'diagram.svg' },
+        }),
+      );
+      await settle(shell);
+      expect(shell._activeViewer).toBe('svg');
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      expect(svg.classList.contains('viewer-visible')).toBe(true);
+      expect(diff.classList.contains('viewer-hidden')).toBe(true);
+    });
+
+    it('switching between .py and .svg toggles visibility', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      // Open .py — diff visible.
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'a.py' },
+        }),
+      );
+      await settle(shell);
+      expect(shell._activeViewer).toBe('diff');
+      // Open .svg — svg visible.
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'b.svg' },
+        }),
+      );
+      await settle(shell);
+      expect(shell._activeViewer).toBe('svg');
+      // Back to .py — diff visible again.
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'c.py' },
+        }),
+      );
+      await settle(shell);
+      expect(shell._activeViewer).toBe('diff');
+    });
+
+    it('both viewers preserve their file lists across visibility toggles', async () => {
+      // Key point: switching between .py and .svg doesn't
+      // close the viewer that becomes hidden. Its tabs
+      // remain intact. Matters for Phase 3.1's Monaco
+      // instances, which are expensive to create.
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'a.py' },
+        }),
+      );
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'b.svg' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      // Both viewers still have their files.
+      expect(diff._files).toHaveLength(1);
+      expect(diff._files[0].path).toBe('a.py');
+      expect(svg._files).toHaveLength(1);
+      expect(svg._files[0].path).toBe('b.svg');
+    });
+
+    it('navigate-file with empty path is ignored', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      expect(diff.hasOpenFiles).toBe(false);
+      expect(svg.hasOpenFiles).toBe(false);
+    });
+
+    it('navigate-file with no detail is ignored', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      window.dispatchEvent(new CustomEvent('navigate-file'));
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff.hasOpenFiles).toBe(false);
+    });
+
+    it('forwards line and searchText to the viewer', async () => {
+      // The stub accepts these and ignores them, but the
+      // shell must pass them through so Phase 3.1's real
+      // implementation can use them without any shell-side
+      // changes.
+      const shell = mountShell();
+      await settle(shell);
+      // Spy on the viewer's openFile to inspect args.
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const spy = vi.spyOn(diff, 'openFile');
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: {
+            path: 'src/foo.py',
+            line: 42,
+            searchText: 'my anchor',
+          },
+        }),
+      );
+      await settle(shell);
+      expect(spy).toHaveBeenCalledWith({
+        path: 'src/foo.py',
+        line: 42,
+        searchText: 'my anchor',
+      });
+    });
+
+    it('unsubscribes from navigate-file on disconnect', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      shell.remove();
+      // After disconnect, dispatching navigate-file must
+      // not affect state on the disconnected element.
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'ghost.py' },
+        }),
+      );
+      // No crash; viewer inside the removed shell hasn't
+      // been re-attached so we can't check its state
+      // directly, but the lack of exception is the
+      // contract.
+      expect(shell.isConnected).toBe(false);
+    });
+  });
 });

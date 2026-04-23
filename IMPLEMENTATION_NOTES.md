@@ -1589,6 +1589,41 @@ Dedicated component wrapping the browser's Web Speech API with a microphone togg
 
 Delivered test count: 867 total (up from 832 after file search), all 18 webapp test files passing.
 
+### 5.6 — Phase 3 groundwork Viewer background routing — **delivered**
+
+Lays the integration surface between `navigate-file` events and the file viewers. Phase 3.1 (diff viewer) and 3.2 (SVG viewer) can now be built against a fully-tested routing contract — each real viewer just swaps in for its stub without app-shell changes.
+
+- `webapp/src/viewer-routing.js` — pure `viewerForPath(path)` function. Returns `'svg'` for `.svg` paths (case-insensitive), `'diff'` for everything else, `null` for malformed input. Extracted as a standalone module so the routing rule is testable without mounting the shell and evolvable without editing the shell's render logic.
+- `webapp/src/diff-viewer.js` — Phase 3 stub. LitElement with reactive `_files` / `_activeIndex` state. Public API (`openFile({path, line?, searchText?})`, `closeFile(path)`, `refreshOpenFiles()`, `getDirtyFiles()`, `hasOpenFiles` getter) matches the shape Phase 3.1's Monaco-backed viewer will inherit. Dispatches `active-file-changed` events (bubbles, composed) on open/close/switch. Same-file suppression: re-opening the current file produces no event. Empty state renders the AC⚡DC watermark; populated state shows a placeholder `.stub-content` naming the active file.
+- `webapp/src/svg-viewer.js` — same contract as diff-viewer, just for `.svg` files. Phase 3.2's real SVG viewer (side-by-side pan/zoom) will replace the stub. Identical public API + event surface so the app shell treats both uniformly.
+- `webapp/src/app-shell.js` — integration:
+  - Imports both viewers and the routing helper
+  - New `_activeViewer` reactive state (`'diff'` or `'svg'`, default `'diff'`)
+  - `_onNavigateFile(event)` — reads `detail.path`, dispatches to `viewerForPath`, calls `openFile` on the right viewer via `updateComplete.then` to guard against first-render edge cases. Forwards `line` and `searchText` through so Phase 3.1 doesn't need shell changes to use them.
+  - `_onActiveFileChanged(event)` — walks `event.composedPath()` to find which viewer emitted the event, flips `_activeViewer` to that tag. Pinpoint source identification (rather than tracking which viewer we last called `openFile` on) means the handler stays correct if future viewers dispatch the same event.
+  - Both viewers rendered as absolutely-positioned siblings in `.viewer-background`. CSS class toggling (`viewer-visible` / `viewer-hidden`) does the visibility via opacity + pointer-events + z-index with a 150ms transition.
+  - Replaced the static watermark `div` in `.viewer-background` — now each viewer carries its own empty-state watermark. Transitions between viewers or between empty and populated states are visually stable (same mark in the same position).
+- `webapp/src/viewer-routing.test.js` — 6 tests: svg extension routing (case-insensitive), non-svg fallback to diff, extensionless paths, defensive substring match prevention (`foo.svg.old` → diff), malformed input (`null`, `42`, empty string → null).
+- `webapp/src/diff-viewer.test.js` — 18 tests across initial state (empty watermark, `hasOpenFiles` / `getDirtyFiles` empty), `openFile` lifecycle (fires event, renders path, same-file suppression, multi-file, re-open inactive switches, malformed-input guard, line/searchText accepted), `closeFile` lifecycle (clears active, activates next, inactive-close still fires for list-changed, unknown-path no-op), event composition (bubbles across shadow DOM), stub API no-ops.
+- `webapp/src/svg-viewer.test.js` — 13 tests mirroring the diff-viewer contract for the SVG viewer.
+- `webapp/src/app-shell.test.js` — new `viewer routing` describe block with 11 tests: both viewers render, diff default-visible, `.py` routes to diff, `.svg` routes to svg, opening `.svg` flips active viewer, switching extensions toggles visibility, file lists preserved across visibility toggles (critical — Phase 3.1 will have expensive Monaco instances, viewer-hiding must not destroy them), empty path ignored, missing detail ignored, `line`/`searchText` forwarded to viewer's `openFile`, unsubscribe on disconnect.
+
+Design points pinned by tests:
+
+- **Hiding a viewer never destroys its state.** The key invariant behind the whole approach — switching from a `.py` to an `.svg` must not close the `.py` viewer's tabs. `both viewers preserve their file lists across visibility toggles` pins this explicitly. Matters for Phase 3.1's Monaco: constructing a `DiffEditor` is expensive (hundreds of ms), so keeping it alive in a hidden container is load-bearing.
+
+- **Same-file suppression at the viewer layer.** The diff-viewer's `openFile` checks `existing === _activeIndex` and returns early. Without this, a user clicking a file mention for the already-active file would re-fire `active-file-changed`, causing the app shell to re-flip visibility (harmless but noisy) and Phase 3.1's viewport-restore logic to treat the call as a tab switch and re-scroll.
+
+- **`_activeViewer` flips based on emitted events, not call site.** The shell could track "which viewer did I last call openFile on" but that's fragile — if another code path calls `viewer.openFile` directly, the shell wouldn't know. Walking `composedPath` identifies the source viewer reliably.
+
+- **`line` and `searchText` forwarded through the routing boundary.** The stub ignores them, but the app shell passes them verbatim. Phase 3.1 just implements them on the real viewer; no shell change needed.
+
+- **Empty-string path ignored at the shell layer.** `viewerForPath('')` returns null, and the shell's guard `if (!target) return` short-circuits. Two belt-and-braces rejections of the same bogus input, but the shell doesn't have to know that — it trusts the routing helper.
+
+- **Both viewers share the same empty-state watermark.** Previously the watermark lived in `.viewer-background` itself. Moving it into each viewer's empty-state means the mark stays visible regardless of which viewer is currently active, and the transition between empty and populated states is smooth (the mark fades out as content fades in, both at 150ms ease). Visual parity with the pre-Phase-3 look.
+
+Delivered test count: 915 total (up from 867 after speech-to-text — +48 tests from Phase 3 groundwork across four new test files).
+
 ### 5.4 — Phase 2c Files tab orchestration — **delivered**
 
 Standalone orchestrator component that combines the file picker (2a) and chat panel (2b) in a single tab. Owns the authoritative selected-files state. Loads the file tree from `Repo.get_file_tree` on RPC-ready. Wires selection sync both directions: user actions in the picker → server via `LLMService.set_selected_files`; server broadcasts (`files-changed`) → picker via direct prop assignment. Reloads the tree on `files-modified`. Translates `file-clicked` from the picker into `navigate-file` window events that Phase 3 will consume.

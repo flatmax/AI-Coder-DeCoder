@@ -25,6 +25,9 @@ import { JRPCClient } from '@flatmax/jrpc-oo/jrpc-client.js';
 
 import { SharedRpc } from './rpc.js';
 import './files-tab.js';
+import './diff-viewer.js';
+import './svg-viewer.js';
+import { viewerForPath } from './viewer-routing.js';
 
 /**
  * Read the WebSocket port from the URL, falling back to 18080.
@@ -88,6 +91,13 @@ export class AppShell extends JRPCClient {
     toasts: { type: Array, state: true },
     /** Number of reconnect attempts (display only). */
     reconnectAttempt: { type: Number, state: true },
+    /**
+     * Which viewer is currently visible — `'diff'` or
+     * `'svg'`. The viewer that isn't active gets the
+     * `viewer-hidden` class (CSS opacity + pointer-events
+     * off). Defaults to diff since it's the common case.
+     */
+    _activeViewer: { type: String, state: true },
   };
 
   static styles = css`
@@ -101,24 +111,34 @@ export class AppShell extends JRPCClient {
       font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
     }
 
-    /* Viewer background — Phase 3 fills this with the diff
-     * viewer and SVG viewer. Phase 1 shows a watermark so the
-     * empty state is visible behind the dialog. */
+    /* Viewer background -- the diff viewer and SVG viewer
+     * are absolutely-positioned siblings filling the
+     * background layer. Only one is visible at a time
+     * (class viewer-visible vs viewer-hidden). Opacity +
+     * pointer-events transition gives a smooth cross-fade
+     * without rebuilding the inactive viewer's DOM --
+     * matters for the diff viewer's Monaco instances,
+     * which are expensive to construct. */
     .viewer-background {
       position: absolute;
       inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
+      overflow: hidden;
     }
-    .watermark {
-      font-size: 8rem;
-      opacity: 0.08;
-      letter-spacing: -0.05em;
+    ac-diff-viewer,
+    ac-svg-viewer {
+      position: absolute;
+      inset: 0;
+      transition: opacity 150ms ease;
     }
-    .watermark .bolt {
-      color: var(--accent-primary, #58a6ff);
+    .viewer-visible {
+      opacity: 1;
+      pointer-events: auto;
+      z-index: 1;
+    }
+    .viewer-hidden {
+      opacity: 0;
+      pointer-events: none;
+      z-index: 0;
     }
 
     /* Dialog — foreground panel. Phase 1 gives it a stub
@@ -276,6 +296,9 @@ export class AppShell extends JRPCClient {
     this.activeTab = 'files';
     this.toasts = [];
     this.reconnectAttempt = 0;
+    // Default to diff viewer — most files route there.
+    // Flipped to 'svg' on navigate-file to an .svg path.
+    this._activeViewer = 'diff';
 
     // Whether we've ever connected successfully. Controls
     // whether disconnects show the startup overlay (first
@@ -285,6 +308,9 @@ export class AppShell extends JRPCClient {
     this._reconnectTimer = null;
     // Global toast event listener binding.
     this._onToastEvent = this._onToastEvent.bind(this);
+    // Navigate-file routing. Bound so add/remove match.
+    this._onNavigateFile = this._onNavigateFile.bind(this);
+    this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
   }
 
   connectedCallback() {
@@ -294,10 +320,20 @@ export class AppShell extends JRPCClient {
     const host = window.location.hostname || 'localhost';
     this.serverURI = `ws://${host}:${port}`;
     window.addEventListener(TOAST_EVENT, this._onToastEvent);
+    // navigate-file is dispatched by the files tab (file
+    // picker clicks), the chat panel (file mention clicks),
+    // and the navigateFile server-push callback (when
+    // another collaborator opens a file). Extension-based
+    // routing picks the right viewer.
+    window.addEventListener('navigate-file', this._onNavigateFile);
   }
 
   disconnectedCallback() {
     window.removeEventListener(TOAST_EVENT, this._onToastEvent);
+    window.removeEventListener(
+      'navigate-file',
+      this._onNavigateFile,
+    );
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -512,6 +548,78 @@ export class AppShell extends JRPCClient {
   }
 
   // ---------------------------------------------------------------
+  // Viewer routing
+  // ---------------------------------------------------------------
+
+  /**
+   * Route a `navigate-file` event to the appropriate viewer
+   * based on the file's extension. Dispatches `openFile` on
+   * the target viewer. The viewer's `active-file-changed`
+   * event then triggers visibility toggling.
+   *
+   * The `_remote` flag on broadcasts is consumed by the
+   * chat panel / picker to suppress re-broadcasts — we
+   * don't care about it here. Same routing applies
+   * whether the event came from a local click or a
+   * collaboration broadcast.
+   */
+  _onNavigateFile(event) {
+    const detail = event.detail || {};
+    const path = detail.path;
+    if (typeof path !== 'string' || !path) return;
+    const target = viewerForPath(path);
+    if (!target) return;
+    // Defer until the viewers exist in the DOM. Normally
+    // they're rendered from the first template commit and
+    // this is synchronous; the guard protects against
+    // navigate-file firing before first render (rare,
+    // but possible during startup).
+    this.updateComplete.then(() => {
+      const viewer =
+        target === 'svg'
+          ? this.shadowRoot?.querySelector('ac-svg-viewer')
+          : this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (!viewer) return;
+      viewer.openFile({
+        path,
+        line: detail.line,
+        searchText: detail.searchText,
+      });
+    });
+  }
+
+  /**
+   * Handle `active-file-changed` bubbling up from either
+   * viewer. When a viewer reports it has an active file,
+   * that viewer becomes visible. When it reports null
+   * (no files open), we keep the currently-visible viewer
+   * as-is — flipping to the other one would just show
+   * its empty state, which isn't what the user wants.
+   *
+   * Uses `event.composedPath()` to identify which viewer
+   * emitted the event, so the handler is robust even if
+   * additional viewers are added later.
+   */
+  _onActiveFileChanged(event) {
+    const detail = event.detail || {};
+    if (!detail.path) return;
+    // Identify the source viewer by walking the composed
+    // path — the event originates inside the viewer's
+    // shadow root and bubbles up through the host element.
+    const path = event.composedPath ? event.composedPath() : [];
+    for (const el of path) {
+      if (el && el.tagName === 'AC-SVG-VIEWER') {
+        this._activeViewer = 'svg';
+        return;
+      }
+      if (el && el.tagName === 'AC-DIFF-VIEWER') {
+        this._activeViewer = 'diff';
+        return;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Toast system
   // ---------------------------------------------------------------
 
@@ -546,9 +654,18 @@ export class AppShell extends JRPCClient {
   render() {
     return html`
       <div class="viewer-background">
-        <div class="watermark">
-          <span>AC</span><span class="bolt">⚡</span><span>DC</span>
-        </div>
+        <ac-diff-viewer
+          class=${this._activeViewer === 'diff'
+            ? 'viewer-visible'
+            : 'viewer-hidden'}
+          @active-file-changed=${this._onActiveFileChanged}
+        ></ac-diff-viewer>
+        <ac-svg-viewer
+          class=${this._activeViewer === 'svg'
+            ? 'viewer-visible'
+            : 'viewer-hidden'}
+          @active-file-changed=${this._onActiveFileChanged}
+        ></ac-svg-viewer>
       </div>
 
       <div class="dialog">
