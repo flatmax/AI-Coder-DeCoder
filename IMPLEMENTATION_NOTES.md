@@ -732,6 +732,28 @@ Open carried over for later sub-layers:
 
 Current status: 3.1–3.10 delivered. Layer 3 is feature-complete for single-agent operation. Layer 4 (features — URL content, images, code review, collaboration, doc convert) is next.
 
+### 4.2 — Image persistence — **delivered (absorbed into 3.2)**
+
+Layer 4.2's backend scope is fully delivered by the `HistoryStore` implementation in Layer 3.2 and the streaming handler's user-message persistence in 3.7. Nothing new to ship on the backend side.
+
+What specs4/4-features/images.md requires that the backend already does:
+
+- **Storage location** — `.ac-dc/images/` created by `ConfigManager._init_ac_dc_dir()` AND by `HistoryStore.__init__()`. Idempotent: either order works, `mkdir(exist_ok=True)` on both sides.
+- **Content-hash filenames** — `HistoryStore._save_image()` uses `{hash_prefix}{ext}` where hash_prefix is the first 12 chars of SHA-256 over the raw data URI. Deterministic — identical data URIs produce identical filenames, so re-pasting the same image in a later message produces no new file. Pinned by `test_duplicate_image_deduplicated` in `tests/test_history_store.py`.
+- **MIME-to-extension mapping** — covers png / jpg / jpeg / gif / webp / bmp with png fallback. Round-trips correctly via `_EXT_TO_MIME` reverse map.
+- **Writing flow** — `append_message(images=...)` accepts a list of data URIs; saves each, stores filenames as `image_refs` in the JSONL record. Legacy integer-count shape tolerated for backwards compat but never produced by new writes.
+- **Reading flow** — `get_session_messages_for_context(session_id)` reconstructs images back to data URIs via `_reconstruct_image`. Missing image files skipped silently with a debug log — a corrupt images directory never breaks session load.
+- **LLM service integration** — `_stream_chat` passes `images=images if images else None` to `history_store.append_message`. The streaming handler already gets the full data URI list from the RPC call (the frontend passes data URIs through, not counts). Pinned indirectly by every streaming test that includes the image-path via the integration tests in `TestStreamingHappyPath`.
+
+What specs4/4-features/images.md requires that lands in Layer 5 (webapp):
+
+- Paste input (accept formats, size limits, per-message cap, encoding, thumbnail previews, token counting)
+- Message display (thumbnails in user cards, lightbox with Escape-to-close)
+- Re-attach overlay button (📎 on thumbnail and in lightbox)
+- Re-attach behavior (size/count limits, deduplication, toast feedback)
+
+These are pure frontend concerns — no backend changes needed. The backend already serves data URIs in both live messages (pending send) and loaded session messages; the frontend just needs to render and re-attach.
+
 ### 4.1.6 — LLMService integration — **delivered**
 
 - `src/ac_dc/llm_service.py` — changes:
