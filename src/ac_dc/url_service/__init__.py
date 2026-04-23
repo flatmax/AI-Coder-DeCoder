@@ -31,10 +31,21 @@ from ac_dc.url_service.detection import (
     detect_urls,
     display_name,
 )
+from ac_dc.url_service.fetchers import (
+    fetch_github_file,
+    fetch_github_repo,
+    fetch_web_page,
+)
+from ac_dc.url_service.models import GitHubInfo, URLContent
 
 __all__ = [
+    "GitHubInfo",
+    "URLContent",
     "URLType",
     "classify_url",
     "detect_urls",
     "display_name",
+    "fetch_github_file",
+    "fetch_github_repo",
+    "fetch_web_page",
 ]
