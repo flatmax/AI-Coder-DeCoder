@@ -1439,11 +1439,12 @@ Layer 4 (features) is complete. All of: URL content (detection + fetching + summ
 
 ## Layer 5 — in progress
 
-Layer 5 (webapp) is the largest remaining surface. Delivering in three phases to keep each commit coherent:
+Layer 5 (webapp) is the largest remaining surface. Delivering in sub-phases to keep each commit coherent:
 
-- **Phase 1 — Minimum viable shell** (this commit): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
-- **Phase 2 — Essential tabs**: Chat panel (send/receive/streaming/markdown/edit blocks), Files tab (file picker tree, selection sync), action bar with session controls.
-- **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, history browser, search, file navigation grid, Speech-to-text, TeX preview, Doc convert tab.
+- **Phase 1 — Minimum viable shell** (delivered): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
+- **Phase 2 — Essential tabs** (delivered): Chat panel (send/receive/streaming/markdown/edit blocks/images/file mentions/retry prompts/compaction events/message action buttons), Files tab (file picker tree, selection sync), action bar with session controls.
+- **Phase 2e — Search and refinements** (in progress): message search (this commit), file search, history browser refinements, speech-to-text.
+- **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, file navigation grid, TeX preview, Doc convert tab.
 
 ### 5.1 — Phase 1 Minimum viable shell — **delivered**
 

@@ -78,6 +78,7 @@ import {
   extractImagesFromClipboard,
   normalizeMessageContent,
 } from './image-utils.js';
+import { findMessageMatches } from './message-search.js';
 import './history-browser.js';
 import './input-history.js';
 
@@ -244,6 +245,43 @@ function _saveDrawerOpen(open) {
 }
 
 /**
+ * localStorage keys for each search toggle. Three separate
+ * keys (rather than one JSON blob) match specs3's keying so
+ * users migrating from a previous install see the same
+ * persisted state. The values are string `'true'`/`'false'`
+ * for consistency with the drawer key.
+ */
+const _SEARCH_IGNORE_CASE_KEY = 'ac-dc-search-ignore-case';
+const _SEARCH_REGEX_KEY = 'ac-dc-search-regex';
+const _SEARCH_WHOLE_WORD_KEY = 'ac-dc-search-whole-word';
+
+/**
+ * Load a boolean search toggle from localStorage with a
+ * specific default. Shares the defensive try/catch pattern
+ * used for the drawer state — private browsing mode or
+ * cross-origin iframes can throw on access.
+ */
+function _loadSearchToggle(key, defaultValue) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+    return defaultValue;
+  } catch (_) {
+    return defaultValue;
+  }
+}
+
+function _saveSearchToggle(key, value) {
+  try {
+    localStorage.setItem(key, value ? 'true' : 'false');
+  } catch (_) {
+    // Best-effort — in-memory state is authoritative for
+    // the session.
+  }
+}
+
+/**
  * How close to the bottom counts as "still at the bottom". Scroll
  * events fire with sub-pixel offsets during smooth scrolling, so
  * a tolerance of a few pixels avoids flicker between engaged and
@@ -330,6 +368,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * preview; cleared by Escape or backdrop click.
      */
     _lightboxImage: { type: String, state: true },
+    /** Current search query text. Empty = no active search. */
+    _searchQuery: { type: String, state: true },
+    /** Ignore-case search toggle. Persisted to localStorage. */
+    _searchIgnoreCase: { type: Boolean, state: true },
+    /** Regex search toggle. Persisted to localStorage. */
+    _searchRegex: { type: Boolean, state: true },
+    /** Whole-word search toggle. Persisted to localStorage. */
+    _searchWholeWord: { type: Boolean, state: true },
+    /**
+     * Index into the matches array of the currently-highlighted
+     * match. -1 when no matches or no active search. Wraps
+     * on Enter/Shift+Enter navigation.
+     */
+    _searchCurrentIndex: { type: Number, state: true },
   };
 
   static styles = css`
@@ -383,6 +435,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
     .message-card.streaming {
       border-color: var(--accent-primary, #58a6ff);
+    }
+    /* Search highlight — current match gets an accent border
+     * and subtle glow. Applied via the 'search-highlight'
+     * class when a message's data-msg-index matches the
+     * _searchCurrentIndex state. Transparent default border
+     * on every card makes the transition smooth (no layout
+     * shift when the highlight comes and goes). */
+    .message-card {
+      transition: border-color 120ms ease,
+        box-shadow 120ms ease;
+    }
+    .message-card.search-highlight {
+      border-color: var(--accent-primary, #58a6ff);
+      box-shadow: 0 0 0 1px var(--accent-primary, #58a6ff),
+        0 0 12px rgba(79, 195, 247, 0.15);
     }
 
     .role-label {
@@ -570,6 +637,96 @@ export class ChatPanel extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.12);
       color: var(--accent-primary, #58a6ff);
       border-color: rgba(88, 166, 255, 0.3);
+    }
+    /* Search bar — sits inside the action bar between the
+     * snippet-drawer toggle and the session buttons. Flex-1
+     * to take the middle space. Inline toggles live inside
+     * the input's border so the whole search area visually
+     * groups as one element. */
+    .search-bar {
+      display: flex;
+      flex: 1;
+      align-items: center;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+    .search-input-wrapper {
+      display: flex;
+      flex: 1;
+      align-items: center;
+      min-width: 0;
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .search-input-wrapper:focus-within {
+      border-color: var(--accent-primary, #58a6ff);
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      padding: 0.3rem 0.5rem;
+      background: transparent;
+      border: none;
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.8125rem;
+    }
+    .search-input:focus {
+      outline: none;
+    }
+    .search-toggle {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.25rem 0.4rem;
+      font-size: 0.7rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      cursor: pointer;
+      border-radius: 2px;
+      line-height: 1;
+    }
+    .search-toggle:hover {
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .search-toggle.active {
+      background: rgba(88, 166, 255, 0.2);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .search-counter {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      font-variant-numeric: tabular-nums;
+      padding: 0 0.5rem;
+      white-space: nowrap;
+    }
+    .search-counter.no-match {
+      color: #f85149;
+    }
+    .search-nav {
+      display: flex;
+      align-items: center;
+      gap: 0.1rem;
+    }
+    .search-nav-button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.4rem;
+      font-size: 0.75rem;
+      border-radius: 3px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .search-nav-button:hover {
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .search-nav-button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
     }
     .snippet-drawer {
       display: flex;
@@ -965,6 +1122,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._snippets = [];
     this._pendingImages = [];
     this._lightboxImage = null;
+    // Search state — query empty by default, toggles loaded
+    // from localStorage. Ignore-case defaults true (most
+    // users expect case-insensitive), regex and whole-word
+    // default false.
+    this._searchQuery = '';
+    this._searchIgnoreCase = _loadSearchToggle(
+      _SEARCH_IGNORE_CASE_KEY,
+      true,
+    );
+    this._searchRegex = _loadSearchToggle(
+      _SEARCH_REGEX_KEY,
+      false,
+    );
+    this._searchWholeWord = _loadSearchToggle(
+      _SEARCH_WHOLE_WORD_KEY,
+      false,
+    );
+    this._searchCurrentIndex = -1;
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -2082,6 +2257,171 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Compute current search matches — delegates to the pure
+   * `findMessageMatches` helper with the current toggle state.
+   * Called from render and from navigation handlers.
+   *
+   * Returns an array of message indices. Stable between
+   * re-renders for the same query + messages + toggle state.
+   */
+  _computeSearchMatches() {
+    return findMessageMatches(this.messages, this._searchQuery, {
+      ignoreCase: this._searchIgnoreCase,
+      regex: this._searchRegex,
+      wholeWord: this._searchWholeWord,
+    });
+  }
+
+  /**
+   * Handle typing in the search input. Updates the query
+   * state; match computation happens in render. Resets the
+   * current-match cursor to 0 so the first match is always
+   * the initial highlight, regardless of where the cursor
+   * was before the query changed.
+   *
+   * Scrolls the first match into view on each keystroke —
+   * gives the user immediate visual confirmation without
+   * waiting for them to hit Enter.
+   */
+  _onSearchInput(event) {
+    this._searchQuery = event.target.value;
+    this._searchCurrentIndex = 0;
+    // Defer the scroll until Lit has rendered — the new
+    // match might be a message that wasn't previously
+    // highlighted, and the DOM needs to reflect the class
+    // change before scrollIntoView can target the right
+    // element.
+    this.updateComplete.then(() => {
+      this._scrollToCurrentMatch();
+    });
+  }
+
+  /**
+   * Toggle one of the three search options. Persists the new
+   * value to localStorage so it survives page reloads.
+   * `which` is a static string so the switch is cheap and
+   * the method signature stays narrow.
+   */
+  _toggleSearchOption(which) {
+    switch (which) {
+      case 'ignoreCase':
+        this._searchIgnoreCase = !this._searchIgnoreCase;
+        _saveSearchToggle(
+          _SEARCH_IGNORE_CASE_KEY,
+          this._searchIgnoreCase,
+        );
+        break;
+      case 'regex':
+        this._searchRegex = !this._searchRegex;
+        _saveSearchToggle(_SEARCH_REGEX_KEY, this._searchRegex);
+        break;
+      case 'wholeWord':
+        this._searchWholeWord = !this._searchWholeWord;
+        _saveSearchToggle(
+          _SEARCH_WHOLE_WORD_KEY,
+          this._searchWholeWord,
+        );
+        break;
+      default:
+        return;
+    }
+    // Toggle change alters which messages match — reset
+    // the cursor and re-scroll so the user sees the first
+    // match under the new settings.
+    this._searchCurrentIndex = 0;
+    this.updateComplete.then(() => {
+      this._scrollToCurrentMatch();
+    });
+  }
+
+  /**
+   * Handle keydown in the search input. Enter navigates to
+   * the next match (wrapping at the end); Shift+Enter to
+   * the previous. Escape clears the query and blurs the
+   * input so the user can resume typing in the textarea.
+   *
+   * Letter keys fall through to the input's default
+   * behaviour — the `_onSearchInput` handler catches the
+   * subsequent `input` event.
+   */
+  _onSearchKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (event.shiftKey) {
+        this._onSearchPrev();
+      } else {
+        this._onSearchNext();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._searchQuery = '';
+      this._searchCurrentIndex = -1;
+      // Blur so the user's next keystroke goes to the
+      // main textarea.
+      event.target.blur();
+      return;
+    }
+  }
+
+  _onSearchNext() {
+    const matches = this._computeSearchMatches();
+    if (matches.length === 0) return;
+    // Wrap around at end.
+    this._searchCurrentIndex =
+      (Math.max(0, this._searchCurrentIndex) + 1) %
+      matches.length;
+    this.updateComplete.then(() => {
+      this._scrollToCurrentMatch();
+    });
+  }
+
+  _onSearchPrev() {
+    const matches = this._computeSearchMatches();
+    if (matches.length === 0) return;
+    // Wrap around at start — `(-1 + total) % total`
+    // handles the wrap without a conditional.
+    const base = Math.max(0, this._searchCurrentIndex);
+    this._searchCurrentIndex =
+      (base - 1 + matches.length) % matches.length;
+    this.updateComplete.then(() => {
+      this._scrollToCurrentMatch();
+    });
+  }
+
+  /**
+   * Scroll the currently-highlighted match into view.
+   * Noop when there's no current match or the message card
+   * is missing (streaming card isn't indexed, shouldn't be
+   * the current match anyway).
+   *
+   * The `scrollIntoView` availability check is defensive —
+   * jsdom doesn't implement it on Element, so tests that
+   * don't stub it would produce unhandled promise rejections
+   * from the `updateComplete.then` callers. Older browser
+   * contexts could similarly lack it. Checking once per call
+   * costs nothing and avoids scattering test-infrastructure
+   * coupling through unrelated tests.
+   */
+  _scrollToCurrentMatch() {
+    const matches = this._computeSearchMatches();
+    if (matches.length === 0) return;
+    const idx = Math.max(0, this._searchCurrentIndex);
+    if (idx >= matches.length) return;
+    const msgIndex = matches[idx];
+    const card = this.shadowRoot?.querySelector(
+      `.message-card[data-msg-index="${msgIndex}"]`,
+    );
+    if (!card) return;
+    if (typeof card.scrollIntoView !== 'function') return;
+    card.scrollIntoView({
+      block: 'center',
+      behavior: 'smooth',
+    });
+  }
+
   _onInputKeyDown(event) {
     // If the input-history overlay is open, it gets first
     // refusal on navigation keys (arrows, Enter, Escape).
@@ -2244,7 +2584,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
               Start a conversation…
             </div>`
           : ''}
-        ${this.messages.map((msg) => this._renderMessage(msg))}
+        ${this.messages.map((msg, index) =>
+          this._renderMessage(msg, index),
+        )}
         ${this._streaming ? this._renderStreamingMessage() : ''}
       </div>
       ${!this.rpcConnected
@@ -2270,7 +2612,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
               ✂️ Snippets
             </button>
           </div>
-          <div class="spacer"></div>
+          <div class="action-divider" aria-hidden="true"></div>
+          ${this._renderSearchBar()}
           <div class="action-divider" aria-hidden="true"></div>
           <div class="action-group">
             <button
@@ -2424,13 +2767,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
     `;
   }
 
-  _renderMessage(msg) {
+  _renderMessage(msg, index) {
     const roleClass = msg.system_event ? 'role-system' : `role-${msg.role}`;
     const roleLabel = msg.system_event
       ? 'System'
       : msg.role === 'user'
         ? 'You'
         : 'Assistant';
+    // Compute whether this message is the current search
+    // match. Matches are resolved by index lookup to avoid
+    // per-card regex re-evaluation on every render.
+    const matches = this._computeSearchMatches();
+    const currentMatchIdx =
+      matches.length > 0
+        ? matches[Math.max(0, this._searchCurrentIndex) % matches.length]
+        : -1;
+    const isHighlighted =
+      this._searchQuery.trim() !== '' &&
+      index === currentMatchIdx;
     // User and system-event content is rendered as-is — users
     // typed what they typed (escaped verbatim), system events
     // come through markdown so the `**Committed** …` pattern
@@ -2457,8 +2811,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
     const images = Array.isArray(msg.images) ? msg.images : [];
     const toolbar = this._renderMessageToolbar(msg);
+    const highlightClass = isHighlighted ? ' search-highlight' : '';
     return html`
-      <div class="message-card ${roleClass}">
+      <div
+        class="message-card ${roleClass}${highlightClass}"
+        data-msg-index=${index}
+      >
         <div class="message-toolbar top">${toolbar}</div>
         <div class="role-label">${roleLabel}</div>
         ${bodyHtml}
@@ -2620,6 +2978,100 @@ export class ChatPanel extends RpcMixin(LitElement) {
     return html`<div class="assistant-body">${parts}</div>`;
   }
 
+  _renderSearchBar() {
+    // Compute matches and counter state at render time so
+    // they always reflect the current query + toggles +
+    // messages. Cheap — substring over a few hundred
+    // messages is microseconds.
+    const matches = this._computeSearchMatches();
+    const hasQuery = this._searchQuery.trim().length > 0;
+    const total = matches.length;
+    const current =
+      total === 0
+        ? 0
+        : Math.min(
+            Math.max(0, this._searchCurrentIndex) + 1,
+            total,
+          );
+    const counterText = hasQuery
+      ? `${current}/${total}`
+      : '';
+    const noMatch = hasQuery && total === 0;
+    return html`
+      <div class="search-bar" role="search">
+        <div class="search-input-wrapper">
+          <input
+            type="text"
+            class="search-input"
+            placeholder="Search messages…"
+            .value=${this._searchQuery}
+            @input=${this._onSearchInput}
+            @keydown=${this._onSearchKeyDown}
+            aria-label="Search messages"
+          />
+          <button
+            class="search-toggle ${this._searchIgnoreCase
+              ? 'active'
+              : ''}"
+            @click=${() =>
+              this._toggleSearchOption('ignoreCase')}
+            aria-pressed=${this._searchIgnoreCase}
+            title="Ignore case"
+          >
+            Aa
+          </button>
+          <button
+            class="search-toggle ${this._searchRegex
+              ? 'active'
+              : ''}"
+            @click=${() => this._toggleSearchOption('regex')}
+            aria-pressed=${this._searchRegex}
+            title="Regex"
+          >
+            .*
+          </button>
+          <button
+            class="search-toggle ${this._searchWholeWord
+              ? 'active'
+              : ''}"
+            @click=${() =>
+              this._toggleSearchOption('wholeWord')}
+            aria-pressed=${this._searchWholeWord}
+            title="Whole word"
+          >
+            ab
+          </button>
+        </div>
+        <span
+          class="search-counter ${noMatch ? 'no-match' : ''}"
+          aria-live="polite"
+        >
+          ${counterText}
+        </span>
+        <div class="search-nav" aria-label="Match navigation">
+          <button
+            class="search-nav-button"
+            ?disabled=${total === 0}
+            @click=${this._onSearchPrev}
+            aria-label="Previous match"
+            title="Previous (Shift+Enter)"
+          >
+            ▲
+          </button>
+          <button
+            class="search-nav-button"
+            ?disabled=${total === 0}
+            @click=${this._onSearchNext}
+            aria-label="Next match"
+            title="Next (Enter)"
+          >
+            ▼
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   _renderSnippetDrawer() {
     // Empty list (pre-load, post-error, or genuinely no
     // snippets configured) shows a placeholder rather than
@@ -2696,6 +3148,11 @@ export {
   _loadDrawerOpen,
   _saveDrawerOpen,
   _DRAWER_STORAGE_KEY,
+  _SEARCH_IGNORE_CASE_KEY,
+  _SEARCH_REGEX_KEY,
+  _SEARCH_WHOLE_WORD_KEY,
+  _loadSearchToggle,
+  _saveSearchToggle,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,
