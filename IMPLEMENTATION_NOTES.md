@@ -778,7 +778,74 @@ Design points pinned by tests:
 Open carried over:
 
 - **Layer 6 wiring.** `main.py` will construct the Settings service alongside Repo and LLMService, register it via `server.add_class(settings)`, and (in collab mode) set `settings._collab = collab_instance`. The collab reference is runtime-attached just like Repo's and LLMService's; in single-user mode `_collab` stays None and every caller is treated as localhost.
-- **DocConvert RPC service.** The other Layer 4 item — `convert_files` mutating, `scan_convertible_files` + `is_available` read-only. Same restriction pattern. Not in scope for this turn.
+
+### 4.6 — DocConvert (Pass A — foundation) — **delivered**
+
+Ships the Doc Convert backend skeleton: class structure, dependency probing, repository scanning with status classification via provenance headers, and the localhost-only guard on the `convert_files` stub. Conversion itself (Passes A2–A5) will layer on top — markitdown for simple formats, openpyxl for xlsx colours, python-pptx fallback, LibreOffice + PyMuPDF for the full PDF pipeline.
+
+- `src/ac_dc/doc_convert.py` — `DocConvert` class with:
+  - Construction takes `config: ConfigManager` and optional `repo`. `repo` is `Any`-typed to avoid a Layer 1 ↔ Layer 4 circular import; all we need is `.root` as a Path-like attribute. Tests use `SimpleNamespace(root=tmp_path)` to avoid pulling in the Repo fixture dependencies.
+  - `is_available()` probes every optional dependency: markitdown (importable → conversion possible at all), LibreOffice (`shutil.which("soffice")` → pptx/odp path works), PyMuPDF (`fitz` importable → PDF text extraction works), and derives `pdf_pipeline = libreoffice AND pymupdf`. Returns the specs4-mandated shape `{available, libreoffice, pymupdf, pdf_pipeline}`.
+  - `_probe_import(name)` is a broad-catch helper that returns False on any exception during import. A module that installs but raises at import time (corrupted install, missing native dependency, version mismatch) shows as unavailable rather than propagating the exception into what is meant to be a cheap probe.
+  - `scan_convertible_files()` walks the repo via `os.walk` (chosen over `Path.rglob` for the in-place directory pruning hook) and classifies each source file. Respects `_EXCLUDED_DIRS` (`.git`, `.ac-dc`, `node_modules`, `__pycache__`, `.venv`, `venv`, `dist`, `build`) plus hidden directories with an exception for `.github` (some repos store CI docs there). Returns entries with `path`, `name`, `size`, `status`, `output_path`, `over_size` fields. Results stable-sorted by path for deterministic frontend rendering.
+  - `_classify_status(source, output)` runs the spec's four-step priority ladder: no output → `new`; output without docuvert header → `conflict`; hash matches → `current`; hash differs → `stale`. Defensive — any I/O error reading the output file or hashing the source downgrades to `new` rather than showing a misleading `current`.
+  - `parse_provenance_body(body)` — static method exposing the header parser for testing and future utilities. Extracts `source`, `sha256` (both required) plus optional `images` list. Unknown fields land in `extra` for forward compatibility — a future release adding a `tool_version` field won't break older clients reading newer files.
+  - `_read_provenance_header(path)` reads the first 2048 bytes, runs the parser, returns a `ProvenanceHeader` or `None`. Lenient on file format — UTF-8 with error replacement on the probe bytes, so a mid-file binary section can't crash the scanner.
+  - `_hash_file(path)` streams the file in 64 KB chunks and returns the SHA-256 hex digest. Full hex (not a prefix) goes into provenance headers so collision risk stays negligible even in repos with thousands of source files.
+  - `convert_files(paths)` runs the localhost guard, then raises `NotImplementedError` for localhost callers. Deliberately a hard failure so Pass A2 can't accidentally ship code calling the stub; the guard still runs so the restricted-error path is testable today.
+  - `_check_localhost_only()` — same contract as Repo/LLMService/Settings. Fails closed on collab-check exceptions.
+  - Read-through config accessors (`_enabled`, `_extensions`, `_max_size_bytes`) — every call re-reads `config.doc_convert_config`, so hot-reloaded values take effect immediately. Useful during development; matches the pattern other services use.
+
+- `src/ac_dc/doc_convert.py` (module-level):
+  - `_DEFAULT_EXTENSIONS` — fallback when config's `extensions` list is missing or malformed. Matches specs4's list exactly.
+  - `_EXCLUDED_DIRS` — frozen set of directory names never walked. Mirrors the indexers' exclusion list; rebuilt here rather than imported to keep the doc-convert scan a self-contained code path.
+  - `_PROVENANCE_RE` — matches the whole `<!-- docuvert: ... -->` comment. Uses `([^>]+?)` to capture the body lazily so we can parse unknown fields ourselves rather than reusing capture groups for each expected field.
+  - `_PROV_FIELD_RE` — matches individual `key=value` pairs inside the body.
+  - `_PROVENANCE_PROBE_BYTES = 2048` — enough to find a header near the top of any realistic file; small enough that scanning doesn't slow down on repos with thousands of converted outputs.
+  - `ProvenanceHeader` — frozen dataclass for parsed headers (source, sha256, images tuple, optional extra dict).
+
+- `tests/test_doc_convert.py` — 13 test classes, 48 tests covering:
+  - Construction (config reference held, collab starts None, repo optional with CWD fallback).
+  - Localhost guard (no-collab None, localhost None, non-localhost restricted, raising collab fails closed).
+  - `is_available` (returns all four flags with bool types, pdf_pipeline truth table with all four combinations, markitdown-missing flag, all-missing, probe-catches-exception, disabled config doesn't affect availability).
+  - `scan_convertible_files` empty cases (empty repo, disabled config returns empty, missing root logs and returns empty).
+  - Extension filtering (all default extensions recognised, non-convertible ignored, case-insensitive match, config restriction applied).
+  - Directory exclusions (`.git`, `.ac-dc`, `node_modules` each individually; hidden dirs excluded except `.github`; full enumeration of `_EXCLUDED_DIRS`).
+  - Status classification matrix (new / conflict / current / stale, plus precedence — conflict beats hash check, malformed header → conflict).
+  - Entry shape (required fields, path/name populated, output_path is sibling `.md`, size is byte count, over_size flag false under threshold, over_size flag true above threshold after config reload, Windows path normalisation to forward slashes).
+  - Ordering (stable alphabetical sort, nested paths sorted correctly).
+  - Provenance body parsing (valid minimal header, missing source → None, missing sha256 → None, empty body → None, unknown fields captured as extra, empty images list, single image, frozen dataclass).
+  - Provenance file reading (reads from actual file, missing header → None, invalid body → None, unreadable file → None with no crash, header on non-first line still found).
+  - Source hashing (matches stdlib SHA-256, streams large files, handles empty file).
+  - `convert_files` stub (non-localhost restricted, localhost raises NotImplementedError, no-collab raises NotImplementedError, raising collab returns restricted rather than raising — proves guard order).
+
+Design points pinned by tests:
+
+- **Availability probes never raise.** `test_probe_import_catches_exception` patches `importlib.import_module` to raise and verifies `_probe_import` still returns `False`. A module with a broken install shouldn't crash `is_available`; it should just mark the feature unavailable so the frontend degrades gracefully.
+
+- **`pdf_pipeline` truth table is exhaustive.** Four tests cover the four corners: both deps present → True; libreoffice only → False; pymupdf only → False; neither → False. Matters because the frontend uses this one flag to decide whether to show the PDF conversion UI.
+
+- **Disabled config returns empty, availability still probes.** `test_is_available_callable_when_disabled` and `test_disabled_returns_empty` pin the distinction — `enabled=false` is a user opt-out (hide the tab's conversion controls), but the frontend still calls `is_available` to decide whether to show the tab at all. Two separate concepts, pinned by separate tests.
+
+- **Status precedence.** `test_conflict_takes_precedence_over_hash_check` verifies that an output file lacking a docuvert header is always `conflict`, never `current` or `stale`, even if a hash would have matched. Specs4 is explicit — manually-authored files need explicit opt-in to overwrite.
+
+- **Malformed headers → conflict.** A header present but missing `sha256` returns `None` from the parser, and the classifier treats `None` exactly the same as "no header at all": `conflict`. Pinned by `test_malformed_header_treated_as_conflict`. The failure mode is "I don't know what this file is, so don't overwrite it" rather than "pretend it's new".
+
+- **Path normalisation.** `test_windows_path_normalised` explicitly checks no backslashes appear in `path` or `output_path` fields. Matters for frontend rendering consistency across platforms.
+
+- **Forward-compatibility on unknown provenance fields.** `test_unknown_fields_captured_as_extra` adds two arbitrary `key=value` pairs and verifies they survive parsing in the `extra` dict. Critical invariant — a future release that adds a `tool_version` or `encoding` field must not break older clients reading newer files.
+
+- **Guard ordering on `convert_files`.** Three tests prove the guard runs before the NotImplementedError body: non-localhost returns restricted (doesn't raise), localhost raises NotImplementedError (guard passed), raising-collab returns restricted (guard ran, failed closed, body never reached). Pins the contract that restriction checks are strictly before body logic in every guarded method.
+
+Open carried over for Pass A2+:
+
+- **Markitdown path.** Pass A2 will wire `.docx`, `.rtf`, `.odt` through markitdown. Produces markdown output, writes provenance header (source path, sha256 of source content, list of extracted image filenames), extracts data-URI images from markitdown's output and saves them as separate files in the per-source assets subdirectory.
+- **DOCX image extraction workaround.** markitdown emits truncated data URIs (`data:image/png;base64...`) for embedded images. Pass A2 will open the .docx as a zip archive, extract the `word/media/` files, and substitute the truncated URIs with filename references in the markdown.
+- **xlsx colour-aware pipeline.** Pass A3 uses openpyxl directly (not markitdown) to preserve cell background colours as emoji markers. Two-pass algorithm (collect fills, assign markers, emit tables), well-known-hue named markers, fallback markers for unrecognised hues via RGB-distance clustering.
+- **pptx fallback.** Pass A4 handles pptx via python-pptx when LibreOffice isn't available — renders each slide as an SVG with text/images/tables, emits an index markdown that links all slide SVGs.
+- **PDF + LibreOffice pipeline.** Pass A5 integrates LibreOffice (pptx/odp → PDF) and PyMuPDF (PDF → text + image detection + SVG export with text-as-path=0). Hybrid output: text extracted into markdown paragraphs, per-page SVGs generated only when pages contain graphics. Embedded raster images externalised from SVGs to separate files. All with provenance-header tracking.
+- **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name like `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop.
+- **Clean-tree gate.** Before `convert_files` runs, it must check `repo.is_clean()` and reject dirty working trees with a clear error — matches the Code Review gate and specs4's "all converted files appear as clear, reviewable diffs" requirement.
 
 ### 4.3 — Code review — **delivered**
 
