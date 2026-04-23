@@ -109,6 +109,7 @@ from ac_dc.file_context import FileContext
 from ac_dc.history_compactor import HistoryCompactor, TopicBoundary
 from ac_dc.stability_tracker import StabilityTracker
 from ac_dc.token_counter import TokenCounter
+from ac_dc.url_service import URLCache, URLService
 
 if TYPE_CHECKING:
     from ac_dc.config import ConfigManager
@@ -158,6 +159,14 @@ _DETECTOR_MSG_TRUNCATE_CHARS = 1000
 # Max messages passed to the detector. Newer history gets priority;
 # if the list is longer we keep the tail.
 _DETECTOR_MAX_MESSAGES = 50
+
+# Per-message URL fetch limit. Up to this many URLs are fetched
+# during streaming; extra URLs are silently skipped (still appear
+# as chips via the UI's independent detection pass, but aren't
+# injected into the LLM context). Matches specs4/4-features/
+# url-content.md — "Up to a small number of URLs per message are
+# detected and fetched during streaming."
+_URL_PER_MESSAGE_LIMIT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +515,15 @@ class LLMService:
         )
         self._context.set_compactor(self._compactor)
 
+        # URL service — detects, fetches, caches, summarizes URLs
+        # mentioned in user prompts. Constructed from config values
+        # so hot-reloaded cache paths and model names take effect
+        # on the next request. SymbolIndex class injected (not an
+        # instance) so the GitHub repo fetcher can produce symbol
+        # maps for cloned repos without paying the tree-sitter
+        # import cost at service construction time.
+        self._url_service = self._build_url_service()
+
         # Session management. New session ID generated on
         # construction; auto-restore may replace it with the most
         # recent prior session's ID so new messages persist to the
@@ -594,6 +612,52 @@ class LLMService:
         self._stream_executor.shutdown(wait=False)
         self._aux_executor.shutdown(wait=False)
 
+    def _build_url_service(self) -> URLService:
+        """Construct the URL service from config values.
+
+        Wires the filesystem cache (from ``url_cache`` app config),
+        the smaller model name, and the SymbolIndex class. When
+        the config omits a cache path, the cache uses a
+        system-temp-directory default. When the symbol index
+        isn't available (pre-deferred-init or tests that skip
+        it), the GitHub repo fetcher still works but produces
+        content without a symbol map.
+        """
+        cache_config = self._config.url_cache_config
+        cache_path = cache_config.get("path")
+        ttl_hours = cache_config.get("ttl_hours", 24)
+        if cache_path:
+            from pathlib import Path as _Path
+            cache = URLCache(_Path(cache_path), ttl_hours=ttl_hours)
+        else:
+            # Fall back to a per-user temp dir. URLCache creates
+            # the directory if missing.
+            import tempfile
+            from pathlib import Path as _Path
+            default_path = _Path(tempfile.gettempdir()) / "ac-dc-url-cache"
+            cache = URLCache(default_path, ttl_hours=ttl_hours)
+
+        # Lazy symbol-index class import — avoids paying the
+        # tree-sitter grammar load cost when the URL service
+        # doesn't actually hit a GitHub repo URL. The URLService
+        # accepts None for symbol_index_cls and the repo fetcher
+        # degrades gracefully (no symbol map field on the result).
+        symbol_index_cls = None
+        try:
+            from ac_dc.symbol_index.index import SymbolIndex
+            symbol_index_cls = SymbolIndex
+        except ImportError:
+            logger.debug(
+                "SymbolIndex not available; URL service will fetch "
+                "GitHub repos without symbol maps"
+            )
+
+        return URLService(
+            cache=cache,
+            smaller_model=self._config.smaller_model,
+            symbol_index_cls=symbol_index_cls,
+        )
+
     # ------------------------------------------------------------------
     # Session restore
     # ------------------------------------------------------------------
@@ -664,6 +728,116 @@ class LLMService:
             "mode": self._context.mode.value,
             "cross_ref_enabled": self._cross_ref_enabled,
         }
+
+    # ------------------------------------------------------------------
+    # URL service RPC surface
+    # ------------------------------------------------------------------
+    #
+    # Thin delegations to the URL service so the browser can drive
+    # the URL chip UI (detect on input, fetch on click, view
+    # content in a modal, remove/invalidate). The frontend calls
+    # these via jrpc-oo; the service methods themselves are pure
+    # delegations.
+
+    def detect_urls(self, text: str) -> list[dict[str, Any]]:
+        """Return detected URLs with classification and display names.
+
+        Shape: ``[{url, type, display_name}, ...]``. ``type`` is the
+        string form of :class:`URLType` so the frontend doesn't
+        need to unwrap an enum.
+        """
+        return self._url_service.detect_urls(text)
+
+    async def fetch_url(
+        self,
+        url: str,
+        use_cache: bool = True,
+        summarize: bool = True,
+        user_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a URL with optional summarization.
+
+        Runs in the aux executor so the blocking HTTP / git-clone
+        / LLM summarization doesn't starve the event loop. The
+        returned dict is the URLContent dataclass's ``to_dict``
+        form — frontend consumes the same fields regardless of
+        whether it came from a fresh fetch or a cache hit.
+        """
+        assert self._main_loop is not None
+        loop = self._main_loop
+        content = await loop.run_in_executor(
+            self._aux_executor,
+            lambda: self._url_service.fetch_url(
+                url,
+                use_cache=use_cache,
+                summarize=summarize,
+                user_text=user_text,
+            ),
+        )
+        return content.to_dict()
+
+    async def detect_and_fetch(
+        self,
+        text: str,
+        use_cache: bool = True,
+        summarize: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Detect and fetch all URLs in text.
+
+        Convenience wrapper for the frontend's "fetch all" button
+        on the URL chips panel. Sequential per-URL, capped by
+        the URL service's ``max_urls`` parameter (None here,
+        since the frontend already decides how many to fetch).
+        Runs in the aux executor for the same reason as
+        :meth:`fetch_url`.
+        """
+        assert self._main_loop is not None
+        loop = self._main_loop
+        results = await loop.run_in_executor(
+            self._aux_executor,
+            lambda: self._url_service.detect_and_fetch(
+                text,
+                use_cache=use_cache,
+                summarize=summarize,
+            ),
+        )
+        return [c.to_dict() for c in results]
+
+    def get_url_content(self, url: str) -> dict[str, Any]:
+        """Return the stored content for a URL (or a sentinel error).
+
+        Checks in-memory first, falls back to filesystem cache.
+        Returns a URLContent dict; the frontend checks the
+        ``error`` field to distinguish fetched content from
+        "not yet fetched" (sentinel) vs "fetch failed" (real
+        error).
+        """
+        content = self._url_service.get_url_content(url)
+        return content.to_dict()
+
+    def invalidate_url_cache(self, url: str) -> dict[str, Any]:
+        """Remove a URL from both cache and in-memory dict.
+
+        Used by the "refresh this URL" action on the chip UI —
+        forces the next fetch to hit the network.
+        """
+        return self._url_service.invalidate_url_cache(url)
+
+    def remove_fetched_url(self, url: str) -> dict[str, Any]:
+        """Remove a URL from the in-memory fetched dict only.
+
+        Preserves the filesystem cache — a later re-fetch will
+        hit the cache. Used by the "remove from this conversation"
+        action on the chip UI.
+        """
+        return self._url_service.remove_fetched(url)
+
+    def clear_url_cache(self) -> dict[str, Any]:
+        """Clear all cached and fetched URLs.
+
+        Used by the "clear URL cache" RPC in the settings UI.
+        """
+        return self._url_service.clear_url_cache()
 
     # ------------------------------------------------------------------
     # Public RPC — file selection
@@ -1006,6 +1180,20 @@ class LLMService:
                 "userMessage", {"content": message}
             )
 
+            # URL detection and fetching. Detects URLs in the user
+            # prompt, skips already-fetched ones (session-level
+            # memoisation in the URL service), fetches new ones
+            # via the injected cache + fetchers + summarizer,
+            # and injects formatted content into the context
+            # manager's URL context section.
+            #
+            # The per-message cap of 3 URLs is pinned by specs4 —
+            # prevents a URL-heavy message from blowing out the
+            # prompt budget or hammering upstream. Fetches run
+            # sequentially via the aux executor so the event loop
+            # stays free for WebSocket I/O during the fetch.
+            await self._detect_and_fetch_urls(request_id, message)
+
             # Assemble the message array. Tiered assembly is the
             # primary path — it returns None only when the
             # stability tracker hasn't been initialised yet
@@ -1094,6 +1282,128 @@ class LLMService:
                     "Post-response processing for %s failed: %s",
                     request_id, exc,
                 )
+
+    async def _detect_and_fetch_urls(
+        self,
+        request_id: str,
+        message: str,
+    ) -> None:
+        """Detect URLs in the user message and fetch new ones.
+
+        Runs before prompt assembly so fetched URL content lands
+        in the context manager's URL section by the time the
+        message array is built. Sequential per-URL — the spec's
+        per-message cap (3 URLs) keeps this bounded at a few
+        hundred milliseconds in the worst case.
+
+        Progress events fire for each URL that actually gets
+        fetched (not for cache-hit / already-fetched skips):
+
+        - ``compactionEvent(request_id, {stage: "url_fetch",
+          url: display_name})`` before fetching.
+        - ``compactionEvent(request_id, {stage: "url_ready",
+          url: display_name})`` after successful fetch.
+
+        The frontend renders these as transient toast
+        notifications so the user sees what's being fetched.
+
+        After all URLs are processed (successfully or with
+        errors), the URL service's formatted context is attached
+        to the context manager via ``set_url_context``. Error
+        records are skipped by ``format_url_context``, so failed
+        fetches don't pollute the LLM's view — they appear in
+        the URL chip UI with an error state instead.
+        """
+        from ac_dc.url_service import detect_urls as _detect_urls
+        from ac_dc.url_service import display_name as _display_name
+
+        urls = _detect_urls(message)
+        if not urls:
+            return
+
+        # Cap per-message. Extra URLs are silently skipped — the
+        # UI chip rendering covers them via the detected-chips
+        # path, which is independent of the streaming fetch.
+        urls = urls[:_URL_PER_MESSAGE_LIMIT]
+
+        assert self._main_loop is not None
+        loop = self._main_loop
+
+        for url in urls:
+            # Skip already-fetched URLs (session-level memoisation).
+            # The URL service's fetch_url would short-circuit on
+            # cache hit anyway, but by checking here we also
+            # suppress the progress-event notifications.
+            existing = self._url_service.get_url_content(url)
+            if existing.error != "URL not yet fetched":
+                continue
+
+            name = _display_name(url)
+
+            # Fire fetch-start event.
+            await self._broadcast_event_async(
+                "compactionEvent",
+                request_id,
+                {"stage": "url_fetch", "url": name},
+            )
+
+            # Blocking fetch runs in the aux executor so the event
+            # loop stays responsive. The URL service's fetch_url
+            # is synchronous by design; we wrap it here.
+            try:
+                await loop.run_in_executor(
+                    self._aux_executor,
+                    self._fetch_url_sync,
+                    url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "URL fetch raised for %s: %s", url, exc
+                )
+                # The URL service catches most errors and returns
+                # error records; this branch is a belt-and-braces
+                # for something truly unexpected. No notification
+                # fires — the URL just ends up unfetched for this
+                # request.
+                continue
+
+            # Fire fetch-ready event.
+            await self._broadcast_event_async(
+                "compactionEvent",
+                request_id,
+                {"stage": "url_ready", "url": name},
+            )
+
+        # Attach the formatted URL context to the context manager.
+        # format_url_context with no args uses all fetched URLs and
+        # skips error records. A blank result clears the URL
+        # section cleanly.
+        url_context = self._url_service.format_url_context()
+        if url_context:
+            self._context.set_url_context([url_context])
+        else:
+            self._context.clear_url_context()
+
+    def _fetch_url_sync(self, url: str) -> None:
+        """Blocking fetch — called from the aux executor.
+
+        Split out as a named method so ``run_in_executor`` has
+        something to call without constructing a lambda (which
+        would close over ``self`` and ``url`` silently — the
+        named method makes the argument binding explicit).
+
+        Uses ``summarize=True`` so the smaller model produces a
+        summary alongside the raw content. The user's prompt is
+        passed as ``user_text`` so the summary-type selector can
+        pick an appropriate angle (e.g., "how to use this" →
+        USAGE summary).
+        """
+        self._url_service.fetch_url(
+            url,
+            use_cache=True,
+            summarize=True,
+            user_text=None,  # per-URL summary doesn't get full prompt
+        )
 
     async def _build_completion_result(
         self,

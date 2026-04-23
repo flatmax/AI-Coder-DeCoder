@@ -732,6 +732,35 @@ Open carried over for later sub-layers:
 
 Current status: 3.1–3.10 delivered. Layer 3 is feature-complete for single-agent operation. Layer 4 (features — URL content, images, code review, collaboration, doc convert) is next.
 
+### 4.1.6 — LLMService integration — **delivered**
+
+- `src/ac_dc/llm_service.py` — changes:
+  - Constructor builds `URLService` via `_build_url_service()` helper. Wires the filesystem cache (from `config.url_cache_config` — uses a system-temp-dir fallback when no path configured), the smaller model name, and the SymbolIndex class (lazy-imported so tree-sitter grammars aren't loaded at service construction). Falls back gracefully to `symbol_index_cls=None` if the import fails.
+  - `_stream_chat` calls `_detect_and_fetch_urls(request_id, message)` after persisting the user message and broadcasting `userMessage`, but before tiered-content building and message assembly. Fetched URL content is attached to the context manager's URL context section via `set_url_context([formatted])` or cleared via `clear_url_context()` when no URLs qualify.
+  - `_detect_and_fetch_urls` — detects URLs via `url_service.detect_urls`, caps to `_URL_PER_MESSAGE_LIMIT = 3` (per specs4/4-features/url-content.md), skips already-fetched URLs (checked via `get_url_content` → sentinel compare), fires `compactionEvent(stage="url_fetch", url=display_name)` before each fetch and `compactionEvent(stage="url_ready", url=display_name)` after success. Fetch runs in the aux executor via `run_in_executor(_fetch_url_sync, url)` so the event loop stays free during blocking HTTP/git/LLM calls.
+  - RPC delegation surface added: `detect_urls`, `fetch_url` (async — runs in aux executor), `detect_and_fetch` (async — runs in aux executor), `get_url_content`, `invalidate_url_cache`, `remove_fetched_url`, `clear_url_cache`. All return dicts (URLContent serialized via `to_dict`) for jrpc-oo compatibility.
+
+- `tests/test_llm_service.py` — new `TestURLIntegration` class with 10 tests: URL service constructed with cache + smaller model, `detect_urls` RPC delegates, `get_url_content` returns sentinel for unknown URL, `invalidate_url_cache` / `remove_fetched_url` / `clear_url_cache` all return the service's status dicts, streaming with a URL triggers `url_fetch` + `url_ready` compactionEvents with display names, streaming with already-fetched URL produces NO events (session-level memoization), streaming without URLs skips the fetch path entirely (no url_* events), fetched content lands in the context manager's URL context (assertable via `context.get_url_context()`), per-message limit of 3 URLs enforced (5 URLs in prompt → only 3 fetched).
+
+Design points pinned by tests:
+
+- **Session-level URL memoization prevents duplicate fetches across turns.** The streaming handler checks `get_url_content(url).error != "URL not yet fetched"` — if the URL is already in `_fetched` (from a prior turn in the same session) OR in the filesystem cache, the fetch is skipped AND no progress events fire. The URL chips UI may still be showing the URL — that's the UI's concern, not ours. Pinned by `test_streaming_skips_already_fetched_urls`.
+
+- **Per-message cap of 3 URLs.** Extra URLs in a single message are silently skipped at the streaming layer. The URL chip UI still detects them (via the separate `detect_urls` RPC the frontend drives as the user types), so they appear as clickable chips — the user can fetch additional URLs manually via the chip UI's "fetch" button if they want. The 3-URL cap only governs the auto-fetch-during-streaming path.
+
+- **Aux executor, not stream executor.** URL fetches run in `_aux_executor` so they don't block the `_stream_executor` threads. This matters for future parallel-agent mode where the stream executor may be running multiple agents concurrently; URL fetch for one agent's prompt shouldn't starve the stream pool.
+
+- **`user_text=None` when fetching during streaming.** The URL service's summarizer uses `user_text` for auto-type selection (keyword triggers like "how to" → USAGE, "architecture" → ARCHITECTURE). We don't pass the full user message as `user_text` because the LLM gets the user message in the prompt anyway; adding it to the summarizer's context just inflates the summary prompt without useful signal. The URL-type-default selection in `choose_summary_type` handles the common cases fine.
+
+- **No RPC for `fetch_url` during streaming — only for UI-driven fetches.** The streaming handler calls `_url_service.fetch_url` directly (via the sync helper dispatched to the aux executor). The RPC-exposed `fetch_url` is for the URL chip UI's "fetch this URL" button — manual user action, not an automatic flow during streaming.
+
+- **URL service is constructed unconditionally.** Even when `repo` is None (tests without a real repo), the URL service is built with the cache + smaller model. This matches specs4 — URL detection doesn't require a repo, only git-clone-based GitHub repo fetches do (and those degrade to error records rather than crashing when something's missing).
+
+Open carried over for later sub-layers:
+
+- **Clear-URL-cache in new_session.** Specs4 says starting a new session clears everything, which conceptually includes URL content. Currently `new_session` doesn't touch `_url_service._fetched`. Likely a 1-line addition to `new_session` — `self._url_service.clear_fetched()`. Not included in 4.1.6 because the UI's chip rendering already resets on `sessionChanged`; the in-memory fetched dict being non-empty doesn't affect correctness, just accumulates entries for the next turn's `get_url_content` lookups.
+- **Post-request cleanup.** Some URL service operations (cleanup expired cache entries) are best done on a schedule, not per-request. Layer 6 (startup) will call `_url_service._cache.cleanup_expired()` on startup to remove stale entries; we don't do it per-request to avoid disk I/O on every chat turn.
+
 ### 4.1.5 — URLService — **delivered**
 
 - `src/ac_dc/url_service/service.py` — `URLService` class orchestrating the full URL pipeline: detect → classify → fetch → cache → summarize. Construction takes optional injection points per D10: `cache` (URLCache for cross-session persistence), `smaller_model` (provider-qualified model string for summarization), `symbol_index_cls` (for GitHub repo symbol map generation). All three default to None; the service degrades gracefully when any is absent.
