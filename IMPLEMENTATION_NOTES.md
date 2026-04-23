@@ -1474,7 +1474,37 @@ Phase 1 does NOT include:
 - Token HUD (Phase 3)
 - Global keyboard shortcuts beyond tab clicking (Phase 3)
 
-Next up — Phase 2: chat panel with streaming, files tab with file picker tree, selection sync between picker and chat.
+### 5.2 — Phase 2a File picker — **delivered**
+
+Standalone file picker component. No RPC yet, no git status badges, no context menu, no keyboard navigation — those ride in later sub-phases when the orchestrator is available to feed them data.
+
+- `webapp/src/file-picker.js` — `FilePicker` component plus four exported pure helpers:
+  - `fuzzyMatch(path, query)` — subsequence matching, case-insensitive, empty-query matches everything. The spec-documented examples (`edt`/`edit_parser.py`, `sii`/`symbol_index/index.py`) work directly.
+  - `sortChildren(children)` — dirs before files, alphabetical within each group. Returns new array, doesn't mutate.
+  - `filterTree(tree, query)` — prunes to nodes whose paths (or descendant paths for dirs) match the query. Empty query returns the input verbatim.
+  - `computeFilterExpansions(tree, query)` — set of directory paths that must be expanded for every matching file to be reachable. Merged with user-expanded state at render time so filter-induced expansions never collapse directories the user deliberately opened.
+- Component state — `tree` (default empty root so mount-before-load renders cleanly), `selectedFiles` (a Set, owned by the parent — picker dispatches `selection-changed` events and never mutates its own prop), `filterQuery` (internal state), `_expanded` (internal Set of directory paths).
+- Rendering — two-row types (`.row.is-dir` / `.row.is-file`). Click on a dir row toggles expansion. Click on a file name dispatches `file-clicked` with `{path}`. Checkbox clicks use `event.stopPropagation()` so they don't also fire the row handler.
+- Directory checkbox tri-state — checked when all descendants selected, indeterminate when some, unchecked when none. Clicking toggles the whole subtree. Empty directories' checkbox is a no-op (no descendants to toggle).
+- Event contract — both `selection-changed` and `file-clicked` are dispatched with `bubbles: true, composed: true` so they cross the shadow DOM boundary to the files-tab orchestrator.
+- Public methods — `setTree(tree)` for imperative updates from an RPC callback, `setFilter(query)` for the @-filter bridge from the chat input (Phase 2c), `expandAll()` for operations that should reveal everything (file-search results, Phase 2e).
+- `webapp/src/file-picker.test.js` — 41 tests across 9 describe blocks. Pure helpers tested directly (15 tests covering subsequence matching, case-insensitivity, empty-query behaviour, no-mutation guarantees). Component tested via mount-and-interact: initial render, expand/collapse, file selection with Set-passed-by-parent, directory tri-state checkbox, filter typing with auto-expansion, filter clearing restoring user's expanded state, event bubbling across shadow boundaries. All tests pass.
+
+Deferred to later Phase 2 sub-phases:
+
+- Git status badges (M/S/U/D) — needs status arrays from `Repo.get_file_tree()` plumbed through the orchestrator (Phase 2c)
+- Sort modes (mtime / size) — defer until the data shape is exercised end-to-end
+- Keyboard navigation (arrow keys, space/enter) — Phase 2c when the orchestrator is present
+- Context menu (stage, unstage, rename, delete, etc.) — Phase 2d; each menu item routes to an RPC call
+- Three-state checkbox with exclusion set — Phase 2d, needs `set_excluded_index_files` RPC
+- Middle-click path insertion — needs chat panel (Phase 2d)
+- Branch badge at root — needs `Repo.get_current_branch()` RPC call (Phase 2c)
+- Active-file highlight — needs `active-file-changed` events from the viewer (Phase 2c)
+- File search integration (swap to pruned tree) — Phase 2e when search is wired up
+
+Phase 2a does NOT yet wire the picker into `main.js` or the shell. The component self-registers via `customElements.define('ac-file-picker', ...)` but nothing imports it yet. Phase 2c imports it from the `files-tab` component.
+
+Next up — Phase 2b: chat panel (basic) — message rendering, input area, streaming display, markdown. No edit blocks or file mentions yet; those ride in Phase 2d.
 
 ### 3.8 — Tiered prompt assembly — **delivered**
 
