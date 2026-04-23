@@ -183,6 +183,13 @@ export class FilePicker extends LitElement {
      * references, so expansion state survives tree reloads.
      */
     _expanded: { type: Object, state: true },
+    /**
+     * Path of the focused file row — used during file search
+     * to highlight which file the match overlay is currently
+     * scrolled to. The files-tab orchestrator updates this as
+     * the match overlay scrolls. Null when not in use.
+     */
+    _focusedPath: { type: String, state: true },
   };
 
   static styles = css`
@@ -305,6 +312,13 @@ export class FilePicker extends LitElement {
     this.selectedFiles = new Set();
     this.filterQuery = '';
     this._expanded = new Set();
+    this._focusedPath = null;
+    // Snapshot of the expanded set before the most recent
+    // `setTree` call that replaced a real tree with a pruned
+    // one. Used by `restoreExpandedState` when file search
+    // exits so the user's full-tree expansion state returns.
+    // Non-reactive — purely a restore buffer.
+    this._expandedSnapshot = null;
   }
 
   // ---------------------------------------------------------------
@@ -317,10 +331,43 @@ export class FilePicker extends LitElement {
    * but providing a method lets the orchestrator pass a tree
    * imperatively from an RPC callback without worrying about
    * property propagation.
+   *
+   * Used by the file search flow to swap the full tree for a
+   * pruned one containing only matching files. The first call
+   * after a real tree load snapshots the current expanded set
+   * so `restoreExpandedState` can bring it back on exit.
+   * Subsequent calls (search refinements) don't re-snapshot —
+   * the original full-tree state stays preserved regardless of
+   * how many pruned-tree updates arrive.
    */
   setTree(tree) {
+    if (this._expandedSnapshot === null) {
+      this._expandedSnapshot = new Set(this._expanded);
+    }
     this.tree = tree;
+    // Reset focus — a path from the previous tree may not
+    // exist in the new one.
+    this._focusedPath = null;
     this.requestUpdate();
+  }
+
+  /**
+   * Restore the expanded set to its state before the first
+   * `setTree` call in the current swap. Called by the files-tab
+   * orchestrator when file search exits, before it re-loads the
+   * full tree via `loadTree` (its own method, not exposed on
+   * the picker). Clears the snapshot so the next search cycle
+   * starts fresh.
+   *
+   * If no snapshot exists (e.g., `setTree` was never called,
+   * or `restoreExpandedState` was called twice in a row), this
+   * is a no-op.
+   */
+  restoreExpandedState() {
+    if (this._expandedSnapshot === null) return;
+    this._expanded = this._expandedSnapshot;
+    this._expandedSnapshot = null;
+    this._focusedPath = null;
   }
 
   /**
@@ -445,12 +492,14 @@ export class FilePicker extends LitElement {
   _renderFile(node, depth) {
     const isSelected = this.selectedFiles.has(node.path);
     const indentPx = depth * 16;
+    const isFocused = node.path === this._focusedPath;
     return html`
       <div
-        class="row is-file"
+        class="row is-file ${isFocused ? 'focused' : ''}"
         style="padding-left: ${indentPx}px"
         @click=${(e) => this._onFileClick(e, node)}
         role="treeitem"
+        aria-current=${isFocused ? 'true' : 'false'}
       >
         <span class="indent"></span>
         <span class="twisty empty"></span>

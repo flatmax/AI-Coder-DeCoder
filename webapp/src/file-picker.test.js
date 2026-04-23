@@ -726,6 +726,172 @@ describe('FilePicker component', () => {
     });
   });
 
+  describe('expand state snapshot / restore', () => {
+    // The file-search flow uses `setTree` to swap the full
+    // tree for a pruned one. On exit, the picker must restore
+    // whatever expand/collapse state the user had before the
+    // swap. Tests pin the snapshot-and-restore semantics.
+
+    it('setTree snapshots expanded state on first call', async () => {
+      const p = mountPicker({
+        tree: rootOf([
+          dir('src', [file('src/main.py')]),
+          dir('tests', [file('tests/a.py')]),
+        ]),
+      });
+      await p.updateComplete;
+      // User expands src.
+      const dirRow = p.shadowRoot.querySelector('.row.is-dir');
+      dirRow.click();
+      await p.updateComplete;
+      expect(p._expanded.has('src')).toBe(true);
+      // Swap to a pruned tree.
+      p.setTree(rootOf([file('pruned.md')]));
+      await p.updateComplete;
+      // Snapshot preserved the pre-swap expanded set.
+      expect(p._expandedSnapshot).toBeInstanceOf(Set);
+      expect(p._expandedSnapshot.has('src')).toBe(true);
+    });
+
+    it('repeated setTree calls do not re-snapshot', async () => {
+      // Search refinements send multiple pruned trees as the
+      // user types. Each re-snapshot would overwrite the
+      // original full-tree state with whatever the current
+      // pruned tree's expansion happened to be, defeating
+      // the purpose.
+      const p = mountPicker({
+        tree: rootOf([dir('original', [file('original/x')])]),
+      });
+      await p.updateComplete;
+      // Expand original.
+      p.shadowRoot.querySelector('.row.is-dir').click();
+      await p.updateComplete;
+      const firstSnapshot = new Set(p._expanded);
+      // First setTree — snapshot taken.
+      p.setTree(rootOf([file('a.md')]));
+      await p.updateComplete;
+      expect(p._expandedSnapshot).toEqual(firstSnapshot);
+      // Expand something in the pruned tree (nothing to
+      // expand in this one, so mutate directly to simulate).
+      p._expanded = new Set(['pruned-dir']);
+      await p.updateComplete;
+      // Second setTree — snapshot unchanged.
+      p.setTree(rootOf([file('b.md')]));
+      await p.updateComplete;
+      expect(p._expandedSnapshot).toEqual(firstSnapshot);
+      expect(p._expandedSnapshot.has('pruned-dir')).toBe(false);
+    });
+
+    it('restoreExpandedState restores the snapshot', async () => {
+      const p = mountPicker({
+        tree: rootOf([dir('src', [file('src/x.py')])]),
+      });
+      await p.updateComplete;
+      p.shadowRoot.querySelector('.row.is-dir').click();
+      await p.updateComplete;
+      p.setTree(rootOf([file('a.md')]));
+      await p.updateComplete;
+      // Now restore.
+      p.restoreExpandedState();
+      await p.updateComplete;
+      expect(p._expanded.has('src')).toBe(true);
+      // Snapshot cleared — next setTree starts fresh.
+      expect(p._expandedSnapshot).toBeNull();
+    });
+
+    it('restoreExpandedState without a snapshot is a no-op', async () => {
+      const p = mountPicker({
+        tree: rootOf([dir('src', [file('src/x.py')])]),
+      });
+      await p.updateComplete;
+      p.shadowRoot.querySelector('.row.is-dir').click();
+      await p.updateComplete;
+      const before = new Set(p._expanded);
+      // No setTree → no snapshot.
+      p.restoreExpandedState();
+      await p.updateComplete;
+      // Expanded set unchanged.
+      expect(p._expanded).toEqual(before);
+    });
+
+    it('setTree resets _focusedPath', async () => {
+      // A focused path from the previous tree may not exist
+      // in the new one. Reset to null so render doesn't try
+      // to highlight a non-existent row.
+      const p = mountPicker({
+        tree: rootOf([file('a.md')]),
+      });
+      await p.updateComplete;
+      p._focusedPath = 'a.md';
+      await p.updateComplete;
+      p.setTree(rootOf([file('b.md')]));
+      await p.updateComplete;
+      expect(p._focusedPath).toBeNull();
+    });
+
+    it('restoreExpandedState resets _focusedPath', async () => {
+      const p = mountPicker({
+        tree: rootOf([file('a.md')]),
+      });
+      await p.updateComplete;
+      p._focusedPath = 'a.md';
+      p.setTree(rootOf([file('b.md')]));
+      await p.updateComplete;
+      p._focusedPath = 'b.md';
+      p.restoreExpandedState();
+      await p.updateComplete;
+      expect(p._focusedPath).toBeNull();
+    });
+  });
+
+  describe('_focusedPath highlight', () => {
+    it('file row gets .focused class when _focusedPath matches', async () => {
+      const p = mountPicker({
+        tree: rootOf([file('a.md'), file('b.md')]),
+      });
+      await p.updateComplete;
+      p._focusedPath = 'a.md';
+      await p.updateComplete;
+      const rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      expect(rows[0].classList.contains('focused')).toBe(true);
+      expect(rows[1].classList.contains('focused')).toBe(false);
+    });
+
+    it('aria-current is set on the focused row', async () => {
+      const p = mountPicker({
+        tree: rootOf([file('a.md'), file('b.md')]),
+      });
+      await p.updateComplete;
+      p._focusedPath = 'b.md';
+      await p.updateComplete;
+      const rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      expect(rows[0].getAttribute('aria-current')).toBe('false');
+      expect(rows[1].getAttribute('aria-current')).toBe('true');
+    });
+
+    it('null _focusedPath leaves no row focused', async () => {
+      const p = mountPicker({
+        tree: rootOf([file('a.md')]),
+      });
+      await p.updateComplete;
+      // Default state — nothing focused.
+      expect(p._focusedPath).toBeNull();
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('focused')).toBe(false);
+    });
+
+    it('_focusedPath for non-existent file silently produces no highlight', async () => {
+      const p = mountPicker({
+        tree: rootOf([file('a.md')]),
+      });
+      await p.updateComplete;
+      p._focusedPath = 'does-not-exist.md';
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('focused')).toBe(false);
+    });
+  });
+
   describe('bubbling', () => {
     it('selection-changed bubbles out of the shadow root', async () => {
       // The files-tab orchestrator listens at the parent level,
