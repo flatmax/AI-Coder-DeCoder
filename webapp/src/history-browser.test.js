@@ -1017,3 +1017,666 @@ describe('HistoryBrowser close state reset', () => {
     expect(el._selectedMessages).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Image thumbnails in preview
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser preview images', () => {
+  async function setupWithImage(messages) {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([
+          {
+            session_id: 's1',
+            timestamp: new Date().toISOString(),
+            message_count: messages.length,
+            preview: 'with image',
+            first_role: 'user',
+          },
+        ]),
+      'LLMService.history_get_session': vi
+        .fn()
+        .mockResolvedValue(messages),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  it('renders thumbnails for messages with images field', async () => {
+    // The history store reconstructs image_refs into a
+    // top-level `images` array (the backend's
+    // get_session_messages path does this). The preview
+    // should render thumbnails from it.
+    const el = await setupWithImage([
+      {
+        role: 'user',
+        content: 'look at this',
+        images: [
+          'data:image/png;base64,AAA',
+          'data:image/jpeg;base64,BBB',
+        ],
+      },
+    ]);
+    const thumbs = el.shadowRoot.querySelectorAll('.preview-image');
+    expect(thumbs.length).toBe(2);
+    expect(thumbs[0].src).toContain('base64,AAA');
+    expect(thumbs[1].src).toContain('base64,BBB');
+  });
+
+  it('renders thumbnails for multimodal content arrays', async () => {
+    // When the server sends multimodal content blocks
+    // directly (e.g., some callers don't collapse to a
+    // top-level images field), the normalizer pulls
+    // image_url blocks out.
+    const el = await setupWithImage([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'see this' },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,CCC' },
+          },
+        ],
+      },
+    ]);
+    const thumbs = el.shadowRoot.querySelectorAll('.preview-image');
+    expect(thumbs.length).toBe(1);
+    expect(thumbs[0].src).toContain('base64,CCC');
+  });
+
+  it('does not render image section when images absent', async () => {
+    const el = await setupWithImage([
+      { role: 'user', content: 'plain text' },
+    ]);
+    expect(
+      el.shadowRoot.querySelector('.preview-images'),
+    ).toBeNull();
+  });
+
+  it('renders both text and images together', async () => {
+    const el = await setupWithImage([
+      {
+        role: 'user',
+        content: 'look',
+        images: ['data:image/png;base64,X'],
+      },
+    ]);
+    // Body carries text.
+    const body = el.shadowRoot.querySelector('.preview-body');
+    expect(body.textContent).toContain('look');
+    // And thumbnail renders.
+    expect(el.shadowRoot.querySelector('.preview-image')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hover action buttons (copy, paste-to-prompt)
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser message action buttons', () => {
+  async function setupWithMessages(messages) {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([
+          {
+            session_id: 's1',
+            timestamp: new Date().toISOString(),
+            message_count: messages.length,
+            preview: 'test',
+            first_role: 'user',
+          },
+        ]),
+      'LLMService.history_get_session': vi
+        .fn()
+        .mockResolvedValue(messages),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  function installFakeClipboard() {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    return {
+      writeText,
+      restore() {
+        if (original === undefined) {
+          delete navigator.clipboard;
+        } else {
+          Object.defineProperty(navigator, 'clipboard', {
+            value: original,
+            configurable: true,
+          });
+        }
+      },
+    };
+  }
+
+  it('renders toolbar with copy and paste buttons per message', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ]);
+    const toolbars = el.shadowRoot.querySelectorAll('.preview-toolbar');
+    expect(toolbars.length).toBe(2);
+    for (const tb of toolbars) {
+      const btns = tb.querySelectorAll('.preview-action-button');
+      expect(btns.length).toBe(2);
+    }
+  });
+
+  it('copy button writes raw text to clipboard', async () => {
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const el = await setupWithMessages([
+        { role: 'assistant', content: 'use **bold** here' },
+      ]);
+      // Copy button is the first action button.
+      const copyBtn = el.shadowRoot
+        .querySelector('.preview-toolbar')
+        .querySelectorAll('.preview-action-button')[0];
+      copyBtn.click();
+      await settle(el);
+      expect(writeText).toHaveBeenCalledOnce();
+      // Raw markdown source, not rendered HTML.
+      expect(writeText).toHaveBeenCalledWith('use **bold** here');
+    } finally {
+      restore();
+    }
+  });
+
+  it('copy emits success toast', async () => {
+    const { restore } = installFakeClipboard();
+    try {
+      const el = await setupWithMessages([
+        { role: 'user', content: 'hi' },
+      ]);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        el.shadowRoot
+          .querySelector('.preview-toolbar')
+          .querySelectorAll('.preview-action-button')[0]
+          .click();
+        await settle(el);
+        const detail = toastListener.mock.calls.at(-1)[0].detail;
+        expect(detail.type).toBe('success');
+        expect(detail.message).toMatch(/copied/i);
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('copy emits warning when clipboard unavailable', async () => {
+    // Simulate insecure context — no navigator.clipboard.
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const el = await setupWithMessages([
+        { role: 'user', content: 'hi' },
+      ]);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        el.shadowRoot
+          .querySelector('.preview-toolbar')
+          .querySelectorAll('.preview-action-button')[0]
+          .click();
+        await settle(el);
+        const detail = toastListener.mock.calls.at(-1)[0].detail;
+        expect(detail.type).toBe('warning');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      if (original === undefined) {
+        delete navigator.clipboard;
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: original,
+          configurable: true,
+        });
+      }
+    }
+  });
+
+  it('paste button dispatches paste-to-prompt event', async () => {
+    const el = await setupWithMessages([
+      { role: 'assistant', content: 'paste this' },
+    ]);
+    const listener = vi.fn();
+    el.addEventListener('paste-to-prompt', listener);
+    // Paste button is the second action button.
+    const pasteBtn = el.shadowRoot
+      .querySelector('.preview-toolbar')
+      .querySelectorAll('.preview-action-button')[1];
+    pasteBtn.click();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].detail).toEqual({
+      text: 'paste this',
+    });
+  });
+
+  it('paste-to-prompt bubbles across shadow DOM', async () => {
+    // Chat panel listens at document level.
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    const listener = vi.fn();
+    document.body.addEventListener('paste-to-prompt', listener);
+    try {
+      el.shadowRoot
+        .querySelector('.preview-toolbar')
+        .querySelectorAll('.preview-action-button')[1]
+        .click();
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'paste-to-prompt',
+        listener,
+      );
+    }
+  });
+
+  it('paste closes the modal', async () => {
+    // Modal closes so the user sees the chat input.
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    const closeListener = vi.fn();
+    el.addEventListener('close', closeListener);
+    el.shadowRoot
+      .querySelector('.preview-toolbar')
+      .querySelectorAll('.preview-action-button')[1]
+      .click();
+    expect(closeListener).toHaveBeenCalledOnce();
+  });
+
+  it('actions work on multimodal messages (text extracted)', async () => {
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const el = await setupWithMessages([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'hello' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/png;base64,X' },
+            },
+            { type: 'text', text: 'world' },
+          ],
+        },
+      ]);
+      el.shadowRoot
+        .querySelector('.preview-toolbar')
+        .querySelectorAll('.preview-action-button')[0]
+        .click();
+      await settle(el);
+      expect(writeText).toHaveBeenCalledWith('hello\nworld');
+    } finally {
+      restore();
+    }
+  });
+
+  it('copy on empty content is a no-op', async () => {
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const el = await setupWithMessages([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/png;base64,X' },
+            },
+          ],
+        },
+      ]);
+      el.shadowRoot
+        .querySelector('.preview-toolbar')
+        .querySelectorAll('.preview-action-button')[0]
+        .click();
+      await settle(el);
+      expect(writeText).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context menu
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser context menu', () => {
+  async function setupWithMessages(messages) {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([
+          {
+            session_id: 's1',
+            timestamp: new Date().toISOString(),
+            message_count: messages.length,
+            preview: 'test',
+            first_role: 'user',
+          },
+        ]),
+      'LLMService.history_get_session': vi
+        .fn()
+        .mockResolvedValue(messages),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  function fireContextMenu(el, x = 100, y = 200) {
+    const msg = el.shadowRoot.querySelector('.preview-message');
+    const ev = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+    });
+    msg.dispatchEvent(ev);
+  }
+
+  it('right-click opens the context menu', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'hi' },
+    ]);
+    expect(el.shadowRoot.querySelector('.context-menu')).toBeNull();
+    fireContextMenu(el);
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.context-menu'),
+    ).toBeTruthy();
+  });
+
+  it('context menu positions at click point', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'hi' },
+    ]);
+    fireContextMenu(el, 150, 250);
+    await settle(el);
+    const menu = el.shadowRoot.querySelector('.context-menu');
+    expect(menu.style.left).toBe('150px');
+    expect(menu.style.top).toBe('250px');
+  });
+
+  it('renders four context menu items', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'hi' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    const items = el.shadowRoot.querySelectorAll(
+      '.context-menu-item',
+    );
+    expect(items.length).toBe(4);
+    // Verify labels.
+    const labels = Array.from(items).map((i) =>
+      i.textContent.trim(),
+    );
+    expect(labels[0]).toMatch(/left/i);
+    expect(labels[1]).toMatch(/right/i);
+    expect(labels[2]).toMatch(/copy/i);
+    expect(labels[3]).toMatch(/paste/i);
+  });
+
+  it('contextmenu event has preventDefault called', async () => {
+    // Stops the browser's native right-click menu from
+    // appearing on top of ours.
+    const el = await setupWithMessages([
+      { role: 'user', content: 'hi' },
+    ]);
+    const msg = el.shadowRoot.querySelector('.preview-message');
+    const ev = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    msg.dispatchEvent(ev);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('Load in Left Panel dispatches load-diff-panel', async () => {
+    const el = await setupWithMessages([
+      { role: 'assistant', content: 'panel content' },
+    ]);
+    const listener = vi.fn();
+    el.addEventListener('load-diff-panel', listener);
+    fireContextMenu(el);
+    await settle(el);
+    const items = el.shadowRoot.querySelectorAll(
+      '.context-menu-item',
+    );
+    items[0].click(); // Load in Left Panel
+    expect(listener).toHaveBeenCalledOnce();
+    const detail = listener.mock.calls[0][0].detail;
+    expect(detail.content).toBe('panel content');
+    expect(detail.panel).toBe('left');
+    expect(detail.label).toContain('assistant');
+  });
+
+  it('Load in Right Panel dispatches with panel=right', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'text' },
+    ]);
+    const listener = vi.fn();
+    el.addEventListener('load-diff-panel', listener);
+    fireContextMenu(el);
+    await settle(el);
+    const items = el.shadowRoot.querySelectorAll(
+      '.context-menu-item',
+    );
+    items[1].click(); // Load in Right Panel
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].detail.panel).toBe('right');
+  });
+
+  it('load-diff-panel bubbles across shadow DOM', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    const listener = vi.fn();
+    document.body.addEventListener('load-diff-panel', listener);
+    try {
+      fireContextMenu(el);
+      await settle(el);
+      el.shadowRoot.querySelectorAll('.context-menu-item')[0].click();
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'load-diff-panel',
+        listener,
+      );
+    }
+  });
+
+  it('Load in Panel does NOT close the modal', async () => {
+    // User may want to load both panels from the history
+    // browser in succession — don't close after each.
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    const closeListener = vi.fn();
+    el.addEventListener('close', closeListener);
+    fireContextMenu(el);
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.context-menu-item')[0].click();
+    expect(closeListener).not.toHaveBeenCalled();
+  });
+
+  it('Load in Panel closes the context menu', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    expect(el._contextMenu).not.toBeNull();
+    el.shadowRoot.querySelectorAll('.context-menu-item')[0].click();
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+  });
+
+  it('Copy item uses the clipboard path', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    try {
+      const el = await setupWithMessages([
+        { role: 'user', content: 'copy me' },
+      ]);
+      fireContextMenu(el);
+      await settle(el);
+      el.shadowRoot
+        .querySelectorAll('.context-menu-item')[2]
+        .click();
+      await settle(el);
+      expect(writeText).toHaveBeenCalledWith('copy me');
+    } finally {
+      if (original === undefined) {
+        delete navigator.clipboard;
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: original,
+          configurable: true,
+        });
+      }
+    }
+  });
+
+  it('Copy item closes the context menu', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.context-menu-item')[2].click();
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+  });
+
+  it('Paste item dispatches paste-to-prompt and closes modal', async () => {
+    const el = await setupWithMessages([
+      { role: 'assistant', content: 'paste' },
+    ]);
+    const pasteListener = vi.fn();
+    const closeListener = vi.fn();
+    el.addEventListener('paste-to-prompt', pasteListener);
+    el.addEventListener('close', closeListener);
+    fireContextMenu(el);
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.context-menu-item')[3].click();
+    await settle(el);
+    expect(pasteListener).toHaveBeenCalledOnce();
+    expect(pasteListener.mock.calls[0][0].detail.text).toBe('paste');
+    expect(closeListener).toHaveBeenCalledOnce();
+  });
+
+  it('clicking outside the menu dismisses it', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    expect(el._contextMenu).not.toBeNull();
+    // Click on the backdrop (outside the menu and modal
+    // content alike).
+    document.body.click();
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+  });
+
+  it('Escape closes the context menu without closing modal', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    const closeListener = vi.fn();
+    el.addEventListener('close', closeListener);
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape' }),
+    );
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+    expect(closeListener).not.toHaveBeenCalled();
+  });
+
+  it('Escape after menu already closed closes the modal', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    // No context menu open.
+    const closeListener = vi.fn();
+    el.addEventListener('close', closeListener);
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape' }),
+    );
+    expect(closeListener).toHaveBeenCalledOnce();
+  });
+
+  it('closing the modal also closes context menu', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    expect(el._contextMenu).not.toBeNull();
+    el.shadowRoot.querySelector('.close-button').click();
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+  });
+
+  it('opening the modal again resets context menu state', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    fireContextMenu(el);
+    await settle(el);
+    // Force-close via prop.
+    el.open = false;
+    await settle(el);
+    expect(el._contextMenu).toBeNull();
+  });
+
+  it('document click listener removed on disconnect', async () => {
+    const el = await setupWithMessages([
+      { role: 'user', content: 'x' },
+    ]);
+    el.remove();
+    // No crash when a click fires after disconnect.
+    expect(() => document.body.click()).not.toThrow();
+  });
+});

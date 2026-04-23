@@ -1464,7 +1464,7 @@ Layer 5 (webapp) is the largest remaining surface. Delivering in sub-phases to k
 
 - **Phase 1 — Minimum viable shell** (delivered): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
 - **Phase 2 — Essential tabs** (delivered): Chat panel (send/receive/streaming/markdown/edit blocks/images/file mentions/retry prompts/compaction events/message action buttons), Files tab (file picker tree, selection sync), action bar with session controls.
-- **Phase 2e — Search and refinements** (in progress): message search delivered, file search delivered with test coverage, speech-to-text delivered, history browser refinements remain.
+- **Phase 2e — Search and refinements** (delivered): message search, file search with test coverage, speech-to-text, history browser refinements (per-message action buttons, image thumbnails, context menu).
 - **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, file navigation grid, TeX preview, Doc convert tab.
 
 ### 5.1 — Phase 1 Minimum viable shell — **delivered**
@@ -1588,6 +1588,45 @@ Dedicated component wrapping the browser's Web Speech API with a microphone togg
 - Test file demonstrates an important technique — the `FakeRecognition` class accumulates constructed instances in a static array, so tests can assert on the newest instance without guessing when restarts fire. Makes the auto-restart tests (which create multiple sessions in sequence) trivial to verify.
 
 Delivered test count: 867 total (up from 832 after file search), all 18 webapp test files passing.
+
+### 5.5b — Phase 2e.4 History browser refinements — **delivered**
+
+Closes out Phase 2e by adding the per-message interactions the initial history-browser commit deliberately deferred (the 2e.2 scope cut called these "scope creep; basic load flow matters more"). With the Phase 3 diff-viewer stub now in place, the context menu's ad-hoc-comparison items have somewhere meaningful to dispatch.
+
+- `webapp/src/history-browser.js` — additions:
+  - Per-message hover toolbar: `📋 Copy` and `↩ Paste to Prompt` buttons at each message's top-right, opacity-animated so they appear only on hover (same pattern as chat panel's message toolbar in 2d).
+  - Image thumbnails in preview. `normalizeMessageContent` from `image-utils.js` extracts images from multimodal content arrays; pre-existing `msg.images` (server's flattened shape) takes precedence. 60px thumbnails (smaller than chat panel's 80px — preview pane is narrower and users are scanning, not interacting), no re-attach overlay (re-attaching from a past session into the current input isn't part of the 2e.4 scope).
+  - Context menu on right-click. Four items — "◧ Load in Left Panel", "◨ Load in Right Panel", "📋 Copy", "↩ Paste to Prompt". Positioned at viewport coordinates via `position: fixed` + style bindings. Dismiss paths: click outside the menu (document-level click listener with `composedPath()` check for menu containment), Escape key (first press closes menu only, second closes modal), modal close (context menu state cleared via the existing `_close` path and the `updated()` reset block).
+  - `load-diff-panel` event dispatch carrying `{content, panel, label}` — bubbles and composes out of the shadow DOM so chat panel's event listener (Phase 3.1 will wire this to diff viewer's `loadPanel`) can route it. `label` is `"{role} (history)"` so the floating panel label in the diff viewer tells the user where the content came from.
+  - Extracted text for all actions goes through `_extractMessageText(msg)` which delegates to `normalizeMessageContent` — multimodal messages have text blocks joined with `\n`, image blocks dropped. Empty-text messages (image-only) produce a no-op for copy / paste / load-in-panel rather than emitting an empty toast.
+  - Copy path reuses the clipboard-write-or-warning-toast pattern from chat panel's `_copyMessageText` with `ac-toast` window-event dispatch (the browser is modal, so local toast would be overkill; the app shell's global toast layer is already listening).
+
+- `webapp/src/history-browser.test.js` — three new test blocks covering:
+  - **Image thumbnails** (4 tests) — renders for `images` field, renders for multimodal content arrays, absent image renders no section, renders alongside text.
+  - **Hover action buttons** (9 tests) — toolbar shape, copy writes raw markdown source (not rendered HTML) to clipboard, copy success toast, copy warning when clipboard API unavailable, paste dispatches `paste-to-prompt` with text, event bubbles across shadow DOM, paste closes the modal, actions work on multimodal messages (text extracted), copy on empty content is a no-op.
+  - **Context menu** (15 tests) — right-click opens menu, positions at click coordinates, four items render with correct labels, contextmenu event's `preventDefault` is called (stops native browser menu), Load-in-Panel dispatches `load-diff-panel` with correct panel + content + label, event bubbles across shadow DOM, Load-in-Panel keeps modal open (lets users load both panels in succession), Load-in-Panel closes the context menu, Copy uses clipboard path and closes menu, Paste dispatches and closes modal, click-outside dismisses, Escape closes menu first then modal on second press, modal close also clears menu, reopening modal resets context menu state, document click listener removed on disconnect.
+
+Design points pinned by tests:
+
+- **Load-in-Panel doesn't close the modal.** Users often load a message into the left panel and then want to load a different message into the right panel for ad-hoc comparison. Closing after the first load would force them to reopen the browser every time. The Copy and Paste-to-Prompt items DO close (paste's point is to return to the input; copy's point is that the user now wants to paste elsewhere — usually outside the modal). Pinned explicitly because the asymmetry is easy to miss.
+
+- **Escape priority: context menu → modal.** Two-step Escape matches how most desktop apps handle modal-plus-popover stacks. Without this, right-clicking and then Escape-ing would dismiss the entire history browser, making the user re-open it to try again. Pinned by `test_escape_after_menu_already_closed_closes_the_modal`.
+
+- **composedPath() used for dismiss click detection.** The context menu lives in the history browser's shadow DOM; the document-level click listener sees the shadow host as the target. Walking `composedPath()` lets us distinguish "click inside the menu" (let the button handler run) from "click anywhere else" (dismiss). Matches the same pattern Phase 3's SVG viewer uses for its context menu.
+
+- **Raw markdown source on copy, not rendered HTML.** Pinned by `test_copy_button_writes_raw_text_to_clipboard` which asserts `"use **bold** here"` (asterisks intact) rather than an HTML `<strong>` representation. A user pasting into another editor wants the markdown source, and the assistant message renders bold-via-markdown is a presentation-layer concern.
+
+- **`msg.images` takes precedence over multimodal extraction.** The history store's `get_session_messages` path reconstructs image_refs into a top-level `images` array — that's the server's canonical shape and should win when present. Multimodal content arrays are the fallback for callers that pass the raw message shape directly. Both paths covered by separate tests.
+
+Not included (explicit scope boundaries):
+
+- **Image lightbox in history preview.** Clicking a thumbnail currently does nothing. Adding a lightbox would duplicate chat panel's implementation and the spec isn't explicit that it's needed here. A user who wants to examine a past image closes the browser, loads the session, and views it in the main chat panel where the lightbox already lives.
+- **Re-attach overlay on history thumbnails.** Chat panel's thumbnails have a `📎` button that re-adds the image to the current input. History browser doesn't — re-attaching an image from an earlier session is a reasonable feature but specs4 doesn't call for it, and the Paste-to-Prompt path already lets users bring back past text; images are a separate concern with a different UX path.
+- **Wiring the `load-diff-panel` consumer.** Phase 3.1 will add a handler on the chat panel (or directly on the app shell) that calls `diffViewer.loadPanel(content, panel, label)`. The event fires correctly today; the payload is ready; only the final consumer is Phase 3's job.
+
+## Layer 5 — Phase 2 complete
+
+Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
 ### 5.6 — Phase 3 groundwork Viewer background routing — **delivered**
 

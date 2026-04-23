@@ -56,6 +56,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { RpcMixin } from './rpc-mixin.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
+import { normalizeMessageContent } from './image-utils.js';
 
 /**
  * Debounce delay for search queries. 300ms matches the
@@ -117,6 +118,12 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     _searchHits: { type: Array, state: true },
     /** True while the load-session RPC is in flight. */
     _loadingSession: { type: Boolean, state: true },
+    /**
+     * Context menu state. Null when closed; otherwise
+     * `{x, y, message}` — position in viewport coordinates
+     * and the message the menu targets.
+     */
+    _contextMenu: { type: Object, state: true },
   };
 
   static styles = css`
@@ -351,6 +358,98 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
     }
+    /* Message action buttons — mirrors the chat panel's
+     * hover toolbar pattern. Position:relative on the card
+     * plus absolute on the toolbar keeps the buttons
+     * anchored to the top-right regardless of message
+     * length. Hover-only via opacity so they don't clutter
+     * the reading view. */
+    .preview-message {
+      position: relative;
+    }
+    .preview-toolbar {
+      position: absolute;
+      top: 0.35rem;
+      right: 0.35rem;
+      display: flex;
+      gap: 0.2rem;
+      opacity: 0;
+      transition: opacity 120ms ease;
+      z-index: 1;
+    }
+    .preview-message:hover .preview-toolbar {
+      opacity: 1;
+    }
+    .preview-action-button {
+      background: rgba(13, 17, 23, 0.85);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.1rem 0.35rem;
+      font-size: 0.7rem;
+      border-radius: 3px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .preview-action-button:hover {
+      background: rgba(240, 246, 252, 0.1);
+      border-color: rgba(240, 246, 252, 0.4);
+    }
+    /* Image thumbnails in history preview messages.
+     * Smaller than the chat panel's thumbnails (60px vs
+     * 80px) because the preview pane is narrower and
+     * users are scanning, not interacting. No re-attach
+     * overlay — past-session images aren't part of the
+     * current composition flow. */
+    .preview-images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-top: 0.4rem;
+    }
+    .preview-image {
+      width: 60px;
+      height: 60px;
+      object-fit: cover;
+      border-radius: 3px;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      display: block;
+    }
+    /* Context menu — fixed position at the click point.
+     * Appears above the modal via z-index. Dismiss logic
+     * lives in the document click handler. */
+    .context-menu {
+      position: fixed;
+      z-index: 200;
+      background: rgba(22, 27, 34, 0.98);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      padding: 0.25rem 0;
+      min-width: 200px;
+      display: flex;
+      flex-direction: column;
+    }
+    .context-menu-item {
+      background: transparent;
+      border: none;
+      color: var(--text-primary, #c9d1d9);
+      text-align: left;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.8125rem;
+      font-family: inherit;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .context-menu-item:hover {
+      background: rgba(88, 166, 255, 0.12);
+    }
+    .context-menu-icon {
+      flex-shrink: 0;
+      width: 1rem;
+      text-align: center;
+    }
   `;
 
   constructor() {
@@ -365,6 +464,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._searchMode = false;
     this._searchHits = [];
     this._loadingSession = false;
+    this._contextMenu = null;
 
     // Debounce timer for search.
     this._searchDebounceTimer = null;
@@ -374,6 +474,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._messagesGeneration = 0;
 
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onContextDismiss = this._onContextDismiss.bind(this);
   }
 
   connectedCallback() {
@@ -381,10 +482,20 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // Listen on document so Escape works regardless of
     // which element has focus inside the modal.
     document.addEventListener('keydown', this._onKeyDown);
+    // Dismiss context menu on any click outside it.
+    // Using `click` (not `pointerdown`) so clicks on
+    // menu buttons fire their own handlers before this
+    // dismiss runs. Capture phase so we see clicks that
+    // bubble up through the shadow DOM.
+    document.addEventListener('click', this._onContextDismiss);
   }
 
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
+    document.removeEventListener(
+      'click',
+      this._onContextDismiss,
+    );
     if (this._searchDebounceTimer != null) {
       clearTimeout(this._searchDebounceTimer);
       this._searchDebounceTimer = null;
@@ -430,6 +541,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._searchHits = [];
           this._selectedSessionId = null;
           this._selectedMessages = [];
+          this._contextMenu = null;
         });
       }
     }
@@ -535,6 +647,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   }
 
   _close() {
+    this._contextMenu = null;
     this.dispatchEvent(
       new CustomEvent('close', { bubbles: true, composed: true }),
     );
@@ -589,11 +702,39 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   _onKeyDown(event) {
     if (!this.open) return;
     if (event.key === 'Escape') {
+      // If the context menu is open, close it first.
+      // Second Escape then closes the modal via the
+      // normal path.
+      if (this._contextMenu) {
+        event.stopPropagation();
+        this._contextMenu = null;
+        return;
+      }
       // Top-level Escape handler — closes if the search
       // input didn't already handle it. The search input's
       // handler calls stopPropagation when it's in play.
       this._close();
     }
+  }
+
+  _onContextDismiss(event) {
+    if (!this._contextMenu) return;
+    // Check whether the click landed inside the context
+    // menu itself. If so, let the button's own handler
+    // run (it'll close the menu as part of its action).
+    // composedPath traverses shadow boundaries, which we
+    // need because the menu lives in our shadow DOM.
+    const path = event.composedPath ? event.composedPath() : [];
+    for (const el of path) {
+      if (
+        el &&
+        el.classList &&
+        el.classList.contains('context-menu')
+      ) {
+        return;
+      }
+    }
+    this._contextMenu = null;
   }
 
   _onSessionClick(sessionId) {
@@ -645,6 +786,117 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     } finally {
       this._loadingSession = false;
     }
+  }
+
+  // ---------------------------------------------------------------
+  // Message actions (copy, paste-to-prompt, load-in-panel)
+  // ---------------------------------------------------------------
+
+  /**
+   * Extract raw text from a message, handling both string
+   * and multimodal-array content shapes. Images are
+   * dropped — text actions only. Mirrors the chat panel's
+   * _extractMessageText helper.
+   */
+  _extractMessageText(msg) {
+    if (!msg) return '';
+    const normalized = normalizeMessageContent(msg);
+    return normalized.content;
+  }
+
+  /**
+   * Copy a message's raw text to the clipboard. Emits a
+   * toast on success via the ac-toast window event so the
+   * app shell's toast layer can render it — the history
+   * browser is modal, so a local toast layer here would
+   * be overkill.
+   */
+  async _copyMessageText(msg) {
+    const text = this._extractMessageText(msg);
+    if (!text) return;
+    try {
+      if (
+        navigator.clipboard &&
+        typeof navigator.clipboard.writeText === 'function'
+      ) {
+        await navigator.clipboard.writeText(text);
+        this._emitToast('Copied to clipboard', 'success');
+      } else {
+        this._emitToast('Clipboard not available', 'warning');
+      }
+    } catch (err) {
+      this._emitToast(
+        `Copy failed: ${err?.message || 'permission denied'}`,
+        'warning',
+      );
+    }
+  }
+
+  /**
+   * Paste a message's text into the chat input. Dispatches
+   * a `paste-to-prompt` event with the text in detail; the
+   * chat panel catches it and inserts at the cursor. Closes
+   * the modal after so the user sees their prompt area.
+   */
+  _pasteMessageToPrompt(msg) {
+    const text = this._extractMessageText(msg);
+    if (!text) return;
+    this.dispatchEvent(
+      new CustomEvent('paste-to-prompt', {
+        detail: { text },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this._close();
+  }
+
+  /**
+   * Load a message's content into a diff-viewer panel for
+   * ad-hoc comparison. Dispatches `load-diff-panel` with
+   * `{content, panel}` — chat panel forwards it to the diff
+   * viewer's loadPanel method. Panel is 'left' or 'right'.
+   * Does not close the modal — user may want to load a
+   * second message into the other panel.
+   */
+  _loadMessageInPanel(msg, panel) {
+    const text = this._extractMessageText(msg);
+    if (!text) return;
+    const label = msg.role
+      ? `${msg.role} (history)`
+      : 'history';
+    this.dispatchEvent(
+      new CustomEvent('load-diff-panel', {
+        detail: { content: text, panel, label },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this._contextMenu = null;
+  }
+
+  _emitToast(message, type = 'info') {
+    window.dispatchEvent(
+      new CustomEvent('ac-toast', {
+        detail: { message, type },
+        bubbles: false,
+      }),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Context menu
+  // ---------------------------------------------------------------
+
+  _onMessageContextMenu(event, msg) {
+    event.preventDefault();
+    // Position in viewport coordinates. The menu renders
+    // position:fixed so these coordinates map directly.
+    this._contextMenu = {
+      x: event.clientX,
+      y: event.clientY,
+      message: msg,
+    };
   }
 
   // ---------------------------------------------------------------
@@ -711,6 +963,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
             </div>
           </div>
         </div>
+        ${this._renderContextMenu()}
       </div>
     `;
   }
@@ -802,19 +1055,129 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
         : msg.role === 'assistant'
           ? 'Assistant'
           : msg.role || 'Message';
+    // Normalize content for both text rendering and
+    // image extraction. Session-reloaded messages with
+    // images come through as multimodal arrays; the
+    // normalizer strips text and images into clean
+    // fields. Messages with a pre-existing `images`
+    // field (legacy image_refs reconstruction on the
+    // server) take precedence.
+    const normalized = normalizeMessageContent(msg);
+    const textContent =
+      typeof msg.content === 'string'
+        ? msg.content
+        : normalized.content;
+    const images = Array.isArray(msg.images)
+      ? msg.images
+      : normalized.images;
     // User content rendered escaped verbatim; assistant and
     // system markdown-rendered (matches the main chat
     // panel's treatment).
     let body;
     if (msg.role === 'user' && !msg.system_event) {
-      body = html`${unsafeHTML(escapeHtml(msg.content || ''))}`;
+      body = html`${unsafeHTML(escapeHtml(textContent))}`;
     } else {
-      body = html`${unsafeHTML(renderMarkdown(msg.content || ''))}`;
+      body = html`${unsafeHTML(renderMarkdown(textContent))}`;
     }
     return html`
-      <div class="preview-message ${roleClass}">
+      <div
+        class="preview-message ${roleClass}"
+        @contextmenu=${(e) => this._onMessageContextMenu(e, msg)}
+      >
+        <div class="preview-toolbar">
+          <button
+            class="preview-action-button"
+            title="Copy raw text"
+            aria-label="Copy message text"
+            @click=${(e) => {
+              e.stopPropagation();
+              this._copyMessageText(msg);
+            }}
+          >
+            📋
+          </button>
+          <button
+            class="preview-action-button"
+            title="Paste into input"
+            aria-label="Paste text into chat input"
+            @click=${(e) => {
+              e.stopPropagation();
+              this._pasteMessageToPrompt(msg);
+            }}
+          >
+            ↩
+          </button>
+        </div>
         <div class="preview-role-label">${roleLabel}</div>
         <div class="preview-body">${body}</div>
+        ${images.length > 0
+          ? this._renderPreviewImages(images)
+          : ''}
+      </div>
+    `;
+  }
+
+  _renderPreviewImages(images) {
+    return html`
+      <div class="preview-images" role="list">
+        ${images.map(
+          (dataUri) => html`
+            <img
+              class="preview-image"
+              src=${dataUri}
+              alt=""
+              role="listitem"
+            />
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  _renderContextMenu() {
+    if (!this._contextMenu) return '';
+    const { x, y, message } = this._contextMenu;
+    // Position in viewport coords. Using style= here
+    // rather than a CSS class because the coordinates
+    // are dynamic per click.
+    const style = `left: ${x}px; top: ${y}px;`;
+    return html`
+      <div class="context-menu" style=${style} role="menu">
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => this._loadMessageInPanel(message, 'left')}
+        >
+          <span class="context-menu-icon">◧</span>
+          Load in Left Panel
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => this._loadMessageInPanel(message, 'right')}
+        >
+          <span class="context-menu-icon">◨</span>
+          Load in Right Panel
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => {
+            this._copyMessageText(message);
+            this._contextMenu = null;
+          }}
+        >
+          <span class="context-menu-icon">📋</span>
+          Copy
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => this._pasteMessageToPrompt(message)}
+        >
+          <span class="context-menu-icon">↩</span>
+          Paste to Prompt
+        </button>
       </div>
     `;
   }
