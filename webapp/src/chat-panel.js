@@ -72,6 +72,7 @@ import { renderEditCard } from './edit-block-render.js';
 import { findFileMentions } from './file-mentions.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
 import './history-browser.js';
+import './input-history.js';
 
 /**
  * Generate a request ID matching the specs3 format so the
@@ -822,6 +823,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._streams.clear();
     this._pendingChunks.clear();
     this._autoScroll = true;
+    // Seed input history from the loaded session's user
+    // messages. A new session (empty messages) is a no-op;
+    // a loaded session populates recall with prior prompts.
+    this._seedInputHistory(msgs);
   }
 
   _onModeOrReviewChanged() {
@@ -830,6 +835,64 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // idempotent and cheap; a stray event that doesn't
     // actually change the mode just re-sets the same list.
     this._loadSnippets();
+  }
+
+  /**
+   * Seed the input-history component with user messages
+   * from a just-loaded session. Called from
+   * `_onSessionChanged` after messages are replaced so
+   * up-arrow recall works for messages from the loaded
+   * conversation, not just messages typed since mount.
+   *
+   * Handles multimodal messages — when `content` is an
+   * array of `{type: 'text', text: ...}` / `{type:
+   * 'image_url', ...}` blocks (backend shape for
+   * image-bearing user messages), concatenates the text
+   * blocks and ignores the rest. A future Phase 2d commit
+   * will add image-paste support; for now images are just
+   * stripped during recall since they can't round-trip
+   * through a plain textarea anyway.
+   */
+  _seedInputHistory(msgs) {
+    const history = this.shadowRoot?.querySelector(
+      'ac-input-history',
+    );
+    if (!history) {
+      // Component isn't mounted yet. Defer until it is —
+      // happens on first render after `_onSessionChanged`
+      // fires before `updated()`. Adding entries is cheap,
+      // so we can safely retry once Lit commits.
+      this.updateComplete.then(() => {
+        const h = this.shadowRoot?.querySelector('ac-input-history');
+        if (h) this._seedIntoHistory(h, msgs);
+      });
+      return;
+    }
+    this._seedIntoHistory(history, msgs);
+  }
+
+  _seedIntoHistory(historyEl, msgs) {
+    for (const m of msgs) {
+      if (m.role !== 'user' || m.system_event) continue;
+      let text;
+      if (typeof m.content === 'string') {
+        text = m.content;
+      } else if (Array.isArray(m.content)) {
+        // Multimodal — extract text blocks and join with
+        // newlines. Non-text blocks (images) are dropped —
+        // they'll come back via re-attach in a later
+        // Phase 2d commit.
+        text = m.content
+          .filter((b) => b && b.type === 'text' && b.text)
+          .map((b) => b.text)
+          .join('\n');
+      } else {
+        continue;
+      }
+      if (text && text.trim()) {
+        historyEl.addEntry(text);
+      }
+    }
   }
 
   /**
@@ -900,6 +963,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const requestId = generateRequestId();
     this._currentRequestId = requestId;
     this._streams.set(requestId, { content: '', sticky: true });
+
+    // Record this message in input history before we clear
+    // the textarea — up-arrow recall wants the full text,
+    // not the empty string we're about to replace it with.
+    const history = this.shadowRoot?.querySelector(
+      'ac-input-history',
+    );
+    if (history) history.addEntry(text);
 
     // Add the user message optimistically. The server will
     // broadcast `userMessage` shortly; our handler detects the
@@ -1111,6 +1182,33 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   _onInputKeyDown(event) {
+    // If the input-history overlay is open, it gets first
+    // refusal on navigation keys (arrows, Enter, Escape).
+    // Letters and numbers fall through so the filter input
+    // captures them naturally via its own listener.
+    const history = this.shadowRoot?.querySelector(
+      'ac-input-history',
+    );
+    if (history && history.isOpen) {
+      if (history.handleKey(event)) return;
+    }
+    // Up-arrow at cursor position 0 opens the recall
+    // overlay. Elsewhere in the textarea it's a normal
+    // cursor move (don't intercept — the user might be
+    // editing a multi-line message).
+    if (
+      event.key === 'ArrowUp' &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      event.target.selectionStart === 0 &&
+      event.target.selectionEnd === 0
+    ) {
+      if (history && history.show(this._input)) {
+        event.preventDefault();
+        return;
+      }
+    }
     // Enter sends; Shift+Enter inserts a newline. The
     // composition guard prevents premature send during IME
     // input (e.g. Japanese/Chinese input methods).
@@ -1118,6 +1216,49 @@ export class ChatPanel extends RpcMixin(LitElement) {
       event.preventDefault();
       this._send();
     }
+  }
+
+  /**
+   * Handle `history-select` from the input-history
+   * component. The event carries the selected text; we
+   * replace the textarea content and focus it so the user
+   * can edit before sending (or just hit Enter to send
+   * as-is).
+   */
+  _onHistorySelect(event) {
+    const text = event.detail?.text ?? '';
+    this._input = text;
+    // Focus and move cursor to end on the next tick so
+    // Lit has committed the value. updateComplete ensures
+    // the reassignment reflected into the textarea DOM.
+    this.updateComplete.then(() => {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(text.length, text.length);
+        // Auto-resize to fit the recalled content.
+        ta.style.height = 'auto';
+        ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+      }
+    });
+  }
+
+  /**
+   * Handle `history-cancel` from the input-history
+   * component. The detail carries the saved original input;
+   * we restore it verbatim so Escape feels like an undo.
+   */
+  _onHistoryCancel(event) {
+    const text = event.detail?.text ?? '';
+    this._input = text;
+    // Focus the textarea so the user can resume typing.
+    this.updateComplete.then(() => {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(text.length, text.length);
+      }
+    });
   }
 
   // ---------------------------------------------------------------
@@ -1254,6 +1395,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
         ${this._snippetDrawerOpen
           ? this._renderSnippetDrawer()
           : ''}
+        <ac-input-history
+          @history-select=${this._onHistorySelect}
+          @history-cancel=${this._onHistoryCancel}
+        ></ac-input-history>
         <div class="input-row">
           <textarea
             class="input-textarea"

@@ -1733,6 +1733,308 @@ describe('ChatPanel input handling', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Input history
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel input history — recording', () => {
+  it('records message on send', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'my first prompt';
+    await p._send();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual(['my first prompt']);
+  });
+
+  it('accumulates multiple sends', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'first';
+    await p._send();
+    await settle(p);
+    // Reset streaming state so the next send proceeds.
+    // _send gates on _streaming; in a real flow the
+    // stream-complete event clears it.
+    p._streaming = false;
+    p._currentRequestId = null;
+    p._input = 'second';
+    await p._send();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual(['first', 'second']);
+  });
+
+  it('does not record when send is rejected (empty input)', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._input = '';
+    await p._send();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual([]);
+  });
+
+  it('records even when the RPC call rejects', async () => {
+    // Record-before-RPC is deliberate — a user whose
+    // network ate their prompt still wants up-arrow
+    // recall to bring it back. The failure toast /
+    // error message in the assistant slot communicates
+    // the failure; history recall is about recovering
+    // text, not tracking delivery.
+    const started = vi
+      .fn()
+      .mockRejectedValue(new Error('network boom'));
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      p._input = 'will fail';
+      await p._send();
+      await settle(p);
+      const history = p.shadowRoot.querySelector(
+        'ac-input-history',
+      );
+      expect(history._entries).toEqual(['will fail']);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+});
+
+describe('ChatPanel input history — session seeding', () => {
+  it('seeds history from user messages in session-changed event', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        { role: 'user', content: 'first user msg' },
+        { role: 'assistant', content: 'assistant reply' },
+        { role: 'user', content: 'second user msg' },
+      ],
+    });
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual([
+      'first user msg',
+      'second user msg',
+    ]);
+  });
+
+  it('skips system-event messages when seeding', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'Committed abc1234',
+          system_event: true,
+        },
+        { role: 'user', content: 'real prompt' },
+      ],
+    });
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual(['real prompt']);
+  });
+
+  it('handles multimodal user messages (extracts text blocks)', async () => {
+    // Session store reconstructs images as multimodal
+    // content arrays. Our seeding path should extract the
+    // text and drop the image blocks.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'please look at this' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/png;base64,...' },
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual(['please look at this']);
+  });
+
+  it('empty session (new session) produces no seed entries', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    // Seed some entries, then start a fresh session.
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('existing entry');
+    pushEvent('session-changed', {
+      session_id: 'sess_new',
+      messages: [],
+    });
+    await settle(p);
+    // Existing entries are preserved — only new seed
+    // entries would be added. Empty session adds none.
+    expect(history._entries).toEqual(['existing entry']);
+  });
+});
+
+describe('ChatPanel input history — open/close interactions', () => {
+  it('up-arrow at cursor 0 opens the overlay', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('prior message');
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = '';
+    ta.setSelectionRange(0, 0);
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowUp',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(history.isOpen).toBe(true);
+  });
+
+  it('up-arrow elsewhere in textarea does not open', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('prior');
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'some typed text';
+    ta.setSelectionRange(5, 5);
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowUp',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(history.isOpen).toBe(false);
+  });
+
+  it('up-arrow with empty history does not open', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.setSelectionRange(0, 0);
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowUp',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(history.isOpen).toBe(false);
+  });
+
+  it('saves current input when opening', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('prior');
+    p._input = 'draft message';
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'draft message';
+    ta.setSelectionRange(0, 0);
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowUp',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(history._savedInput).toBe('draft message');
+  });
+});
+
+describe('ChatPanel input history — event handling', () => {
+  it('selecting an entry replaces textarea content', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('recalled prompt');
+    history.show('');
+    await settle(p);
+    // Simulate Enter to select the newest entry.
+    history.handleKey(
+      new KeyboardEvent('keydown', { key: 'Enter' }),
+    );
+    await settle(p);
+    expect(p._input).toBe('recalled prompt');
+  });
+
+  it('cancelling restores the saved input', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('prior');
+    history.show('my draft');
+    await settle(p);
+    history.handleKey(
+      new KeyboardEvent('keydown', { key: 'Escape' }),
+    );
+    await settle(p);
+    expect(p._input).toBe('my draft');
+  });
+
+  it('Enter in overlay does not send message', async () => {
+    // While the overlay is open, Enter selects (not sends).
+    // Prevents accidentally sending what the user was just
+    // recalling.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    history.addEntry('prior');
+    history.show('');
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // Dispatch Enter on the textarea (simulating focus
+    // still being there). The chat panel's key handler
+    // must delegate to the overlay.
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    // Overlay closed via select, but no send fired.
+    expect(started).not.toHaveBeenCalled();
+    expect(history.isOpen).toBe(false);
+    // Selected text is now in the input.
+    expect(p._input).toBe('prior');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Snippet drawer
 // ---------------------------------------------------------------------------
 
