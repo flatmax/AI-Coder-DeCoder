@@ -256,7 +256,7 @@ Webapp side:
 
 ### Layer 1 deferrals
 
-- **Settings RPC service** — its restriction check (`_check_localhost_only`) belongs to Layer 4's collab module. Skipping the service class in Layer 1 rather than stubbing it; it lands with its siblings in Layer 3/4.
+- **Settings RPC service** — delivered in Layer 4 alongside the collaboration restriction enforcement (see Layer 4.5 below). Originally deferred from Layer 1 because the restriction check belongs to the collab module; landed now that collab is in place.
 - **`Repo.compile_tex_preview`** — Layer 5 (TeX preview UI) brings make4ht invocation and asset-inlining logic. Layer 1 exposes only `Repo.is_make4ht_available()`.
 - **URL cache filesystem operations** — Layer 4. Layer 1 only wires `ConfigManager.url_cache_config` accessor.
 
@@ -753,6 +753,32 @@ Open for future sub-layers:
 - **Settings RPC service.** Still deferred (per Layer 1's original deferral). When it lands, the same `_check_localhost_only()` helper pattern applies to `save_config_content`, `reload_llm_config`, `reload_app_config`. `get_config_content` and `get_config_info` stay unguarded (read-only).
 - **DocConvert RPC service.** Layer 4.5. Its `convert_files` method will need the guard; availability / scan queries are read-only.
 - **Collab wiring in `main.py`.** Layer 6 (startup) wires the actual Collab instance into the service classes when `--collab` flag is passed. Currently nothing sets `_collab` on a running LLMService — the tests explicitly assign `service._collab = _StubCollab(...)`. Production wiring lands with startup orchestration.
+
+### 4.5 — Settings RPC service — **delivered**
+
+Closes out the Layer 1 deferral. The Settings service is a narrow RPC surface for reading and writing user-editable config files, using the same `_check_localhost_only()` pattern on write/reload methods that Repo and LLMService got in 4.4.2.
+
+- `src/ac_dc/settings.py` — `Settings` class with seven RPC methods: `get_config_content(type_key)`, `get_config_info()`, `get_snippets()`, `get_review_snippets()` (all unguarded reads), `save_config_content(type_key, content)`, `reload_llm_config()`, `reload_app_config()` (all localhost-gated). Plus a static `is_reloadable(type_key)` helper for callers (tests, a future UI-side dispatcher) that want to know whether a save on a given type warrants a reload RPC.
+- **Whitelist enforcement.** Every type-taking method consults `CONFIG_TYPES` (imported from `ac_dc.config`). Unknown keys — including internal files like `commit.md` and `system_reminder.md` that are loaded by `ConfigManager` but deliberately excluded from the whitelist per specs4 — return a clean `{"error": "Unknown config type: ..."}` dict. Arbitrary filesystem paths never cross the RPC boundary.
+- **Direct file I/O, not via `_read_user_file`.** `ConfigManager._read_user_file` falls back to the bundle when the user file is missing. That's wrong for Settings — we want to present the user's actual on-disk state so the editor opens with what's really there (empty for missing files, not the bundle default silently reappearing). `get_config_content` reads directly from `config.config_dir / filename`; missing files return empty content, not an error (the next startup re-copies the bundle default anyway).
+- **Advisory JSON validation.** `save_config_content` writes first, then parses. Invalid JSON produces `{"status": "ok", "type": ..., "warning": "JSON parse error: ..."}` — the file is still written so users can save a partially-edited state and come back to finish. Rejecting malformed JSON at the write boundary would force users into external editors to recover.
+- **Write always creates parent directory.** A vanished config dir (manual `rm`, filesystem corruption) doesn't wedge saves — `mkdir(parents=True, exist_ok=True)` before the write re-creates it. Pinned by `test_save_creates_directory_if_missing`.
+- **Reload is separate from save.** Specs4 suggests "save automatically triggers reload" — but that dispatch belongs to the frontend (which can decide e.g. to skip reload if JSON validation failed). The service exposes `reload_llm_config` and `reload_app_config` as distinct RPC calls. `is_reloadable(type_key)` lets a caller query whether a type warrants a reload without having to hardcode the list.
+- `tests/test_settings.py` — 9 test classes, 37 tests covering construction (holds config reference, collab starts None), whitelist (all types resolve, unknown returns None, commit/system_reminder not in whitelist), `get_config_content` (reads shipped llm/system files, unknown type errors, commit not readable, missing user file returns empty content, allowed for non-localhost, allowed when collab raises), `get_config_info` (model names + config dir, allowed for non-localhost), snippets (code + review return non-empty lists with correct shape, allowed for non-localhost), `save_config_content` (overwrite, directory recreation, unknown-type rejected, commit-save rejected, valid JSON no warning, invalid JSON warns + writes, markdown never JSON-warns, localhost allowed, non-localhost rejected with file unchanged, fail-closed on raising collab), `reload_llm_config` (picks up on-disk changes, localhost allowed, non-localhost rejected, fail-closed), `reload_app_config` (same coverage matrix), `is_reloadable` (litellm/app are, prompts/snippets aren't, unknown isn't).
+
+Design points pinned by tests:
+
+- **Missing user file is not an error for reads.** `test_missing_user_file_returns_empty_content` deletes `system_extra.md` AND seeds the version marker to suppress the upgrade re-copy, then reads via the service. Returns `{"type": "system_extra", "content": ""}` — the Settings editor opens blank. Specs4 is explicit about this: "present the user's actual on-disk state, not silently show the bundle."
+- **JSON validation is advisory.** `test_save_invalid_json_warns_but_writes` verifies the file is written with the broken content AND the return carries a warning. Refusing to persist would block mid-edit state. The Settings UI checks for the warning and surfaces it to the user.
+- **Directory re-creation is defensive.** A pathological case, but cheap to handle — `mkdir(parents=True, exist_ok=True)` is a no-op in the common case and recovers from the rare one. Pinned so a future "cleanup" pass that removes the mkdir doesn't break the recovery path.
+- **Reads are genuinely unguarded.** Four methods (`get_config_content`, `get_config_info`, `get_snippets`, `get_review_snippets`) explicitly test the non-localhost path to prove the guard isn't there. Specs4's collaboration policy: "participants can browse, search, view." Config content is part of that.
+- **Fail-closed on collab exceptions.** If `is_caller_localhost()` itself raises, every mutating method returns restricted. Pinned by three separate `test_*_collab_raises_fails_closed` tests covering save, reload_llm, reload_app.
+- **`is_reloadable` is a pure query.** Static method, no state, no side effects. Tests pin the full reloadability matrix (litellm + app reloadable; prompts and snippets not reloadable) so a future refactor that accidentally adds a config type to `_RELOADABLE_TYPES` surfaces as a test failure.
+
+Open carried over:
+
+- **Layer 6 wiring.** `main.py` will construct the Settings service alongside Repo and LLMService, register it via `server.add_class(settings)`, and (in collab mode) set `settings._collab = collab_instance`. The collab reference is runtime-attached just like Repo's and LLMService's; in single-user mode `_collab` stays None and every caller is treated as localhost.
+- **DocConvert RPC service.** The other Layer 4 item — `convert_files` mutating, `scan_convertible_files` + `is_available` read-only. Same restriction pattern. Not in scope for this turn.
 
 ### 4.3 — Code review — **delivered**
 
