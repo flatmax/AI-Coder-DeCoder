@@ -270,6 +270,25 @@ _PDF_EXTENSIONS: frozenset[str] = frozenset({
 })
 
 
+# Extensions routed through the LibreOffice → PDF → PyMuPDF
+# pipeline when available. Falls back to format-specific paths
+# when LibreOffice or PyMuPDF is missing:
+#   .pptx → python-pptx fallback
+#   .odp  → markitdown fallback
+_LIBREOFFICE_EXTENSIONS: frozenset[str] = frozenset({
+    ".pptx",
+    ".odp",
+})
+
+
+# Timeout (seconds) for the `soffice --headless --convert-to
+# pdf` subprocess. LibreOffice launches its UNO listener lazily
+# and can take several seconds on first invocation; subsequent
+# invocations are faster. 120 seconds is generous but bounded —
+# prevents hung conversions from wedging the executor.
+_LIBREOFFICE_TIMEOUT_SECONDS = 120
+
+
 # Minimum number of "significant" drawings on a page before we
 # trigger SVG export alongside text extraction. Below this
 # threshold, the page is treated as text-only — no SVG produced.
@@ -972,11 +991,19 @@ class DocConvert:
         if suffix in _XLSX_EXTENSIONS:
             return self._convert_via_openpyxl(root, source_abs, rel_path)
 
+        # pptx / odp route through LibreOffice + PyMuPDF when
+        # available — gives proper text extraction plus per-page
+        # SVGs for diagrams. Falls back to format-specific paths
+        # when dependencies are missing.
+        if suffix in _LIBREOFFICE_EXTENSIONS:
+            return self._convert_via_libreoffice(
+                root, source_abs, rel_path
+            )
+
         # pptx uses the python-pptx fallback pipeline — renders
         # each slide as an SVG with embedded text, images, and
-        # tables. The primary path (LibreOffice + PyMuPDF, Pass
-        # A5) will supersede this for users with those deps
-        # installed.
+        # tables. Only reached when LibreOffice isn't available
+        # (the libreoffice path would have handled .pptx above).
         if suffix in _PPTX_EXTENSIONS:
             return self._convert_via_python_pptx(
                 root, source_abs, rel_path
@@ -1940,6 +1967,182 @@ class DocConvert:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # pptx / odp — LibreOffice → PDF → PyMuPDF pipeline (primary)
+    # ------------------------------------------------------------------
+
+    def _convert_via_libreoffice(
+        self,
+        root: Path,
+        source_abs: Path,
+        rel_path: str,
+    ) -> dict[str, Any]:
+        """Convert a pptx/odp via LibreOffice + PyMuPDF.
+
+        Spawns ``soffice --headless --convert-to pdf`` to produce
+        an intermediate PDF in a temp directory, then routes that
+        PDF through :meth:`_convert_via_pymupdf` with overridden
+        display name and hash source so the provenance header
+        records the original filename and hash.
+
+        Graceful fallback — when either LibreOffice or PyMuPDF is
+        unavailable, or when the soffice invocation fails for any
+        reason (timeout, non-zero exit, missing output), falls
+        back to the format-specific path:
+
+        - ``.pptx`` → :meth:`_convert_via_python_pptx`
+        - ``.odp`` → :meth:`_convert_via_markitdown`
+
+        Fallback rather than error because the user asked for a
+        conversion; producing some output (even lower-fidelity)
+        beats failing the whole file.
+
+        Temp directory lifetime is bounded by the method call —
+        ``TemporaryDirectory`` cleans up on exit regardless of
+        which branch returns.
+        """
+        # Pre-flight — check both deps before spending subprocess
+        # time. shutil.which is cheap and doesn't launch soffice.
+        soffice_path = shutil.which("soffice")
+        if soffice_path is None:
+            return self._libreoffice_fallback(
+                root, source_abs, rel_path,
+                reason="LibreOffice (soffice) not on PATH",
+            )
+        if not self._probe_import("fitz"):
+            return self._libreoffice_fallback(
+                root, source_abs, rel_path,
+                reason="PyMuPDF not installed",
+            )
+
+        # Run LibreOffice in a temp dir. The --outdir flag tells
+        # soffice where to write the PDF; it picks the filename
+        # from the source stem.
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory(
+            prefix="ac-dc-libreoffice-"
+        ) as tmpdir:
+            tmp_path = Path(tmpdir)
+            try:
+                proc = subprocess.run(
+                    [
+                        soffice_path,
+                        "--headless",
+                        "--convert-to", "pdf",
+                        "--outdir", str(tmp_path),
+                        str(source_abs),
+                    ],
+                    capture_output=True,
+                    timeout=_LIBREOFFICE_TIMEOUT_SECONDS,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                logger.debug(
+                    "LibreOffice timed out for %s; falling back",
+                    rel_path,
+                )
+                return self._libreoffice_fallback(
+                    root, source_abs, rel_path,
+                    reason="LibreOffice timed out",
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.debug(
+                    "LibreOffice subprocess failed for %s: %s; "
+                    "falling back",
+                    rel_path, exc,
+                )
+                return self._libreoffice_fallback(
+                    root, source_abs, rel_path,
+                    reason=f"LibreOffice launch failed: {exc}",
+                )
+
+            if proc.returncode != 0:
+                logger.debug(
+                    "LibreOffice exited %d for %s (stderr: %s); "
+                    "falling back",
+                    proc.returncode, rel_path,
+                    proc.stderr.strip() if proc.stderr else "",
+                )
+                return self._libreoffice_fallback(
+                    root, source_abs, rel_path,
+                    reason=(
+                        f"LibreOffice exited with code "
+                        f"{proc.returncode}"
+                    ),
+                )
+
+            # soffice names the output as {source_stem}.pdf in
+            # the --outdir. Find it rather than assuming.
+            expected_pdf = tmp_path / (source_abs.stem + ".pdf")
+            if not expected_pdf.is_file():
+                # Some locale / template configs produce
+                # differently-named output. Fall back to scanning
+                # the tmp dir for any .pdf.
+                candidates = list(tmp_path.glob("*.pdf"))
+                if not candidates:
+                    logger.debug(
+                        "LibreOffice produced no PDF for %s; "
+                        "falling back",
+                        rel_path,
+                    )
+                    return self._libreoffice_fallback(
+                        root, source_abs, rel_path,
+                        reason="LibreOffice produced no output",
+                    )
+                expected_pdf = candidates[0]
+
+            # Route through the PyMuPDF pipeline. source_abs
+            # stays as the original (.pptx/.odp) so output lands
+            # next to the original, not in the temp dir. The
+            # display_name and hash_source overrides ensure the
+            # provenance header records the original file.
+            return self._convert_via_pymupdf(
+                root=root,
+                source_abs=source_abs,
+                rel_path=rel_path,
+                pdf_source=expected_pdf,
+                display_name=source_abs.name,
+                hash_source=source_abs,
+            )
+
+    def _libreoffice_fallback(
+        self,
+        root: Path,
+        source_abs: Path,
+        rel_path: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Route to the format-specific fallback path.
+
+        ``.pptx`` falls back to python-pptx (per-slide SVG
+        rendering). ``.odp`` falls back to markitdown (plain-text
+        extraction). Both are lower-fidelity than the LibreOffice
+        path but produce SOMETHING — better than failing the
+        whole conversion.
+        """
+        logger.debug(
+            "LibreOffice path unavailable for %s: %s; "
+            "using format-specific fallback",
+            rel_path, reason,
+        )
+        suffix = source_abs.suffix.lower()
+        if suffix == ".pptx":
+            return self._convert_via_python_pptx(
+                root, source_abs, rel_path
+            )
+        if suffix == ".odp":
+            return self._convert_via_markitdown(
+                root, source_abs, rel_path
+            )
+        # Shouldn't happen — caller only dispatches extensions
+        # in _LIBREOFFICE_EXTENSIONS. Defensive.
+        return self._fail(
+            rel_path,
+            f"No fallback available for {suffix}",
+        )
+
+    # ------------------------------------------------------------------
     # pdf — PyMuPDF hybrid text + SVG pipeline
     # ------------------------------------------------------------------
 
@@ -1948,6 +2151,10 @@ class DocConvert:
         root: Path,
         source_abs: Path,
         rel_path: str,
+        *,
+        pdf_source: Path | None = None,
+        display_name: str | None = None,
+        hash_source: Path | None = None,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
 
@@ -1984,6 +2191,37 @@ class DocConvert:
         Fails with a per-file error when PyMuPDF isn't installed.
         Unlike xlsx (which falls back to markitdown), PyMuPDF is
         the only reliable PDF extractor — no fallback.
+
+        Parameters
+        ----------
+        root:
+            Repository root.
+        source_abs:
+            Absolute path used to compute the output location.
+            Pass A5b note — when converting via LibreOffice,
+            this remains the ORIGINAL source (.pptx/.odp) so the
+            output markdown lands next to the original, not next
+            to the intermediate PDF in the temp dir.
+        rel_path:
+            Relative path for per-file result reporting.
+        pdf_source:
+            Optional — when set, PyMuPDF opens this PDF instead
+            of `source_abs`. Used by Pass A5b to route an
+            intermediate PDF produced by LibreOffice through
+            the pipeline while keeping output paths anchored to
+            the original source.
+        display_name:
+            Optional — what appears in `source=` of the
+            provenance header. Defaults to `source_abs.name`.
+            Pass A5b uses this so a converted .pptx records
+            `source=deck.pptx`, not `source=deck.pdf`.
+        hash_source:
+            Optional — file to hash for the provenance header.
+            Defaults to `source_abs`. Pass A5b hashes the
+            original .pptx so re-running against an unchanged
+            source classifies as `current` regardless of whether
+            LibreOffice produces byte-identical intermediate
+            PDFs across runs (it doesn't — timestamps vary).
         """
         # Lazy import — PyMuPDF is optional in stripped-down
         # releases. Clean error with install hint on ImportError.
@@ -2007,19 +2245,34 @@ class DocConvert:
                 "Output path escapes repository root",
             )
 
-        # Hash source for provenance.
+        # Hash source for provenance. Use hash_source when given
+        # (A5b path) so the hash reflects the original file the
+        # user actually edits, not the intermediate PDF.
+        hash_target = hash_source if hash_source is not None else source_abs
         try:
-            source_hash = self._hash_file(source_abs)
+            source_hash = self._hash_file(hash_target)
         except OSError as exc:
             return self._fail(
                 rel_path, f"Source hash failed: {exc}"
             )
 
+        # Resolve display name for the provenance header. Defaults
+        # to the original source's basename so converted files
+        # carry the user-recognisable name, not the intermediate
+        # PDF's.
+        resolved_display_name = (
+            display_name if display_name is not None
+            else source_abs.name
+        )
+
         # Open the document. Broad catch — corrupt PDFs, wrong
         # version, encrypted without a password all produce
-        # various PyMuPDF exception types.
+        # various PyMuPDF exception types. When pdf_source is
+        # given, open that instead of the original source — the
+        # A5b path hands us an intermediate PDF to process.
+        open_target = pdf_source if pdf_source is not None else source_abs
         try:
-            doc = fitz.open(str(source_abs))
+            doc = fitz.open(str(open_target))
         except Exception as exc:
             return self._fail(
                 rel_path,
@@ -2035,6 +2288,7 @@ class DocConvert:
                 output_rel=output_rel,
                 source_hash=source_hash,
                 rel_path=rel_path,
+                display_name=resolved_display_name,
             )
         finally:
             # Always close — PyMuPDF holds file handles.
@@ -2052,12 +2306,18 @@ class DocConvert:
         output_rel: Path,
         source_hash: str,
         rel_path: str,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         """Walk the pages of an open PDF document and emit output.
 
         Split out from :meth:`_convert_via_pymupdf` so the
         `doc.close()` is guaranteed in the caller's finally
         block regardless of which branch we exit through.
+
+        ``display_name`` defaults to the original source's
+        basename when None — used by Pass A5b to override for
+        converted pptx/odp (the provenance header shows the
+        original filename, not the intermediate PDF's).
         """
         page_count = doc.page_count
         if page_count == 0:
@@ -2071,6 +2331,7 @@ class DocConvert:
                 markdown_text="(empty PDF)\n",
                 rel_path=rel_path,
                 artefacts=(),
+                display_name=display_name,
             )
 
         # Per-page filename width — 2 digits for small PDFs,
@@ -2165,6 +2426,7 @@ class DocConvert:
             markdown_text=markdown_text,
             rel_path=rel_path,
             artefacts=tuple(artefacts),
+            display_name=display_name,
         )
 
     def _process_pdf_page(
@@ -2547,6 +2809,7 @@ class DocConvert:
         markdown_text: str,
         rel_path: str,
         artefacts: tuple[str, ...],
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         """Write PDF pipeline output with provenance header.
 
@@ -2555,9 +2818,14 @@ class DocConvert:
         assets subdirectory — page SVGs AND externalized images
         — so the orphan-cleanup pass on re-conversion can diff
         against this list.
+
+        ``display_name`` defaults to ``source_abs.name`` — Pass
+        A5b overrides it so converted pptx/odp files record the
+        original filename in provenance, not the intermediate
+        PDF's.
         """
         provenance_line = self._build_provenance_header(
-            source_name=source_abs.name,
+            source_name=display_name or source_abs.name,
             source_hash=source_hash,
             images=artefacts,
         )
