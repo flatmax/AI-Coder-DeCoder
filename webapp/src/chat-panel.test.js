@@ -2472,3 +2472,607 @@ describe('ChatPanel cleanup', () => {
     expect(p._streamingContent).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Image paste
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel image paste', () => {
+  /**
+   * Build a fake ClipboardEvent with one or more image
+   * file items. The real ClipboardEvent constructor
+   * doesn't accept a clipboardData override, so we
+   * dispatch a CustomEvent and rely on the handler
+   * reading `event.clipboardData`. Lit's @paste binding
+   * attaches the handler to the element's addEventListener
+   * so a plain `new Event('paste')` with a custom
+   * property works fine.
+   */
+  function pasteEvent(items) {
+    const ev = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(ev, 'clipboardData', {
+      value: { items },
+      writable: false,
+    });
+    return ev;
+  }
+
+  function fakeImageItem(mime, content = 'image-bytes') {
+    return {
+      kind: 'file',
+      type: mime,
+      getAsFile() {
+        return new Blob([content], { type: mime });
+      },
+    };
+  }
+
+  it('paste of an image adds it to pending images', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.dispatchEvent(
+      pasteEvent([fakeImageItem('image/png')]),
+    );
+    // Wait for the async FileReader + state update.
+    await settle(p);
+    expect(p._pendingImages).toHaveLength(1);
+    expect(p._pendingImages[0]).toMatch(/^data:image\/png;/);
+  });
+
+  it('paste of multiple images adds all of them', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.dispatchEvent(
+      pasteEvent([
+        fakeImageItem('image/png', 'first'),
+        fakeImageItem('image/jpeg', 'second'),
+      ]),
+    );
+    await settle(p);
+    expect(p._pendingImages).toHaveLength(2);
+  });
+
+  it('text paste falls through (does not call preventDefault)', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    const ev = pasteEvent([
+      { kind: 'string', type: 'text/plain' },
+    ]);
+    const preventSpy = vi.spyOn(ev, 'preventDefault');
+    ta.dispatchEvent(ev);
+    await settle(p);
+    expect(preventSpy).not.toHaveBeenCalled();
+    expect(p._pendingImages).toEqual([]);
+  });
+
+  it('image paste calls preventDefault', async () => {
+    // Consuming the paste prevents the browser from
+    // additionally inserting `[object Object]` into the
+    // textarea.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    const ev = pasteEvent([fakeImageItem('image/png')]);
+    const preventSpy = vi.spyOn(ev, 'preventDefault');
+    ta.dispatchEvent(ev);
+    await settle(p);
+    expect(preventSpy).toHaveBeenCalled();
+  });
+
+  it('dedup: same image pasted twice only appears once', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.dispatchEvent(
+      pasteEvent([fakeImageItem('image/png', 'SAME')]),
+    );
+    await settle(p);
+    ta.dispatchEvent(
+      pasteEvent([fakeImageItem('image/png', 'SAME')]),
+    );
+    await settle(p);
+    expect(p._pendingImages).toHaveLength(1);
+  });
+
+  it('emits a warning toast when over the count limit', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      // Paste 6 distinct images — limit is 5.
+      for (let i = 0; i < 6; i += 1) {
+        ta.dispatchEvent(
+          pasteEvent([
+            fakeImageItem('image/png', `img-${i}`),
+          ]),
+        );
+        await settle(p);
+      }
+      expect(p._pendingImages).toHaveLength(5);
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toMatch(/Maximum.*5/);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pending images rendering
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel pending images', () => {
+  it('renders thumbnail strip when non-empty', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._pendingImages = [
+      'data:image/png;base64,AAA',
+      'data:image/jpeg;base64,BBB',
+    ];
+    await settle(p);
+    const thumbs = p.shadowRoot.querySelectorAll('.pending-image');
+    expect(thumbs).toHaveLength(2);
+    expect(thumbs[0].src).toContain('data:image/png');
+    expect(thumbs[1].src).toContain('data:image/jpeg');
+  });
+
+  it('does not render strip when empty', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.pending-images'),
+    ).toBeNull();
+  });
+
+  it('remove button removes the image', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._pendingImages = [
+      'data:image/png;base64,A',
+      'data:image/png;base64,B',
+      'data:image/png;base64,C',
+    ];
+    await settle(p);
+    const removeButtons = p.shadowRoot.querySelectorAll(
+      '.pending-image-remove',
+    );
+    removeButtons[1].click();
+    await settle(p);
+    expect(p._pendingImages).toEqual([
+      'data:image/png;base64,A',
+      'data:image/png;base64,C',
+    ]);
+  });
+
+  it('clicking thumbnail opens lightbox', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._pendingImages = ['data:image/png;base64,XYZ'];
+    await settle(p);
+    p.shadowRoot.querySelector('.pending-image').click();
+    await settle(p);
+    expect(p._lightboxImage).toBe('data:image/png;base64,XYZ');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Send with images
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel send with images', () => {
+  it('passes pending images to chat_streaming RPC', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'look at this';
+    p._pendingImages = ['data:image/png;base64,PIC'];
+    await p._send();
+    await settle(p);
+    // Positional args: requestId, message, files, images.
+    const [, message, files, images] = started.mock.calls[0];
+    expect(message).toBe('look at this');
+    expect(files).toEqual([]);
+    expect(images).toEqual(['data:image/png;base64,PIC']);
+  });
+
+  it('clears pending images after send', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    p._pendingImages = ['data:image/png;base64,A'];
+    await p._send();
+    await settle(p);
+    expect(p._pendingImages).toEqual([]);
+  });
+
+  it('optimistic user message carries images', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'see';
+    p._pendingImages = ['data:image/png;base64,A'];
+    await p._send();
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+    expect(p.messages[0].role).toBe('user');
+    expect(p.messages[0].images).toEqual([
+      'data:image/png;base64,A',
+    ]);
+  });
+
+  it('image-only send is allowed (empty text + image)', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = '';
+    p._pendingImages = ['data:image/png;base64,A'];
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledOnce();
+    const [, message, , images] = started.mock.calls[0];
+    expect(message).toBe('');
+    expect(images).toEqual(['data:image/png;base64,A']);
+  });
+
+  it('send button enabled with images even when text is empty', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    // No text, no images — button disabled.
+    let btn = p.shadowRoot.querySelector('.send-button');
+    expect(btn.disabled).toBe(true);
+    // Add an image — button enables.
+    p._pendingImages = ['data:image/png;base64,A'];
+    await settle(p);
+    btn = p.shadowRoot.querySelector('.send-button');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('image is not added to input history (only text)', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Image-only send — text is empty.
+    p._input = '';
+    p._pendingImages = ['data:image/png;base64,A'];
+    await p._send();
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    expect(history._entries).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Message image rendering
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel message images', () => {
+  it('renders thumbnails in user messages with images', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: 'see this',
+          images: [
+            'data:image/png;base64,A',
+            'data:image/png;base64,B',
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    const thumbs = p.shadowRoot.querySelectorAll('.message-image');
+    expect(thumbs).toHaveLength(2);
+  });
+
+  it('does not render image section when images is empty', async () => {
+    const p = mountPanel({
+      messages: [
+        { role: 'user', content: 'plain text message' },
+      ],
+    });
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.message-images'),
+    ).toBeNull();
+  });
+
+  it('clicking a message thumbnail opens the lightbox', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: '',
+          images: ['data:image/png;base64,XYZ'],
+        },
+      ],
+    });
+    await settle(p);
+    p.shadowRoot.querySelector('.message-image').click();
+    await settle(p);
+    expect(p._lightboxImage).toBe('data:image/png;base64,XYZ');
+  });
+
+  it('re-attach button adds image to pending and emits toast', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: 'earlier',
+          images: ['data:image/png;base64,REATTACH'],
+        },
+      ],
+    });
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p.shadowRoot
+        .querySelector('.message-image-reattach')
+        .click();
+      await settle(p);
+      expect(p._pendingImages).toEqual([
+        'data:image/png;base64,REATTACH',
+      ]);
+      const successes = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'success');
+      expect(successes.length).toBe(1);
+      expect(successes[0].message).toContain('attached');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('re-attach of already-attached image emits neutral toast', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: '',
+          images: ['data:image/png;base64,SAME'],
+        },
+      ],
+    });
+    await settle(p);
+    // Pre-attach to pending.
+    p._pendingImages = ['data:image/png;base64,SAME'];
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p.shadowRoot
+        .querySelector('.message-image-reattach')
+        .click();
+      await settle(p);
+      // No duplicate — still one image.
+      expect(p._pendingImages).toHaveLength(1);
+      const infos = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'info');
+      expect(infos.length).toBe(1);
+      expect(infos[0].message).toContain('already attached');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('re-attach click does not open the lightbox', async () => {
+    // The image's own click handler opens the lightbox;
+    // the button stopPropagation prevents that. Pinned
+    // because without stopPropagation, users would see
+    // the lightbox flash open every time they clicked
+    // re-attach.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: '',
+          images: ['data:image/png;base64,X'],
+        },
+      ],
+    });
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.message-image-reattach')
+      .click();
+    await settle(p);
+    expect(p._lightboxImage).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lightbox
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel lightbox', () => {
+  it('renders when _lightboxImage is set', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.lightbox-backdrop'),
+    ).toBeTruthy();
+    expect(
+      p.shadowRoot.querySelector('.lightbox-image').src,
+    ).toContain('base64,X');
+  });
+
+  it('backdrop click closes the lightbox', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    const backdrop = p.shadowRoot.querySelector(
+      '.lightbox-backdrop',
+    );
+    backdrop.click();
+    await settle(p);
+    expect(p._lightboxImage).toBeNull();
+  });
+
+  it('click on content does not close lightbox', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    p.shadowRoot.querySelector('.lightbox-content').click();
+    await settle(p);
+    expect(p._lightboxImage).toBe('data:image/png;base64,X');
+  });
+
+  it('Escape closes the lightbox', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    const backdrop = p.shadowRoot.querySelector(
+      '.lightbox-backdrop',
+    );
+    backdrop.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._lightboxImage).toBeNull();
+  });
+
+  it('Re-attach button attaches and closes', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      // Find the re-attach button by its text/title.
+      const buttons = p.shadowRoot.querySelectorAll(
+        '.lightbox-button',
+      );
+      const reattach = Array.from(buttons).find((b) =>
+        b.textContent.includes('Re-attach'),
+      );
+      reattach.click();
+      await settle(p);
+      expect(p._pendingImages).toEqual([
+        'data:image/png;base64,X',
+      ]);
+      // Lightbox closed after re-attach.
+      expect(p._lightboxImage).toBeNull();
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('Close button closes', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._lightboxImage = 'data:image/png;base64,X';
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.lightbox-button',
+    );
+    const close = Array.from(buttons).find((b) =>
+      b.textContent.includes('Close'),
+    );
+    close.click();
+    await settle(p);
+    expect(p._lightboxImage).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multimodal message normalisation on session-changed
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel multimodal session-changed', () => {
+  it('extracts images from multimodal content blocks', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image_url',
+              image_url: {
+                url: 'data:image/png;base64,FROMSESSION',
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+    expect(p.messages[0].content).toBe('look at this');
+    expect(p.messages[0].images).toEqual([
+      'data:image/png;base64,FROMSESSION',
+    ]);
+  });
+
+  it('preserves pre-existing images field if present', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    // Server may send a flattened shape too — string
+    // content plus an images field. Preserve it.
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'hi',
+          images: ['data:image/png;base64,ALREADY'],
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages[0].images).toEqual([
+      'data:image/png;base64,ALREADY',
+    ]);
+  });
+
+  it('messages without images get no images field', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [{ role: 'user', content: 'plain text' }],
+    });
+    await settle(p);
+    expect(p.messages[0].images).toBeUndefined();
+  });
+});

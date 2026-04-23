@@ -71,6 +71,13 @@ import {
 import { renderEditCard } from './edit-block-render.js';
 import { findFileMentions } from './file-mentions.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
+import {
+  MAX_IMAGES_PER_MESSAGE,
+  MAX_IMAGE_BYTES,
+  estimateDataUriBytes,
+  extractImagesFromClipboard,
+  normalizeMessageContent,
+} from './image-utils.js';
 import './history-browser.js';
 import './input-history.js';
 
@@ -186,6 +193,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * since the server returns mode-aware snippets.
      */
     _snippets: { type: Array, state: true },
+    /**
+     * Images currently attached to the composition, as
+     * data URIs. Accumulated from pastes and re-attaches;
+     * cleared when the message is sent. Capped at
+     * MAX_IMAGES_PER_MESSAGE; over-limit adds produce a
+     * warning toast and are ignored.
+     */
+    _pendingImages: { type: Array, state: true },
+    /**
+     * When non-null, the lightbox is open showing this data
+     * URI. Set by clicking a message thumbnail or a pending
+     * preview; cleared by Escape or backdrop click.
+     */
+    _lightboxImage: { type: String, state: true },
   };
 
   static styles = css`
@@ -603,6 +624,151 @@ export class ChatPanel extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.12);
       text-decoration: underline;
     }
+
+    /* Pending images strip below the textarea, shown while
+     * composing. Thumbnails with a remove button overlay. */
+    .pending-images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      padding: 0.5rem 0;
+    }
+    .pending-image-wrapper {
+      position: relative;
+      width: 64px;
+      height: 64px;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+    }
+    .pending-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      cursor: pointer;
+    }
+    .pending-image-remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      background: rgba(13, 17, 23, 0.85);
+      border: 1px solid rgba(240, 246, 252, 0.3);
+      border-radius: 50%;
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.75rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .pending-image-remove:hover {
+      background: rgba(248, 81, 73, 0.9);
+      border-color: rgba(248, 81, 73, 1);
+    }
+
+    /* Image thumbnails inside user message cards. Same
+     * shape as pending images but with a re-attach button
+     * (📎) instead of remove. */
+    .message-images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .message-image-wrapper {
+      position: relative;
+      width: 80px;
+      height: 80px;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+    }
+    .message-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      cursor: pointer;
+    }
+    .message-image-reattach {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      background: rgba(13, 17, 23, 0.85);
+      border: 1px solid rgba(240, 246, 252, 0.3);
+      border-radius: 3px;
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.7rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 120ms ease;
+    }
+    .message-image-wrapper:hover .message-image-reattach {
+      opacity: 1;
+    }
+    .message-image-reattach:hover {
+      background: rgba(88, 166, 255, 0.9);
+      border-color: var(--accent-primary, #58a6ff);
+      color: #fff;
+    }
+
+    /* Lightbox overlay — full-screen with centered content.
+     * z-index above the dialog so it doesn't disappear
+     * behind the chat panel. */
+    .lightbox-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      outline: none;
+    }
+    .lightbox-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      max-width: 100%;
+      max-height: 100%;
+    }
+    .lightbox-image {
+      max-width: 100%;
+      max-height: calc(100vh - 8rem);
+      border-radius: 4px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    }
+    .lightbox-actions {
+      display: flex;
+      gap: 0.75rem;
+    }
+    .lightbox-button {
+      padding: 0.5rem 1rem;
+      background: rgba(22, 27, 34, 0.9);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.875rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .lightbox-button:hover {
+      background: rgba(240, 246, 252, 0.08);
+    }
   `;
 
   constructor() {
@@ -617,6 +783,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // on mount when the user had it open previously.
     this._snippetDrawerOpen = _loadDrawerOpen();
     this._snippets = [];
+    this._pendingImages = [];
+    this._lightboxImage = null;
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -651,6 +819,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
     this._onMessagesClick = this._onMessagesClick.bind(this);
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
+    this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -713,6 +882,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // manages `_autoScroll`.
     if (this._autoScroll) {
       this._scrollToBottom();
+    }
+    // Focus the lightbox backdrop when it opens so Escape
+    // works without the user having to click first. Using
+    // `changedProps.has('_lightboxImage')` checks the
+    // transition, not the current value, so we don't
+    // re-focus on every render while the lightbox is open.
+    if (
+      changedProps.has('_lightboxImage') &&
+      this._lightboxImage &&
+      !changedProps.get('_lightboxImage')
+    ) {
+      this.updateComplete.then(() => {
+        const backdrop =
+          this.shadowRoot?.querySelector('.lightbox-backdrop');
+        if (backdrop) backdrop.focus();
+      });
     }
   }
 
@@ -808,11 +993,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Normalise to our internal shape — messages from the
     // backend carry extra metadata we ignore in Phase 2b
     // (files, edit_results, etc.). Phase 2d renders those.
-    this.messages = msgs.map((m) => ({
-      role: m.role,
-      content: m.content,
-      ...(m.system_event ? { system_event: true } : {}),
-    }));
+    //
+    // Multimodal messages (images) arrive as an array of
+    // `{type: 'text'/'image_url', ...}` blocks; normalize to
+    // `{content: <string>, images: [<data uri>]}` so render
+    // code has one shape to handle. The msg.images field
+    // passed in may also be a preexisting array (when the
+    // server sends it directly); prefer that.
+    this.messages = msgs.map((m) => {
+      const normalized = normalizeMessageContent(m);
+      const images = Array.isArray(m.images)
+        ? m.images
+        : normalized.images;
+      return {
+        role: m.role,
+        content: normalized.content,
+        ...(images.length > 0 ? { images } : {}),
+        ...(m.system_event ? { system_event: true } : {}),
+      };
+    });
     // Reset transient state — a session switch cancels any
     // in-flight stream from the caller's perspective (the
     // backend's stream may still be running but we're no
@@ -956,7 +1155,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   async _send() {
     const text = this._input.trim();
-    if (!text) return;
+    // Either text or at least one image must be present.
+    // An image-only message is valid ("look at this") —
+    // the LLM receives it as a user message with just the
+    // image content.
+    if (!text && this._pendingImages.length === 0) return;
     if (this._streaming) return;
     if (!this.rpcConnected) return;
 
@@ -964,22 +1167,40 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._currentRequestId = requestId;
     this._streams.set(requestId, { content: '', sticky: true });
 
+    // Snapshot pending images BEFORE we clear the array.
+    // The optimistic message shows them; the RPC receives
+    // them; the send state clears them regardless of
+    // success. Deliberate symmetry: even if the RPC
+    // rejects, the user doesn't want their images
+    // reappearing in the pending strip (the error message
+    // tells them what happened).
+    const images = this._pendingImages.slice();
+
     // Record this message in input history before we clear
     // the textarea — up-arrow recall wants the full text,
     // not the empty string we're about to replace it with.
-    const history = this.shadowRoot?.querySelector(
-      'ac-input-history',
-    );
-    if (history) history.addEntry(text);
+    // Only text goes into recall; images don't round-trip
+    // through a plain textarea.
+    if (text) {
+      const history = this.shadowRoot?.querySelector(
+        'ac-input-history',
+      );
+      if (history) history.addEntry(text);
+    }
 
     // Add the user message optimistically. The server will
     // broadcast `userMessage` shortly; our handler detects the
-    // in-flight request and skips the echo.
-    this.messages = [
-      ...this.messages,
-      { role: 'user', content: text },
-    ];
+    // in-flight request and skips the echo. Images are
+    // attached to the optimistic message so they render
+    // immediately in the card.
+    const optimistic = {
+      role: 'user',
+      content: text,
+      ...(images.length > 0 ? { images } : {}),
+    };
+    this.messages = [...this.messages, optimistic];
     this._input = '';
+    this._pendingImages = [];
     this._streaming = true;
     this._streamingContent = '';
     this._autoScroll = true;
@@ -998,6 +1219,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
         'LLMService.chat_streaming',
         requestId,
         text,
+        // Passed positionally as the 4th arg to match the
+        // backend's `chat_streaming(request_id, message,
+        // files=None, images=None)` signature. Phase 2c's
+        // selected-files list lives on this component
+        // as `selectedFiles` (set by the files-tab
+        // orchestrator); passing it through keeps the
+        // backend aware of the current context.
+        Array.isArray(this.selectedFiles)
+          ? this.selectedFiles
+          : [],
+        images,
       );
       // Response is {status: "started"}. Chunks and completion
       // arrive via server-push events; nothing more to do here.
@@ -1179,6 +1411,130 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const ta = event.target;
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+  }
+
+  /**
+   * Handle paste events on the textarea. If the clipboard
+   * contains image items, consume them and add to the
+   * pending list. Text pastes fall through to the textarea's
+   * native behaviour — don't preventDefault unless we
+   * actually captured at least one image.
+   *
+   * Size and count limits are enforced in `_addPendingImage`,
+   * which is the single code path shared with re-attach.
+   */
+  async _onInputPaste(event) {
+    const cb = event.clipboardData;
+    if (!cb) return;
+    const images = await extractImagesFromClipboard(cb);
+    if (images.length === 0) return;
+    // Consume the paste event so the browser doesn't
+    // additionally try to paste a `[object Object]` string
+    // representation of the image into the textarea.
+    event.preventDefault();
+    for (const dataUri of images) {
+      this._addPendingImage(dataUri);
+    }
+  }
+
+  /**
+   * Add a data URI to the pending images list. Shared
+   * between paste and re-attach paths. Enforces:
+   *   - MAX_IMAGES_PER_MESSAGE — over the cap, emit a
+   *     warning toast and drop the image
+   *   - MAX_IMAGE_BYTES — oversized images rejected with
+   *     a toast
+   *   - Dedup by exact data URI — identical paste twice
+   *     is probably accidental, so silently drop the
+   *     second
+   *
+   * Returns true if the image was added, false if
+   * rejected (for caller-facing feedback, though current
+   * callers don't use the return).
+   */
+  _addPendingImage(dataUri) {
+    if (typeof dataUri !== 'string' || !dataUri) return false;
+    // Already attached? Silently skip — common case is
+    // the user pasting the same screenshot twice.
+    if (this._pendingImages.includes(dataUri)) return false;
+    // At the cap? Warn and drop.
+    if (this._pendingImages.length >= MAX_IMAGES_PER_MESSAGE) {
+      this._emitToast(
+        `Maximum ${MAX_IMAGES_PER_MESSAGE} images per message`,
+        'warning',
+      );
+      return false;
+    }
+    // Over size? Warn and drop.
+    const bytes = estimateDataUriBytes(dataUri);
+    if (bytes > MAX_IMAGE_BYTES) {
+      const mb = Math.round(MAX_IMAGE_BYTES / (1024 * 1024));
+      this._emitToast(
+        `Image exceeds ${mb} MiB limit`,
+        'warning',
+      );
+      return false;
+    }
+    this._pendingImages = [...this._pendingImages, dataUri];
+    return true;
+  }
+
+  /**
+   * Remove a pending image by index. Called by the
+   * thumbnail strip's per-image X button.
+   */
+  _removePendingImage(index) {
+    if (index < 0 || index >= this._pendingImages.length) return;
+    this._pendingImages = [
+      ...this._pendingImages.slice(0, index),
+      ...this._pendingImages.slice(index + 1),
+    ];
+  }
+
+  /**
+   * Re-attach an image from a past message to the current
+   * composition. Goes through the same `_addPendingImage`
+   * path so limit checks and dedup apply uniformly.
+   * Emits a confirmation toast on success since the
+   * visual feedback (image appears in thumbnail strip
+   * below textarea) may not be visible if the user is
+   * scrolled up in the message list. If the image was
+   * already attached, gives neutral feedback so the
+   * click doesn't feel ignored; the over-limit case
+   * already emitted its own warning toast from inside
+   * `_addPendingImage`.
+   */
+  _reattachImage(dataUri) {
+    const wasAlreadyAttached = this._pendingImages.includes(dataUri);
+    if (this._addPendingImage(dataUri)) {
+      this._emitToast('Image attached', 'success');
+    } else if (wasAlreadyAttached) {
+      this._emitToast('Image already attached', 'info');
+    }
+  }
+
+  _emitToast(message, type = 'info') {
+    window.dispatchEvent(
+      new CustomEvent('ac-toast', {
+        detail: { message, type },
+        bubbles: false,
+      }),
+    );
+  }
+
+  _openLightbox(dataUri) {
+    this._lightboxImage = dataUri;
+  }
+
+  _closeLightbox() {
+    this._lightboxImage = null;
+  }
+
+  _onLightboxKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._closeLightbox();
+    }
   }
 
   _onInputKeyDown(event) {
@@ -1399,6 +1755,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
           @history-select=${this._onHistorySelect}
           @history-cancel=${this._onHistoryCancel}
         ></ac-input-history>
+        ${this._pendingImages.length > 0
+          ? this._renderPendingImages()
+          : ''}
         <div class="input-row">
           <textarea
             class="input-textarea"
@@ -1407,6 +1766,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
             ?disabled=${!this.rpcConnected || this._streaming}
             @input=${this._onInputChange}
             @keydown=${this._onInputKeyDown}
+            @paste=${this._onInputPaste}
             aria-label="Message input"
           ></textarea>
           ${this._streaming
@@ -1420,7 +1780,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
             : html`<button
                 class="send-button"
                 ?disabled=${!this.rpcConnected ||
-                !this._input.trim()}
+                (!this._input.trim() &&
+                  this._pendingImages.length === 0)}
                 @click=${this._send}
                 aria-label="Send message"
               >
@@ -1433,6 +1794,88 @@ export class ChatPanel extends RpcMixin(LitElement) {
         @close=${this._onHistoryClose}
         @session-loaded=${this._onHistorySessionLoaded}
       ></ac-history-browser>
+      ${this._lightboxImage
+        ? this._renderLightbox()
+        : ''}
+    `;
+  }
+
+  _renderPendingImages() {
+    return html`
+      <div class="pending-images" role="list"
+        aria-label="Attached images">
+        ${this._pendingImages.map(
+          (dataUri, i) => html`
+            <div class="pending-image-wrapper" role="listitem">
+              <img
+                class="pending-image"
+                src=${dataUri}
+                alt=""
+                @click=${() => this._openLightbox(dataUri)}
+                title="Click to view, × to remove"
+              />
+              <button
+                class="pending-image-remove"
+                @click=${() => this._removePendingImage(i)}
+                aria-label="Remove image"
+                title="Remove image"
+              >
+                ×
+              </button>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  _renderLightbox() {
+    // Inline overlay rather than a separate component —
+    // simple enough that the extra file would be overkill.
+    // Focus the backdrop so Escape works without the user
+    // having to click first.
+    return html`
+      <div
+        class="lightbox-backdrop"
+        tabindex="0"
+        @click=${(e) => {
+          // Close on backdrop click but not on clicks
+          // inside the content. Check target === currentTarget
+          // so the content's own click doesn't bubble up
+          // and dismiss.
+          if (e.target === e.currentTarget) this._closeLightbox();
+        }}
+        @keydown=${this._onLightboxKeyDown}
+        aria-modal="true"
+        role="dialog"
+      >
+        <div class="lightbox-content">
+          <img
+            class="lightbox-image"
+            src=${this._lightboxImage}
+            alt=""
+          />
+          <div class="lightbox-actions">
+            <button
+              class="lightbox-button"
+              @click=${() => {
+                this._reattachImage(this._lightboxImage);
+                this._closeLightbox();
+              }}
+              title="Re-attach this image to your message"
+            >
+              📎 Re-attach
+            </button>
+            <button
+              class="lightbox-button"
+              @click=${this._closeLightbox}
+              title="Close (Escape)"
+            >
+              ✕ Close
+            </button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -1467,10 +1910,47 @@ export class ChatPanel extends RpcMixin(LitElement) {
         </div>
       `;
     }
+    const images = Array.isArray(msg.images) ? msg.images : [];
     return html`
       <div class="message-card ${roleClass}">
         <div class="role-label">${roleLabel}</div>
         ${bodyHtml}
+        ${images.length > 0
+          ? this._renderMessageImages(images)
+          : ''}
+      </div>
+    `;
+  }
+
+  _renderMessageImages(images) {
+    return html`
+      <div class="message-images" role="list">
+        ${images.map(
+          (dataUri) => html`
+            <div class="message-image-wrapper" role="listitem">
+              <img
+                class="message-image"
+                src=${dataUri}
+                alt=""
+                @click=${() => this._openLightbox(dataUri)}
+                title="Click to view"
+              />
+              <button
+                class="message-image-reattach"
+                @click=${(e) => {
+                  // Don't also open the lightbox from the
+                  // click-through on the image itself.
+                  e.stopPropagation();
+                  this._reattachImage(dataUri);
+                }}
+                aria-label="Re-attach image to your message"
+                title="Re-attach to composition"
+              >
+                📎
+              </button>
+            </div>
+          `,
+        )}
       </div>
     `;
   }
