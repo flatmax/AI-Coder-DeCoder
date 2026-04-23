@@ -1282,6 +1282,158 @@ describe('ChatPanel user-message event', () => {
 });
 
 // ---------------------------------------------------------------------------
+// New session button
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel new-session button', () => {
+  it('renders the button', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.new-session-button');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain('New session');
+  });
+
+  it('is disabled when RPC is not connected', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.new-session-button');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('is enabled when RPC is connected and not streaming', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.new-session-button');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('is disabled during streaming', async () => {
+    // Specs4 says starting a new session cancels in-flight
+    // streams, but we gate at the UI level — the user
+    // cancels explicitly first. Matches the pattern where
+    // destructive operations need a clean state.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.new-session-button');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('calls LLMService.new_session on click', async () => {
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: 'sess_new' });
+    publishFakeRpc({ 'LLMService.new_session': newSession });
+    const p = mountPanel();
+    await settle(p);
+    p.shadowRoot.querySelector('.new-session-button').click();
+    await settle(p);
+    expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  it('does not modify local message list directly on click', async () => {
+    // The server's `sessionChanged` broadcast is what
+    // clears the message list. The click alone must
+    // NOT mutate messages — otherwise a failed RPC
+    // would leave the UI in a spuriously-cleared state.
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: 'sess_new' });
+    publishFakeRpc({ 'LLMService.new_session': newSession });
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'existing' }],
+    });
+    await settle(p);
+    p.shadowRoot.querySelector('.new-session-button').click();
+    await settle(p);
+    // Messages still there — broadcast hasn't arrived.
+    expect(p.messages).toHaveLength(1);
+    expect(p.messages[0].content).toBe('existing');
+  });
+
+  it('session-changed broadcast after click clears messages', async () => {
+    // End-to-end: click the button, simulate the server
+    // broadcast, messages clear. Proves the button + the
+    // existing `session-changed` handler compose correctly.
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: 'sess_new' });
+    publishFakeRpc({ 'LLMService.new_session': newSession });
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'before' }],
+    });
+    await settle(p);
+    p.shadowRoot.querySelector('.new-session-button').click();
+    await settle(p);
+    // Server responds — the AppShell would normally
+    // translate `sessionChanged` RPC into this window
+    // event. Simulate it directly.
+    pushEvent('session-changed', {
+      session_id: 'sess_new',
+      messages: [],
+    });
+    await settle(p);
+    expect(p.messages).toEqual([]);
+  });
+
+  it('RPC failure is logged but does not crash', async () => {
+    const newSession = vi
+      .fn()
+      .mockRejectedValue(new Error('server down'));
+    publishFakeRpc({ 'LLMService.new_session': newSession });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'user', content: 'existing' }],
+      });
+      await settle(p);
+      p.shadowRoot.querySelector('.new-session-button').click();
+      await settle(p);
+      // Messages intact — the failure didn't trigger
+      // any local mutation.
+      expect(p.messages).toHaveLength(1);
+      // Error logged.
+      expect(consoleSpy).toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('clicking while streaming is guarded at the method level', async () => {
+    // Double-check the method guard, not just the
+    // disabled attribute. Someone could call _onNewSession
+    // programmatically (or a future test could mock a
+    // different trigger) — the method must refuse to
+    // proceed regardless.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: 'sess_new' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': started,
+      'LLMService.new_session': newSession,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Now try to start a new session — should be a no-op.
+    await p._onNewSession();
+    expect(newSession).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Session changes
 // ---------------------------------------------------------------------------
 

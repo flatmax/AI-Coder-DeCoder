@@ -271,6 +271,52 @@ export class ChatPanel extends RpcMixin(LitElement) {
       padding: 0.75rem 1rem;
       background: rgba(13, 17, 23, 0.6);
     }
+    .action-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      min-height: 1.75rem;
+    }
+    .action-bar .spacer {
+      flex: 1;
+    }
+    .action-bar .action-divider {
+      width: 1px;
+      height: 1.25rem;
+      background: rgba(240, 246, 252, 0.15);
+      flex-shrink: 0;
+    }
+    .action-group {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .action-button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.25rem 0.5rem;
+      font-size: 0.8125rem;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .action-button:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.1);
+    }
+    .action-button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .action-button:disabled:hover {
+      background: transparent;
+      border-color: transparent;
+    }
     .input-row {
       display: flex;
       gap: 0.5rem;
@@ -742,6 +788,37 @@ export class ChatPanel extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Start a new session. The server generates a new
+   * session ID, clears history, and broadcasts
+   * `sessionChanged` with an empty messages array. Our
+   * `_onSessionChanged` handler then resets the message
+   * list and streaming state — so this method is
+   * responsibility-light: call the RPC, trust the
+   * broadcast to clean up.
+   *
+   * Disabled during streaming to avoid racing against
+   * an in-flight stream. The spec-level contract says
+   * starting a new session "cancels any in-flight
+   * stream from the caller's perspective", but we
+   * prefer to gate at the UI layer rather than
+   * abandoning a stream mid-flight. User cancels
+   * explicitly via the Stop button first, then starts
+   * a new session.
+   */
+  async _onNewSession() {
+    if (this._streaming) return;
+    if (!this.rpcConnected) return;
+    try {
+      await this.rpcExtract('LLMService.new_session');
+      // The server's `sessionChanged` broadcast is what
+      // actually clears our message list. No local
+      // state to update here.
+    } catch (err) {
+      console.error('[chat] new_session failed', err);
+    }
+  }
+
   // ---------------------------------------------------------------
   // Input handling
   // ---------------------------------------------------------------
@@ -857,6 +934,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
           </div>`
         : ''}
       <div class="input-area">
+        <div class="action-bar" role="toolbar">
+          <div class="spacer"></div>
+          <div class="action-divider" aria-hidden="true"></div>
+          <div class="action-group">
+            <button
+              class="action-button new-session-button"
+              ?disabled=${!this.rpcConnected || this._streaming}
+              @click=${this._onNewSession}
+              aria-label="Start a new session"
+              title="New session (clears the conversation)"
+            >
+              ✨ New session
+            </button>
+          </div>
+        </div>
         <div class="input-row">
           <textarea
             class="input-textarea"
