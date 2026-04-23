@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 
 from ac_dc.config import ConfigManager
+from ac_dc.context_manager import Mode
 from ac_dc.history_compactor import TopicBoundary
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm_service import LLMService, _build_topic_detector
@@ -885,6 +886,7 @@ class TestStateSnapshot:
             "repo_name",
             "init_complete",
             "mode",
+            "cross_ref_enabled",
         }
 
     def test_messages_is_copy(
@@ -906,6 +908,236 @@ class TestStateSnapshot:
         state = service.get_current_state()
         state["selected_files"].append("fake.md")
         assert service.get_current_state()["selected_files"] == ["a.md"]
+
+
+# ---------------------------------------------------------------------------
+# Mode switching — Layer 3.10
+# ---------------------------------------------------------------------------
+
+
+class TestMode:
+    """Mode switching, cross-reference toggle, state snapshot fields."""
+
+    def test_get_mode_default_shape(
+        self, service: LLMService
+    ) -> None:
+        """get_mode returns the documented shape in default state."""
+        result = service.get_mode()
+        assert result == {
+            "mode": "code",
+            "doc_index_ready": False,
+            "doc_index_building": False,
+            "cross_ref_ready": False,
+            "cross_ref_enabled": False,
+        }
+
+    def test_state_snapshot_includes_cross_ref(
+        self, service: LLMService
+    ) -> None:
+        """get_current_state carries cross_ref_enabled field."""
+        state = service.get_current_state()
+        assert "cross_ref_enabled" in state
+        assert state["cross_ref_enabled"] is False
+
+    def test_switch_to_same_mode_is_noop(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        history_store: HistoryStore,
+    ) -> None:
+        """Switching to the already-active mode produces no side effects."""
+        # Clear any events from construction.
+        event_cb.events.clear()
+
+        result = service.switch_mode("code")
+
+        assert result["mode"] == "code"
+        assert "Already" in result.get("message", "")
+        # No system event message added.
+        assert service.get_current_state()["messages"] == []
+        # No broadcast.
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        assert mode_events == []
+
+    def test_switch_to_unknown_mode_rejected(
+        self, service: LLMService
+    ) -> None:
+        """Unknown mode string returns a clean error."""
+        result = service.switch_mode("invalid")
+        assert "error" in result
+        assert "code" in result["error"]
+        assert "doc" in result["error"]
+        # Mode unchanged.
+        assert service.get_current_state()["mode"] == "code"
+
+    def test_switch_code_to_doc_changes_mode(
+        self, service: LLMService
+    ) -> None:
+        """Switching code → doc updates the context manager's mode."""
+        result = service.switch_mode("doc")
+        assert result == {"mode": "doc"}
+        assert service.get_current_state()["mode"] == "doc"
+
+    def test_switch_swaps_system_prompt(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+    ) -> None:
+        """Mode switch installs the mode-appropriate system prompt."""
+        code_prompt = service._context.get_system_prompt()
+        service.switch_mode("doc")
+        doc_prompt = service._context.get_system_prompt()
+        assert doc_prompt == config.get_doc_system_prompt()
+        assert doc_prompt != code_prompt
+        # Switch back — original code prompt restored (via the
+        # config, not via save-and-restore — mode switch uses
+        # plain set_system_prompt).
+        service.switch_mode("code")
+        assert service._context.get_system_prompt() == (
+            config.get_system_prompt()
+        )
+
+    def test_switch_swaps_stability_tracker(
+        self, service: LLMService
+    ) -> None:
+        """Each mode has its own tracker; switching swaps the active one."""
+        code_tracker = service._stability_tracker
+        service.switch_mode("doc")
+        doc_tracker = service._stability_tracker
+        # Distinct instances.
+        assert doc_tracker is not code_tracker
+        # Context manager's attached tracker updated too.
+        assert service._context.stability_tracker is doc_tracker
+
+    def test_switch_preserves_tracker_state(
+        self, service: LLMService
+    ) -> None:
+        """Switching away and back returns to the original tracker."""
+        first_code_tracker = service._stability_tracker
+        service.switch_mode("doc")
+        service.switch_mode("code")
+        # Same instance as before — not reconstructed.
+        assert service._stability_tracker is first_code_tracker
+
+    def test_switch_lazy_constructs_doc_tracker(
+        self, service: LLMService
+    ) -> None:
+        """Doc tracker only exists once doc mode is first entered."""
+        assert Mode.DOC not in service._trackers
+        service.switch_mode("doc")
+        assert Mode.DOC in service._trackers
+
+    def test_switch_records_system_event_in_context(
+        self, service: LLMService
+    ) -> None:
+        """Mode switch appends a system event to conversation history."""
+        service.switch_mode("doc")
+        messages = service.get_current_state()["messages"]
+        assert len(messages) == 1
+        event = messages[0]
+        assert event["role"] == "user"
+        assert event.get("system_event") is True
+        assert "doc" in event["content"].lower()
+
+    def test_switch_records_system_event_in_history_store(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Mode switch persists the system event to JSONL."""
+        service.switch_mode("doc")
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        events = [
+            m for m in persisted
+            if m.get("system_event")
+            and "doc" in m.get("content", "").lower()
+        ]
+        assert len(events) == 1
+
+    def test_switch_broadcasts_mode_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """modeChanged event fires with the new mode."""
+        event_cb.events.clear()
+        service.switch_mode("doc")
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        assert len(mode_events) == 1
+        payload = mode_events[0][0]
+        assert payload == {"mode": "doc"}
+
+    def test_set_cross_reference_enable(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Enabling cross-reference flips the flag and broadcasts."""
+        event_cb.events.clear()
+        result = service.set_cross_reference(True)
+        assert result == {
+            "status": "ok",
+            "cross_ref_enabled": True,
+        }
+        assert service.get_current_state()["cross_ref_enabled"] is True
+        # Broadcast carries both mode and new state.
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        assert len(mode_events) == 1
+        payload = mode_events[0][0]
+        assert payload["mode"] == "code"
+        assert payload["cross_ref_enabled"] is True
+
+    def test_set_cross_reference_disable(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Disabling cross-reference flips the flag back."""
+        service.set_cross_reference(True)
+        result = service.set_cross_reference(False)
+        assert result == {
+            "status": "ok",
+            "cross_ref_enabled": False,
+        }
+        assert service.get_current_state()["cross_ref_enabled"] is False
+
+    def test_set_cross_reference_idempotent(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Setting cross-reference to its current value is a no-op."""
+        event_cb.events.clear()
+        # Default is False; setting to False should not broadcast.
+        result = service.set_cross_reference(False)
+        assert result["cross_ref_enabled"] is False
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        assert mode_events == []
+
+    def test_cross_reference_resets_on_mode_switch(
+        self, service: LLMService
+    ) -> None:
+        """Cross-reference flag resets to False on every mode switch."""
+        service.set_cross_reference(True)
+        assert service.get_current_state()["cross_ref_enabled"] is True
+        service.switch_mode("doc")
+        assert service.get_current_state()["cross_ref_enabled"] is False
+        # And staying on: re-enable, switch back to code, reset.
+        service.set_cross_reference(True)
+        service.switch_mode("code")
+        assert service.get_current_state()["cross_ref_enabled"] is False
 
 
 # ---------------------------------------------------------------------------

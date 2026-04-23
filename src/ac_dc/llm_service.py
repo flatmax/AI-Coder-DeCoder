@@ -429,13 +429,41 @@ class LLMService:
             system_prompt=config.get_system_prompt(),
         )
 
-        # Stability tracker — attached to context manager. One
-        # instance per context manager (D10). Cache-target tokens
-        # match the model-aware value.
-        self._stability_tracker = StabilityTracker(
-            cache_target_tokens=config.cache_target_tokens_for_model(),
-        )
+        # Per-mode stability trackers. Each mode keeps its own
+        # tier state so switching between code and doc mode is
+        # instant (specs4/3-llm/modes.md — "each mode maintains
+        # an independent tracker instance; switching back
+        # preserves state"). The active tracker is whichever
+        # matches the context manager's current mode; the
+        # inactive instance retains its state for when the user
+        # switches back.
+        #
+        # We construct the CODE tracker eagerly because the
+        # session starts in code mode. The DOC tracker is
+        # created lazily on first switch — it costs nothing
+        # while the session stays in code mode.
+        cache_target = config.cache_target_tokens_for_model()
+        self._trackers: dict[Mode, StabilityTracker] = {
+            Mode.CODE: StabilityTracker(cache_target_tokens=cache_target),
+        }
+        # Point the context manager at the current mode's tracker.
+        # _stability_tracker is kept as a backwards-compatible
+        # alias referring to the ACTIVE tracker; callers that
+        # read ``service._stability_tracker`` get whichever
+        # tracker is live. switch_mode updates both the alias
+        # and the context manager's attachment in lockstep.
+        self._stability_tracker = self._trackers[Mode.CODE]
         self._context.set_stability_tracker(self._stability_tracker)
+
+        # Cross-reference toggle. When True, the other mode's
+        # index items are added to the active tracker so the
+        # LLM sees both structural maps at once. Always reset
+        # to False on mode switch (specs4/3-llm/modes.md — the
+        # toggle is mode-scoped UI state, not a persistent
+        # preference). The doc index hasn't landed yet; when
+        # it does, enabling cross-ref will populate the active
+        # tracker with items from the opposite index.
+        self._cross_ref_enabled = False
 
         # Edit pipeline — validates and applies edit blocks parsed
         # from the LLM response. Constructed only when a repo is
@@ -624,7 +652,7 @@ class LLMService:
         Called by the browser on WebSocket connect. Returns the
         minimal set of fields needed to rebuild the UI — messages,
         selected files, streaming status, session ID, repo name,
-        init flag, mode.
+        init flag, mode, cross-reference state.
         """
         return {
             "messages": self._context.get_history(),
@@ -634,6 +662,7 @@ class LLMService:
             "repo_name": self._repo.name if self._repo else "",
             "init_complete": self._init_complete,
             "mode": self._context.mode.value,
+            "cross_ref_enabled": self._cross_ref_enabled,
         }
 
     # ------------------------------------------------------------------
@@ -667,6 +696,184 @@ class LLMService:
     def get_selected_files(self) -> list[str]:
         """Return a copy of the selected-files list."""
         return list(self._selected_files)
+
+    # ------------------------------------------------------------------
+    # Public RPC — mode and cross-reference
+    # ------------------------------------------------------------------
+
+    def get_mode(self) -> dict[str, Any]:
+        """Return current mode and cross-reference state.
+
+        The frontend polls this to re-sync on reconnect and to
+        gate the doc-mode toggle button on doc-index readiness.
+        ``doc_index_ready`` reflects whether the doc index has
+        been built — currently always False since the doc
+        index hasn't landed.
+
+        Returned shape matches the specs4 RPC contract and is
+        stable across both code and doc modes.
+        """
+        return {
+            "mode": self._context.mode.value,
+            "doc_index_ready": False,  # Layer 2 doc-index pending
+            "doc_index_building": False,
+            "cross_ref_ready": False,  # Depends on doc index
+            "cross_ref_enabled": self._cross_ref_enabled,
+        }
+
+    def switch_mode(self, mode: str) -> dict[str, Any]:
+        """Switch between code and document mode.
+
+        Matches specs4/3-llm/modes.md:
+
+        - Reset cross-reference to OFF (mode-scoped UI state)
+        - Swap system prompt (code → doc or doc → code)
+        - Swap stability tracker (each mode has its own; lazy
+          construction for the DOC tracker on first switch)
+        - Insert system-event message into conversation history
+          so the LLM sees the mode change
+        - Broadcast ``modeChanged`` to collaborators
+
+        Rejects unknown mode strings. Switching to the
+        already-active mode is a no-op that still returns the
+        current mode — matches idempotence expectations of the
+        frontend's mode-refresh flow.
+
+        Doc mode currently works only with an empty doc index;
+        once Layer 2's doc-index sub-layer lands, doc mode will
+        feed doc outlines into context. Switching is still
+        meaningful today because the system prompt swap changes
+        the LLM's behaviour.
+        """
+        # Validate the mode string. Mode(mode) raises ValueError
+        # on unknown inputs — we catch and return a clean RPC
+        # error rather than propagating.
+        try:
+            target = Mode(mode)
+        except ValueError:
+            return {
+                "error": (
+                    f"Unknown mode {mode!r}; expected 'code' or 'doc'"
+                )
+            }
+
+        current = self._context.mode
+        if target == current:
+            # Already in the requested mode. Return the current
+            # state without side effects — matches the
+            # frontend's mode-refresh auto-switch logic which
+            # may call switch_mode redundantly.
+            return {
+                "mode": target.value,
+                "message": f"Already in {target.value} mode",
+            }
+
+        # Cross-reference toggle resets to OFF on mode switch.
+        # If it was on, remove cross-ref items from the current
+        # tracker before switching so they don't linger.
+        if self._cross_ref_enabled:
+            self._cross_ref_enabled = False
+            # When the doc index lands, this is where we'd
+            # remove `doc:*` (in code mode) or `symbol:*` (in
+            # doc mode) items from the active tracker.
+
+        # Lazy-construct the target mode's tracker on first use.
+        if target not in self._trackers:
+            self._trackers[target] = StabilityTracker(
+                cache_target_tokens=(
+                    self._config.cache_target_tokens_for_model()
+                ),
+            )
+
+        # Swap prompts. The context manager's save/replace
+        # saves the CURRENT prompt and installs the new one, so
+        # a switch back restores the saved prompt. But we want
+        # the new prompt to persist across another switch —
+        # set_system_prompt (non-saving) is the right primitive.
+        if target == Mode.DOC:
+            new_prompt = self._config.get_doc_system_prompt()
+        else:
+            new_prompt = self._config.get_system_prompt()
+        self._context.set_system_prompt(new_prompt)
+
+        # Swap trackers.
+        self._stability_tracker = self._trackers[target]
+        self._context.set_stability_tracker(self._stability_tracker)
+
+        # Update the context manager's mode flag.
+        self._context.set_mode(target)
+
+        # Record a system event so the LLM sees the transition
+        # in its next request. The streaming handler will
+        # persist this to JSONL on the next append cycle via
+        # the standard system-event flag.
+        event_text = f"Switched to {target.value} mode."
+        self._context.add_message(
+            "user", event_text, system_event=True
+        )
+        if self._history_store is not None:
+            self._history_store.append_message(
+                session_id=self._session_id,
+                role="user",
+                content=event_text,
+                system_event=True,
+            )
+
+        # Broadcast to collaborators. Fire-and-forget per the
+        # general event-callback contract.
+        self._broadcast_event("modeChanged", {"mode": target.value})
+
+        return {"mode": target.value}
+
+    def set_cross_reference(self, enabled: bool) -> dict[str, Any]:
+        """Toggle cross-reference mode.
+
+        When enabled, the opposite index's items are added to
+        the active tracker. In code mode that means ``doc:*``
+        items; in doc mode that means ``symbol:*`` items.
+
+        The doc index hasn't landed yet, so enabling
+        cross-reference is currently a no-op that just flips
+        the flag and logs a warning. The frontend toggle is
+        still available — when the doc index lands, existing
+        ``_cross_ref_enabled=True`` state will start producing
+        cross-ref content on the next request without needing
+        a re-toggle.
+        """
+        new_state = bool(enabled)
+        if new_state == self._cross_ref_enabled:
+            return {
+                "status": "ok",
+                "cross_ref_enabled": new_state,
+            }
+        self._cross_ref_enabled = new_state
+        if new_state:
+            # Doc index not yet available — log and continue.
+            # When Layer 2's doc-index sub-layer lands, this
+            # branch will populate the active tracker with
+            # cross-ref items.
+            logger.info(
+                "Cross-reference enabled, but doc index is not "
+                "yet available; toggle will take effect once "
+                "Layer 2 doc-index lands"
+            )
+        else:
+            # Disabling — remove cross-ref items from the
+            # active tracker. No-op until the doc index lands
+            # and items actually exist.
+            pass
+        # Broadcast so collaborators see the state update.
+        self._broadcast_event(
+            "modeChanged",
+            {
+                "mode": self._context.mode.value,
+                "cross_ref_enabled": new_state,
+            },
+        )
+        return {
+            "status": "ok",
+            "cross_ref_enabled": new_state,
+        }
 
     # ------------------------------------------------------------------
     # Public RPC — session management
