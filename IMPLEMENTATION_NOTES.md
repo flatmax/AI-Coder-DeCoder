@@ -963,11 +963,102 @@ Notes from delivery:
 
 - **Graceful degradation.** The xlsx pipeline never errors for reasons specific to xlsx. ImportError on openpyxl, corrupt file, unexpected structure — all fall back to markitdown. The user gets SOMETHING (possibly just raw text with no colour info) rather than a red error result.
 
-Open carried over for Pass A4+:
+#### Pass A4 — pptx via python-pptx (fallback) (delivered)
 
-- **pptx fallback (Pass A4).** python-pptx when LibreOffice isn't available — renders each slide as an SVG with text/images/tables, emits an index markdown that links all slide SVGs.
-- **PDF + LibreOffice pipeline (Pass A5).** LibreOffice (pptx/odp → PDF) and PyMuPDF (PDF → text + image detection + SVG export with text-as-path=0). Hybrid output: text extracted into markdown paragraphs, per-page SVGs generated only when pages contain graphics. Embedded raster images externalised from SVGs to separate files.
-- **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop. Passes A4 and A5 especially need this — PDF compilation can take seconds per file.
+Adds pptx support via a dedicated python-pptx pipeline that renders each slide as a standalone SVG. Each SVG contains the slide's text, embedded images, and tables. An index markdown links all slide SVGs. This is the fallback pipeline; the primary PyMuPDF+LibreOffice path for pptx lands in Pass A5.
+
+- `src/ac_dc/doc_convert.py` — module-level additions:
+  - `_PPTX_EXTENSIONS = frozenset({".pptx"})` — dispatch set for the python-pptx path.
+  - `_EMU_PER_INCH`, `_SVG_DPI = 96`, `_EMU_TO_PX` — conversion from python-pptx's native EMU units to SVG pixels at 96 DPI.
+  - `_DEFAULT_SLIDE_WIDTH_EMU` / `_DEFAULT_SLIDE_HEIGHT_EMU` — standard 4:3 slide (10" x 7.5") as fallback when python-pptx reports None dimensions (rare but defensive against corrupted templates).
+  - `_DEFAULT_FONT_SIZE_PT = 18` — PowerPoint's default body text size. Used when a text run doesn't specify a font size explicitly.
+  - `_DEFAULT_FONT_COLOR = "#000000"` — black reads correctly against default white slide backgrounds. Theme-aware colour resolution is a future enhancement.
+  - `_PT_TO_PX = 96 / 72` — SVG font-size is in user units (pixels at 96 DPI); 1 point = 4/3 pixels.
+  - `_SLIDE_NUMBER_MIN_WIDTH = 2` — default zero-padding width for slide filenames. Decks with more than 99 slides dynamically pad to 3 digits.
+
+- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+  - Added a new branch after the xlsx path and before the "not yet supported" skip: `if suffix in _PPTX_EXTENSIONS: return self._convert_via_python_pptx(root, source_abs, rel_path)`.
+
+- `src/ac_dc/doc_convert.py` — `_convert_via_python_pptx` and helpers:
+  - Lazy python-pptx import. ImportError → per-file error with install hint (same pattern as markitdown). Unlike xlsx there's no fallback — A5's LibreOffice+PyMuPDF pipeline is the primary path; this is the fallback for users without those deps.
+  - Source hash computed before open so provenance is correct.
+  - Slide dimensions extracted via `presentation.slide_width` / `.slide_height` in EMU, converted to pixels for SVG viewBox.
+  - Empty-presentation placeholder — a deck with no slides produces a `(empty presentation)` body so the scan classifies it as `current` rather than cycling `new` every pass. Output file is still written with a provenance header.
+  - Dynamic zero-padding — `max(_SLIDE_NUMBER_MIN_WIDTH, len(str(len(slides))))` so 150-slide decks pad to 3 digits, 10-slide decks pad to 2. Consistent width within a single deck.
+  - Assets subdirectory always created — every slide produces an SVG, unlike markitdown where image subdir creation is conditional.
+  - Per-slide failure isolation — a slide that fails to render gets a placeholder entry in the index (`## Slide N\n\n*(rendering failed)*`) and the rest of the deck proceeds. Debug-logged for diagnostics without breaking the batch.
+  - Orphan cleanup on re-conversion — reads the prior output's provenance header, diffs `images=` against the slides produced this round, unlinks orphans. Prevents a re-saved deck with fewer slides from leaving stale SVGs on disk.
+
+- `src/ac_dc/doc_convert.py` — SVG rendering helpers:
+  - `_render_pptx_slide` — emits the full SVG document. White background rect sized to viewBox, then walks slide shapes and dispatches each to `_render_pptx_shape`. Per-shape exceptions are caught and logged; never aborts the whole slide.
+  - `_render_pptx_shape` — dispatches on shape type via attribute probes: `_is_picture` (checks for `.image.blob`), `has_table`, `has_text_frame`. Unsupported shapes (charts, SmartArt, groups, OLE) return empty string — caller skips. Probes use attribute access rather than importing `MSO_SHAPE_TYPE` to keep the pipeline resilient to python-pptx API changes.
+  - `_render_picture` — reads `shape.image.blob`, base64-encodes, emits `<image>` with `xlink:href="data:{mime};base64,..."`. Inline images keep slide layout self-contained (one SVG per slide, no external refs).
+  - `_render_text_frame` — renders each paragraph as a `<text>` line positioned by cumulative line height. Returns a `<g>` wrapper. Empty frames produce empty string rather than degenerate wrappers.
+  - `_render_paragraph` — extracts font properties from the first non-empty run: size (via `font.size.pt`), weight (bold → `bold`), style (italic → `italic`), colour (via `_extract_font_color`), alignment (via `_resolve_text_anchor`). SVG baseline positioning — shifts y by font size so text renders at the visually expected vertical position. Line height is 1.2× font size (PowerPoint single-spacing default).
+  - `_extract_font_color` — returns `#rrggbb` from `font.color.rgb` or None when the font uses a theme colour. python-pptx raises `AttributeError` for theme colours; the swallow is deliberate, callers use the default black.
+  - `_resolve_text_anchor` — maps `PP_ALIGN` enum values to SVG `text-anchor` + adjusted x coordinate. Probes the alignment name (`"CENTER"`, `"RIGHT"`) rather than importing the enum from python-pptx.
+  - `_render_table` — renders as a grid of `<rect>` borders + `<text>` cell content. Uniform cell widths from `table.columns` / `table.rows` with fallback to equal division if dimensions are zero. No merged-cell handling — out of A4 scope.
+  - `_escape_svg_text` — XML-escapes `<`, `>`, `&`, plus quote characters for attribute-context robustness. Strips leading/trailing whitespace (PowerPoint often pads bullet text).
+
+- `src/ac_dc/doc_convert.py` — `_write_pptx_output` and `_read_prior_images` helpers:
+  - Shared output-writing path for the normal and empty-deck cases. Builds provenance header with `images=(slide_names)` tuple, prepends to markdown body, atomic write.
+  - `_read_prior_images` — reads the existing output's provenance header and returns the tuple from `images=`. Used by the orphan-cleanup path. Empty tuple when no prior output exists or the header is absent/malformed.
+
+- `tests/test_doc_convert.py` — test infrastructure:
+  - `_require_pptx()` — skip guard for tests running without python-pptx.
+  - `_make_pptx_with_title(path, title, body="")` — builds a pptx with a title slide using python-pptx's default layout. Body text optional.
+  - `_make_pptx_with_n_slides(path, n)` — builds a pptx with `n` numbered title slides.
+  - `_make_pptx_with_image(path, image_bytes)` — builds a pptx with one image-containing slide using `add_picture`. Image is sized to 3"x2" positioned at (1", 1").
+  - `_make_pptx_with_table(path)` — builds a pptx with a 2×3 table. Fixed content so tests can assert on specific cell text.
+
+- `tests/test_doc_convert.py` — removed the obsolete `test_pptx_skipped_not_yet_supported` test (pptx is now implemented).
+
+- `tests/test_doc_convert.py` — five new test classes:
+  - `TestPptxDispatch` — 5 tests: pptx routes to python-pptx (not markitdown), output markdown file produced, assets subdirectory produced, provenance header present, scan classifies as `current` after conversion.
+  - `TestPptxSlideFiles` — 4 tests: single slide produces `01_slide.svg`, multiple slides zero-padded, 100-slide deck pads to 3 digits (`001_slide.svg` through `100_slide.svg`), images listed in provenance header.
+  - `TestPptxIndexMarkdown` — 3 tests: index contains `## Slide N` headings, index contains `![Slide N](deck/NN_slide.svg)` image references, empty presentation produces placeholder body.
+  - `TestPptxSvgContent` — 6 tests: title text appears in SVG, SVG has valid root and xmlns, SVG has viewBox attribute, image embedded as `data:image/...;base64,...` URI, table cell text present with rect borders, special characters (`<`, `>`, `&`) XML-escaped.
+  - `TestPptxOrphanCleanup` — 1 test: re-conversion with fewer slides deletes the stale SVGs from the assets subdirectory.
+  - `TestPptxFailures` — 2 tests: missing python-pptx returns error with install hint (via `builtins.__import__` monkeypatching), corrupt pptx errors cleanly without crashing.
+
+Design points pinned by tests:
+
+- **Every slide produces an SVG.** Unlike the markitdown path where assets-dir creation is conditional on image presence, the pptx fallback always produces an assets subdirectory because every slide renders as an SVG. Pinned by `test_pptx_produces_assets_subdirectory` — even a title-only slide with no embedded images still generates its own SVG.
+
+- **Zero-padding width is deck-scoped.** The padding chosen for a 3-slide deck (2 digits) differs from a 100-slide deck (3 digits). Within one deck the width is consistent, which keeps the file listing in alphabetical sort order. Pinned by `test_large_deck_pads_width` with an explicit 100-slide deck.
+
+- **Attribute-probe dispatch over enum import.** The shape-type dispatch uses `hasattr(shape.image, "blob")`, `shape.has_table`, `shape.has_text_frame` rather than importing `MSO_SHAPE_TYPE`. python-pptx's internal enum values have changed between versions; hasattr is forward-compatible. Pinned by the image and table tests passing on the library's current API — a future version that reshapes the enum won't break the dispatch.
+
+- **Theme colours degrade to default.** `_extract_font_color` swallows `AttributeError` when `font.color.rgb` raises (which happens for theme colours). Returning None triggers the default black. Rather than resolving theme colours properly (which would require parsing the slide master's theme XML), we accept the fidelity loss for a much simpler implementation.
+
+- **First-run property extraction, not per-run.** `_render_paragraph` extracts properties from the first non-empty run in the paragraph. Text within a paragraph that mixes bold/non-bold runs rendered with the first run's style. The spec explicitly calls this out as A4 scope — per-run formatting is deferred to the richer A5 pipeline.
+
+- **Empty-presentation placeholder is mandatory.** Without the `(empty presentation)` body, a pptx with no slides would produce zero `images=` entries in the provenance header and potentially an empty markdown body. Next scan classifies it as `current` because the hash matches, but the output is useless. The placeholder ensures something navigable exists.
+
+- **Orphan cleanup mirrors the markitdown path.** Re-saved deck with 1 slide replacing a 3-slide deck: `02_slide.svg` and `03_slide.svg` are unlinked because they're in the prior `images=` list but not in the current round's saved slides. Pinned by `test_reconversion_with_fewer_slides_removes_orphans`.
+
+- **Per-slide failure is isolated.** A slide that fails to render doesn't break the deck. The index entry becomes `*(rendering failed)*` for that slide, the rest proceed. Not tested directly (all test slides are well-formed), but the exception-handling structure matches the markitdown path's per-file isolation.
+
+- **No fallback to markitdown.** Unlike xlsx where openpyxl failures fall back to markitdown, pptx has no fallback in A4 — python-pptx missing returns a clean error. A5 will add the LibreOffice+PyMuPDF primary path; until then, users without python-pptx can't convert pptx files.
+
+Notes from delivery:
+
+- **EMU → pixels is a reference conversion.** SVG's `user units` scale with the viewBox — the absolute pixel values don't matter as long as shape dimensions are consistent with the viewBox. Using 96 DPI as the reference gives SVGs that render at approximately the original slide size in a 1:1 viewer, but renderers that fit-to-container will scale them regardless.
+
+- **`shape.image.blob` for picture detection.** The natural test is `shape.shape_type == MSO_SHAPE_TYPE.PICTURE` (value 13), but importing the enum couples to python-pptx internals. The attribute probe is equally specific and version-independent.
+
+- **Table rendering uses default font.** Per-cell formatting would require walking `cell.text_frame.paragraphs` and merging run properties with cell-level defaults. Keeping the table renderer to default-font text keeps the implementation compact and the output legible — richer formatting is a future refinement, not an A4 requirement.
+
+- **Alpha channel on images preserved.** Raster images with transparency (PNG with alpha channel) are embedded via the data URI verbatim. The SVG renderer honours the transparency, so slide backgrounds show through — matches PowerPoint behaviour.
+
+- **Base64-inlined images are self-contained.** A slide with an image produces a single SVG file rather than an SVG + separate PNG. Image-externalisation (for the PyMuPDF path in A5) will extract these to separate files; in A4 the inlining keeps per-slide output atomic.
+
+- **Background colour hardcoded white.** A theme-aware implementation would parse the slide master's `bg` XML. Keeping it white in A4 is acceptable because most presentations use white backgrounds, and users with dark-themed presentations will see dark text on white instead of dark text on dark (legible, if not visually faithful).
+
+Open carried over for Pass A5:
+
+- **PDF + LibreOffice pipeline (Pass A5).** LibreOffice (pptx/odp → PDF) and PyMuPDF (PDF → text + image detection + SVG export with text-as-path=0). Hybrid output: text extracted into markdown paragraphs, per-page SVGs generated only when pages contain graphics. Embedded raster images externalised from SVGs to separate files. This is the *primary* path for pptx; the A4 python-pptx path remains as the fallback when LibreOffice isn't available.
+- **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop. Pass A5 especially needs this — PDF compilation can take seconds per file.
 
 ### 4.3 — Code review — **delivered**
 
