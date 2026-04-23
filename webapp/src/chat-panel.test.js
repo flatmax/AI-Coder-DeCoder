@@ -3341,6 +3341,582 @@ describe('buildNotInContextRetryPrompt', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Message action buttons
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel message action buttons', () => {
+  it('renders two toolbars (top and bottom) on each message', async () => {
+    // Both ends because long messages mean the user might
+    // have scrolled either end into view without the
+    // other. Duplicating toolbars saves them from
+    // scrolling to reach the action.
+    const p = mountPanel({
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ],
+    });
+    await settle(p);
+    // Two cards × two toolbars = four toolbar elements.
+    const toolbars = p.shadowRoot.querySelectorAll(
+      '.message-toolbar',
+    );
+    expect(toolbars.length).toBe(4);
+    // Top and bottom classes applied correctly.
+    const tops = p.shadowRoot.querySelectorAll(
+      '.message-toolbar.top',
+    );
+    const bottoms = p.shadowRoot.querySelectorAll(
+      '.message-toolbar.bottom',
+    );
+    expect(tops.length).toBe(2);
+    expect(bottoms.length).toBe(2);
+  });
+
+  it('each toolbar has copy and paste buttons', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    await settle(p);
+    const toolbar = p.shadowRoot.querySelector(
+      '.message-toolbar.top',
+    );
+    const buttons = toolbar.querySelectorAll(
+      '.message-action-button',
+    );
+    expect(buttons.length).toBe(2);
+    // Distinguished by aria-label so screen readers
+    // can identify them.
+    const labels = Array.from(buttons).map((b) =>
+      b.getAttribute('aria-label'),
+    );
+    expect(labels[0]).toMatch(/copy/i);
+    expect(labels[1]).toMatch(/insert/i);
+  });
+
+  it('toolbar is NOT rendered on streaming message', async () => {
+    // The streaming card is live; copy/paste on partial
+    // content is meaningless. The render path for the
+    // streaming card bypasses _renderMessage, so the
+    // toolbar naturally doesn't appear there.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      content: 'partial response',
+    });
+    await settle(p);
+    const streamingCard = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    expect(streamingCard).toBeTruthy();
+    // No toolbar on the streaming card.
+    expect(
+      streamingCard.querySelector('.message-toolbar'),
+    ).toBeNull();
+    // But the settled user message card does have one.
+    const userCard = p.shadowRoot.querySelector(
+      '.message-card.role-user',
+    );
+    expect(
+      userCard.querySelector('.message-toolbar'),
+    ).toBeTruthy();
+  });
+
+  it('system event messages get toolbars too', async () => {
+    // A user might want to copy a commit SHA or error
+    // message from a system event — no reason to exclude
+    // them.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: '**Committed** abc1234',
+          system_event: true,
+        },
+      ],
+    });
+    await settle(p);
+    const card = p.shadowRoot.querySelector(
+      '.message-card.role-system',
+    );
+    expect(card.querySelector('.message-toolbar')).toBeTruthy();
+  });
+});
+
+describe('ChatPanel copy action', () => {
+  /** Share helper installation with the suite above. */
+  function installFakeClipboard() {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    return {
+      writeText,
+      restore() {
+        if (originalClipboard === undefined) {
+          delete navigator.clipboard;
+        } else {
+          Object.defineProperty(navigator, 'clipboard', {
+            value: originalClipboard,
+            configurable: true,
+          });
+        }
+      },
+    };
+  }
+
+  it('copies raw string content, not rendered HTML', async () => {
+    // Assistant markdown should be copied as markdown
+    // source, not as rendered HTML. A user pasting into
+    // another editor wants the `**bold**`, not a fully
+    // formatted `<strong>` run.
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const p = mountPanel({
+        messages: [
+          { role: 'assistant', content: 'use **bold** here' },
+        ],
+      });
+      await settle(p);
+      const copyBtn = p.shadowRoot
+        .querySelector('.message-toolbar.top')
+        .querySelectorAll('.message-action-button')[0];
+      copyBtn.click();
+      await settle(p);
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledWith('use **bold** here');
+    } finally {
+      restore();
+    }
+  });
+
+  it('emits success toast after copy', async () => {
+    const { restore } = installFakeClipboard();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector('.message-toolbar.top')
+          .querySelectorAll('.message-action-button')[0]
+          .click();
+        await settle(p);
+        const detail = toastListener.mock.calls.at(-1)[0].detail;
+        expect(detail.type).toBe('success');
+        expect(detail.message).toMatch(/copied/i);
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('copies extracted text from multimodal content', async () => {
+    // Session-reloaded messages with images come in
+    // multimodal array form. Copy should extract the
+    // text blocks and skip images.
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const p = mountPanel({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'look at this' },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: 'data:image/png;base64,XXX',
+                },
+              },
+              { type: 'text', text: 'and this' },
+            ],
+          },
+        ],
+      });
+      await settle(p);
+      p.shadowRoot
+        .querySelector('.message-toolbar.top')
+        .querySelectorAll('.message-action-button')[0]
+        .click();
+      await settle(p);
+      expect(writeText).toHaveBeenCalledWith('look at this\nand this');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does nothing for image-only messages', async () => {
+    // Multimodal content with only image blocks and no
+    // text extracts to an empty string. Silent no-op
+    // rather than copying an empty clipboard (which
+    // would be a confusing "success" toast).
+    const { writeText, restore } = installFakeClipboard();
+    try {
+      const p = mountPanel({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image_url',
+                image_url: {
+                  url: 'data:image/png;base64,XXX',
+                },
+              },
+            ],
+          },
+        ],
+      });
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector('.message-toolbar.top')
+          .querySelectorAll('.message-action-button')[0]
+          .click();
+        await settle(p);
+        expect(writeText).not.toHaveBeenCalled();
+        // No toast either — silent.
+        expect(toastListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('emits warning toast when clipboard API is unavailable', async () => {
+    // Some older browsers / insecure contexts don't
+    // expose navigator.clipboard. Surface the limitation
+    // rather than silently failing.
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector('.message-toolbar.top')
+          .querySelectorAll('.message-action-button')[0]
+          .click();
+        await settle(p);
+        const detail = toastListener.mock.calls.at(-1)[0].detail;
+        expect(detail.type).toBe('warning');
+        expect(detail.message).toMatch(/not available/i);
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      if (originalClipboard === undefined) {
+        delete navigator.clipboard;
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: originalClipboard,
+          configurable: true,
+        });
+      }
+    }
+  });
+
+  it('emits warning toast on clipboard rejection', async () => {
+    const writeText = vi
+      .fn()
+      .mockRejectedValue(new Error('permission denied'));
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector('.message-toolbar.top')
+          .querySelectorAll('.message-action-button')[0]
+          .click();
+        await settle(p);
+        const detail = toastListener.mock.calls.at(-1)[0].detail;
+        expect(detail.type).toBe('warning');
+        expect(detail.message).toMatch(/copy failed/i);
+        expect(detail.message).toContain('permission denied');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      if (originalClipboard === undefined) {
+        delete navigator.clipboard;
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: originalClipboard,
+          configurable: true,
+        });
+      }
+    }
+  });
+
+  it('top and bottom toolbars both work', async () => {
+    // Pin that both toolbars trigger the same action —
+    // one isn't a decoy. Two separate DOM buttons, one
+    // copy each.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'user', content: 'echo' }],
+      });
+      await settle(p);
+      p.shadowRoot
+        .querySelector('.message-toolbar.top')
+        .querySelectorAll('.message-action-button')[0]
+        .click();
+      await settle(p);
+      p.shadowRoot
+        .querySelector('.message-toolbar.bottom')
+        .querySelectorAll('.message-action-button')[0]
+        .click();
+      await settle(p);
+      expect(writeText).toHaveBeenCalledTimes(2);
+      expect(writeText.mock.calls[0][0]).toBe('echo');
+      expect(writeText.mock.calls[1][0]).toBe('echo');
+    } finally {
+      if (originalClipboard === undefined) {
+        delete navigator.clipboard;
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: originalClipboard,
+          configurable: true,
+        });
+      }
+    }
+  });
+});
+
+describe('ChatPanel paste-to-prompt action', () => {
+  it('inserts raw text into empty textarea', async () => {
+    const p = mountPanel({
+      messages: [
+        { role: 'assistant', content: 'help me edit' },
+      ],
+    });
+    await settle(p);
+    const pasteBtn = p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1];
+    pasteBtn.click();
+    await settle(p);
+    expect(p._input).toBe('help me edit');
+  });
+
+  it('inserts raw markdown source, not rendered HTML', async () => {
+    // Parallel to the copy test — `**bold**` source is
+    // what the user wants to continue with, not a
+    // rendered <strong> representation that wouldn't
+    // round-trip through a textarea anyway.
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'assistant',
+          content: 'say **bold** and `code`',
+        },
+      ],
+    });
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('say **bold** and `code`');
+  });
+
+  it('inserts at cursor position in non-empty textarea', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'INSERTED' }],
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'before  after';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(7, 7); // between "before " and " after"
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('before INSERTED after');
+  });
+
+  it('replaces selection when one exists', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'NEW' }],
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'keep OLD keep';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(5, 8); // "OLD"
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('keep NEW keep');
+  });
+
+  it('focuses textarea after paste', async () => {
+    // Publish a fake RPC so the textarea isn't disabled —
+    // `focus()` on a disabled element is a no-op in
+    // browsers, and the assertion would fail despite the
+    // code doing the right thing. The paste-to-prompt
+    // action is meant to be used during normal (connected)
+    // operation; disabled-textarea is already covered
+    // implicitly by the initial-state tests.
+    publishFakeRpc({});
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hi' }],
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // Focus something else so we can observe the shift.
+    const btn = p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1];
+    btn.focus();
+    btn.click();
+    await settle(p);
+    expect(p.shadowRoot.activeElement).toBe(ta);
+  });
+
+  it('positions cursor at end of inserted text', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'XYZ' }],
+    });
+    await settle(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'ab';
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    ta.setSelectionRange(1, 1); // between a and b
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    // Inserted "XYZ" at pos 1 → cursor at 1 + 3 = 4.
+    expect(ta.selectionStart).toBe(4);
+    expect(ta.selectionEnd).toBe(4);
+  });
+
+  it('extracts text from multimodal content', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'part 1' },
+            {
+              type: 'image_url',
+              image_url: {
+                url: 'data:image/png;base64,Z',
+              },
+            },
+            { type: 'text', text: 'part 2' },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('part 1\npart 2');
+  });
+
+  it('does nothing for image-only messages', async () => {
+    const p = mountPanel({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: 'data:image/png;base64,Z',
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    // Input unchanged — no text to insert.
+    expect(p._input).toBe('');
+  });
+
+  it('top and bottom paste buttons both work', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'A' }],
+    });
+    await settle(p);
+    // Click top paste.
+    p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('A');
+    // Click bottom paste — accumulates.
+    p.shadowRoot
+      .querySelector('.message-toolbar.bottom')
+      .querySelectorAll('.message-action-button')[1]
+      .click();
+    await settle(p);
+    expect(p._input).toBe('AA');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Retry prompt integration (populate-on-stream-complete)
 // ---------------------------------------------------------------------------
 

@@ -394,6 +394,63 @@ export class ChatPanel extends RpcMixin(LitElement) {
       margin-bottom: 0.375rem;
     }
 
+    /* Message action toolbars — hover-only copy and paste
+     * buttons, at top-right and bottom-right of each card.
+     * Both ends because long messages might be partially
+     * scrolled off either side of the viewport; having a
+     * toolbar at each end saves the user from scrolling to
+     * reach actions.
+     *
+     * position:relative on the card + absolute on the
+     * toolbars keeps them anchored regardless of card
+     * content height. Hover-only via opacity transition —
+     * the buttons don't steal space or draw attention
+     * during normal reading, and are discoverable via
+     * mouseover. */
+    .message-card {
+      position: relative;
+    }
+    .message-toolbar {
+      position: absolute;
+      right: 0.5rem;
+      display: flex;
+      gap: 0.25rem;
+      opacity: 0;
+      transition: opacity 120ms ease;
+      /* Buttons should be above the card's text content
+       * so they're clickable when visible. */
+      z-index: 1;
+    }
+    .message-toolbar.top {
+      top: 0.4rem;
+    }
+    .message-toolbar.bottom {
+      bottom: 0.4rem;
+    }
+    .message-card:hover .message-toolbar {
+      opacity: 1;
+    }
+    .message-action-button {
+      background: rgba(13, 17, 23, 0.85);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.15rem 0.4rem;
+      font-size: 0.75rem;
+      border-radius: 3px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
+      line-height: 1;
+    }
+    .message-action-button:hover {
+      background: rgba(240, 246, 252, 0.1);
+      border-color: rgba(240, 246, 252, 0.4);
+    }
+    .message-action-button:active {
+      transform: translateY(1px);
+    }
+
     /* Markdown-rendered content inherits the message card's
      * styling but tightens up paragraphs and adds a subtle
      * background on code blocks. */
@@ -1740,6 +1797,127 @@ export class ChatPanel extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Extract raw text from a message for copy / paste
+   * actions. Handles both string and multimodal-array
+   * content shapes — the backend sends multimodal arrays
+   * for session-reloaded messages that had images, plain
+   * strings for everything else.
+   *
+   * Images are dropped — this is a text action. The
+   * message card's image thumbnails have their own
+   * re-attach / lightbox affordances.
+   *
+   * @param {object} msg — message dict
+   * @returns {string}
+   */
+  _extractMessageText(msg) {
+    if (!msg) return '';
+    const raw = msg.content;
+    if (typeof raw === 'string') return raw;
+    if (Array.isArray(raw)) {
+      // normalizeMessageContent does this work already,
+      // but it also builds an images array we don't need.
+      // Inline the text extraction for a smaller hot path.
+      const parts = [];
+      for (const block of raw) {
+        if (
+          block &&
+          block.type === 'text' &&
+          typeof block.text === 'string'
+        ) {
+          parts.push(block.text);
+        }
+      }
+      return parts.join('\n');
+    }
+    return '';
+  }
+
+  /**
+   * Copy the message's raw text to the clipboard. Emits a
+   * toast on success so the user gets confirmation (the
+   * clipboard write is silent otherwise). Falls back to a
+   * warning toast if the Clipboard API rejects — happens
+   * in insecure contexts (file://), older browsers, or
+   * when permission is denied.
+   */
+  async _copyMessageText(msg) {
+    const text = this._extractMessageText(msg);
+    if (!text) {
+      // Nothing to copy — probably an image-only message.
+      // Silent rather than emitting a noisy warning; the
+      // UX is "the button did nothing meaningful" and the
+      // user will see their clipboard wasn't changed.
+      return;
+    }
+    try {
+      if (
+        navigator.clipboard &&
+        typeof navigator.clipboard.writeText === 'function'
+      ) {
+        await navigator.clipboard.writeText(text);
+        this._emitToast('Copied to clipboard', 'success');
+      } else {
+        // No Clipboard API — surface the limitation
+        // rather than silently failing.
+        this._emitToast('Clipboard not available', 'warning');
+      }
+    } catch (err) {
+      // Permission denied / insecure context / etc. Don't
+      // spam the console for an expected failure mode —
+      // the toast tells the user what happened.
+      this._emitToast(
+        `Copy failed: ${err?.message || 'permission denied'}`,
+        'warning',
+      );
+    }
+  }
+
+  /**
+   * Insert the message's raw text into the chat input at
+   * the current cursor position. Replaces any selection.
+   * Focuses the textarea after insertion so the user can
+   * continue typing.
+   *
+   * Follows the same pattern as _insertSnippet — reads
+   * cursor state from the textarea directly (not from
+   * this._input) so rapid typing doesn't produce a stale
+   * cursor position.
+   */
+  _pasteMessageToPrompt(msg) {
+    const text = this._extractMessageText(msg);
+    if (!text) return;
+    const ta = this.shadowRoot?.querySelector('.input-textarea');
+    if (!ta) {
+      // Defensive — textarea should always exist. Fall
+      // back to plain append so the click isn't lost.
+      this._input = `${this._input}${text}`;
+      return;
+    }
+    // Insert at cursor. If the textarea has a selection,
+    // it's replaced. Using ta.value (not this._input) as
+    // the source so we reflect the textarea's actual
+    // current state.
+    const before = ta.value.slice(0, ta.selectionStart);
+    const after = ta.value.slice(ta.selectionEnd);
+    const next = `${before}${text}${after}`;
+    this._input = next;
+    // Set the textarea value directly so selection can
+    // be positioned right after the inserted text. Lit
+    // will reflect `.value=${this._input}` on the next
+    // render; doing it here first keeps cursor state
+    // accurate without waiting for updateComplete.
+    ta.value = next;
+    const cursor = before.length + text.length;
+    ta.setSelectionRange(cursor, cursor);
+    ta.focus();
+    // Fire an input event so the auto-resize logic runs.
+    // Without this, inserting a multi-line message
+    // doesn't grow the textarea until the next keystroke.
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   _openLightbox(dataUri) {
     this._lightboxImage = dataUri;
   }
@@ -2129,14 +2307,62 @@ export class ChatPanel extends RpcMixin(LitElement) {
       `;
     }
     const images = Array.isArray(msg.images) ? msg.images : [];
+    const toolbar = this._renderMessageToolbar(msg);
     return html`
       <div class="message-card ${roleClass}">
+        <div class="message-toolbar top">${toolbar}</div>
         <div class="role-label">${roleLabel}</div>
         ${bodyHtml}
         ${images.length > 0
           ? this._renderMessageImages(images)
           : ''}
+        <div class="message-toolbar bottom">${toolbar}</div>
       </div>
+    `;
+  }
+
+  /**
+   * Render the action toolbar for a message — copy raw text
+   * and paste raw text into the chat input. Shared renderer
+   * used at both top-right and bottom-right of each message
+   * card. Returns a Lit template with two buttons, both
+   * calling methods that operate on the message's extracted
+   * text content.
+   *
+   * Returns the same toolbar fragment for both placements —
+   * Lit deduplicates the underlying event bindings, so
+   * rendering twice is cheap and the two toolbars behave
+   * identically.
+   */
+  _renderMessageToolbar(msg) {
+    return html`
+      <button
+        class="message-action-button"
+        title="Copy raw text"
+        aria-label="Copy message text to clipboard"
+        @click=${(e) => {
+          // Prevent click-through to the card / mention
+          // handler. The delegated mention click listener
+          // on .messages only fires for .file-mention
+          // elements, but stopPropagation is cheap
+          // insurance against future additions.
+          e.stopPropagation();
+          this._copyMessageText(msg);
+        }}
+      >
+        📋
+      </button>
+      <button
+        class="message-action-button"
+        title="Paste into input"
+        aria-label="Insert message text into chat input"
+        @click=${(e) => {
+          e.stopPropagation();
+          this._pasteMessageToPrompt(msg);
+        }}
+      >
+        ↩
+      </button>
     `;
   }
 
