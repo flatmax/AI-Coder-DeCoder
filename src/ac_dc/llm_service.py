@@ -98,6 +98,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from ac_dc.context_manager import ContextManager, Mode
+from ac_dc.edit_pipeline import EditPipeline
+from ac_dc.edit_protocol import (
+    EditResult,
+    EditStatus,
+    detect_shell_commands,
+    parse_text,
+)
 from ac_dc.file_context import FileContext
 from ac_dc.history_compactor import HistoryCompactor, TopicBoundary
 from ac_dc.stability_tracker import StabilityTracker
@@ -429,6 +436,23 @@ class LLMService:
             cache_target_tokens=config.cache_target_tokens_for_model(),
         )
         self._context.set_stability_tracker(self._stability_tracker)
+
+        # Edit pipeline — validates and applies edit blocks parsed
+        # from the LLM response. Constructed only when a repo is
+        # attached; without one there's nothing to write to.
+        # The pipeline is stateless across invocations, so we
+        # build it once and reuse.
+        self._edit_pipeline: EditPipeline | None = (
+            EditPipeline(repo) if repo is not None else None
+        )
+
+        # Review-mode flag. Layer 3.9 stub — always False.
+        # Layer 4.3 (code review) wires entry/exit and the
+        # read-only guard that skips edit application while
+        # active. The flag lives here rather than on the context
+        # manager because the streaming handler is what gates
+        # the apply step, not the assembly layer.
+        self._review_active = False
 
         # Executors. Streaming gets its own pool so aux work doesn't
         # starve it. Aux pool handles commit-message generation and
@@ -819,36 +843,33 @@ class LLMService:
             )
             error = str(exc)
 
-        # Build the completion result. 3.7 ships a minimal shape —
-        # 3.9 (edit protocol) will populate edit_blocks,
-        # edit_results, files_modified, files_auto_added.
-        result: dict[str, Any] = {
-            "response": full_content,
-            "token_usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-            },
-            "edit_blocks": [],
-            "shell_commands": [],
-            "passed": 0,
-            "already_applied": 0,
-            "failed": 0,
-            "skipped": 0,
-            "not_in_context": 0,
-            "files_modified": [],
-            "edit_results": [],
-            "files_auto_added": [],
-            "user_message": message,
-        }
-        if cancelled:
-            result["cancelled"] = True
-        if error is not None:
-            result["error"] = error
+        # Build the completion result. Edit parsing and apply
+        # happen only when the stream completed normally — errors
+        # and cancellations skip the apply step so partial
+        # assistant output doesn't silently touch the filesystem.
+        # Review mode is read-only (specs4/4-features/code-review.md);
+        # we parse for UI display but skip application.
+        result = await self._build_completion_result(
+            full_content=full_content,
+            user_message=message,
+            cancelled=cancelled,
+            error=error,
+        )
 
         # Fire completion event.
         await self._broadcast_event_async(
             "streamComplete", request_id, result
         )
+
+        # Broadcast filesChanged if the apply step auto-added
+        # files (not-in-context edits). Clients update their
+        # file picker to reflect the new selection so the user
+        # sees which files were added for retry on the next
+        # request.
+        if result.get("files_auto_added"):
+            self._broadcast_event(
+                "filesChanged", list(self._selected_files)
+            )
 
         # Clear active-request flag BEFORE post-response work, so a
         # concurrent cancel check doesn't hold on to a stale ID.
@@ -866,6 +887,173 @@ class LLMService:
                     "Post-response processing for %s failed: %s",
                     request_id, exc,
                 )
+
+    async def _build_completion_result(
+        self,
+        full_content: str,
+        user_message: str,
+        cancelled: bool,
+        error: str | None,
+    ) -> dict[str, Any]:
+        """Parse the response, apply edits, build the result dict.
+
+        The result shape matches what the frontend expects in
+        ``streamComplete.result``. Edit parsing happens even for
+        cancelled streams (so partial assistant output renders
+        pending cards for the user), but apply is gated on
+        ``error is None and not cancelled and not _review_active``.
+
+        Order of operations:
+
+        1. Parse the full response via :func:`parse_text` —
+           produces completed blocks, incomplete blocks, and
+           shell commands.
+        2. If apply is gated off, return a result with the parsed
+           blocks and zero counts.
+        3. Otherwise, run the pipeline against the current
+           selected-files set. Auto-added files are appended to
+           ``_selected_files`` so the next request's file sync
+           includes them.
+        4. Populate aggregate counts and files_* lists from the
+           pipeline's :class:`ApplyReport`.
+        """
+        # Parse the response. We do this even for cancelled /
+        # error streams — the frontend renders incomplete blocks
+        # as pending cards, and shell-command detection on a
+        # partial response is still useful.
+        parse_result = parse_text(full_content)
+
+        # Convert parsed blocks into the frontend's "edit_blocks"
+        # shape — file path plus is_create flag. Full old/new
+        # text lives on the per-block result, not this summary.
+        edit_blocks_summary = [
+            {
+                "file": b.file_path,
+                "is_create": b.is_create,
+            }
+            for b in parse_result.blocks
+        ]
+
+        # Default result — apply step skipped.
+        result: dict[str, Any] = {
+            "response": full_content,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+            "edit_blocks": edit_blocks_summary,
+            "shell_commands": parse_result.shell_commands,
+            "passed": 0,
+            "already_applied": 0,
+            "failed": 0,
+            "skipped": 0,
+            "not_in_context": 0,
+            "files_modified": [],
+            "edit_results": [],
+            "files_auto_added": [],
+            "user_message": user_message,
+        }
+        if cancelled:
+            result["cancelled"] = True
+        if error is not None:
+            result["error"] = error
+
+        # Gate the apply step. Three conditions must hold:
+        # - No error occurred during streaming
+        # - Stream wasn't cancelled mid-way
+        # - Review mode isn't active (read-only contract)
+        # - We have a pipeline (repo was attached)
+        # - There are blocks to apply
+        if (
+            error is not None
+            or cancelled
+            or self._review_active
+            or self._edit_pipeline is None
+            or not parse_result.blocks
+        ):
+            return result
+
+        # Apply the blocks. The pipeline expects a set of
+        # currently-selected files so it can mark not-in-context
+        # edits. We pass a copy — the pipeline doesn't mutate
+        # its input, but the defensive copy means a concurrent
+        # mutation of _selected_files can't affect apply
+        # results mid-loop.
+        in_context = set(self._selected_files)
+        try:
+            report = await self._edit_pipeline.apply_edits(
+                parse_result.blocks,
+                in_context_files=in_context,
+            )
+        except Exception as exc:
+            # Defensive — the pipeline itself shouldn't raise
+            # (per-block errors are captured in results), but
+            # if it does we surface it as a stream error rather
+            # than crashing the post-response flow.
+            logger.exception("Edit pipeline raised: %s", exc)
+            result["error"] = (
+                f"Edit application failed: {exc}"
+            )
+            return result
+
+        # Auto-add files from not-in-context edits to the
+        # selection so the next request has them in context.
+        # The frontend receives this via the filesChanged
+        # broadcast (fired by the caller after streamComplete).
+        if report.files_auto_added:
+            added: list[str] = []
+            for path in report.files_auto_added:
+                if path not in self._selected_files:
+                    self._selected_files.append(path)
+                    added.append(path)
+            # Load the newly-selected files into the file
+            # context so the next request's assembly has their
+            # content. Silently skip files that fail to load
+            # (binary, missing) — matches the file_sync
+            # policy.
+            for path in added:
+                try:
+                    self._file_context.add_file(path)
+                except Exception as exc:
+                    logger.debug(
+                        "Auto-added file %s could not be "
+                        "loaded: %s",
+                        path, exc,
+                    )
+
+        # Serialise the per-block results for the JSON
+        # response. Each EditResult is a dataclass; we emit a
+        # plain dict matching the frontend contract.
+        result["edit_results"] = [
+            self._serialise_edit_result(r) for r in report.results
+        ]
+        result["passed"] = report.passed
+        result["already_applied"] = report.already_applied
+        result["failed"] = report.failed
+        result["skipped"] = report.skipped
+        result["not_in_context"] = report.not_in_context
+        result["files_modified"] = list(report.files_modified)
+        result["files_auto_added"] = list(report.files_auto_added)
+
+        return result
+
+    @staticmethod
+    def _serialise_edit_result(r: EditResult) -> dict[str, Any]:
+        """Convert an EditResult dataclass to the RPC dict shape.
+
+        Status is serialised as its string value (the enum
+        subclasses str, so ``r.status.value`` is explicit about
+        intent). Error type is always present as a string —
+        empty for success.
+        """
+        return {
+            "file": r.file_path,
+            "status": r.status.value,
+            "message": r.message,
+            "error_type": r.error_type,
+            "old_preview": r.old_preview,
+            "new_preview": r.new_preview,
+        }
 
     def _run_completion_sync(
         self,
