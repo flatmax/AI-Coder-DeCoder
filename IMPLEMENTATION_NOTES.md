@@ -1055,10 +1055,100 @@ Notes from delivery:
 
 - **Background colour hardcoded white.** A theme-aware implementation would parse the slide master's `bg` XML. Keeping it white in A4 is acceptable because most presentations use white backgrounds, and users with dark-themed presentations will see dark text on white instead of dark text on dark (legible, if not visually faithful).
 
-Open carried over for Pass A5:
+#### Pass A5a — PDF via PyMuPDF (direct, no LibreOffice) (delivered)
 
-- **PDF + LibreOffice pipeline (Pass A5).** LibreOffice (pptx/odp → PDF) and PyMuPDF (PDF → text + image detection + SVG export with text-as-path=0). Hybrid output: text extracted into markdown paragraphs, per-page SVGs generated only when pages contain graphics. Embedded raster images externalised from SVGs to separate files. This is the *primary* path for pptx; the A4 python-pptx path remains as the fallback when LibreOffice isn't available.
-- **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop. Pass A5 especially needs this — PDF compilation can take seconds per file.
+Adds PDF support via PyMuPDF's hybrid text + SVG pipeline. Each page's text is extracted into markdown paragraphs; pages with raster images or significant vector drawings also get companion SVGs. Glyph elements are stripped from SVGs when text is already in markdown (avoids duplication). Embedded raster images are externalised from SVGs to separate files. This is the direct PDF path — Pass A5b will add the LibreOffice-based pptx/odp → PDF conversion on top of this pipeline.
+
+- `src/ac_dc/doc_convert.py` — module-level additions:
+  - `_PDF_EXTENSIONS = frozenset({".pdf"})` — dispatch set for the direct PyMuPDF path.
+  - `_PAGE_GRAPHICS_THRESHOLD = 3` — minimum significant-drawing count to trigger SVG export alongside text. Below this, page is treated as text-only.
+  - `_PATH_SIGNIFICANT_SEGMENTS = 4` / `_POLYGON_SIGNIFICANT_SEGMENTS = 2` — significance thresholds per specs4/4-features/doc-convert.md.
+
+- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+  - Added a new branch after the pptx path: `if suffix in _PDF_EXTENSIONS: return self._convert_via_pymupdf(...)`.
+
+- `src/ac_dc/doc_convert.py` — `_convert_via_pymupdf` and helpers:
+  - Lazy PyMuPDF import. ImportError → per-file error with install hint. No fallback — PyMuPDF is the only reliable PDF extractor.
+  - Document opened via `fitz.open`; errors wrapped with broad catch (corrupt PDF, wrong version, encrypted without password all produce different exception types).
+  - `_process_pdf_document` split from `_convert_via_pymupdf` so the `doc.close()` is guaranteed in the caller's finally block regardless of which branch exits.
+  - Empty-PDF placeholder — a document with zero pages produces `(empty PDF)` body so the scan classifies it as `current`.
+  - Dynamic zero-padding for page filenames — `max(_SLIDE_NUMBER_MIN_WIDTH, len(str(page_count)))`. Consistent width within a single PDF.
+  - Per-page failure isolation — a page that fails to process gets a placeholder entry in the index (`## Page N\n\n*(page rendering failed)*`) and the rest of the document proceeds. Two failure paths: page load fails (rare) and page rendering fails (more common, e.g. unusual font).
+  - Assets subdirectory created lazily on the first page that actually needs it. Text-only PDFs produce no assets dir.
+  - Orphan cleanup on re-conversion — reads prior provenance header, unlinks artefacts (SVGs + externalised images) listed there but not produced this round. Empty assets dir removed after cleanup.
+
+- `src/ac_dc/doc_convert.py` — `_process_pdf_page`:
+  - Per-page dispatch logic: extract text first, then detect images and drawings, then decide whether to emit SVG.
+  - SVG emission criteria: page has any raster images OR >= _PAGE_GRAPHICS_THRESHOLD significant drawings OR page has no text AND no detected content (fallback — lightweight vector graphics below the significance threshold still get captured).
+  - Markdown structure per page: `## Page N` heading, then extracted text paragraphs if any, then image reference if SVG was emitted.
+  - Text-only pages emit no SVG — keeps output lean.
+  - Pages where SVG write fails still emit the text markdown (best-effort).
+
+- `src/ac_dc/doc_convert.py` — text extraction via `_extract_pdf_text`:
+  - Uses `page.get_text("dict")` which returns structured blocks/lines/spans.
+  - Each text block becomes one paragraph; spans within lines joined by spaces; lines within a block also joined by spaces (visual-wrap within a block is usually not semantic paragraph break).
+  - Future enhancement: heading detection from font sizes. For A5a, emits plain paragraphs.
+
+- `src/ac_dc/doc_convert.py` — drawing significance via `_count_significant_drawings`:
+  - Walks `page.get_drawings()` output.
+  - Bézier (`c`) or quadratic (`qu`) curves → always significant.
+  - Filled paths with > _POLYGON_SIGNIFICANT_SEGMENTS segments → significant.
+  - Other paths with > _PATH_SIGNIFICANT_SEGMENTS segments → significant.
+  - Simple rectangles and single lines → NOT significant (border/table-rule noise every PDF emits).
+
+- `src/ac_dc/doc_convert.py` — SVG export and processing:
+  - `_export_pdf_page_svg` — calls `page.get_svg_image(text_as_path=0)` so text stays as `<text>` elements rather than decomposed paths. Keeps SVG selectable and small.
+  - `_strip_svg_glyphs` — regex-removes `<text>...</text>` when `strip_glyphs=True`. Used when text is already in markdown; keeps visual layout (drawings, images) without duplicating word content. PyMuPDF's SVG output doesn't nest `<text>` elements so the regex is reliable.
+  - `_externalize_svg_images` — scans SVG for `href="data:image/..."` attributes (both `href` and `xlink:href` variants), decodes base64 payloads, writes files with `{stem}_img{NN}{ext}` naming, rewrites SVG attributes to reference files. Failures leave original data URI in place (broken-ref is better than silent content loss). Uses the `_MIME_TO_EXT` map shared with the markitdown path.
+
+- `tests/test_doc_convert.py` — test infrastructure:
+  - `_require_pymupdf()` — skip guard for tests without PyMuPDF installed.
+  - `_make_pdf_with_text(path, pages)` — builds a PDF with one text block per page.
+  - `_make_pdf_with_image(path, image_bytes)` — builds a PDF with one image-containing page.
+  - `_make_pdf_with_text_and_image(path, text, image_bytes)` — mixed-content page.
+  - `_make_empty_pdf(path)` — writes a minimal valid PDF with zero pages by hand (PyMuPDF's save requires at least one page, so we bypass the library to construct the zero-page case).
+
+- `tests/test_doc_convert.py` — removed `test_pdf_skipped_not_yet_supported` (PDF is now implemented).
+
+- `tests/test_doc_convert.py` — seven new test classes:
+  - `TestPdfDispatch` — 4 tests: pdf routes to PyMuPDF, produces output file, provenance header present, scan classifies as `current`.
+  - `TestPdfTextExtraction` — 4 tests: single-page text appears, multi-page text appears, page headings in order (`## Page 1` before `## Page 2`), text-only page produces no SVG.
+  - `TestPdfImageHandling` — 6 tests: page with image produces SVG, SVG filename zero-padded, markdown has image link, text+image page produces both (text in markdown + SVG link), externalised image saved to disk, provenance lists all artefacts (SVGs + externalised images).
+  - `TestPdfEmptyAndEdgeCases` — 1 test: empty PDF produces `(empty pdf)` placeholder.
+  - `TestPdfOrphanCleanup` — 1 test: re-conversion with fewer pages removes stale artefacts.
+  - `TestPdfFailures` — 2 tests: missing PyMuPDF returns error with install hint, corrupt PDF errors cleanly.
+  - `TestPdfSvgGlyphStripping` — 1 test: text on a text+image page is in markdown only, NOT in the SVG (pins the glyph-stripping contract).
+
+Design points pinned by tests:
+
+- **Text-only pages produce no SVG.** `test_text_only_page_no_svg` writes a PDF with nothing but text and asserts the assets subdirectory doesn't exist. Text-only pages don't need SVG companion files; keeping the output lean matters for doc-heavy repos.
+
+- **Glyph stripping is load-bearing for text+image pages.** `test_text_page_svg_has_no_text_elements` uses a distinctive unique phrase and asserts it appears in the markdown but NOT in the SVG. Without glyph stripping, both the markdown body AND the SVG would carry the text, doubling the LLM's token cost for no information gain. The regex is simple because PyMuPDF's SVG output is well-formed.
+
+- **Image externalisation is mandatory.** PyMuPDF's SVG output embeds raster images as base64 data URIs. For large images this can blow up the SVG to megabytes. The externalisation step extracts them to sibling files, rewrites the SVG to reference those files. Matches the approach used by other subsystems that emit SVGs (the diff viewer's SVG resolution path).
+
+- **Provenance tracks BOTH SVGs and externalised images.** `test_provenance_lists_all_artefacts` verifies the `images=` header field lists both types of files. The orphan cleanup pass on re-conversion diffs against this full list so stale externalised images don't accumulate.
+
+- **Page-heading ordering pinned by index.** `test_page_headings_in_order` uses string indices to verify `## Page 1` appears before `## Page 2` before `## Page 3`. PyMuPDF's page iteration order IS document order by spec, but pinning the invariant in a test catches any future refactor that might sort pages differently.
+
+- **Empty PDF has its own fast path.** `test_empty_pdf_placeholder` passes a zero-page PDF (built by hand since PyMuPDF's save requires ≥1 page) and asserts the output contains `empty pdf` content. Prevents scan re-classifying the output as `new` on every pass.
+
+Notes from delivery:
+
+- **`_process_pdf_document` extracted for finally-safety.** The main `_convert_via_pymupdf` has a try/finally that calls `doc.close()`. Extracting the actual work into a separate method means any early return (empty PDF, error writing output) still unwinds through the finally and closes the document. PyMuPDF keeps the underlying file descriptor open until close; leaking one per failed conversion would quickly hit file-descriptor limits.
+
+- **Significance thresholds tuned for real-world PDFs.** Every PDF generator emits rectangles for page borders and lines for table rules; treating those as "significant graphics" would trigger SVG export on every page. The threshold of ≥3 significant drawings filters these out while still catching pages with genuine diagrams. Tuning could need revisiting for specific document types but the current values match the spec recommendation.
+
+- **Raster image presence trumps drawing threshold.** One image anywhere on a page triggers SVG export regardless of drawing count. Raster content can't be extracted as text, so the SVG is the only representation.
+
+- **Text-only page fallback.** A page with zero extractable text AND zero detected raster/drawings still gets a full-page SVG as a safety net. Lightweight vector content (a thin border, a single line) doesn't meet the significance threshold but isn't literally nothing. Better to produce an SVG that captures it than silently drop a page of content.
+
+- **Externalised image naming uses zero-padded 2-digit index.** `{stem}_img01.png`, `{stem}_img02.png`. Different from the pptx path (which pads slide numbers at deck level, not image level) — each PDF page gets its own image counter starting from 01. Matches how users think about "the first image on page 2" vs the pptx model of "slide 7's content".
+
+Open carried over for Pass A5b:
+
+- **LibreOffice-based pptx/odp conversion.** Pass A5b will add `_convert_via_libreoffice` that spawns `soffice --headless --convert-to pdf` in a temp dir, then routes the resulting PDF through `_convert_via_pymupdf`. pptx and odp will get new dispatch branches that try the LibreOffice path first and fall back to python-pptx (for pptx) or markitdown (for odp) when either LibreOffice or PyMuPDF is missing.
+- **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop. Pass A5b especially needs this — LibreOffice subprocess launches take 1-3 seconds per file.
 
 ### 4.3 — Code review — **delivered**
 

@@ -788,15 +788,50 @@ def dirty_repo(scan_root):
 def _make_png_bytes() -> bytes:
     """Return a minimal valid 1x1 PNG payload.
 
-    We don't need a real image — just something that base64-encodes
-    and decodes round-trip. Using genuine PNG bytes lets the test
-    double-check we're preserving payload integrity.
+    Constructed at runtime with real CRC checksums via `zlib.crc32`.
+    A hand-encoded hex string is error-prone — one wrong nibble in
+    a length or CRC field makes the file fail strict decoders like
+    PyMuPDF with "premature end of data". Building fresh means
+    every chunk is structurally valid by construction.
+
+    The image is a 1x1 red pixel (grayscale-simplest-form would
+    save ~10 bytes but isn't worth the added obscurity).
     """
-    # 1x1 transparent PNG — smallest valid file (~67 bytes).
-    return bytes.fromhex(
-        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f"
-        "15c4890000000d49444154789c62000100000500010d0a2db400000000"
-        "49454e44ae426082"
+    import struct
+    import zlib
+
+    def _chunk(chunk_type: bytes, data: bytes) -> bytes:
+        """Build a PNG chunk: length + type + data + CRC."""
+        return (
+            struct.pack(">I", len(data))
+            + chunk_type
+            + data
+            + struct.pack(">I", zlib.crc32(chunk_type + data))
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    # IHDR — 13 bytes: width, height, bit depth, colour type,
+    # compression, filter, interlace.
+    ihdr = struct.pack(
+        ">IIBBBBB",
+        1,    # width
+        1,    # height
+        8,    # bit depth
+        2,    # colour type: truecolour (RGB)
+        0,    # compression method
+        0,    # filter method
+        0,    # interlace method
+    )
+    # IDAT — zlib-compressed raw scanlines. For a 1x1 RGB image,
+    # the raw data is 1 filter byte + 3 RGB bytes = 4 bytes.
+    raw = b"\x00\xff\x00\x00"  # filter=None, red=255, green=0, blue=0
+    idat = zlib.compress(raw, level=9)
+    # IEND — no data.
+    return (
+        signature
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", idat)
+        + _chunk(b"IEND", b"")
     )
 
 
@@ -920,14 +955,6 @@ class TestExtensionDispatch:
         [entry] = result["results"]
         assert entry["status"] == "ok"
 
-    def test_pdf_skipped_not_yet_supported(
-        self, doc_convert, scan_root, fake_markitdown
-    ):
-        _write_source(scan_root, "doc.pdf", b"x")
-        result = doc_convert.convert_files(["doc.pdf"])
-        [entry] = result["results"]
-        assert entry["status"] == "skipped"
-        assert "not yet" in entry["message"].lower()
 
     def test_unsupported_extension_errors(
         self, doc_convert, scan_root, fake_markitdown
@@ -952,10 +979,16 @@ class TestExtensionDispatch:
     def test_mixed_batch_produces_per_file_results(
         self, doc_convert, scan_root, fake_markitdown
     ):
+        # Use .odp for the deferred side — it's in the
+        # supported-extensions list but still routes to the
+        # "not yet supported" skip branch (A5b will add odp
+        # via LibreOffice). `.pdf` used to be the deferred
+        # example before Pass A5a implemented it, so we pick
+        # an extension that is still genuinely deferred.
         _write_source(scan_root, "ok.docx", b"x")
-        _write_source(scan_root, "deferred.pdf", b"x")
+        _write_source(scan_root, "deferred.odp", b"x")
         fake_markitdown.outputs[str(scan_root / "ok.docx")] = "text\n"
-        result = doc_convert.convert_files(["ok.docx", "deferred.pdf"])
+        result = doc_convert.convert_files(["ok.docx", "deferred.odp"])
         assert len(result["results"]) == 2
         statuses = [r["status"] for r in result["results"]]
         assert statuses == ["ok", "skipped"]
@@ -2163,3 +2196,395 @@ class TestPptxFailures:
         result = doc_convert.convert_files(["corrupt.pptx"])
         [entry] = result["results"]
         assert entry["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Pass A5a — PDF via PyMuPDF (direct, no LibreOffice)
+# ---------------------------------------------------------------------------
+#
+# PyMuPDF (fitz) is a required dependency of the `[docs]` extra, so
+# these tests import it directly when available. The library builds
+# real PDFs via the same API used for reading, which lets us test
+# the full pipeline without mocking every page/drawing/image call.
+# Tests that need "PyMuPDF missing" use the builtins.__import__
+# monkeypatch pattern from the other pass tests.
+
+
+def _require_pymupdf():
+    """Skip the test if PyMuPDF isn't installed."""
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        pytest.skip("PyMuPDF not installed")
+
+
+def _make_pdf_with_text(path: Path, pages: list[str]) -> None:
+    """Create a minimal PDF with one text block per page.
+
+    Each page gets a single text block positioned near the
+    top-left. No images or drawings — pure text.
+    """
+    _require_pymupdf()
+    import fitz
+
+    doc = fitz.open()
+    for text in pages:
+        page = doc.new_page(width=612, height=792)  # US Letter
+        # Insert text at a visible position.
+        page.insert_text((72, 72), text, fontsize=12)
+    doc.save(str(path))
+    doc.close()
+
+
+def _make_pdf_with_image(path: Path, image_bytes: bytes) -> None:
+    """Create a PDF with one image-containing page."""
+    _require_pymupdf()
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Insert a raster image at a fixed position.
+    rect = fitz.Rect(72, 72, 372, 372)
+    page.insert_image(rect, stream=image_bytes)
+    doc.save(str(path))
+    doc.close()
+
+
+def _make_pdf_with_text_and_image(
+    path: Path, text: str, image_bytes: bytes
+) -> None:
+    """Create a PDF with both text and an image on one page."""
+    _require_pymupdf()
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 72), text, fontsize=12)
+    rect = fitz.Rect(72, 400, 372, 700)
+    page.insert_image(rect, stream=image_bytes)
+    doc.save(str(path))
+    doc.close()
+
+
+def _make_empty_pdf(path: Path) -> None:
+    """Create a PDF with zero pages.
+
+    PyMuPDF allows empty documents but the save invokes the
+    writer which requires at least one page — so we use a
+    workaround by writing a minimal valid PDF directly.
+    """
+    # Minimal valid PDF with 0 pages. The xref is the trick —
+    # PDF spec allows empty page trees.
+    path.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n"
+        b"xref\n0 3\n"
+        b"0000000000 65535 f \n"
+        b"0000000009 00000 n \n"
+        b"0000000052 00000 n \n"
+        b"trailer<</Size 3/Root 1 0 R>>\n"
+        b"startxref\n94\n%%EOF\n"
+    )
+
+
+class TestPdfDispatch:
+    """Basic routing — pdf goes to PyMuPDF."""
+
+    def test_pdf_routes_to_pymupdf(self, doc_convert, scan_root):
+        _require_pymupdf()
+        _make_pdf_with_text(scan_root / "doc.pdf", ["Hello world"])
+        result = doc_convert.convert_files(["doc.pdf"])
+        [entry] = result["results"]
+        assert entry["status"] == "ok"
+
+    def test_pdf_produces_output_file(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(scan_root / "doc.pdf", ["Hello"])
+        doc_convert.convert_files(["doc.pdf"])
+        assert (scan_root / "doc.md").is_file()
+
+    def test_pdf_header_has_provenance(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(scan_root / "doc.pdf", ["Hello"])
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        assert content.startswith("<!-- docuvert:")
+        assert "source=doc.pdf" in content
+        assert "sha256=" in content
+
+    def test_pdf_scan_current_after_conversion(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(scan_root / "doc.pdf", ["Hello"])
+        doc_convert.convert_files(["doc.pdf"])
+        scan = doc_convert.scan_convertible_files()
+        [entry] = scan
+        assert entry["status"] == "current"
+
+
+class TestPdfTextExtraction:
+    """Text extraction into markdown paragraphs."""
+
+    def test_single_page_text_extracted(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(
+            scan_root / "doc.pdf",
+            ["This is page one."],
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        assert "This is page one." in content
+
+    def test_multi_page_text_extracted(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(
+            scan_root / "doc.pdf",
+            ["First page text.", "Second page text.", "Third page."],
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        assert "First page text." in content
+        assert "Second page text." in content
+        assert "Third page." in content
+
+    def test_page_headings_in_order(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_pdf_with_text(
+            scan_root / "doc.pdf",
+            ["First", "Second", "Third"],
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        # All three page headings present.
+        for i in range(1, 4):
+            assert f"## Page {i}" in content
+        # In order.
+        idx1 = content.index("## Page 1")
+        idx2 = content.index("## Page 2")
+        idx3 = content.index("## Page 3")
+        assert idx1 < idx2 < idx3
+
+    def test_text_only_page_no_svg(
+        self, doc_convert, scan_root
+    ):
+        """Pages with only text produce no SVG — keeps output lean."""
+        _require_pymupdf()
+        _make_pdf_with_text(
+            scan_root / "doc.pdf",
+            ["Just text, nothing else."],
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        # Assets dir should not have been created for a
+        # text-only page.
+        assert not (scan_root / "doc").exists()
+
+
+class TestPdfImageHandling:
+    """Pages with images get SVG companions."""
+
+    def test_page_with_image_produces_svg(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_image(scan_root / "doc.pdf", png)
+        doc_convert.convert_files(["doc.pdf"])
+        svgs = list((scan_root / "doc").glob("*.svg"))
+        assert len(svgs) == 1
+
+    def test_image_page_svg_filename_padded(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_image(scan_root / "doc.pdf", png)
+        doc_convert.convert_files(["doc.pdf"])
+        svgs = list((scan_root / "doc").glob("*.svg"))
+        assert svgs[0].name == "01_page.svg"
+
+    def test_image_page_markdown_has_link(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_image(scan_root / "doc.pdf", png)
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        assert "![Page 1](doc/01_page.svg)" in content
+
+    def test_text_plus_image_produces_both(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_text_and_image(
+            scan_root / "doc.pdf",
+            "Text content here.",
+            png,
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        # Markdown has both the text AND the SVG link.
+        assert "Text content here." in content
+        assert "doc/01_page.svg" in content
+        assert (scan_root / "doc" / "01_page.svg").is_file()
+
+    def test_externalized_image_saved_to_disk(
+        self, doc_convert, scan_root
+    ):
+        """PyMuPDF's SVG output embeds images; we extract them."""
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_image(scan_root / "doc.pdf", png)
+        doc_convert.convert_files(["doc.pdf"])
+        # An image file should have been extracted alongside
+        # the SVG. PyMuPDF may re-encode the image so we don't
+        # check byte-exact, but we expect at least one extra
+        # file with an image extension.
+        assets = list((scan_root / "doc").iterdir())
+        image_files = [
+            f for f in assets
+            if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp")
+        ]
+        assert len(image_files) >= 1
+
+    def test_provenance_lists_all_artefacts(
+        self, doc_convert, scan_root
+    ):
+        """All SVGs AND externalized images appear in images= field."""
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_image(scan_root / "doc.pdf", png)
+        doc_convert.convert_files(["doc.pdf"])
+        content = (scan_root / "doc.md").read_text(encoding="utf-8")
+        # The SVG should be listed.
+        assert "01_page.svg" in content
+        # The externalized image should also be listed.
+        # Filename pattern: 01_page_img01.<ext>
+        assert "01_page_img01" in content
+
+
+class TestPdfEmptyAndEdgeCases:
+    """Edge cases — empty PDF, zero-length pages."""
+
+    def test_empty_pdf_placeholder(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _make_empty_pdf(scan_root / "empty.pdf")
+        result = doc_convert.convert_files(["empty.pdf"])
+        [entry] = result["results"]
+        assert entry["status"] == "ok"
+        content = (scan_root / "empty.md").read_text(encoding="utf-8")
+        assert "empty pdf" in content.lower()
+
+
+class TestPdfOrphanCleanup:
+    """Re-conversion with fewer pages removes stale artefacts."""
+
+    def test_reconversion_with_fewer_pages_removes_orphans(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        png = _make_png_bytes()
+        # v1 — PDF with 3 image-containing pages.
+        import fitz
+        doc = fitz.open()
+        for _ in range(3):
+            page = doc.new_page(width=612, height=792)
+            rect = fitz.Rect(72, 72, 372, 372)
+            page.insert_image(rect, stream=png)
+        doc.save(str(scan_root / "doc.pdf"))
+        doc.close()
+
+        doc_convert.convert_files(["doc.pdf"])
+        svgs_v1 = sorted(
+            p.name for p in (scan_root / "doc").glob("*.svg")
+        )
+        assert svgs_v1 == [
+            "01_page.svg", "02_page.svg", "03_page.svg",
+        ]
+
+        # v2 — PDF with 1 image-containing page.
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        rect = fitz.Rect(72, 72, 372, 372)
+        page.insert_image(rect, stream=png)
+        doc.save(str(scan_root / "doc.pdf"))
+        doc.close()
+
+        doc_convert.convert_files(["doc.pdf"])
+        svgs_v2 = sorted(
+            p.name for p in (scan_root / "doc").glob("*.svg")
+        )
+        assert svgs_v2 == ["01_page.svg"]
+
+
+class TestPdfFailures:
+    """PyMuPDF missing, corrupt PDF."""
+
+    def test_missing_pymupdf_returns_error(
+        self, doc_convert, scan_root, monkeypatch
+    ):
+        import sys
+        _write_source(scan_root, "doc.pdf", b"fake pdf")
+        monkeypatch.delitem(sys.modules, "fitz", raising=False)
+        real_import = __builtins__["__import__"] if isinstance(
+            __builtins__, dict
+        ) else __builtins__.__import__
+
+        def blocking_import(name, *args, **kwargs):
+            if name == "fitz" or name.startswith("fitz."):
+                raise ImportError("PyMuPDF not installed")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", blocking_import)
+        result = doc_convert.convert_files(["doc.pdf"])
+        [entry] = result["results"]
+        assert entry["status"] == "error"
+        assert "PyMuPDF" in entry["message"]
+
+    def test_corrupt_pdf_errors(
+        self, doc_convert, scan_root
+    ):
+        _require_pymupdf()
+        _write_source(scan_root, "corrupt.pdf", b"not a real pdf")
+        result = doc_convert.convert_files(["corrupt.pdf"])
+        [entry] = result["results"]
+        assert entry["status"] == "error"
+
+
+class TestPdfSvgGlyphStripping:
+    """Text in markdown → SVG has glyphs stripped."""
+
+    def test_text_page_svg_has_no_text_elements(
+        self, doc_convert, scan_root
+    ):
+        """When a page has text AND images, the SVG shouldn't
+        duplicate the text content."""
+        _require_pymupdf()
+        png = _make_png_bytes()
+        _make_pdf_with_text_and_image(
+            scan_root / "doc.pdf",
+            "Distinctive unique phrase abc123",
+            png,
+        )
+        doc_convert.convert_files(["doc.pdf"])
+        svg_content = (
+            scan_root / "doc" / "01_page.svg"
+        ).read_text(encoding="utf-8")
+        # The distinctive phrase should NOT appear in the SVG —
+        # we stripped glyphs because text is in markdown.
+        assert "Distinctive unique phrase abc123" not in svg_content
