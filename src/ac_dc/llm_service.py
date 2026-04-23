@@ -775,11 +775,20 @@ class LLMService:
                 "userMessage", {"content": message}
             )
 
-            # Assemble the message array. 3.7 uses a FLAT assembly:
-            # system prompt + history + current user prompt with
-            # system reminder appended. Tiered assembly lands with
-            # 3.8 and will replace this.
-            messages = self._assemble_messages_flat(message, images)
+            # Assemble the message array. Tiered assembly is the
+            # primary path — it returns None only when the
+            # stability tracker hasn't been initialised yet
+            # (narrow startup window). Fall back to flat in that
+            # case so early requests still work.
+            tiered_content = self._build_tiered_content()
+            if tiered_content is None:
+                messages = self._assemble_messages_flat(
+                    message, images
+                )
+            else:
+                messages = self._assemble_tiered(
+                    message, images, tiered_content
+                )
 
             # Run the LLM call in the stream executor.
             assert self._main_loop is not None
@@ -957,7 +966,219 @@ class LLMService:
         )
 
     # ------------------------------------------------------------------
-    # Message assembly (flat — 3.8 will replace with tiered)
+    # Tiered content builder
+    # ------------------------------------------------------------------
+
+    def _build_tiered_content(
+        self,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Walk the stability tracker and build per-tier content dicts.
+
+        Returns ``None`` when the tracker has no items yet —
+        the streaming handler uses that as the signal to fall
+        back to flat assembly. An empty-but-initialised tracker
+        returns an empty-but-non-None dict (all tiers with empty
+        content lists), so the fallback only fires during a
+        narrow pre-init window.
+
+        Each tier entry has keys:
+
+        - ``symbols`` — concatenated symbol/doc index blocks for
+          files in this tier
+        - ``files`` — concatenated fenced file contents for
+          ``file:`` items in this tier
+        - ``history`` — history message dicts graduated to this
+          tier (in original index order)
+        - ``graduated_files`` — file paths whose full content is
+          in this tier (used for active-files exclusion)
+        - ``graduated_history_indices`` — history message indices
+          in this tier (used for active-history exclusion)
+
+        Key-prefix dispatch:
+
+        - ``symbol:{path}`` — symbol index block for the file
+        - ``doc:{path}`` — doc index block (Layer 3.10+; currently
+          skipped since the doc index hasn't landed)
+        - ``file:{path}`` — full file content as a fenced block
+        - ``history:{N}`` — history message at index N
+        - ``system:*``, ``url:*`` — skipped (system prompt is
+          handled by the assembler directly; URL tier entry is
+          deferred to Layer 4.1)
+
+        Items whose key references a user-excluded path are
+        skipped defensively — the tracker's own exclusion pass
+        should have removed them, but this belt-and-suspenders
+        check prevents leakage if the two passes ever
+        desynchronise.
+        """
+        if self._stability_tracker is None:
+            return None
+        all_items = self._stability_tracker.get_all_items()
+        if not all_items:
+            return None
+
+        # Result skeleton — every tier gets an entry even when
+        # empty, so the assembler's `tiered_content.get(tier) or
+        # {}` fallback always finds the right shape.
+        result: dict[str, dict[str, Any]] = {
+            tier: {
+                "symbols": "",
+                "files": "",
+                "history": [],
+                "graduated_files": [],
+                "graduated_history_indices": [],
+            }
+            for tier in ("L0", "L1", "L2", "L3")
+        }
+
+        history = self._context.get_history()
+
+        # Walk items once, dispatching by tier + prefix. Each
+        # tier builds lists of fragments first, then joins at
+        # the end so the fragment ordering is deterministic
+        # (we sort by key for stability).
+        tier_symbol_fragments: dict[str, list[str]] = {
+            t: [] for t in ("L0", "L1", "L2", "L3")
+        }
+        tier_file_fragments: dict[str, list[str]] = {
+            t: [] for t in ("L0", "L1", "L2", "L3")
+        }
+        tier_history_entries: dict[str, list[tuple[int, dict[str, Any]]]] = {
+            t: [] for t in ("L0", "L1", "L2", "L3")
+        }
+
+        for key in sorted(all_items.keys()):
+            item = all_items[key]
+            # The tracker's Tier enum subclasses str — its value
+            # is the tier name. Skip items in the active tier
+            # (they don't go into cached blocks) and unknown
+            # tiers.
+            tier_name = getattr(item.tier, "value", str(item.tier))
+            if tier_name not in ("L0", "L1", "L2", "L3"):
+                continue
+
+            if key.startswith("symbol:"):
+                path = key[len("symbol:"):]
+                if self._symbol_index is None:
+                    continue
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    tier_symbol_fragments[tier_name].append(block)
+            elif key.startswith("doc:"):
+                # Doc index lands with Layer 3.10+. Items appear
+                # here during cross-ref mode or doc mode; we skip
+                # them for now rather than erroring so partial
+                # tracker state (e.g. a doc-mode session restored
+                # before Layer 3.10) doesn't crash assembly.
+                continue
+            elif key.startswith("file:"):
+                path = key[len("file:"):]
+                content = self._file_context.get_content(path)
+                if content is None:
+                    continue
+                tier_file_fragments[tier_name].append(
+                    f"{path}\n```\n{content}\n```"
+                )
+                result[tier_name]["graduated_files"].append(path)
+            elif key.startswith("history:"):
+                try:
+                    idx = int(key[len("history:"):])
+                except ValueError:
+                    continue
+                if 0 <= idx < len(history):
+                    tier_history_entries[tier_name].append(
+                        (idx, dict(history[idx]))
+                    )
+                    result[tier_name]["graduated_history_indices"].append(idx)
+            # system:*, url:* — intentionally skipped.
+
+        # Finalise each tier. Symbols and files join with blank
+        # lines between fragments. History is sorted by original
+        # index so multi-message tier content reads in
+        # conversation order.
+        for tier_name in ("L0", "L1", "L2", "L3"):
+            result[tier_name]["symbols"] = "\n\n".join(
+                tier_symbol_fragments[tier_name]
+            )
+            result[tier_name]["files"] = "\n\n".join(
+                tier_file_fragments[tier_name]
+            )
+            tier_history_entries[tier_name].sort(key=lambda p: p[0])
+            result[tier_name]["history"] = [
+                msg for _idx, msg in tier_history_entries[tier_name]
+            ]
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Message assembly — tiered (primary path, 3.8)
+    # ------------------------------------------------------------------
+
+    def _assemble_tiered(
+        self,
+        user_prompt: str,
+        images: list[str],
+        tiered_content: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build the tiered message array.
+
+        Computes the symbol map with tier-aware exclusions (two-
+        pass: exclude selected files from the map, then exclude
+        tier-graduated file paths too) and delegates message
+        assembly to the context manager.
+
+        System reminder is appended to the user prompt here so
+        the tier assembler doesn't need to know about it.
+        """
+        # Append the system reminder before assembly so it lands
+        # at the end of the user's text — closest to where the
+        # model generates.
+        reminder = self._config.get_system_reminder()
+        augmented_prompt = user_prompt + (reminder or "")
+
+        # Build the exclusion set: selected files (full content
+        # present in the active "Working Files" section, so the
+        # index block would be redundant) plus every path that
+        # has graduated into a cached tier as a file: item (full
+        # content present in that tier, so neither the active
+        # section NOR the main symbol map should render it).
+        exclude_files: set[str] = set(self._selected_files)
+        for tier_name in ("L0", "L1", "L2", "L3"):
+            tier = tiered_content.get(tier_name) or {}
+            for path in tier.get("graduated_files", ()) or ():
+                exclude_files.add(path)
+
+        symbol_map = ""
+        symbol_legend = ""
+        if self._symbol_index is not None:
+            symbol_map = self._symbol_index.get_symbol_map(
+                exclude_files=exclude_files
+            )
+            symbol_legend = self._symbol_index.get_legend()
+
+        # File tree — the flat repo listing, rendered in its own
+        # uncached user/assistant pair by the assembler.
+        file_tree = ""
+        if self._repo is not None:
+            try:
+                file_tree = self._repo.get_flat_file_list()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch file tree for prompt: %s", exc
+                )
+
+        return self._context.assemble_tiered_messages(
+            user_prompt=augmented_prompt,
+            images=images if images else None,
+            symbol_map=symbol_map,
+            symbol_legend=symbol_legend,
+            doc_legend="",  # Layer 3.10 adds cross-ref mode
+            file_tree=file_tree,
+            tiered_content=tiered_content,
+        )
+
+    # ------------------------------------------------------------------
+    # Message assembly (flat — fallback during startup window)
     # ------------------------------------------------------------------
 
     def _assemble_messages_flat(
@@ -967,10 +1188,11 @@ class LLMService:
     ) -> list[dict[str, Any]]:
         """Build a flat message array for the LLM call.
 
-        Layer 3.7 placeholder — no tiered cache content, no
-        symbol map, no file tree, no URL context. Just system
-        prompt + history + user prompt with system reminder
-        appended.
+        Fallback path used only when the stability tracker
+        hasn't been initialised yet (narrow startup window
+        before :meth:`_try_initialize_stability` completes).
+        Produces a system prompt + history + user prompt
+        sequence with no cache-control markers.
         """
         system_prompt = self._context.get_system_prompt()
         reminder = self._config.get_system_reminder()

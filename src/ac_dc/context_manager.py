@@ -55,6 +55,92 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Header constants
+# ---------------------------------------------------------------------------
+#
+# Named constants used when building the LLM message array. Their values
+# are pinned by specs4/3-llm/prompt-assembly.md — implementers must not
+# vary the wording casually since the LLM's behaviour depends on these
+# exact headers (system prompts reference them, edit-protocol
+# documentation relies on the "Working Files" label).
+#
+# Kept at module level rather than on ContextManager itself — they are
+# assembly-layer concerns, not instance state. Multiple ContextManager
+# instances (future parallel-agent mode, D10) share one set of headers.
+
+REPO_MAP_HEADER = (
+    "# Repository Structure\n\n"
+    "Below is a map of the repository showing classes, functions, "
+    "and their relationships.\nUse this to understand the codebase "
+    "structure and find relevant code.\n\n"
+)
+
+DOC_MAP_HEADER = (
+    "# Document Structure\n\n"
+    "Below is an outline map of documentation files showing "
+    "headings, keywords, and cross-references.\nUse this to "
+    "navigate and reference documentation without loading every "
+    "file.\n\n"
+)
+
+FILE_TREE_HEADER = (
+    "# Repository Files\n\n"
+    "Complete list of files in the repository:\n\n"
+)
+
+URL_CONTEXT_HEADER = (
+    "# URL Context\n\n"
+    "The following content was fetched from URLs mentioned in the "
+    "conversation:\n\n"
+)
+
+FILES_ACTIVE_HEADER = (
+    "# Working Files\n\n"
+    "Here are the files:\n\n"
+)
+
+FILES_L0_HEADER = (
+    "# Reference Files (Stable)\n\n"
+    "These files are included for reference:\n\n"
+)
+
+FILES_L1_HEADER = (
+    "# Reference Files\n\n"
+    "These files are included for reference:\n\n"
+)
+
+FILES_L2_HEADER = (
+    "# Reference Files (L2)\n\n"
+    "These files are included for reference:\n\n"
+)
+
+FILES_L3_HEADER = (
+    "# Reference Files (L3)\n\n"
+    "These files are included for reference:\n\n"
+)
+
+TIER_SYMBOLS_HEADER = "# Repository Structure (continued)\n\n"
+
+REVIEW_CONTEXT_HEADER = "# Code Review Context\n\n"
+
+
+# Per-tier file-section headers keyed by Tier enum value. Used by the
+# assembly helper to pick the right header for each cached tier.
+_TIER_FILE_HEADERS: dict[str, str] = {
+    "L0": FILES_L0_HEADER,
+    "L1": FILES_L1_HEADER,
+    "L2": FILES_L2_HEADER,
+    "L3": FILES_L3_HEADER,
+}
+
+
+# Ordered tier names for cascade iteration during assembly. L0 is
+# handled specially (its content lives on the system message); L1–L3
+# each produce a user/assistant pair.
+_CACHED_TIERS: tuple[str, ...] = ("L0", "L1", "L2", "L3")
+
+
+# ---------------------------------------------------------------------------
 # Mode enum
 # ---------------------------------------------------------------------------
 
@@ -690,6 +776,327 @@ class ContextManager:
             total += self._counter.count(user_prompt)
         total += _BUDGET_ESTIMATE_OVERHEAD
         return total
+
+    # ------------------------------------------------------------------
+    # Prompt assembly — helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _with_cache_control(msg: dict[str, Any]) -> dict[str, Any]:
+        """Wrap a message's content in the structured cache-control form.
+
+        Takes a plain ``{"role": ..., "content": "text"}`` dict and
+        returns the same role with ``content`` wrapped as a single
+        text block carrying ``cache_control: {"type": "ephemeral"}``.
+        Providers (Anthropic, Bedrock Claude via litellm) treat this
+        as a cache breakpoint — everything from the start of the
+        prompt up to and including this message is cacheable.
+
+        Idempotent — if the content is already a structured list,
+        the cache-control marker is attached to the last text block
+        without rewrapping. Matters for multimodal messages where
+        content is already a list of text + image blocks.
+        """
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            msg["content"] = [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]
+            return msg
+        if isinstance(content, list) and content:
+            # Attach the marker to the last text block. Image
+            # blocks can't carry cache_control.
+            for block in reversed(content):
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                ):
+                    block["cache_control"] = {"type": "ephemeral"}
+                    return msg
+        # Fallback — wrap the stringified content.
+        msg["content"] = [{
+            "type": "text",
+            "text": str(content),
+            "cache_control": {"type": "ephemeral"},
+        }]
+        return msg
+
+    # ------------------------------------------------------------------
+    # Prompt assembly — tiered (primary mode)
+    # ------------------------------------------------------------------
+
+    def assemble_tiered_messages(
+        self,
+        user_prompt: str,
+        images: list[str] | None = None,
+        symbol_map: str = "",
+        symbol_legend: str = "",
+        doc_legend: str = "",
+        file_tree: str = "",
+        tiered_content: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Assemble the tiered message array for the LLM.
+
+        Produces a structured message list with ``cache_control``
+        markers at tier boundaries. Each non-empty cached tier
+        (L0–L3) gets exactly one breakpoint so the provider can
+        reuse the preceding prefix across requests.
+
+        Parameters
+        ----------
+        user_prompt:
+            The current user input text. The system reminder is
+            already appended upstream by the streaming handler.
+        images:
+            Optional list of base64 data URIs. When present, the
+            final user message becomes a multimodal content block
+            list instead of a plain string.
+        symbol_map:
+            The symbol or doc map body (excluding graduated
+            file blocks — those live in their tier's content
+            instead). Empty when no map is available.
+        symbol_legend:
+            The primary index's legend block — goes under
+            :data:`REPO_MAP_HEADER` when in code mode, or
+            :data:`DOC_MAP_HEADER` when in document mode.
+        doc_legend:
+            Optional secondary legend for cross-reference mode.
+            When non-empty, appended to L0 under the *opposite*
+            mode's header.
+        file_tree:
+            The flat file-tree text produced by the streaming
+            handler. Rendered as its own uncached user/assistant
+            pair.
+        tiered_content:
+            Dict keyed by tier name (``"L0"``, ``"L1"``, ``"L2"``,
+            ``"L3"``) mapping to per-tier content dicts with keys
+            ``symbols``, ``files``, ``history``,
+            ``graduated_files``, ``graduated_history_indices``.
+            When ``None``, callers should have fallen back to
+            flat assembly.
+        """
+        if tiered_content is None:
+            raise ValueError(
+                "assemble_tiered_messages requires a tiered_content "
+                "dict; use assemble_messages for flat assembly"
+            )
+
+        # Which mode decides the primary map header.
+        if self._mode == Mode.DOC:
+            primary_header = DOC_MAP_HEADER
+            cross_ref_header = REPO_MAP_HEADER
+        else:
+            primary_header = REPO_MAP_HEADER
+            cross_ref_header = DOC_MAP_HEADER
+
+        # Graduated paths and history indices collapse across all
+        # tiers — a file graduated to L2 must be excluded from the
+        # active "Working Files" section, not just from L2 content.
+        all_graduated_history: set[int] = set()
+        for tier_name in _CACHED_TIERS:
+            tier = tiered_content.get(tier_name) or {}
+            for idx in tier.get("graduated_history_indices", ()) or ():
+                all_graduated_history.add(int(idx))
+
+        messages: list[dict[str, Any]] = []
+
+        # L0 — system message with prompt + map header + legend +
+        # L0 index entries + L0 file contents + optional cross-ref
+        # legend. Cache-control goes on the system message itself
+        # when L0 has no history, else on the last L0 history msg.
+        l0 = tiered_content.get("L0") or {}
+        l0_symbols = l0.get("symbols") or ""
+        l0_files = l0.get("files") or ""
+        l0_history = l0.get("history") or []
+
+        system_parts: list[str] = [self._system_prompt]
+        if symbol_legend or l0_symbols or symbol_map:
+            system_parts.append(primary_header + symbol_legend)
+            if l0_symbols:
+                system_parts.append(l0_symbols)
+            if symbol_map:
+                system_parts.append(symbol_map)
+        if doc_legend:
+            system_parts.append(cross_ref_header + doc_legend)
+        if l0_files:
+            system_parts.append(FILES_L0_HEADER + l0_files)
+        system_content = "\n\n".join(p for p in system_parts if p)
+
+        if l0_history:
+            messages.append({
+                "role": "system",
+                "content": system_content,
+            })
+            for i, msg in enumerate(l0_history):
+                copied = dict(msg)
+                if i == len(l0_history) - 1:
+                    messages.append(self._with_cache_control(copied))
+                else:
+                    messages.append(copied)
+        else:
+            messages.append({
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": system_content,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            })
+
+        # L1, L2, L3 — each produces a user/assistant pair + history
+        # when non-empty. Cache-control on the last message of the
+        # tier's sequence.
+        for tier_name in ("L1", "L2", "L3"):
+            tier = tiered_content.get(tier_name) or {}
+            tier_symbols = tier.get("symbols") or ""
+            tier_files = tier.get("files") or ""
+            tier_history = tier.get("history") or []
+            if not (tier_symbols or tier_files or tier_history):
+                continue
+
+            tier_messages: list[dict[str, Any]] = []
+            body_parts: list[str] = []
+            if tier_symbols:
+                body_parts.append(TIER_SYMBOLS_HEADER + tier_symbols)
+            if tier_files:
+                body_parts.append(
+                    _TIER_FILE_HEADERS[tier_name] + tier_files
+                )
+            if body_parts:
+                tier_messages.append({
+                    "role": "user",
+                    "content": "\n\n".join(body_parts),
+                })
+                tier_messages.append({
+                    "role": "assistant",
+                    "content": "Ok.",
+                })
+            for msg in tier_history:
+                tier_messages.append(dict(msg))
+
+            # Mark the last message of the tier as the breakpoint.
+            if tier_messages:
+                tier_messages[-1] = self._with_cache_control(
+                    tier_messages[-1]
+                )
+                messages.extend(tier_messages)
+
+        # File tree — uncached user/assistant pair.
+        if file_tree:
+            messages.append({
+                "role": "user",
+                "content": FILE_TREE_HEADER + file_tree,
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Ok.",
+            })
+
+        # URL context — uncached user/assistant pair. Joined with a
+        # blank-line separator when multiple parts are present.
+        if self._url_context:
+            messages.append({
+                "role": "user",
+                "content": URL_CONTEXT_HEADER + "\n---\n".join(
+                    self._url_context
+                ),
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Ok, I've reviewed the URL content.",
+            })
+
+        # Review context — uncached user/assistant pair when active.
+        if self._review_context:
+            messages.append({
+                "role": "user",
+                "content": REVIEW_CONTEXT_HEADER + self._review_context,
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Ok, I've reviewed the code changes.",
+            })
+
+        # Active files — files not graduated to any cached tier.
+        # The file context's insertion order is preserved.
+        active_files_text = self._format_active_files(
+            tiered_content
+        )
+        if active_files_text:
+            messages.append({
+                "role": "user",
+                "content": FILES_ACTIVE_HEADER + active_files_text,
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Ok.",
+            })
+
+        # Active history — messages whose index is not in any
+        # cached tier's graduated indices.
+        history = self._history
+        for i, msg in enumerate(history):
+            if i in all_graduated_history:
+                continue
+            # Strip the last user message — that's the one we're
+            # about to render with images. The streaming handler
+            # added it before calling assembly.
+            if i == len(history) - 1 and msg.get("role") == "user":
+                continue
+            messages.append(dict(msg))
+
+        # Current user message — text-only or multimodal.
+        messages.append(self._build_user_message(user_prompt, images))
+
+        return messages
+
+    def _format_active_files(
+        self,
+        tiered_content: dict[str, dict[str, Any]],
+    ) -> str:
+        """Format active files — those not in any cached tier.
+
+        Collects graduated paths from every tier's
+        ``graduated_files`` list, then renders every file context
+        entry whose path is not in that set. Order is the file
+        context's insertion order (preserved across requests).
+        """
+        graduated: set[str] = set()
+        for tier_name in _CACHED_TIERS:
+            tier = tiered_content.get(tier_name) or {}
+            for path in tier.get("graduated_files", ()) or ():
+                graduated.add(path)
+
+        blocks: list[str] = []
+        for path in self._file_context.get_files():
+            if path in graduated:
+                continue
+            content = self._file_context.get_content(path)
+            if content is None:
+                continue
+            blocks.append(f"{path}\n```\n{content}\n```")
+        return "\n\n".join(blocks)
+
+    def _build_user_message(
+        self,
+        user_prompt: str,
+        images: list[str] | None,
+    ) -> dict[str, Any]:
+        """Build the current-turn user message, multimodal if images."""
+        if not images:
+            return {"role": "user", "content": user_prompt}
+        content_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": user_prompt}
+        ]
+        for uri in images:
+            if isinstance(uri, str) and uri.startswith("data:"):
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": uri},
+                })
+        return {"role": "user", "content": content_blocks}
 
     def shed_files_if_needed(
         self,
