@@ -111,6 +111,97 @@ function flattenTreePaths(node) {
 }
 
 /**
+ * Build a pruned file tree from flat search results.
+ *
+ * Input shape (from chat panel's `file-search-changed`
+ * event): `[{file: string, matches: [{...}, ...]}, ...]`.
+ * Output is a tree node with the standard shape the
+ * picker understands — root directory with nested
+ * children, file leaves set to the match count in their
+ * `lines` field (the picker renders this as a badge
+ * identically, giving the user a visual sense of which
+ * files have the most hits).
+ *
+ * Paths are split on `/` to build nested directories.
+ * Files at the root of the repo appear as direct children
+ * of the pruned root. Sorting within each directory
+ * follows the picker's convention (dirs before files,
+ * alphabetical within each).
+ *
+ * Empty input produces an empty root — the picker's
+ * built-in "No matching files" placeholder handles the
+ * rendering.
+ *
+ * @param {Array<{file: string, matches: Array}>} results
+ * @returns {object} picker-compatible tree node
+ */
+function buildPrunedTree(results) {
+  const root = {
+    name: '',
+    path: '',
+    type: 'dir',
+    lines: 0,
+    children: [],
+  };
+  if (!Array.isArray(results) || results.length === 0) return root;
+  // Build a nested structure by walking each file path's
+  // segments and creating directory nodes on demand. Map
+  // indexing keeps lookup O(1) per segment so the overall
+  // build is O(total segments), linear in path-length sum.
+  const dirByPath = new Map();
+  dirByPath.set('', root);
+  for (const entry of results) {
+    if (!entry || typeof entry.file !== 'string' || !entry.file) continue;
+    const matches = Array.isArray(entry.matches) ? entry.matches : [];
+    const segments = entry.file.split('/');
+    const fileName = segments.pop();
+    // Walk / create directory nodes.
+    let parent = root;
+    let accumPath = '';
+    for (const seg of segments) {
+      accumPath = accumPath ? `${accumPath}/${seg}` : seg;
+      let dir = dirByPath.get(accumPath);
+      if (!dir) {
+        dir = {
+          name: seg,
+          path: accumPath,
+          type: 'dir',
+          lines: 0,
+          children: [],
+        };
+        parent.children.push(dir);
+        dirByPath.set(accumPath, dir);
+      }
+      parent = dir;
+    }
+    // Add the file leaf. `lines` is the match count — the
+    // picker renders it as a badge so users see at a
+    // glance which files have the most hits.
+    parent.children.push({
+      name: fileName,
+      path: entry.file,
+      type: 'file',
+      lines: matches.length,
+    });
+  }
+  // Sort children per directory — dirs before files,
+  // alphabetical within each group. Matches the picker's
+  // `sortChildren` behaviour.
+  const sortNode = (node) => {
+    if (!Array.isArray(node.children)) return;
+    node.children.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const child of node.children) {
+      if (child.type === 'dir') sortNode(child);
+    }
+  };
+  sortNode(root);
+  return root;
+}
+
+/**
  * Default tree stub used before the first RPC load. Lets the
  * picker render empty rather than showing a spinner while the
  * tree is en route — the picker's empty-state placeholder
@@ -203,6 +294,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // trigger full re-renders and reset scroll / streaming
     // state in the chat panel.
     this._repoFiles = [];
+    // File search state — tracks whether the chat panel is
+    // currently in file-search mode. When active, picker
+    // file-clicked events route to the chat panel's
+    // scrollFileSearchToFile rather than opening the file
+    // in the viewer. Non-reactive; read inside event
+    // handlers only.
+    this._fileSearchActive = false;
 
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
@@ -385,17 +483,99 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   _onFileClicked(event) {
     // Picker emits `file-clicked` when the user clicks a
-    // file's name (not its checkbox). We translate to a
-    // `navigate-file` window event that Phase 3's viewer
-    // will consume. No-op at the consumer side for now.
+    // file's name (not its checkbox). Normally this
+    // translates to a `navigate-file` window event so the
+    // viewer (Phase 3) opens the file.
+    //
+    // During file search, the picker shows a pruned tree
+    // of matching files and clicking a file should scroll
+    // the match overlay to that file rather than opening
+    // it. We route to the chat panel's
+    // scrollFileSearchToFile method instead.
     const path = event.detail?.path;
     if (!path) return;
+    if (this._fileSearchActive) {
+      event.stopPropagation();
+      const chat = this._chat();
+      if (chat && typeof chat.scrollFileSearchToFile === 'function') {
+        chat.scrollFileSearchToFile(path);
+      }
+      return;
+    }
     window.dispatchEvent(
       new CustomEvent('navigate-file', {
         detail: { path },
         bubbles: false,
       }),
     );
+  }
+
+  /**
+   * Chat panel dispatched `file-search-changed` — mode
+   * entered, results updated, or mode exited. Swap the
+   * picker tree to a pruned view containing only files
+   * that have matches; on exit, restore the full tree and
+   * the user's previous expand state.
+   */
+  _onFileSearchChanged(event) {
+    const active = !!event.detail?.active;
+    const results = Array.isArray(event.detail?.results)
+      ? event.detail.results
+      : [];
+    const prev = this._fileSearchActive;
+    this._fileSearchActive = active;
+    const picker = this._picker();
+    if (!picker) return;
+    if (!active) {
+      // Exiting file search mode. Restore picker state:
+      // first the expand-state snapshot (so the user's
+      // pre-search expansions come back), then the full
+      // tree. `setTree` during the pruned phase snapshotted;
+      // `restoreExpandedState` now installs the snapshot.
+      if (prev) {
+        picker.restoreExpandedState();
+        picker.tree = this._latestTree;
+        picker.selectedFiles = new Set(this._selectedFiles);
+        picker.requestUpdate();
+      }
+      return;
+    }
+    // Entering file search mode (or results refreshed).
+    // Build a pruned tree from the results. Empty results
+    // produce an empty root; the picker renders its empty-
+    // state placeholder.
+    const pruned = buildPrunedTree(results);
+    picker.setTree(pruned);
+    picker.expandAll();
+    picker.requestUpdate();
+  }
+
+  /**
+   * Chat panel dispatched `file-search-scroll` — the match
+   * overlay scrolled, and we should update the picker's
+   * focused-path highlight to show which file section is
+   * currently at the top of the visible area.
+   */
+  _onFileSearchScroll(event) {
+    if (!this._fileSearchActive) return;
+    const filePath = event.detail?.filePath;
+    if (typeof filePath !== 'string' || !filePath) return;
+    const picker = this._picker();
+    if (!picker) return;
+    picker._focusedPath = filePath;
+    // Also ensure ancestor directories are expanded so the
+    // highlighted row is visible. The pruned tree was
+    // `expandAll()`d on entry so this is usually a no-op,
+    // but if the user collapsed a directory manually the
+    // focused row might be hidden.
+    const parts = filePath.split('/');
+    const next = new Set(picker._expanded);
+    let acc = '';
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      acc = acc ? `${acc}/${parts[i]}` : parts[i];
+      next.add(acc);
+    }
+    picker._expanded = next;
   }
 
   /**
@@ -491,6 +671,8 @@ export class FilesTab extends RpcMixin(LitElement) {
       <div class="chat-pane">
         <ac-chat-panel
           @file-mention-click=${this._onFileMentionClick}
+          @file-search-changed=${this._onFileSearchChanged}
+          @file-search-scroll=${this._onFileSearchScroll}
         ></ac-chat-panel>
       </div>
     `;
@@ -500,5 +682,6 @@ export class FilesTab extends RpcMixin(LitElement) {
 customElements.define('ac-files-tab', FilesTab);
 
 // Exported for unit tests. Production callers don't need
-// the helper — it runs internally during tree load.
-export { flattenTreePaths };
+// the helpers — they run internally during tree load and
+// file search result handling.
+export { flattenTreePaths, buildPrunedTree };

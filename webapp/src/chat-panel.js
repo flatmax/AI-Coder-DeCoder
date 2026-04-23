@@ -382,6 +382,30 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * on Enter/Shift+Enter navigation.
      */
     _searchCurrentIndex: { type: Number, state: true },
+    /**
+     * Search mode — 'message' (default) searches chat
+     * messages; 'file' searches repository content via the
+     * Repo.search_files RPC. Toggled via the mode button in
+     * the action bar and by the activateFileSearch() public
+     * method (called from Ctrl+Shift+F at the shell level).
+     */
+    _searchMode: { type: String, state: true },
+    /**
+     * Flat list of file search results, shape from the RPC:
+     * [{file, matches: [{line_num, line, context_before,
+     * context_after}]}]. Empty until the first debounced RPC
+     * call completes.
+     */
+    _fileSearchResults: { type: Array, state: true },
+    /** True while a file-search RPC call is in flight. */
+    _fileSearchLoading: { type: Boolean, state: true },
+    /**
+     * Flat index into the results' matches — each file's
+     * matches contribute N slots, enumerated top-to-bottom.
+     * A value of 0 means the first match of the first file.
+     * -1 means no focus (empty results).
+     */
+    _fileSearchFocusedIndex: { type: Number, state: true },
   };
 
   static styles = css`
@@ -396,6 +420,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
       line-height: 1.5;
     }
 
+    .messages-wrapper {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
     .messages {
       flex: 1;
       overflow-y: auto;
@@ -403,6 +434,109 @@ export class ChatPanel extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
+    }
+    .messages.messages-hidden {
+      display: none;
+    }
+    /* File search overlay — fills the wrapper, scroll
+     * independent of messages. Messages stay in DOM so
+     * state (scroll position, streaming cards) survives
+     * across mode toggles. */
+    .file-search-overlay {
+      position: absolute;
+      inset: 0;
+      background: var(--bg-primary, #0d1117);
+      overflow-y: auto;
+      padding: 0.5rem 0;
+    }
+    .file-search-empty {
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
+    .file-search-section {
+      border-bottom: 1px solid rgba(240, 246, 252, 0.06);
+    }
+    .file-search-section:last-child {
+      border-bottom: none;
+    }
+    .file-section-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 0.4rem 1rem;
+      background: rgba(22, 27, 34, 0.95);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .file-section-header:hover {
+      background: rgba(240, 246, 252, 0.04);
+    }
+    .file-section-path {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      color: var(--accent-primary, #58a6ff);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .file-section-count {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      background: rgba(13, 17, 23, 0.6);
+      padding: 0.05rem 0.4rem;
+      border-radius: 3px;
+    }
+    .file-match-row {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.2rem 1rem 0.2rem 2rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      line-height: 1.4;
+    }
+    .file-match-row:hover {
+      background: rgba(240, 246, 252, 0.04);
+    }
+    .file-match-row.focused {
+      background: rgba(88, 166, 255, 0.12);
+      border-left: 3px solid var(--accent-primary, #58a6ff);
+      padding-left: calc(2rem - 3px);
+    }
+    .file-match-row.context {
+      color: var(--text-secondary, #8b949e);
+      opacity: 0.7;
+      cursor: default;
+    }
+    .file-match-row.context:hover {
+      background: transparent;
+    }
+    .file-match-linenum {
+      color: var(--text-secondary, #8b949e);
+      text-align: right;
+      width: 3.5rem;
+      flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+    }
+    .file-match-text {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: pre;
+    }
+    .file-match-highlight {
+      background: rgba(210, 153, 34, 0.25);
+      border-radius: 2px;
+      padding: 0 2px;
+      margin: 0 -2px;
     }
 
     .empty-state {
@@ -1140,6 +1274,27 @@ export class ChatPanel extends RpcMixin(LitElement) {
       false,
     );
     this._searchCurrentIndex = -1;
+    // File search state — starts in message mode; file mode
+    // activates on button click or via activateFileSearch().
+    this._searchMode = 'message';
+    this._fileSearchResults = [];
+    this._fileSearchLoading = false;
+    this._fileSearchFocusedIndex = -1;
+    // Generation counter for stale-response guard. RPC calls
+    // increment this; when a response arrives with a stale
+    // gen, we discard it rather than overwrite fresher
+    // results. Handles the race where the user types fast
+    // enough that an earlier call's response arrives after
+    // a later call's.
+    this._fileSearchGeneration = 0;
+    // Debounce handle for the file search RPC. Cleared on
+    // query change / mode change / unmount.
+    this._fileSearchDebounceTimer = null;
+    // Flag that temporarily suppresses scroll-sync dispatches
+    // when a scroll is externally driven (e.g., by the picker
+    // clicking a file to scroll the overlay). Prevents
+    // feedback loops. Cleared after a short timeout.
+    this._fileSearchScrollPaused = false;
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -1236,6 +1391,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (this._rafHandle != null) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
+    }
+    if (this._fileSearchDebounceTimer != null) {
+      clearTimeout(this._fileSearchDebounceTimer);
+      this._fileSearchDebounceTimer = null;
     }
     super.disconnectedCallback();
   }
@@ -1678,6 +1837,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (!text && this._pendingImages.length === 0) return;
     if (this._streaming) return;
     if (!this.rpcConnected) return;
+
+    // Auto-exit file search mode on send — the user is
+    // now composing a message, not scanning results.
+    // Matches specs4/5-webapp/search.md.
+    if (this._searchMode === 'file') {
+      this._setSearchMode('message');
+    }
 
     const requestId = generateRequestId();
     this._currentRequestId = requestId;
@@ -2275,17 +2441,29 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   /**
    * Handle typing in the search input. Updates the query
-   * state; match computation happens in render. Resets the
-   * current-match cursor to 0 so the first match is always
-   * the initial highlight, regardless of where the cursor
-   * was before the query changed.
+   * state; match computation happens in render (message
+   * mode) or via a debounced RPC (file mode).
    *
-   * Scrolls the first match into view on each keystroke —
-   * gives the user immediate visual confirmation without
-   * waiting for them to hit Enter.
+   * Message mode — resets the current-match cursor to 0 and
+   * scrolls the first match into view on each keystroke
+   * (immediate visual confirmation).
+   *
+   * File mode — schedules a debounced RPC call via
+   * `_runFileSearch`. The RPC only fires after the user
+   * stops typing for a short interval; stale responses are
+   * discarded via a generation counter.
    */
   _onSearchInput(event) {
     this._searchQuery = event.target.value;
+    if (this._searchMode === 'file') {
+      // File mode — reset focus and debounce the RPC. No
+      // immediate UI update beyond clearing the focused
+      // match; the next update comes from the RPC response.
+      this._fileSearchFocusedIndex = -1;
+      this._scheduleFileSearch();
+      return;
+    }
+    // Message mode — existing behaviour.
     this._searchCurrentIndex = 0;
     // Defer the scroll until Lit has rendered — the new
     // match might be a message that wasn't previously
@@ -2326,6 +2504,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
       default:
         return;
     }
+    if (this._searchMode === 'file') {
+      // In file mode — re-run the search with the new
+      // options. Reset focus since the match set may
+      // change.
+      this._fileSearchFocusedIndex = -1;
+      this._scheduleFileSearch();
+      return;
+    }
     // Toggle change alters which messages match — reset
     // the cursor and re-scroll so the user sees the first
     // match under the new settings.
@@ -2336,16 +2522,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   /**
-   * Handle keydown in the search input. Enter navigates to
-   * the next match (wrapping at the end); Shift+Enter to
-   * the previous. Escape clears the query and blurs the
-   * input so the user can resume typing in the textarea.
+   * Handle keydown in the search input. In message mode,
+   * Enter/Shift+Enter navigate message matches; Escape
+   * clears and blurs. In file mode, Enter opens the focused
+   * match in the viewer; ↑/↓ navigate matches; Escape
+   * clears, then on second press exits file mode.
    *
    * Letter keys fall through to the input's default
    * behaviour — the `_onSearchInput` handler catches the
    * subsequent `input` event.
    */
   _onSearchKeyDown(event) {
+    if (this._searchMode === 'file') {
+      this._onFileSearchKeyDown(event);
+      return;
+    }
+    // Message mode — existing behaviour.
     if (event.key === 'Enter') {
       event.preventDefault();
       if (event.shiftKey) {
@@ -2361,6 +2553,58 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._searchCurrentIndex = -1;
       // Blur so the user's next keystroke goes to the
       // main textarea.
+      event.target.blur();
+      return;
+    }
+  }
+
+  /**
+   * Keyboard handling specific to file-search mode.
+   *
+   * - Enter → open the focused match in the diff viewer
+   *   (via a `navigate-file` window event) and keep the
+   *   overlay open so the user can continue scanning
+   * - Shift+Enter → previous match
+   * - ↑/↓ → navigate matches
+   * - Escape → clear query; on second press (empty query),
+   *   exit file search mode
+   *
+   * Letter keys fall through — the subsequent `input`
+   * event triggers the debounced RPC.
+   */
+  _onFileSearchKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (event.shiftKey) {
+        this._onFileSearchPrev();
+      } else {
+        this._onFileSearchOpenFocused();
+      }
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._onFileSearchNext();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._onFileSearchPrev();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (this._searchQuery) {
+        // First press — clear the query, results will
+        // clear on the next debounce tick.
+        this._searchQuery = '';
+        this._fileSearchResults = [];
+        this._fileSearchFocusedIndex = -1;
+        this._fileSearchLoading = false;
+        return;
+      }
+      // Second press — exit file mode.
+      this._setSearchMode('message');
       event.target.blur();
       return;
     }
@@ -2420,6 +2664,383 @@ export class ChatPanel extends RpcMixin(LitElement) {
       block: 'center',
       behavior: 'smooth',
     });
+  }
+
+  // ---------------------------------------------------------------
+  // File search mode
+  // ---------------------------------------------------------------
+
+  /**
+   * Switch search mode. Resets state specific to the
+   * mode being LEFT (message highlights cleared on exit;
+   * file results cleared on exit). Dispatches
+   * `file-search-changed` so the files-tab orchestrator
+   * can swap the picker tree accordingly.
+   *
+   * Safe to call with the current mode — becomes a no-op
+   * (no state change, no event dispatch).
+   */
+  _setSearchMode(mode) {
+    if (mode !== 'message' && mode !== 'file') return;
+    if (mode === this._searchMode) return;
+    const wasFile = this._searchMode === 'file';
+    this._searchMode = mode;
+    // Leaving message mode — clear highlight cursor so the
+    // settled cards don't show stale borders when the user
+    // re-enters later.
+    this._searchCurrentIndex = -1;
+    // Leaving file mode — clear results and cancel any
+    // pending RPC. Entering file mode — results start
+    // empty until the first RPC returns.
+    this._fileSearchResults = [];
+    this._fileSearchFocusedIndex = -1;
+    this._fileSearchLoading = false;
+    if (this._fileSearchDebounceTimer != null) {
+      clearTimeout(this._fileSearchDebounceTimer);
+      this._fileSearchDebounceTimer = null;
+    }
+    // Clear the query on mode switch — otherwise a
+    // message-search query would suddenly become a
+    // file-search query (or vice versa) with surprising
+    // results. Explicit clear keeps the mental model
+    // clean.
+    this._searchQuery = '';
+    // Notify the files-tab. Emits on EVERY mode change so
+    // entry triggers a tree swap and exit triggers a
+    // restore. Carries the current results (empty) so the
+    // files-tab doesn't need to guess.
+    this._dispatchFileSearchChanged();
+    // Kick off a debounced search if we just entered file
+    // mode with a pre-filled query (from
+    // activateFileSearch). Normal mode entry has empty
+    // query so this is a no-op.
+    if (mode === 'file' && this._searchQuery) {
+      this._scheduleFileSearch();
+    }
+  }
+
+  /**
+   * Toggle between message and file search modes via
+   * the mode button.
+   */
+  _toggleSearchMode() {
+    this._setSearchMode(
+      this._searchMode === 'message' ? 'file' : 'message',
+    );
+    // Focus the search input after the mode switch so the
+    // user can start typing immediately. Deferred to the
+    // next Lit update so the input element reflects any
+    // placeholder/ARIA changes.
+    this.updateComplete.then(() => {
+      const input = this.shadowRoot?.querySelector(
+        '.search-input',
+      );
+      if (input) input.focus();
+    });
+  }
+
+  /**
+   * Schedule a debounced file-search RPC call. Clears any
+   * pending timer. The RPC fires 300ms after the last
+   * keystroke (matches specs3's debounce value). Empty
+   * queries clear results immediately without a round-trip.
+   */
+  _scheduleFileSearch() {
+    if (this._fileSearchDebounceTimer != null) {
+      clearTimeout(this._fileSearchDebounceTimer);
+      this._fileSearchDebounceTimer = null;
+    }
+    const query = this._searchQuery.trim();
+    if (!query) {
+      // Empty query — clear results immediately. Bump the
+      // generation so any in-flight response is discarded
+      // when it arrives.
+      this._fileSearchGeneration += 1;
+      this._fileSearchResults = [];
+      this._fileSearchFocusedIndex = -1;
+      this._fileSearchLoading = false;
+      this._dispatchFileSearchChanged();
+      return;
+    }
+    this._fileSearchDebounceTimer = setTimeout(() => {
+      this._fileSearchDebounceTimer = null;
+      this._runFileSearch(query);
+    }, 300);
+  }
+
+  /**
+   * Run the file-search RPC. Generation-guarded so a stale
+   * response (user typed faster than the server responded)
+   * is silently discarded rather than overwriting fresher
+   * results.
+   *
+   * Mode-guarded too — if the user exited file search
+   * between the debounce firing and the RPC returning,
+   * the response is discarded.
+   */
+  async _runFileSearch(query) {
+    if (!this.rpcConnected) {
+      this._fileSearchLoading = false;
+      return;
+    }
+    const gen = ++this._fileSearchGeneration;
+    this._fileSearchLoading = true;
+    let results;
+    try {
+      results = await this.rpcExtract(
+        'Repo.search_files',
+        query,
+        this._searchWholeWord,
+        this._searchRegex,
+        this._searchIgnoreCase,
+        // context_lines — single line before and after
+        // each match per specs4/5-webapp/search.md.
+        1,
+      );
+    } catch (err) {
+      // Stale-gen check first — a later call may have
+      // already replaced our future.
+      if (gen !== this._fileSearchGeneration) return;
+      if (this._searchMode !== 'file') return;
+      console.error('[chat] Repo.search_files failed', err);
+      this._fileSearchLoading = false;
+      this._fileSearchResults = [];
+      this._fileSearchFocusedIndex = -1;
+      this._emitToast(
+        `Search failed: ${err?.message || String(err)}`,
+        'error',
+      );
+      this._dispatchFileSearchChanged();
+      return;
+    }
+    if (gen !== this._fileSearchGeneration) return;
+    if (this._searchMode !== 'file') return;
+    this._fileSearchLoading = false;
+    this._fileSearchResults = Array.isArray(results) ? results : [];
+    // Focus the first match when results arrive. Flat
+    // match-count-driven index — 0 means first match of
+    // first file.
+    this._fileSearchFocusedIndex =
+      this._totalFileSearchMatches() > 0 ? 0 : -1;
+    this._dispatchFileSearchChanged();
+  }
+
+  /**
+   * Total match count across all files in the current
+   * results. Used for counter display and for bounding the
+   * focus index on navigation.
+   */
+  _totalFileSearchMatches() {
+    let total = 0;
+    for (const r of this._fileSearchResults) {
+      if (r && Array.isArray(r.matches)) {
+        total += r.matches.length;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Map a flat match index to a `{file, match, matchIndex,
+   * fileIndex}` structure. `matchIndex` is the position
+   * within the file; `fileIndex` is the position of the
+   * file in the results array. Returns null when the index
+   * is out of range.
+   */
+  _resolveFileSearchFocus(flatIndex) {
+    if (flatIndex < 0) return null;
+    let cursor = 0;
+    for (let fi = 0; fi < this._fileSearchResults.length; fi += 1) {
+      const entry = this._fileSearchResults[fi];
+      const matches = Array.isArray(entry?.matches) ? entry.matches : [];
+      if (flatIndex < cursor + matches.length) {
+        const mi = flatIndex - cursor;
+        return {
+          file: entry.file,
+          match: matches[mi],
+          fileIndex: fi,
+          matchIndex: mi,
+        };
+      }
+      cursor += matches.length;
+    }
+    return null;
+  }
+
+  _onFileSearchNext() {
+    const total = this._totalFileSearchMatches();
+    if (total === 0) return;
+    this._fileSearchFocusedIndex =
+      (Math.max(0, this._fileSearchFocusedIndex) + 1) % total;
+    this.updateComplete.then(() =>
+      this._scrollFocusedFileSearchMatchIntoView(),
+    );
+  }
+
+  _onFileSearchPrev() {
+    const total = this._totalFileSearchMatches();
+    if (total === 0) return;
+    const base = Math.max(0, this._fileSearchFocusedIndex);
+    this._fileSearchFocusedIndex = (base - 1 + total) % total;
+    this.updateComplete.then(() =>
+      this._scrollFocusedFileSearchMatchIntoView(),
+    );
+  }
+
+  _onFileSearchOpenFocused() {
+    const target = this._resolveFileSearchFocus(
+      this._fileSearchFocusedIndex,
+    );
+    if (!target) return;
+    // Dispatch navigate-file with the line number so the
+    // viewer can scroll to the match. specs4/5-webapp's
+    // app-shell routes this to the diff viewer.
+    window.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: {
+          path: target.file,
+          line: target.match?.line_num,
+        },
+        bubbles: false,
+      }),
+    );
+  }
+
+  /**
+   * Scroll the focused match row into view within the
+   * overlay. Also dispatches `file-search-scroll` so the
+   * files-tab can sync the picker's focused path.
+   */
+  _scrollFocusedFileSearchMatchIntoView() {
+    const target = this._resolveFileSearchFocus(
+      this._fileSearchFocusedIndex,
+    );
+    if (!target) return;
+    const row = this.shadowRoot?.querySelector(
+      `[data-file-match-flat="${this._fileSearchFocusedIndex}"]`,
+    );
+    if (row && typeof row.scrollIntoView === 'function') {
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    // Sync the picker highlight. Dispatch unconditionally
+    // of scroll success — the picker's highlight shouldn't
+    // depend on whether scrollIntoView was a no-op.
+    this._dispatchFileSearchScroll(target.file);
+  }
+
+  _dispatchFileSearchChanged() {
+    this.dispatchEvent(
+      new CustomEvent('file-search-changed', {
+        detail: {
+          active: this._searchMode === 'file',
+          results: this._fileSearchResults,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  _dispatchFileSearchScroll(filePath) {
+    this.dispatchEvent(
+      new CustomEvent('file-search-scroll', {
+        detail: { filePath },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Public entry point for Ctrl+Shift+F from the shell.
+   * Switches to file mode (if not already), prefills the
+   * query, focuses the search input, and kicks off a
+   * debounced RPC call. The prefill typically comes from
+   * window.getSelection() captured synchronously at the
+   * shell keydown handler (per specs4's Ctrl+Shift+F
+   * timing rules).
+   *
+   * Accepts empty prefill — switches to file mode with an
+   * empty query, ready for the user to type.
+   */
+  activateFileSearch(prefill = '') {
+    const query = typeof prefill === 'string' ? prefill.trim() : '';
+    if (this._searchMode !== 'file') {
+      this._setSearchMode('file');
+    }
+    // Set query AFTER mode switch (mode switch clears the
+    // query). Schedule a search if the query is non-empty.
+    if (query) {
+      this._searchQuery = query;
+      this._scheduleFileSearch();
+    }
+    this.updateComplete.then(() => {
+      const input = this.shadowRoot?.querySelector(
+        '.search-input',
+      );
+      if (input) input.focus();
+    });
+  }
+
+  /**
+   * Public entry point for picker clicks during file
+   * search. The files-tab forwards `file-clicked` events
+   * from the picker here so the overlay scrolls to the
+   * corresponding file section.
+   *
+   * Sets a brief scroll-pause flag so the reciprocal
+   * overlay-scroll → picker-focus sync doesn't re-fire
+   * and create a feedback loop. The pause auto-clears
+   * after a short delay.
+   */
+  scrollFileSearchToFile(filePath) {
+    if (this._searchMode !== 'file') return;
+    if (typeof filePath !== 'string' || !filePath) return;
+    // Find the first match index for this file and focus
+    // it. Gives the user a consistent focus state after
+    // the scroll — clicking a file both scrolls the
+    // overlay AND focuses that file's first match so
+    // Enter-to-open works right away.
+    let cursor = 0;
+    let targetFlatIndex = -1;
+    for (const entry of this._fileSearchResults) {
+      if (entry?.file === filePath) {
+        targetFlatIndex = cursor;
+        break;
+      }
+      const matches = Array.isArray(entry?.matches) ? entry.matches : [];
+      cursor += matches.length;
+    }
+    if (targetFlatIndex < 0) return;
+    this._fileSearchFocusedIndex = targetFlatIndex;
+    this._fileSearchScrollPaused = true;
+    this.updateComplete.then(() => {
+      const section = this.shadowRoot?.querySelector(
+        `[data-file-section="${this._cssEscape(filePath)}"]`,
+      );
+      if (section && typeof section.scrollIntoView === 'function') {
+        section.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+      // Release the pause after the scroll settles. 400ms
+      // matches the smooth-scroll duration generously.
+      setTimeout(() => {
+        this._fileSearchScrollPaused = false;
+      }, 400);
+    });
+  }
+
+  /**
+   * Defensive CSS selector escape — file paths may contain
+   * characters that need escaping when embedded in a
+   * `[data-file-section="..."]` selector. `CSS.escape` is
+   * the standard API; fallback to a manual quote-escape
+   * when unavailable (older jsdom).
+   */
+  _cssEscape(value) {
+    if (typeof CSS !== 'undefined' && CSS && CSS.escape) {
+      return CSS.escape(value);
+    }
+    return String(value).replace(/(["\\])/g, '\\$1');
   }
 
   _onInputKeyDown(event) {
@@ -2571,23 +3192,27 @@ export class ChatPanel extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
 
   render() {
+    const fileMode = this._searchMode === 'file';
     return html`
-      <div
-        class="messages"
-        role="log"
-        aria-live="polite"
-        @scroll=${this._onMessagesScroll}
-        @click=${this._onMessagesClick}
-      >
-        ${this.messages.length === 0 && !this._streaming
-          ? html`<div class="empty-state">
-              Start a conversation…
-            </div>`
-          : ''}
-        ${this.messages.map((msg, index) =>
-          this._renderMessage(msg, index),
-        )}
-        ${this._streaming ? this._renderStreamingMessage() : ''}
+      <div class="messages-wrapper">
+        <div
+          class="messages ${fileMode ? 'messages-hidden' : ''}"
+          role="log"
+          aria-live="polite"
+          @scroll=${this._onMessagesScroll}
+          @click=${this._onMessagesClick}
+        >
+          ${this.messages.length === 0 && !this._streaming
+            ? html`<div class="empty-state">
+                Start a conversation…
+              </div>`
+            : ''}
+          ${this.messages.map((msg, index) =>
+            this._renderMessage(msg, index),
+          )}
+          ${this._streaming ? this._renderStreamingMessage() : ''}
+        </div>
+        ${fileMode ? this._renderFileSearchOverlay() : ''}
       </div>
       ${!this.rpcConnected
         ? html`<div class="disconnected-note">
@@ -2614,27 +3239,31 @@ export class ChatPanel extends RpcMixin(LitElement) {
           </div>
           <div class="action-divider" aria-hidden="true"></div>
           ${this._renderSearchBar()}
-          <div class="action-divider" aria-hidden="true"></div>
-          <div class="action-group">
-            <button
-              class="action-button new-session-button"
-              ?disabled=${!this.rpcConnected || this._streaming}
-              @click=${this._onNewSession}
-              aria-label="Start a new session"
-              title="New session (clears the conversation)"
-            >
-              ✨ New session
-            </button>
-            <button
-              class="action-button history-button"
-              ?disabled=${!this.rpcConnected || this._streaming}
-              @click=${this._onOpenHistory}
-              aria-label="Open history browser"
-              title="Browse past sessions"
-            >
-              📜 History
-            </button>
-          </div>
+          ${this._searchMode === 'file'
+            ? ''
+            : html`
+                <div class="action-divider" aria-hidden="true"></div>
+                <div class="action-group">
+                  <button
+                    class="action-button new-session-button"
+                    ?disabled=${!this.rpcConnected || this._streaming}
+                    @click=${this._onNewSession}
+                    aria-label="Start a new session"
+                    title="New session (clears the conversation)"
+                  >
+                    ✨ New session
+                  </button>
+                  <button
+                    class="action-button history-button"
+                    ?disabled=${!this.rpcConnected || this._streaming}
+                    @click=${this._onOpenHistory}
+                    aria-label="Open history browser"
+                    title="Browse past sessions"
+                  >
+                    📜 History
+                  </button>
+                </div>
+              `}
         </div>
         ${this._snippetDrawerOpen
           ? this._renderSnippetDrawer()
@@ -2979,35 +3608,80 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   _renderSearchBar() {
-    // Compute matches and counter state at render time so
-    // they always reflect the current query + toggles +
-    // messages. Cheap — substring over a few hundred
-    // messages is microseconds.
-    const matches = this._computeSearchMatches();
+    // Mode-dependent state — file mode uses its own
+    // counter shape (matches in N files) and its own
+    // nav handlers.
+    const fileMode = this._searchMode === 'file';
     const hasQuery = this._searchQuery.trim().length > 0;
-    const total = matches.length;
-    const current =
-      total === 0
-        ? 0
-        : Math.min(
-            Math.max(0, this._searchCurrentIndex) + 1,
-            total,
-          );
-    const counterText = hasQuery
-      ? `${current}/${total}`
-      : '';
-    const noMatch = hasQuery && total === 0;
+    let counterText = '';
+    let noMatch = false;
+    let navTotal = 0;
+    if (fileMode) {
+      const matchCount = this._totalFileSearchMatches();
+      const fileCount = this._fileSearchResults.length;
+      navTotal = matchCount;
+      if (this._fileSearchLoading) {
+        counterText = 'Searching…';
+      } else if (hasQuery) {
+        counterText =
+          matchCount === 0
+            ? '0 results'
+            : `${matchCount} in ${fileCount}`;
+        noMatch = matchCount === 0;
+      }
+    } else {
+      const matches = this._computeSearchMatches();
+      const total = matches.length;
+      navTotal = total;
+      if (hasQuery) {
+        const current =
+          total === 0
+            ? 0
+            : Math.min(
+                Math.max(0, this._searchCurrentIndex) + 1,
+                total,
+              );
+        counterText = `${current}/${total}`;
+        noMatch = total === 0;
+      }
+    }
+    const placeholder = fileMode
+      ? 'Search files…'
+      : 'Search messages…';
+    const ariaLabel = fileMode
+      ? 'Search repository files'
+      : 'Search messages';
+    const onPrev = fileMode
+      ? this._onFileSearchPrev
+      : this._onSearchPrev;
+    const onNext = fileMode
+      ? this._onFileSearchNext
+      : this._onSearchNext;
     return html`
       <div class="search-bar" role="search">
+        <button
+          class="action-button search-mode-toggle ${fileMode
+            ? 'active'
+            : ''}"
+          @click=${this._toggleSearchMode}
+          aria-label=${fileMode
+            ? 'Switch to message search'
+            : 'Switch to file search'}
+          title=${fileMode
+            ? 'File search — click to switch to messages'
+            : 'Message search — click to switch to files'}
+        >
+          ${fileMode ? '📁' : '💬'}
+        </button>
         <div class="search-input-wrapper">
           <input
             type="text"
             class="search-input"
-            placeholder="Search messages…"
+            placeholder=${placeholder}
             .value=${this._searchQuery}
             @input=${this._onSearchInput}
             @keydown=${this._onSearchKeyDown}
-            aria-label="Search messages"
+            aria-label=${ariaLabel}
           />
           <button
             class="search-toggle ${this._searchIgnoreCase
@@ -3051,8 +3725,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
         <div class="search-nav" aria-label="Match navigation">
           <button
             class="search-nav-button"
-            ?disabled=${total === 0}
-            @click=${this._onSearchPrev}
+            ?disabled=${navTotal === 0}
+            @click=${onPrev}
             aria-label="Previous match"
             title="Previous (Shift+Enter)"
           >
@@ -3060,10 +3734,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
           </button>
           <button
             class="search-nav-button"
-            ?disabled=${total === 0}
-            @click=${this._onSearchNext}
+            ?disabled=${navTotal === 0}
+            @click=${onNext}
             aria-label="Next match"
-            title="Next (Enter)"
+            title="Next (Enter / ↓)"
           >
             ▼
           </button>
@@ -3111,6 +3785,227 @@ export class ChatPanel extends RpcMixin(LitElement) {
         )}
       </div>
     `;
+  }
+
+  _renderFileSearchOverlay() {
+    if (!this._searchQuery.trim()) {
+      return html`
+        <div class="file-search-overlay">
+          <div class="file-search-empty">
+            Type to search across files
+          </div>
+        </div>
+      `;
+    }
+    if (this._fileSearchLoading && this._fileSearchResults.length === 0) {
+      return html`
+        <div class="file-search-overlay">
+          <div class="file-search-empty">Searching…</div>
+        </div>
+      `;
+    }
+    if (this._fileSearchResults.length === 0) {
+      return html`
+        <div class="file-search-overlay">
+          <div class="file-search-empty">No results found</div>
+        </div>
+      `;
+    }
+    // Walk results, maintaining a running flat-index so each
+    // match row carries its position in the overall navigation
+    // sequence. The focused row gets `.focused` class and a
+    // `data-file-match-flat` attribute so scroll-sync can
+    // target it.
+    let flatIndex = 0;
+    const sections = [];
+    for (let fi = 0; fi < this._fileSearchResults.length; fi += 1) {
+      const entry = this._fileSearchResults[fi];
+      const matches = Array.isArray(entry?.matches) ? entry.matches : [];
+      const matchRows = matches.map((match) => {
+        const thisFlat = flatIndex++;
+        return this._renderFileSearchMatch(
+          entry.file,
+          match,
+          thisFlat,
+        );
+      });
+      sections.push(html`
+        <div
+          class="file-search-section"
+          data-file-section=${entry.file}
+        >
+          <div
+            class="file-section-header"
+            @click=${() => this._onFileSearchHeaderClick(entry.file)}
+            title="Open ${entry.file}"
+          >
+            <span class="file-section-path">${entry.file}</span>
+            <span class="file-section-count">
+              ${matches.length}
+            </span>
+          </div>
+          ${matchRows}
+        </div>
+      `);
+    }
+    return html`
+      <div
+        class="file-search-overlay"
+        @scroll=${this._onFileSearchOverlayScroll}
+      >
+        ${sections}
+      </div>
+    `;
+  }
+
+  /**
+   * Render a single match row — context lines before,
+   * the match line itself, context lines after. Context
+   * rows are not clickable and not focusable; only the
+   * match line navigates.
+   */
+  _renderFileSearchMatch(filePath, match, flatIndex) {
+    if (!match) return '';
+    const isFocused = flatIndex === this._fileSearchFocusedIndex;
+    const before = Array.isArray(match.context_before)
+      ? match.context_before
+      : [];
+    const after = Array.isArray(match.context_after)
+      ? match.context_after
+      : [];
+    return html`
+      ${before.map(
+        (ctx) => html`
+          <div class="file-match-row context">
+            <span class="file-match-linenum">
+              ${ctx.line_num ?? ''}
+            </span>
+            <span class="file-match-text">${ctx.line ?? ''}</span>
+          </div>
+        `,
+      )}
+      <div
+        class="file-match-row ${isFocused ? 'focused' : ''}"
+        data-file-match-flat=${flatIndex}
+        @click=${() =>
+          this._onFileSearchMatchClick(filePath, match)}
+      >
+        <span class="file-match-linenum">
+          ${match.line_num ?? ''}
+        </span>
+        <span class="file-match-text">
+          ${this._renderHighlightedMatchLine(match.line ?? '')}
+        </span>
+      </div>
+      ${after.map(
+        (ctx) => html`
+          <div class="file-match-row context">
+            <span class="file-match-linenum">
+              ${ctx.line_num ?? ''}
+            </span>
+            <span class="file-match-text">${ctx.line ?? ''}</span>
+          </div>
+        `,
+      )}
+    `;
+  }
+
+  /**
+   * Highlight occurrences of the search query within a
+   * match line. Regex / whole-word / ignore-case toggles
+   * are respected. Falls back to the plain line when
+   * the pattern can't be built (invalid regex).
+   */
+  _renderHighlightedMatchLine(line) {
+    if (!line) return '';
+    const query = this._searchQuery;
+    if (!query.trim()) return line;
+    let pattern;
+    try {
+      let source = this._searchRegex
+        ? query
+        : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (this._searchWholeWord) {
+        source = `\\b(?:${source})\\b`;
+      }
+      const flags = this._searchIgnoreCase ? 'gi' : 'g';
+      pattern = new RegExp(source, flags);
+    } catch (_) {
+      return line;
+    }
+    const parts = [];
+    let cursor = 0;
+    let m;
+    pattern.lastIndex = 0;
+    while ((m = pattern.exec(line)) !== null) {
+      if (m.index > cursor) {
+        parts.push(line.slice(cursor, m.index));
+      }
+      parts.push(
+        html`<span class="file-match-highlight"
+          >${m[0]}</span
+        >`,
+      );
+      cursor = m.index + m[0].length;
+      // Guard against zero-width matches — infinite loop
+      // prevention.
+      if (m[0].length === 0) {
+        pattern.lastIndex += 1;
+      }
+    }
+    if (cursor < line.length) {
+      parts.push(line.slice(cursor));
+    }
+    return parts;
+  }
+
+  _onFileSearchMatchClick(filePath, match) {
+    window.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: { path: filePath, line: match?.line_num },
+        bubbles: false,
+      }),
+    );
+  }
+
+  _onFileSearchHeaderClick(filePath) {
+    window.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: { path: filePath },
+        bubbles: false,
+      }),
+    );
+  }
+
+  /**
+   * Overlay scroll handler. Dispatches `file-search-scroll`
+   * with the file path at the top of the visible area so
+   * the picker can sync its focus. Throttled via the
+   * scroll-paused flag so an externally-driven scroll
+   * (picker click → scrollFileSearchToFile) doesn't
+   * bounce back.
+   */
+  _onFileSearchOverlayScroll(event) {
+    if (this._fileSearchScrollPaused) return;
+    const overlay = event.currentTarget;
+    const sections = overlay.querySelectorAll(
+      '[data-file-section]',
+    );
+    const overlayTop = overlay.getBoundingClientRect().top;
+    let topFile = null;
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      // The section at the top of the visible area is the
+      // one whose bottom edge is still below the overlay's
+      // top edge.
+      if (rect.bottom > overlayTop + 1) {
+        topFile = section.getAttribute('data-file-section');
+        break;
+      }
+    }
+    if (topFile) {
+      this._dispatchFileSearchScroll(topFile);
+    }
   }
 
   _renderStreamingMessage() {
