@@ -895,10 +895,76 @@ Design points pinned by tests:
 
 - **Path traversal rejected defensively.** `test_path_traversal_rejected` passes `../escape.docx`. Even though the caller should use `scan_convertible_files` output (which never contains traversal), we validate `source_abs.relative_to(root.resolve())`. The test accepts either "must be within repository root" or "not found" messages — the important invariant is that the traversal doesn't escape, not the specific wording.
 
-Open carried over for Pass A3+:
+#### Pass A3 — xlsx colour-aware + csv (delivered)
 
-- **xlsx colour-aware pipeline (Pass A3).** Uses openpyxl directly (not markitdown) to preserve cell background colours as emoji markers. Two-pass algorithm (collect fills, assign markers, emit tables), well-known-hue named markers, fallback markers for unrecognised hues via RGB-distance clustering.
-- **csv via openpyxl-or-stdlib (Pass A3).** Simple format — render as a markdown table with the first row as headers if plausible. Pass A3 will likely bundle csv with xlsx since both produce tabular output.
+Adds xlsx support via a dedicated openpyxl pipeline that preserves cell background colours as emoji markers. csv support is simpler — routed through markitdown since markitdown produces clean markdown tables for csv natively and there's no formatting to preserve.
+
+- `src/ac_dc/doc_convert.py` — module-level additions:
+  - `_XLSX_EXTENSIONS = frozenset({".xlsx"})` — dispatch set for the openpyxl path. Separated from `_MARKITDOWN_EXTENSIONS` so the xlsx-specific routing is explicit.
+  - `.csv` added to `_MARKITDOWN_EXTENSIONS`. markitdown's built-in csv handling produces standard markdown tables; no colour info to preserve.
+  - `_IGNORE_NEAR_WHITE_THRESHOLD` / `_IGNORE_NEAR_BLACK_THRESHOLD` — per-channel RGB deltas (20) for filtering "effectively no fill" cells. Default formatting in many spreadsheets produces near-white fills; emitting an emoji for every such cell would overwhelm the output. Black is filtered for symmetry with border-coloured cells.
+  - `_COLOUR_CLUSTER_DISTANCE = 40.0` — Euclidean RGB distance below which two unknown colours collapse into one cluster. Tuned so three shades of brown each get distinct markers but slight rendering drift of the same "red" stays unified.
+  - `_NAMED_COLOURS` — eight well-known hues (red, green, yellow, blue, orange, purple, pink, brown) each mapped to an emoji and a name. Used for the "named match" path in colour assignment.
+  - `_NAMED_COLOUR_DISTANCE = 80.0` — looser threshold for matching against named colours than the cluster distance. Named colours should absorb a wider range of shades (every "pinkish red" → 🔴); fallback clusters should stay distinct.
+  - `_FALLBACK_MARKERS` — eight distinct emoji glyphs (⬛, ◆, ▲, ●, ■, ★, ◉, ◈) for unrecognised colour clusters. Cycle with index suffixing if more than eight clusters appear (rare in practice).
+- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+  - Added a new branch between the markitdown path and the "not yet supported" skip: `if suffix in _XLSX_EXTENSIONS: return self._convert_via_openpyxl(root, source_abs, rel_path)`.
+- `src/ac_dc/doc_convert.py` — `_convert_via_openpyxl` and helpers:
+  - Lazy openpyxl import. ImportError → fall back to markitdown (not error). Matches specs4's "graceful degradation" policy for optional deps.
+  - Source hash computed before open so the provenance header is correct even on fallback.
+  - openpyxl `load_workbook(read_only=False)` — read-only mode would strip the Cell.fill attribute we need. data_only=True so formula cells yield cached values rather than formula strings.
+  - Pass 1 — `_xlsx_pass1_collect` walks every sheet via `sheet.iter_rows()`. For each cell, normalises the value (via `_normalise_cell_value`) and extracts the fill (via `_extract_cell_fill`). Unique hex fills accumulated into a set for the colour-map pass.
+  - Colour mapping — `_xlsx_build_colour_map`. Two-phase: named-colour match first (closest named hue within `_NAMED_COLOUR_DISTANCE`), then cluster-based fallback for unmatched fills. Fills sorted lexicographically before processing so the marker assignment is deterministic across runs.
+  - Pass 2 — `_xlsx_render_sheet` emits markdown per sheet. Strips fully-empty rows, then fully-empty columns. Uses the first non-empty row as the header if every kept-column cell has a string value; otherwise synthesises `col1`, `col2`, ... names. Coloured cells get their marker prepended (`"🔴 Failed"`); coloured empty cells show just the marker.
+  - Legend rendering — `_xlsx_render_legend` emits a `## Legend` section listing each unique (marker, name) pair once. Multiple fills mapped to the same named colour (all reddish → 🔴 red) collapse in the legend.
+  - Empty-spreadsheet case — produces a placeholder `(empty spreadsheet)` body so the output file exists and the scanner classifies it as `current`. Without this, a sparse xlsx would produce no output and re-scan as `new` every cycle.
+  - xlsx path never produces embedded images, so the provenance header always has `images=()`. Skips the whole data-URI extraction pipeline that the markitdown path runs.
+
+- `src/ac_dc/doc_convert.py` — helper methods:
+  - `_normalise_cell_value` — handles None (→ empty), "nan"/"none" case-insensitively (→ empty, catches pandas/numpy export artifacts), stringification for non-strings, and pipe escaping (`|` → `\|`) so cell values can't break the markdown table row structure.
+  - `_extract_cell_fill` — the defensive part. openpyxl's fill model is verbose: cells with no explicit fill still have a `PatternFill` with theme-default `fgColor`. Filter by checking `patternType` is one of `solid`/`lightGrid`/`darkGrid` (solid is the common case; the grid variants crop up in rare templates). Theme colours return None from `rgb`; we don't resolve them without the workbook theme table, which isn't worth the code for a diagnostic marker. 8-char `AARRGGBB` strips the alpha prefix. Near-white and near-black fills filtered per the module thresholds. Broad exception handler — anything unexpected from openpyxl returns None rather than raising.
+  - `_hex_to_rgb` / `_colour_distance` — straightforward Euclidean RGB. Perceptually naive (doesn't weight green) but fine for the "are these two reds the same?" question the clustering needs.
+
+- `tests/test_doc_convert.py` — test infrastructure:
+  - `_require_openpyxl()` — skips tests when openpyxl isn't installed. Tests don't mock openpyxl; building real xlsx files through the library's own API is cheaper and catches more real-world bugs than a mock that tracks only the shape of `iter_rows`.
+  - `_write_xlsx(path, sheets)` — builds a real xlsx file at `path` from a `{sheet_name: [[(value, fill_hex), ...]]}` dict. Uses `openpyxl.Workbook` + `PatternFill` directly. Removes the default sheet before adding named ones so sheet ordering is predictable.
+
+- `tests/test_doc_convert.py` — removed the obsolete `test_xlsx_skipped_not_yet_supported` test (xlsx is now implemented, so "skipped" is no longer the expected behaviour).
+
+- `tests/test_doc_convert.py` — four new test classes:
+  - `TestXlsxDispatch` — 4 tests: xlsx routes to openpyxl (not markitdown), output file produced, provenance header present, scan classifies as `current` after conversion.
+  - `TestXlsxContent` — 8 tests: sheet name becomes `## heading`, first row becomes table header, separator row present, multiple sheets each produce their own section, empty rows stripped, empty columns stripped, "nan"/"none" values normalised to empty, empty spreadsheet produces placeholder output.
+  - `TestXlsxColours` — 8 tests: red fill (`FF0000`) → 🔴 marker, green fill (`00C800`) → 🟢 marker, legend lists used colours, no legend when no colours, near-white fills ignored, near-black fills ignored, unknown colours get fallback markers via clustering, coloured empty cells show marker alone.
+  - `TestXlsxFallback` — 2 tests: missing openpyxl import falls back to markitdown (via `builtins.__import__` monkeypatching), corrupt xlsx (not a real zip) falls back to markitdown without crashing.
+
+- `tests/test_doc_convert.py` — added `test_csv_routes_to_markitdown` to `TestExtensionDispatch` confirming csv now goes through markitdown (previously part of the "deferred" extensions).
+
+Design points pinned by tests:
+
+- **Deterministic colour assignment.** `_xlsx_build_colour_map` sorts `unique_fills` lexicographically before processing. Without this, Python's set iteration order would assign cluster markers non-deterministically across runs. Two runs on the same workbook must produce byte-identical output for the stability tracker's content-hash to stay stable.
+
+- **Sheet titles preserved verbatim.** Sheet names containing pipes, markdown special chars, etc. would break the output, but realistically users don't name sheets `| broken | table |`. No escaping for sheet titles — only cell values. If this becomes a problem we can add heading escaping in a follow-up.
+
+- **Empty-spreadsheet handling is mandatory.** Without the `(empty spreadsheet)` fallback, a sparse xlsx produces zero body parts, the legend is empty, and we write a file with just the provenance header. That file parses as a conflict (no recognisable content after the header) on the next scan. The placeholder keeps the file classifiable as `current`.
+
+- **Near-white threshold matters in practice.** Many spreadsheets have theme-default "subtle" fills (pale yellow for note rows, near-white for alternating stripes) that users don't consciously set. The 20-per-channel threshold filters these out while still catching deliberate fills like "light red" (`FFAAAA`) which sit well above the threshold.
+
+- **Pipe escaping in cell values.** `_normalise_cell_value` escapes `|` as `\|`. Without this, a cell containing "a | b" would add a fake column separator and break the table structure. Tested indirectly — any test that produces markdown output exercises this path.
+
+- **Legend deduplication by (marker, name) pair.** Multiple hex fills can map to the same named colour (slight variations of red all → 🔴 red). The legend lists the pair once rather than duplicating per-hex. Pinned by `test_legend_lists_used_colours` which uses two different hex values that both fall into the "red" named-colour range.
+
+Notes from delivery:
+
+- **The `read_only=False` mode is deliberate.** openpyxl's `read_only=True` is faster and uses less memory but strips the `Cell.fill` attribute — which is the whole point of the xlsx pipeline. Tests on small files are trivially fast so the tradeoff doesn't matter for typical xlsx sizes; if huge-xlsx support becomes a concern we can add a two-path implementation.
+
+- **`patternType` check catches the "no fill but has colour" case.** openpyxl represents a cell with no explicit fill as `PatternFill(patternType=None, fgColor=...)` — the fgColor is a theme default, not a user choice. Filtering on `patternType in ("solid", ...)` eliminates the false positive without needing to resolve theme colours.
+
+- **Alpha channel stripping.** openpyxl returns fgColor.rgb as an 8-char `AARRGGBB` hex string. We strip the alpha prefix if present (`len(raw) == 8`). Alpha is virtually always `FF` (fully opaque) in practice; a semi-transparent fill is not meaningful for our marker extraction.
+
+- **Graceful degradation.** The xlsx pipeline never errors for reasons specific to xlsx. ImportError on openpyxl, corrupt file, unexpected structure — all fall back to markitdown. The user gets SOMETHING (possibly just raw text with no colour info) rather than a red error result.
+
+Open carried over for Pass A4+:
+
 - **pptx fallback (Pass A4).** python-pptx when LibreOffice isn't available — renders each slide as an SVG with text/images/tables, emits an index markdown that links all slide SVGs.
 - **PDF + LibreOffice pipeline (Pass A5).** LibreOffice (pptx/odp → PDF) and PyMuPDF (PDF → text + image detection + SVG export with text-as-path=0). Hybrid output: text extracted into markdown paragraphs, per-page SVGs generated only when pages contain graphics. Embedded raster images externalised from SVGs to separate files.
 - **Progress events.** Conversion will post progress via the event callback pattern already used by LLMService (event name `docConvertProgress`). Runs in a dedicated single-thread executor so GIL-heavy format-converter work doesn't block the event loop. Passes A4 and A5 especially need this — PDF compilation can take seconds per file.
