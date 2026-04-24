@@ -2180,12 +2180,12 @@ class LLMService:
 
         # Cross-reference toggle resets to OFF on mode switch.
         # If it was on, remove cross-ref items from the current
-        # tracker before switching so they don't linger.
+        # tracker BEFORE swapping so the removal runs against
+        # the right prefix (code-mode tracker removes doc:*,
+        # doc-mode tracker removes symbol:*).
         if self._cross_ref_enabled:
+            self._remove_cross_reference_items()
             self._cross_ref_enabled = False
-            # When the doc index lands, this is where we'd
-            # remove `doc:*` (in code mode) or `symbol:*` (in
-            # doc mode) items from the active tracker.
 
         # Lazy-construct the target mode's tracker on first use.
         if target not in self._trackers:
@@ -2242,13 +2242,24 @@ class LLMService:
         the active tracker. In code mode that means ``doc:*``
         items; in doc mode that means ``symbol:*`` items.
 
-        The doc index hasn't landed yet, so enabling
-        cross-reference is currently a no-op that just flips
-        the flag and logs a warning. The frontend toggle is
-        still available — when the doc index lands, existing
-        ``_cross_ref_enabled=True`` state will start producing
-        cross-ref content on the next request without needing
-        a re-toggle.
+        Readiness gate — enabling cross-reference requires
+        structural doc-index extraction to be complete
+        (``_doc_index_ready`` flipped True via 2.8.2b's
+        background build). Enabling before readiness returns
+        an error rather than silently producing an empty
+        secondary index. Disable is always allowed (it's the
+        cleanup path; gating it would leave users stuck).
+
+        On enable, seeds the active tracker with cross-ref
+        items from the reference graph so content appears on
+        the VERY NEXT request rather than waiting one full
+        cycle for ``_update_stability`` to discover them. On
+        disable, removes all cross-ref items from the tracker
+        and marks their tiers broken so the next cascade
+        rebalances cleanly.
+
+        Both paths broadcast ``modeChanged`` to collaborators
+        with the new state.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -2259,22 +2270,25 @@ class LLMService:
                 "status": "ok",
                 "cross_ref_enabled": new_state,
             }
+
+        # Enable requires readiness. Disable doesn't — the
+        # caller may be cleaning up after a failed enable or
+        # after a mode switch that left stale items.
+        if new_state and not self._doc_index_ready:
+            return {
+                "error": "cross-reference not ready",
+                "reason": (
+                    "Doc index is still building; try again "
+                    "in a moment"
+                ),
+            }
+
         self._cross_ref_enabled = new_state
         if new_state:
-            # Doc index not yet available — log and continue.
-            # When Layer 2's doc-index sub-layer lands, this
-            # branch will populate the active tracker with
-            # cross-ref items.
-            logger.info(
-                "Cross-reference enabled, but doc index is not "
-                "yet available; toggle will take effect once "
-                "Layer 2 doc-index lands"
-            )
+            self._seed_cross_reference_items()
         else:
-            # Disabling — remove cross-ref items from the
-            # active tracker. No-op until the doc index lands
-            # and items actually exist.
-            pass
+            self._remove_cross_reference_items()
+
         # Broadcast so collaborators see the state update.
         self._broadcast_event(
             "modeChanged",
@@ -2287,6 +2301,117 @@ class LLMService:
             "status": "ok",
             "cross_ref_enabled": new_state,
         }
+
+    def _seed_cross_reference_items(self) -> None:
+        """Add opposite-index items to the active tracker.
+
+        Iterates the non-primary index's files (doc outlines in
+        code mode, symbol files in doc mode) and creates
+        tracker entries at ACTIVE with N=0. The next
+        ``_update_stability`` cycle promotes them via the
+        standard N-value machinery.
+
+        Selected files are excluded — they carry content via
+        ``file:`` entries and the cross-ref entry would be
+        redundant. Missing blocks (outline not yet loaded,
+        symbol index empty) are skipped silently.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        tracker = self._stability_tracker
+        selected_set = set(self._selected_files)
+        affected_tiers: set[Tier] = set()
+
+        if self._context.mode == Mode.CODE:
+            # Code mode primary → add doc: entries as secondary.
+            for path in list(self._doc_index._all_outlines.keys()):
+                if path in selected_set:
+                    continue
+                block = self._doc_index.get_file_doc_block(path)
+                if not block:
+                    continue
+                sig_hash = self._doc_index.get_signature_hash(path)
+                key = f"doc:{path}"
+                if key in tracker._items:
+                    # Already tracked (from a prior enable that
+                    # wasn't fully cleaned up, or from a mode
+                    # switch edge case). Leave it alone.
+                    continue
+                tracker._items[key] = TrackedItem(
+                    key=key,
+                    tier=Tier.ACTIVE,
+                    n_value=0,
+                    content_hash=sig_hash or "",
+                    tokens=self._counter.count(block),
+                )
+                affected_tiers.add(Tier.ACTIVE)
+        else:
+            # Doc mode primary → add symbol: entries as secondary.
+            if self._symbol_index is None:
+                return
+            for path in list(self._symbol_index._all_symbols.keys()):
+                if path in selected_set:
+                    continue
+                block = self._symbol_index.get_file_symbol_block(path)
+                if not block:
+                    continue
+                sig_hash = self._symbol_index.get_signature_hash(path)
+                key = f"symbol:{path}"
+                if key in tracker._items:
+                    continue
+                tracker._items[key] = TrackedItem(
+                    key=key,
+                    tier=Tier.ACTIVE,
+                    n_value=0,
+                    content_hash=sig_hash or "",
+                    tokens=self._counter.count(block),
+                )
+                affected_tiers.add(Tier.ACTIVE)
+
+        # Mark affected tiers broken so the next cascade can
+        # reconsider placement.
+        for tier in affected_tiers:
+            tracker._broken_tiers.add(tier)
+
+    def _remove_cross_reference_items(self) -> None:
+        """Strip opposite-index items from the active tracker.
+
+        Called when cross-reference is disabled (explicitly or
+        via mode switch reset). Walks the tracker and removes
+        every entry whose prefix is the OPPOSITE of the current
+        mode's primary — ``doc:*`` in code mode, ``symbol:*``
+        in doc mode.
+
+        Selected files' ``file:`` entries are always preserved
+        regardless of mode — they're primary content, not
+        cross-reference data. Same for ``system:``, ``url:``,
+        and ``history:`` entries.
+
+        Marks every tier that held removed items as broken so
+        the next cascade rebalances cleanly (items may promote
+        upward to fill gaps).
+        """
+        from ac_dc.stability_tracker import Tier
+
+        tracker = self._stability_tracker
+        if self._context.mode == Mode.CODE:
+            target_prefix = "doc:"
+        else:
+            target_prefix = "symbol:"
+
+        to_remove: list[str] = []
+        affected_tiers: set[Tier] = set()
+        all_items = tracker.get_all_items()
+        for key, item in all_items.items():
+            if key.startswith(target_prefix):
+                to_remove.append(key)
+                affected_tiers.add(item.tier)
+
+        for key in to_remove:
+            tracker._items.pop(key, None)
+
+        for tier in affected_tiers:
+            tracker._broken_tiers.add(tier)
 
     # ------------------------------------------------------------------
     # Public RPC — manual cache rebuild

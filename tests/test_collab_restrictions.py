@@ -529,6 +529,10 @@ class TestLLMServiceLocalhostAllowed:
     def test_set_cross_reference(
         self, service: LLMService
     ) -> None:
+        # Enable requires doc index readiness (2.8.2g). Fake
+        # the flag since the real background build isn't
+        # wired in this fixture.
+        service._doc_index_ready = True
         service._collab = _StubCollab(is_localhost=True)
         result = service.set_cross_reference(True)
         assert result.get("status") == "ok"
