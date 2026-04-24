@@ -280,6 +280,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // and localStorage persistence.
     this._pickerWidthPx = 280;
     this._treeLoaded = false;
+    // True once `_pushChildProps` has successfully reached
+    // both children. Guards the `updated()` retry path
+    // against re-pushing on every subsequent Lit update.
+    // Reset never happens — once pushed, future tree loads
+    // just update `_latestTree` / `_repoFiles` and push
+    // again via the same helper.
+    this._childPropsPushed = false;
     // Latest loaded file tree. Kept as a non-reactive field
     // so the template's `.tree=${this._latestTree}` bind
     // carries the most recent value across re-renders rather
@@ -370,17 +377,71 @@ export class FilesTab extends RpcMixin(LitElement) {
     // chat panel's `repoFiles` prop short-circuits on empty
     // input, so before the first load the cost is zero.
     this._repoFiles = flattenTreePaths(this._latestTree);
-    const picker = this._picker();
-    if (picker) {
-      picker.tree = this._latestTree;
-      picker.requestUpdate();
-    }
-    const chat = this._chat();
-    if (chat) {
-      chat.repoFiles = this._repoFiles;
-      chat.requestUpdate();
-    }
+    // Reset the push flag — a fresh tree load means the
+    // children need fresh props, even if a previous load
+    // already pushed once. `updated()` will retry if the
+    // call below is too early in the lifecycle.
+    this._childPropsPushed = false;
+    this._pushChildProps();
     this._treeLoaded = true;
+  }
+
+  /**
+   * Push `tree` and `repoFiles` to child components.
+   *
+   * Called both from `_loadFileTree` (first-time populate)
+   * and from `updated` after the initial render (retry path
+   * for the race where RPC-ready fires before the template
+   * has committed and `this._chat()` returns null). The
+   * retry is guarded by `_childPropsPushed` so a successful
+   * push isn't redone on every subsequent update.
+   *
+   * Returns true when both children were reachable and
+   * received their props — the caller uses this to mark
+   * the push complete.
+   */
+  _pushChildProps() {
+    const picker = this._picker();
+    const chat = this._chat();
+    if (!picker || !chat) {
+      // One or both children not mounted yet. `updated()`
+      // will retry after the first render commits.
+      return false;
+    }
+    picker.tree = this._latestTree;
+    picker.requestUpdate();
+    chat.repoFiles = this._repoFiles;
+    chat.requestUpdate();
+    this._childPropsPushed = true;
+    return true;
+  }
+
+  /**
+   * Retry the child-props push after the first render.
+   *
+   * The RPC-ready microtask hook can fire before Lit's
+   * first `updateComplete` resolves, meaning
+   * `this._chat()` inside `_loadFileTree` returns null
+   * and the assignments are silently lost. The Phase 2c
+   * original code had this failure mode but it was
+   * masked because `repoFiles` was optional and nothing
+   * in the chat panel consumed it.
+   *
+   * Phase 2d's file summary section DOES consume
+   * `repoFiles`, so the silent drop became visible. The
+   * fix is to retry once the first render has happened
+   * — `updated()` always runs after commit, so by then
+   * `this._chat()` returns a real element.
+   */
+  updated(changedProps) {
+    super.updated?.(changedProps);
+    if (
+      !this._childPropsPushed &&
+      this._treeLoaded &&
+      Array.isArray(this._repoFiles)
+    ) {
+      this._pushChildProps();
+    }
   }
 
   // ---------------------------------------------------------------

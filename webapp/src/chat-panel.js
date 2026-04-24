@@ -1097,6 +1097,109 @@ export class ChatPanel extends RpcMixin(LitElement) {
       text-decoration: underline;
     }
 
+    /* File summary section — renders below the assistant
+     * message body, shows every file the message referenced
+     * (via edit blocks or inline mentions) as a chip. The
+     * chips are deliberately NOT styled as links — they're
+     * buttons that toggle selection, not navigation. */
+    .file-summary-section {
+      margin-top: 0.75rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .file-summary-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+    }
+    .file-summary-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary, #8b949e);
+    }
+    .file-summary-add-all {
+      background: rgba(88, 166, 255, 0.1);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      color: var(--accent-primary, #58a6ff);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      font-weight: 500;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .file-summary-add-all:hover {
+      background: rgba(88, 166, 255, 0.2);
+      border-color: rgba(88, 166, 255, 0.5);
+    }
+    .file-summary-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+    .file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8125rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .file-chip:hover {
+      background: rgba(240, 246, 252, 0.06);
+      border-color: rgba(240, 246, 252, 0.25);
+    }
+    /* In-context files — muted presentation. They're
+     * already selected; no call-to-action needed. */
+    .file-chip.in-context {
+      color: var(--text-secondary, #8b949e);
+      border-color: rgba(126, 231, 135, 0.25);
+    }
+    .file-chip.in-context:hover {
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(126, 231, 135, 0.4);
+    }
+    .file-chip.in-context .file-chip-mark {
+      color: #7ee787;
+    }
+    /* Not-in-context files — accent presentation. This
+     * is the action chip; clicking adds the file to
+     * context. */
+    .file-chip.not-in-context {
+      border-color: rgba(88, 166, 255, 0.3);
+    }
+    .file-chip.not-in-context:hover {
+      background: rgba(88, 166, 255, 0.1);
+      border-color: rgba(88, 166, 255, 0.5);
+    }
+    .file-chip.not-in-context .file-chip-mark {
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+    }
+    .file-chip-mark {
+      font-size: 0.875rem;
+      line-height: 1;
+    }
+    .file-chip-path {
+      /* Truncate very long paths. Full path is in the
+       * tooltip. */
+      max-width: 24rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     /* Pending images strip below the textarea, shown while
      * composing. Thumbnails with a remove button overlay. */
     .pending-images {
@@ -3233,6 +3336,296 @@ export class ChatPanel extends RpcMixin(LitElement) {
     );
   }
 
+  // ---------------------------------------------------------------
+  // File summary section
+  // ---------------------------------------------------------------
+
+  /**
+   * Collect every file path referenced by an assistant
+   * message — both edit-block headers and inline prose
+   * mentions. Returns `[{path, inContext}]` deduplicated
+   * in first-seen order, with `inContext` reflecting
+   * whether the path is currently in `selectedFiles`.
+   *
+   * Edit blocks always contribute their `filePath` — the
+   * LLM unambiguously named the file as an edit target,
+   * so it belongs in the summary regardless of whether
+   * the file exists in `repoFiles` (it might be a freshly
+   * created file not yet in the tree).
+   *
+   * Prose mentions are harvested only when `repoFiles` is
+   * non-empty, using the same longest-first substring
+   * matching as `findFileMentions` but returning the
+   * matched paths rather than rewritten HTML. This
+   * mirrors specs4/5-webapp/chat.md — "Scan assistant
+   * message HTML for known repo file paths… also collect
+   * file paths from edit block headers."
+   *
+   * Runs per message during settled rendering only
+   * (never during streaming), so the O(paths × content)
+   * cost is bounded and not on the rAF hot path.
+   *
+   * @param {object} msg — assistant message dict
+   * @returns {Array<{path: string, inContext: boolean}>}
+   */
+  _collectMessageFiles(msg) {
+    if (!msg || msg.role !== 'assistant') return [];
+    const content =
+      typeof msg.content === 'string' ? msg.content : '';
+    const selected = new Set(
+      Array.isArray(this.selectedFiles) ? this.selectedFiles : [],
+    );
+    const seen = new Set();
+    const out = [];
+
+    // Edit block file paths. Segment the response and pull
+    // filePath off every edit / edit-pending segment.
+    // segmentResponse is the same parser used for
+    // rendering the cards, so we see exactly what the user
+    // sees.
+    if (content) {
+      const segments = segmentResponse(content);
+      for (const seg of segments) {
+        if (
+          (seg.type === 'edit' || seg.type === 'edit-pending') &&
+          typeof seg.filePath === 'string' &&
+          seg.filePath &&
+          !seen.has(seg.filePath)
+        ) {
+          seen.add(seg.filePath);
+          out.push({
+            path: seg.filePath,
+            inContext: selected.has(seg.filePath),
+          });
+        }
+      }
+    }
+
+    // Inline prose mentions — only detectable when we
+    // know the repo's file list. Runs a cheap substring
+    // scan with the same longest-first + boundary rules
+    // findFileMentions uses. We operate on raw content
+    // (not rendered HTML) to avoid tripping on markdown
+    // entity encoding.
+    if (content && Array.isArray(this.repoFiles) && this.repoFiles.length > 0) {
+      // Pre-filter candidates — paths that appear as a
+      // plain substring anywhere in content. Most repo
+      // paths won't appear in any given message; skipping
+      // them up front keeps the inner loop tight.
+      const candidates = this.repoFiles.filter(
+        (p) => typeof p === 'string' && p && content.includes(p),
+      );
+      if (candidates.length > 0) {
+        // Longest-first + lexicographic tie-break — same
+        // ordering as findFileMentions so we pick the
+        // most-specific path when two overlap.
+        candidates.sort((a, b) => {
+          if (b.length !== a.length) return b.length - a.length;
+          return a.localeCompare(b);
+        });
+        for (const path of candidates) {
+          if (seen.has(path)) continue;
+          if (this._proseContainsPath(content, path)) {
+            seen.add(path);
+            out.push({
+              path,
+              inContext: selected.has(path),
+            });
+          }
+        }
+      }
+    }
+
+    return out;
+  }
+
+  /**
+   * Check whether `path` appears in `content` as a real
+   * mention — same boundary rules as the HTML mention
+   * matcher. We skip code fences (triple-backtick blocks)
+   * since the spec says matches inside fenced code blocks
+   * are skipped. Returns true on the first valid match;
+   * doesn't enumerate them.
+   *
+   * Simple character-level scan — text is assistant
+   * output, typically a few KB at most, so the cost is
+   * negligible compared to the segmenter and markdown
+   * render that already ran.
+   */
+  _proseContainsPath(content, path) {
+    // Skip anything inside ``` fences. We walk lines,
+    // toggling an "inside fence" flag when we hit a line
+    // starting with three backticks. Inline code (single
+    // backticks) isn't excluded — per specs3 matches
+    // inside inline code are wrapped normally.
+    let inFence = false;
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+      if (this._lineContainsPath(line, path)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Boundary-aware substring check for a single line.
+   * Matches the rules in `file-mentions.js::_isBoundary`:
+   * path characters (letters, digits, underscore, hyphen,
+   * slash) never terminate a match; dot is a boundary
+   * only at the trailing edge; everything else
+   * (whitespace, punctuation) is a boundary on both sides.
+   */
+  _lineContainsPath(line, path) {
+    let from = 0;
+    while (from <= line.length - path.length) {
+      const idx = line.indexOf(path, from);
+      if (idx === -1) return false;
+      const endIdx = idx + path.length;
+      const before = idx > 0 ? line[idx - 1] : '';
+      const after = endIdx < line.length ? line[endIdx] : '';
+      if (
+        this._isMentionBoundary(before, 'before') &&
+        this._isMentionBoundary(after, 'after')
+      ) {
+        return true;
+      }
+      from = idx + 1;
+    }
+    return false;
+  }
+
+  _isMentionBoundary(ch, position) {
+    if (ch === '') return true;
+    if (/[A-Za-z0-9_\-/]/.test(ch)) return false;
+    if (ch === '.') return position === 'after';
+    return true;
+  }
+
+  /**
+   * Render the file summary section for an assistant
+   * message. Emits nothing when the file list is empty —
+   * casual assistant replies with no file references
+   * shouldn't carry an empty summary section.
+   *
+   * Layout per specs3:
+   *
+   *   📁 Files Referenced       [+ Add All (N)]
+   *   [✓ path/to/in.py]  [+ path/to/out.py]
+   *
+   * Chips show ✓ for in-context (muted style) and + for
+   * not-in-context (accent style). Clicking a chip
+   * dispatches `file-chip-click` with `{path, navigate:
+   * false}`. The "Add All" button is shown only when ≥2
+   * files are not currently in context — a single
+   * unselected file already has its own + chip, and
+   * "Add All (1)" would be redundant noise.
+   *
+   * @param {Array<{path: string, inContext: boolean}>} files
+   * @returns {import('lit').TemplateResult | ''}
+   */
+  _renderFileSummary(files) {
+    if (!Array.isArray(files) || files.length === 0) return '';
+    const notInContext = files.filter((f) => !f.inContext);
+    const showAddAll = notInContext.length >= 2;
+    return html`
+      <div class="file-summary-section" role="group"
+        aria-label="Files referenced by this message">
+        <div class="file-summary-header">
+          <span class="file-summary-title">
+            📁 Files Referenced
+          </span>
+          ${showAddAll
+            ? html`<button
+                class="file-summary-add-all"
+                @click=${(e) => {
+                  e.stopPropagation();
+                  this._onAddAllFiles(notInContext);
+                }}
+                title="Add all unselected files to context"
+                aria-label="Add all ${notInContext.length} unselected files to context"
+              >
+                + Add All (${notInContext.length})
+              </button>`
+            : ''}
+        </div>
+        <div class="file-summary-chips">
+          ${files.map(
+            (file) => html`
+              <button
+                class="file-chip ${file.inContext
+                  ? 'in-context'
+                  : 'not-in-context'}"
+                @click=${(e) => {
+                  e.stopPropagation();
+                  this._onFileChipClick(file.path);
+                }}
+                title=${file.inContext
+                  ? `${file.path} — in context (click to remove)`
+                  : `${file.path} — click to add to context`}
+                aria-label=${file.inContext
+                  ? `Remove ${file.path} from context`
+                  : `Add ${file.path} to context`}
+              >
+                <span class="file-chip-mark" aria-hidden="true">
+                  ${file.inContext ? '✓' : '+'}
+                </span>
+                <span class="file-chip-path">${file.path}</span>
+              </button>
+            `,
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Handle a chip click — dispatch `file-chip-click`
+   * with `navigate: false` so the files-tab toggles
+   * selection without opening the file in the viewer.
+   *
+   * Distinct from `file-mention-click` on purpose:
+   * inline mentions in prose navigate + toggle; summary
+   * chips only toggle. Same info, different interaction
+   * contract, different event name means no conditional
+   * on the handler side.
+   */
+  _onFileChipClick(path) {
+    if (typeof path !== 'string' || !path) return;
+    this.dispatchEvent(
+      new CustomEvent('file-chip-click', {
+        detail: { path, navigate: false },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * "Add All" button handler. Dispatches
+   * `file-chips-add-all` with `{paths: [...]}` carrying
+   * the list of not-in-context paths. The files-tab
+   * handler (Step 2) batches them into a single
+   * `set_selected_files` call rather than N round-trips.
+   */
+  _onAddAllFiles(notInContext) {
+    if (!Array.isArray(notInContext) || notInContext.length === 0) return;
+    const paths = notInContext
+      .map((f) => f.path)
+      .filter((p) => typeof p === 'string' && p);
+    if (paths.length === 0) return;
+    this.dispatchEvent(
+      new CustomEvent('file-chips-add-all', {
+        detail: { paths },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _scrollToBottom() {
     // Double rAF — wait for Lit's DOM commit, then one more
     // frame for browser layout to settle before measuring
@@ -3508,6 +3901,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const images = Array.isArray(msg.images) ? msg.images : [];
     const toolbar = this._renderMessageToolbar(msg);
     const highlightClass = isHighlighted ? ' search-highlight' : '';
+    // File summary section — settled assistant messages
+    // only. Per specs4/5-webapp/chat.md: "Section only
+    // shown for final rendered messages, never during
+    // streaming." The streaming card uses
+    // `_renderStreamingMessage` which doesn't call this
+    // path, and user / system messages never reference
+    // files in a way worth summarising.
+    const fileSummary =
+      msg.role === 'assistant' && !msg.system_event
+        ? this._renderFileSummary(this._collectMessageFiles(msg))
+        : '';
     return html`
       <div
         class="message-card ${roleClass}${highlightClass}"
@@ -3519,6 +3923,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
         ${images.length > 0
           ? this._renderMessageImages(images)
           : ''}
+        ${fileSummary}
         <div class="message-toolbar bottom">${toolbar}</div>
       </div>
     `;
