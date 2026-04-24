@@ -888,6 +888,8 @@ class TestStateSnapshot:
             "mode",
             "cross_ref_enabled",
             "review_state",
+            "excluded_index_files",
+            "doc_convert_available",
         }
 
     def test_messages_is_copy(

@@ -572,6 +572,12 @@ class LLMService:
         # concern.
         self._selected_files: list[str] = []
 
+        # Excluded index files — files the user has explicitly
+        # excluded from the index via the file picker's three-state
+        # checkbox. These files get no content, no index block, and
+        # no tracker item.
+        self._excluded_index_files: list[str] = []
+
         # Session-totals accumulator. The token HUD reads this for
         # cumulative display.
         self._session_totals: dict[str, int] = {
@@ -808,11 +814,22 @@ class LLMService:
         Called by the browser on WebSocket connect. Returns the
         minimal set of fields needed to rebuild the UI — messages,
         selected files, streaming status, session ID, repo name,
-        init flag, mode, cross-reference state, review state.
+        init flag, mode, cross-reference state, review state,
+        excluded files, doc convert availability.
         """
+        # Check doc convert availability dynamically — not cached
+        # at startup since optional deps may be installed later.
+        doc_convert_available = False
+        try:
+            from ac_dc.doc_convert import DocConvert
+            doc_convert_available = DocConvert._probe_import("markitdown")
+        except Exception:
+            pass
+
         return {
             "messages": self._context.get_history(),
             "selected_files": list(self._selected_files),
+            "excluded_index_files": list(self._excluded_index_files),
             "streaming_active": self._active_user_request is not None,
             "session_id": self._session_id,
             "repo_name": self._repo.name if self._repo else "",
@@ -820,6 +837,7 @@ class LLMService:
             "mode": self._context.mode.value,
             "cross_ref_enabled": self._cross_ref_enabled,
             "review_state": self.get_review_state(),
+            "doc_convert_available": doc_convert_available,
         }
 
     # ------------------------------------------------------------------
@@ -1556,6 +1574,159 @@ class LLMService:
     def get_selected_files(self) -> list[str]:
         """Return a copy of the selected-files list."""
         return list(self._selected_files)
+
+    # ------------------------------------------------------------------
+    # Public RPC — navigation broadcast
+    # ------------------------------------------------------------------
+
+    def navigate_file(self, path: str) -> dict[str, Any]:
+        """Broadcast file navigation to all connected clients.
+
+        Called when a client navigates to a file (file picker click,
+        search result, edit block anchor). All clients open the same
+        file in their viewer. The frontend's ``_fromNav`` flag
+        prevents echo loops.
+        """
+        self._broadcast_event("navigateFile", {"path": path})
+        return {"status": "ok", "path": path}
+
+    # ------------------------------------------------------------------
+    # Public RPC — excluded index files
+    # ------------------------------------------------------------------
+
+    def set_excluded_index_files(
+        self, files: list[str]
+    ) -> list[str]:
+        """Store the set of files excluded from the index.
+
+        Excluded files have no content, no index block, and no
+        tracker item in the stability system. Used by the file
+        picker's three-state checkbox (shift+click to exclude).
+
+        Returns the canonical excluded list.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
+        self._excluded_index_files = list(files)
+        # Remove excluded items from the tracker immediately.
+        for path in files:
+            for prefix in ("symbol:", "doc:", "file:"):
+                key = prefix + path
+                if self._stability_tracker.has_item(key):
+                    all_items = self._stability_tracker.get_all_items()
+                    item = all_items.get(key)
+                    if item is not None:
+                        self._stability_tracker._items.pop(key, None)
+                        self._stability_tracker._broken_tiers.add(item.tier)
+        self._broadcast_event("filesChanged", list(self._selected_files))
+        return list(self._excluded_index_files)
+
+    def get_excluded_index_files(self) -> list[str]:
+        """Return the current excluded-files list."""
+        return list(getattr(self, "_excluded_index_files", []))
+
+    # ------------------------------------------------------------------
+    # Public RPC — history browsing and session management
+    # ------------------------------------------------------------------
+
+    def history_search(
+        self,
+        query: str,
+        role: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search conversation history across all sessions."""
+        if self._history_store is None:
+            return []
+        return self._history_store.search_messages(
+            query, role=role, limit=limit
+        )
+
+    def history_list_sessions(
+        self, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return recent sessions for the history browser."""
+        if self._history_store is None:
+            return []
+        sessions = self._history_store.list_sessions(limit=limit)
+        return [
+            {
+                "session_id": s.session_id,
+                "timestamp": s.timestamp,
+                "message_count": s.message_count,
+                "preview": s.preview,
+                "first_role": s.first_role,
+            }
+            for s in sessions
+        ]
+
+    def history_get_session(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Return all messages for a session (full metadata)."""
+        if self._history_store is None:
+            return []
+        return self._history_store.get_session_messages(session_id)
+
+    def load_session_into_context(
+        self, session_id: str
+    ) -> dict[str, Any]:
+        """Load a previous session into the active context.
+
+        Clears current history, loads the target session's
+        messages, and reuses that session's ID so subsequent
+        messages persist to the same session.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if self._history_store is None:
+            return {"error": "No history store available"}
+        messages = self._history_store.get_session_messages_for_context(
+            session_id
+        )
+        if not messages:
+            return {"error": f"Session {session_id} not found or empty"}
+        # Clear and replace.
+        self._context.clear_history()
+        self._context.set_history(messages)
+        self._session_id = session_id
+        # Broadcast to all clients so collaborators see the loaded
+        # conversation.
+        self._broadcast_event(
+            "sessionChanged",
+            {
+                "session_id": session_id,
+                "messages": messages,
+            },
+        )
+        return {
+            "session_id": session_id,
+            "messages": messages,
+        }
+
+    def history_new_session(self) -> dict[str, Any]:
+        """Create a new history session (alias for new_session)."""
+        return self.new_session()
+
+    def get_history_status(self) -> dict[str, Any]:
+        """Return history token counts and compaction status.
+
+        Used by the dialog's history bar to show usage percentage.
+        """
+        budget = self._context.get_token_budget()
+        compaction = self._context.get_compaction_status()
+        return {
+            "session_id": self._session_id,
+            "history_tokens": budget["history_tokens"],
+            "max_history_tokens": budget["max_history_tokens"],
+            "remaining": budget["remaining"],
+            "needs_compaction": budget["needs_compaction"],
+            "compaction_enabled": compaction["enabled"],
+            "compaction_trigger": compaction["trigger_tokens"],
+            "compaction_percent": compaction["percent"],
+        }
 
     # ------------------------------------------------------------------
     # Public RPC — TeX preview
