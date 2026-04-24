@@ -27,6 +27,7 @@ import { SharedRpc } from './rpc.js';
 import './files-tab.js';
 import './diff-viewer.js';
 import './svg-viewer.js';
+import './settings-tab.js';
 import { viewerForPath } from './viewer-routing.js';
 
 /**
@@ -845,14 +846,14 @@ export class AppShell extends JRPCClient {
   }
 
   _renderTab() {
-    // Phase 2c wires up the files tab. Context and settings
-    // remain placeholders until Phase 3.
     if (this.activeTab === 'files') {
       return html`<ac-files-tab></ac-files-tab>`;
     }
+    if (this.activeTab === 'settings') {
+      return html`<ac-settings-tab></ac-settings-tab>`;
+    }
     const labels = {
       context: 'Context',
-      settings: 'Settings',
     };
     return html`
       <div class="tab-placeholder">

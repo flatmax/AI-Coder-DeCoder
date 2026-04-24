@@ -1628,6 +1628,21 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.26 — Phase 3.3 Settings tab — **delivered**
+
+Wires the Settings dialog tab to the `Settings` RPC service (Layer 4.5). Card grid of eight whitelisted config types; clicking a card opens an inline monospace textarea editor. Save writes via `Settings.save_config_content`; reloadable configs (LLM, App) auto-trigger their reload RPC on save. Ctrl+S shortcut within the textarea. Info banner shows model names and config directory from `Settings.get_config_info`.
+
+- `webapp/src/settings-tab.js` — new `SettingsTab(RpcMixin(LitElement))` component:
+  - `CONFIG_CARDS` array — eight entries matching the backend's `CONFIG_TYPES` whitelist (litellm, app, system, system_extra, compaction, snippets, review, system_doc). Each has icon, label, format hint, and reloadable flag.
+  - `_loadInfo()` — fetches model names + config dir on RPC ready.
+  - `_openCard(key)` — loads content via `get_config_content`, sets `_activeKey` to show the editor.
+  - `_save()` — writes via `save_config_content`, surfaces advisory JSON warnings, auto-triggers reload for reloadable types.
+  - `_reload()` — dispatches to `reload_llm_config` or `reload_app_config` based on the active key.
+  - `_onEditorKeyDown` — Ctrl+S shortcut within the textarea.
+  - Toast feedback for all success/error/warning paths via `ac-toast` window events.
+
+- `webapp/src/app-shell.js` — imports `settings-tab.js`, renders `<ac-settings-tab>` when `activeTab === 'settings'`. Context tab remains a placeholder.
+
 ### 5.25 — Phase 3.2e SVG embedded image resolution — **delivered**
 
 Resolves relative `<image href="...">` references in SVG files rendered by the viewer. PDF/PPTX-converted SVGs produced by doc-convert reference sibling raster images with relative paths (e.g., `<image href="01_slide_img1.png"/>`). When injected into the webapp DOM, the browser resolves these against the webapp's origin URL — which doesn't serve repo files — so images silently fail to load.
