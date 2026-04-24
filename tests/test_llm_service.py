@@ -35,6 +35,7 @@ import pytest
 
 from ac_dc.config import ConfigManager
 from ac_dc.context_manager import Mode
+from ac_dc.doc_index.index import DocIndex
 from ac_dc.history_compactor import TopicBoundary
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm_service import LLMService, _build_topic_detector
@@ -295,6 +296,113 @@ class TestConstruction:
         """Session ID has the expected prefix."""
         sid = service.get_current_state()["session_id"]
         assert sid.startswith("sess_")
+
+
+# ---------------------------------------------------------------------------
+# DocIndex attachment (2.8.2a)
+# ---------------------------------------------------------------------------
+
+
+class TestDocIndexConstruction:
+    """LLMService always holds a DocIndex.
+
+    Unlike ``_symbol_index`` (which can be None during deferred
+    init and is attached later via ``complete_deferred_init``),
+    the doc index is constructed unconditionally. DocIndex
+    construction is cheap — no tree-sitter grammars, no
+    heavyweight dependencies — so there's no reason to defer.
+
+    The background build that actually populates
+    ``_doc_index._all_outlines`` lands in 2.8.2b. These tests
+    cover the attachment surface only; content is empty.
+    """
+
+    def test_doc_index_populated_on_construction(
+        self, service: LLMService
+    ) -> None:
+        """The attribute exists and is a DocIndex instance."""
+        assert service._doc_index is not None
+        assert isinstance(service._doc_index, DocIndex)
+
+    def test_doc_index_uses_repo_root(
+        self,
+        service: LLMService,
+        repo: Repo,
+    ) -> None:
+        """repo_root passed to DocIndex matches the attached repo."""
+        assert service._doc_index.repo_root == repo.root
+
+    def test_doc_index_memory_only_without_repo(
+        self,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """When repo is None, DocIndex is built in memory-only mode."""
+        svc = LLMService(config=config, repo=None)
+        assert svc._doc_index is not None
+        assert svc._doc_index.repo_root is None
+
+    def test_doc_index_present_with_deferred_init(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Deferred init doesn't skip DocIndex construction.
+
+        Symbol index is explicitly deferrable (heavyweight,
+        slow startup) but doc index is always built. Pinning
+        this prevents a future refactor that "helpfully"
+        defers both.
+        """
+        svc = LLMService(
+            config=config, repo=repo, deferred_init=True
+        )
+        assert svc._doc_index is not None
+
+    def test_doc_index_starts_empty(
+        self, service: LLMService
+    ) -> None:
+        """Pre-background-build, the doc index holds no outlines.
+
+        Populated by ``complete_deferred_init`` which triggers
+        the background build (2.8.2b). Until then, reads return
+        empty.
+        """
+        assert service._doc_index._all_outlines == {}
+        assert service._doc_index.get_doc_map() == ""
+
+    def test_doc_index_identity_preserved_across_mode_switch(
+        self, service: LLMService
+    ) -> None:
+        """Switching modes doesn't swap out the doc index.
+
+        Unlike the stability tracker (which has per-mode
+        instances), the doc index is shared across both modes
+        — the same outlines are consulted whether rendering
+        for doc mode (primary) or code mode + cross-reference
+        (secondary).
+        """
+        original = service._doc_index
+        service.switch_mode("doc")
+        assert service._doc_index is original
+        service.switch_mode("code")
+        assert service._doc_index is original
+
+    def test_readiness_flags_start_false(
+        self, service: LLMService
+    ) -> None:
+        """All three readiness flags start False.
+
+        ``_doc_index_ready`` flips True when structure extraction
+        completes (2.8.2b). ``_doc_index_building`` flips True
+        during the build, False after. ``_doc_index_enriched``
+        stays False throughout 2.8.2 — enrichment lands in
+        2.8.4.
+        """
+        assert service._doc_index_ready is False
+        assert service._doc_index_building is False
+        assert service._doc_index_enriched is False
 
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from ac_dc.context_manager import ContextManager, Mode
+from ac_dc.doc_index.index import DocIndex
 from ac_dc.edit_pipeline import EditPipeline
 from ac_dc.edit_protocol import (
     EditResult,
@@ -419,6 +420,22 @@ class LLMService:
         self._config = config
         self._repo = repo
         self._symbol_index = symbol_index
+        # Doc index is never optional — construction is cheap
+        # (no tree-sitter grammars, no heavyweight dependencies)
+        # so we always build one. Empty until the background
+        # build populates it via complete_deferred_init (2.8.2b).
+        # When repo is None, DocIndex runs in memory-only mode.
+        self._doc_index = DocIndex(
+            repo_root=repo.root if repo is not None else None
+        )
+        # Readiness flags — flip during the background build
+        # (2.8.2b). Cross-reference toggle gates on
+        # _doc_index_ready per specs4/3-llm/modes.md.
+        self._doc_index_ready = False
+        self._doc_index_building = False
+        # Enrichment flag — always False in 2.8.2; flips in
+        # 2.8.4 when keyword enrichment lands.
+        self._doc_index_enriched = False
         self._event_callback = event_callback
         self._history_store = history_store
 
