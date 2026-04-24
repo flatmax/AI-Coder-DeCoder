@@ -63,6 +63,8 @@
 
 import { LitElement, css, html } from 'lit';
 
+import svgPanZoom from 'svg-pan-zoom';
+
 import { SharedRpc } from './rpc.js';
 
 /**
@@ -71,6 +73,39 @@ import { SharedRpc } from './rpc.js';
  * from collapsing visually.
  */
 const _EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>';
+
+/**
+ * Pan/zoom configuration shared by both panels. Matches
+ * specs4/5-webapp/svg-viewer.md#synchronized-panzoom —
+ * mouse wheel zoom, click-drag pan, zoom bounds.
+ *
+ * `controlIconsEnabled: false` — we render our own fit
+ * button as a floating overlay rather than the library's
+ * built-in control buttons (which would conflict with
+ * the status LED visually and don't match the app's
+ * design language).
+ *
+ * `dblClickZoomEnabled: true` — touchpads use two-finger
+ * tap as a double-click equivalent; letting that zoom
+ * feels natural.
+ *
+ * `fit: true, center: true` — on init, fit the SVG to
+ * the panel and center it. Subsequent user interaction
+ * takes over.
+ */
+const _PAN_ZOOM_OPTIONS = Object.freeze({
+  panEnabled: true,
+  controlIconsEnabled: false,
+  zoomEnabled: true,
+  dblClickZoomEnabled: true,
+  mouseWheelZoomEnabled: true,
+  preventMouseEventsDefault: true,
+  zoomScaleSensitivity: 0.2,
+  minZoom: 0.1,
+  maxZoom: 10,
+  fit: true,
+  center: true,
+});
 
 export class SvgViewer extends LitElement {
   static properties = {
@@ -197,6 +232,37 @@ export class SvgViewer extends LitElement {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.55; }
     }
+
+    /* Fit button — floating overlay in the bottom-right
+     * corner. Sized similarly to the status LED so the
+     * two controls feel like siblings visually. Clicking
+     * resets both panels to their fit+center state. */
+    .fit-button {
+      position: absolute;
+      bottom: 12px;
+      right: 16px;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      background: rgba(22, 27, 34, 0.85);
+      color: var(--text-secondary, #8b949e);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.875rem;
+      line-height: 1;
+      z-index: 10;
+      backdrop-filter: blur(4px);
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .fit-button:hover {
+      background: rgba(240, 246, 252, 0.1);
+      border-color: rgba(240, 246, 252, 0.4);
+      color: var(--text-primary, #c9d1d9);
+    }
   `;
 
   constructor() {
@@ -212,8 +278,25 @@ export class SvgViewer extends LitElement {
     // a full SVG re-parse and visual flash.
     this._lastLeftContent = null;
     this._lastRightContent = null;
+    // svg-pan-zoom instances, one per panel. Initialised
+    // after SVG injection; disposed before every re-
+    // injection so Monaco doesn't retain references to
+    // detached DOM. Null when no file is open.
+    this._panZoomLeft = null;
+    this._panZoomRight = null;
+    // Guard against feedback loops when syncing pan/zoom
+    // between panels. Set before programmatically moving
+    // one panel to match the other; cleared after. Pure
+    // mutex pattern — same as markdown preview's scroll
+    // sync in 3.1b.
+    this._syncingPanZoom = false;
     // Bound handlers for add/remove symmetry.
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onLeftPan = this._onLeftPan.bind(this);
+    this._onLeftZoom = this._onLeftZoom.bind(this);
+    this._onRightPan = this._onRightPan.bind(this);
+    this._onRightZoom = this._onRightZoom.bind(this);
+    this._onFitClick = this._onFitClick.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -227,6 +310,7 @@ export class SvgViewer extends LitElement {
 
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
+    this._disposePanZoom();
     super.disconnectedCallback();
   }
 
@@ -428,6 +512,7 @@ export class SvgViewer extends LitElement {
     if (this._activeIndex < 0) {
       this._lastLeftContent = null;
       this._lastRightContent = null;
+      this._disposePanZoom();
       return;
     }
     const file = this._files[this._activeIndex];
@@ -439,16 +524,187 @@ export class SvgViewer extends LitElement {
     if (!leftContainer || !rightContainer) return;
     const leftContent = file.original || _EMPTY_SVG;
     const rightContent = file.modified || _EMPTY_SVG;
+    // Track whether either side actually changed. If yes,
+    // we tear down and re-init pan/zoom; if no, we leave
+    // existing instances alone (avoids resetting the
+    // user's pan/zoom state on no-op updates).
+    let changed = false;
     // Skip reassignment when content hasn't changed —
     // innerHTML assignment forces a full SVG re-parse
     // which flashes the visual.
     if (leftContent !== this._lastLeftContent) {
       leftContainer.innerHTML = leftContent;
       this._lastLeftContent = leftContent;
+      changed = true;
     }
     if (rightContent !== this._lastRightContent) {
       rightContainer.innerHTML = rightContent;
       this._lastRightContent = rightContent;
+      changed = true;
+    }
+    if (changed) {
+      // Right panel gets preserveAspectRatio="none" so a
+      // future SvgEditor (3.2c) has sole viewBox authority
+      // — otherwise the browser's aspect-ratio fitting
+      // fights with editor coordinate math. Applied via
+      // attribute on the root <svg> element. Left panel
+      // keeps the default (preserveAspectRatio="xMidYMid
+      // meet") since it's a read-only reference.
+      const rightSvg = rightContainer.querySelector('svg');
+      if (rightSvg) {
+        rightSvg.setAttribute('preserveAspectRatio', 'none');
+      }
+      this._initPanZoom(leftContainer, rightContainer);
+    }
+  }
+
+  /**
+   * Initialise pan/zoom on both panels. Tears down any
+   * existing instances first so DOM references aren't
+   * retained across file switches.
+   *
+   * Both panels' pan/zoom instances are wired to mirror
+   * each other via `onPan`/`onZoom` callbacks. A
+   * `_syncingPanZoom` guard flag prevents ping-pong
+   * loops — when we programmatically move one panel to
+   * match the other, the callback on the moved panel
+   * fires but bails out because the flag is set.
+   *
+   * Initialisation is wrapped in try/catch — jsdom's
+   * SVG implementation doesn't support enough of the
+   * real library's feature set, so tests that mount
+   * real `svg-pan-zoom` against injected SVG would
+   * throw. Tests should mock the library at the module
+   * level; production runs fine.
+   */
+  _initPanZoom(leftContainer, rightContainer) {
+    this._disposePanZoom();
+    const leftSvg = leftContainer.querySelector('svg');
+    const rightSvg = rightContainer.querySelector('svg');
+    if (!leftSvg || !rightSvg) return;
+    try {
+      this._panZoomLeft = svgPanZoom(leftSvg, {
+        ..._PAN_ZOOM_OPTIONS,
+        onPan: this._onLeftPan,
+        onZoom: this._onLeftZoom,
+      });
+    } catch (err) {
+      console.warn('[svg-viewer] left pan/zoom init failed', err);
+      this._panZoomLeft = null;
+    }
+    try {
+      this._panZoomRight = svgPanZoom(rightSvg, {
+        ..._PAN_ZOOM_OPTIONS,
+        onPan: this._onRightPan,
+        onZoom: this._onRightZoom,
+      });
+    } catch (err) {
+      console.warn('[svg-viewer] right pan/zoom init failed', err);
+      this._panZoomRight = null;
+    }
+  }
+
+  /**
+   * Destroy pan/zoom instances and null the refs. Safe
+   * to call when instances don't exist — no-op.
+   */
+  _disposePanZoom() {
+    if (this._panZoomLeft) {
+      try {
+        this._panZoomLeft.destroy();
+      } catch (_) {
+        // Already destroyed or underlying SVG detached —
+        // harmless.
+      }
+      this._panZoomLeft = null;
+    }
+    if (this._panZoomRight) {
+      try {
+        this._panZoomRight.destroy();
+      } catch (_) {}
+      this._panZoomRight = null;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Pan/zoom sync callbacks
+  // ---------------------------------------------------------------
+
+  _onLeftPan(newPan) {
+    if (this._syncingPanZoom) return;
+    if (!this._panZoomRight) return;
+    this._syncingPanZoom = true;
+    try {
+      this._panZoomRight.pan(newPan);
+    } catch (_) {
+    } finally {
+      this._syncingPanZoom = false;
+    }
+  }
+
+  _onLeftZoom(newZoom) {
+    if (this._syncingPanZoom) return;
+    if (!this._panZoomRight) return;
+    this._syncingPanZoom = true;
+    try {
+      this._panZoomRight.zoom(newZoom);
+    } catch (_) {
+    } finally {
+      this._syncingPanZoom = false;
+    }
+  }
+
+  _onRightPan(newPan) {
+    if (this._syncingPanZoom) return;
+    if (!this._panZoomLeft) return;
+    this._syncingPanZoom = true;
+    try {
+      this._panZoomLeft.pan(newPan);
+    } catch (_) {
+    } finally {
+      this._syncingPanZoom = false;
+    }
+  }
+
+  _onRightZoom(newZoom) {
+    if (this._syncingPanZoom) return;
+    if (!this._panZoomLeft) return;
+    this._syncingPanZoom = true;
+    try {
+      this._panZoomLeft.zoom(newZoom);
+    } catch (_) {
+    } finally {
+      this._syncingPanZoom = false;
+    }
+  }
+
+  /**
+   * Fit button click handler. Resets both panels to
+   * fit+center. The sync guard is held across both
+   * operations so the fit call on one panel doesn't
+   * trigger mirror calls into the other — both are
+   * being explicitly reset.
+   */
+  _onFitClick() {
+    if (!this._panZoomLeft && !this._panZoomRight) return;
+    this._syncingPanZoom = true;
+    try {
+      if (this._panZoomLeft) {
+        try {
+          this._panZoomLeft.resize();
+          this._panZoomLeft.fit();
+          this._panZoomLeft.center();
+        } catch (_) {}
+      }
+      if (this._panZoomRight) {
+        try {
+          this._panZoomRight.resize();
+          this._panZoomRight.fit();
+          this._panZoomRight.center();
+        } catch (_) {}
+      }
+    } finally {
+      this._syncingPanZoom = false;
     }
   }
 
@@ -605,6 +861,14 @@ export class SvgViewer extends LitElement {
           aria-label=${this._statusLedTitle()}
           @click=${this._onStatusLedClick}
         ></div>
+        <button
+          class="fit-button"
+          title="Fit to view"
+          aria-label="Fit SVG to view"
+          @click=${this._onFitClick}
+        >
+          ⊡
+        </button>
       </div>
     `;
   }

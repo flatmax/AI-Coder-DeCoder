@@ -8,6 +8,13 @@
 //
 // RPC is injected via globalThis.__sharedRpcOverride,
 // matching the diff viewer's pattern.
+//
+// svg-pan-zoom is mocked at the module level since
+// jsdom's SVG implementation doesn't support enough of
+// the real library to run. The mock records every
+// construction and exposes pan/zoom/fit/center/destroy
+// spies so tests can drive the sync callbacks and verify
+// disposal.
 
 import {
   afterEach,
@@ -18,6 +25,41 @@ import {
   vi,
 } from 'vitest';
 
+// Mock must land before './svg-viewer.js' loads — vitest
+// hoists vi.mock() calls above imports automatically, so
+// this works even though the import below appears to
+// happen first textually.
+vi.mock('svg-pan-zoom', () => {
+  // Each call records the options so tests can invoke
+  // the onPan / onZoom callbacks. Instances expose
+  // spies for every method the viewer calls.
+  const instances = [];
+  const factory = vi.fn((element, options) => {
+    const instance = {
+      element,
+      options,
+      pan: vi.fn(),
+      zoom: vi.fn(),
+      fit: vi.fn(),
+      center: vi.fn(),
+      resize: vi.fn(),
+      destroy: vi.fn(() => {
+        instance._destroyed = true;
+      }),
+      _destroyed: false,
+    };
+    instances.push(instance);
+    return instance;
+  });
+  factory._instances = instances;
+  factory._reset = () => {
+    instances.length = 0;
+    factory.mockClear();
+  };
+  return { default: factory };
+});
+
+import svgPanZoom from 'svg-pan-zoom';
 import './svg-viewer.js';
 
 const _mounted = [];
@@ -60,6 +102,7 @@ function svgFixture(label = 'content') {
 
 beforeEach(() => {
   clearFakeRpc();
+  svgPanZoom._reset();
 });
 
 afterEach(() => {
@@ -68,6 +111,7 @@ afterEach(() => {
     if (el.isConnected) el.remove();
   }
   clearFakeRpc();
+  svgPanZoom._reset();
 });
 
 // ---------------------------------------------------------------------------
@@ -752,5 +796,380 @@ describe('SvgViewer events cross shadow DOM', () => {
     await settle(el);
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0][0].detail).toEqual({ path: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pan/zoom initialization
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer pan/zoom initialization', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => svgFixture()),
+    });
+  });
+
+  it('creates one pan/zoom instance per panel on open', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(svgPanZoom).toHaveBeenCalledTimes(2);
+    expect(svgPanZoom._instances).toHaveLength(2);
+  });
+
+  it('wires left and right instances to different SVG elements', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    expect(leftInst.element).not.toBe(rightInst.element);
+    expect(leftInst.element.tagName.toLowerCase()).toBe('svg');
+    expect(rightInst.element.tagName.toLowerCase()).toBe('svg');
+  });
+
+  it('applies preserveAspectRatio="none" only to right panel', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const leftSvg = el.shadowRoot.querySelector(
+      '.pane-left .svg-container svg',
+    );
+    const rightSvg = el.shadowRoot.querySelector(
+      '.pane-right .svg-container svg',
+    );
+    expect(rightSvg.getAttribute('preserveAspectRatio')).toBe('none');
+    // Left panel should NOT have preserveAspectRatio set
+    // by us — keeps browser default (xMidYMid meet).
+    expect(leftSvg.getAttribute('preserveAspectRatio')).toBe(null);
+  });
+
+  it('configures pan/zoom with documented options', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst] = svgPanZoom._instances;
+    expect(leftInst.options.zoomEnabled).toBe(true);
+    expect(leftInst.options.panEnabled).toBe(true);
+    expect(leftInst.options.dblClickZoomEnabled).toBe(true);
+    expect(leftInst.options.minZoom).toBe(0.1);
+    expect(leftInst.options.maxZoom).toBe(10);
+    expect(leftInst.options.fit).toBe(true);
+    expect(leftInst.options.center).toBe(true);
+    // Control icons off — we render our own fit button.
+    expect(leftInst.options.controlIconsEnabled).toBe(false);
+  });
+
+  it('registers onPan and onZoom callbacks on both instances', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    expect(typeof leftInst.options.onPan).toBe('function');
+    expect(typeof leftInst.options.onZoom).toBe('function');
+    expect(typeof rightInst.options.onPan).toBe('function');
+    expect(typeof rightInst.options.onZoom).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pan/zoom synchronization
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer pan/zoom sync', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => svgFixture()),
+    });
+  });
+
+  it('left pan mirrors to right via pan() call', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    leftInst.options.onPan({ x: 10, y: 20 });
+    expect(rightInst.pan).toHaveBeenCalledWith({ x: 10, y: 20 });
+  });
+
+  it('left zoom mirrors to right via zoom() call', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    leftInst.options.onZoom(1.5);
+    expect(rightInst.zoom).toHaveBeenCalledWith(1.5);
+  });
+
+  it('right pan mirrors to left via pan() call', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    rightInst.options.onPan({ x: 5, y: 15 });
+    expect(leftInst.pan).toHaveBeenCalledWith({ x: 5, y: 15 });
+  });
+
+  it('right zoom mirrors to left via zoom() call', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    rightInst.options.onZoom(2.0);
+    expect(leftInst.zoom).toHaveBeenCalledWith(2.0);
+  });
+
+  it('guard prevents ping-pong loop on pan', async () => {
+    // When the right panel's pan is called from the left's
+    // onPan handler, the right's own onPan callback would
+    // normally fire and try to sync back to left. The
+    // _syncingPanZoom flag prevents that. We verify by
+    // simulating the right panel's onPan firing while the
+    // flag is set.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    // Drive left -> right. The right.pan mock doesn't
+    // auto-fire right.options.onPan (it's a mock), so
+    // we simulate the callback firing manually during
+    // the sync window.
+    leftInst.options.onPan({ x: 1, y: 2 });
+    // Confirm right.pan was called once.
+    expect(rightInst.pan).toHaveBeenCalledTimes(1);
+    // If the right's onPan had fired during that call,
+    // left.pan would have been invoked. It should not
+    // have been.
+    expect(leftInst.pan).not.toHaveBeenCalled();
+  });
+
+  it('guard prevents right->left feedback during sync', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    // Manually replicate the race: left pan fires, which
+    // sets the guard and calls right.pan. While the guard
+    // is held, the right's onPan shouldn't cascade back.
+    // We force-invoke right.options.onPan inside the
+    // sync window by making right.pan call it.
+    let reentered = false;
+    rightInst.pan = vi.fn(() => {
+      // While we're inside left's onPan handler, the guard
+      // should be set. Call right's onPan to verify it
+      // short-circuits.
+      rightInst.options.onPan({ x: 99, y: 99 });
+      // If left.pan was called now, the guard failed.
+      if (leftInst.pan.mock.calls.length > 0) reentered = true;
+    });
+    leftInst.options.onPan({ x: 1, y: 2 });
+    expect(reentered).toBe(false);
+  });
+
+  it('sync is a no-op when the other panel has no instance', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst] = svgPanZoom._instances;
+    // Drop the right instance to simulate partial init.
+    el._panZoomRight = null;
+    // Should not throw.
+    expect(() => leftInst.options.onPan({ x: 0, y: 0 })).not.toThrow();
+    expect(() => leftInst.options.onZoom(1)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fit button
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer fit button', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => svgFixture()),
+    });
+  });
+
+  it('renders the fit button when a file is open', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const btn = el.shadowRoot.querySelector('.fit-button');
+    expect(btn).toBeTruthy();
+  });
+
+  it('does not render the fit button in empty state', async () => {
+    const el = mountViewer();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.fit-button')).toBe(null);
+  });
+
+  it('click calls fit and center on both panels', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    el.shadowRoot.querySelector('.fit-button').click();
+    expect(leftInst.fit).toHaveBeenCalled();
+    expect(leftInst.center).toHaveBeenCalled();
+    expect(rightInst.fit).toHaveBeenCalled();
+    expect(rightInst.center).toHaveBeenCalled();
+  });
+
+  it('click also calls resize on both panels', async () => {
+    // resize() ensures pan/zoom picks up current container
+    // dimensions — important when the user resized the
+    // dialog before clicking fit.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    el.shadowRoot.querySelector('.fit-button').click();
+    expect(leftInst.resize).toHaveBeenCalled();
+    expect(rightInst.resize).toHaveBeenCalled();
+  });
+
+  it('click does not trigger feedback loop via onPan/onZoom', async () => {
+    // The fit button calls fit() on both panels. If the
+    // mock fit() were to trigger onPan/onZoom callbacks,
+    // the guard must prevent them from cascading. We
+    // verify by manually firing the callbacks from inside
+    // the fit mock.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    let cascaded = false;
+    rightInst.fit = vi.fn(() => {
+      // Simulate real pan/zoom emitting callbacks during
+      // fit operation.
+      leftInst.options.onPan({ x: 0, y: 0 });
+      leftInst.options.onZoom(1);
+      // If the guard failed, rightInst.pan/.zoom would
+      // have been called from within those callbacks.
+      if (
+        rightInst.pan.mock.calls.length > 0 ||
+        rightInst.zoom.mock.calls.length > 0
+      ) {
+        cascaded = true;
+      }
+    });
+    el.shadowRoot.querySelector('.fit-button').click();
+    expect(cascaded).toBe(false);
+  });
+
+  it('click with no instances is a no-op', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    // Drop both instances to simulate an edge case.
+    el._panZoomLeft = null;
+    el._panZoomRight = null;
+    // Should not throw.
+    expect(() =>
+      el.shadowRoot.querySelector('.fit-button').click(),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pan/zoom disposal
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer pan/zoom disposal', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async (path) => svgFixture(path)),
+    });
+  });
+
+  it('disposes instances when the last file closes', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    el.closeFile('a.svg');
+    await settle(el);
+    expect(leftInst.destroy).toHaveBeenCalled();
+    expect(rightInst.destroy).toHaveBeenCalled();
+    expect(el._panZoomLeft).toBe(null);
+    expect(el._panZoomRight).toBe(null);
+  });
+
+  it('disposes old instances and creates new ones on file switch', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(svgPanZoom._instances).toHaveLength(2);
+    const firstPair = svgPanZoom._instances.slice();
+    await el.openFile({ path: 'b.svg' });
+    await settle(el);
+    // Old pair destroyed.
+    expect(firstPair[0].destroy).toHaveBeenCalled();
+    expect(firstPair[1].destroy).toHaveBeenCalled();
+    // New pair created.
+    expect(svgPanZoom._instances).toHaveLength(4);
+  });
+
+  it('disposes instances on component disconnect', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    el.remove();
+    expect(leftInst.destroy).toHaveBeenCalled();
+    expect(rightInst.destroy).toHaveBeenCalled();
+  });
+
+  it('disposes instances on refreshOpenFiles', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst, rightInst] = svgPanZoom._instances;
+    // Force the refetch to return different content so
+    // re-injection fires.
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(
+        async () => svgFixture('refreshed'),
+      ),
+    });
+    await el.refreshOpenFiles();
+    await settle(el);
+    expect(leftInst.destroy).toHaveBeenCalled();
+    expect(rightInst.destroy).toHaveBeenCalled();
+  });
+
+  it('handles destroy throwing gracefully', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const [leftInst] = svgPanZoom._instances;
+    leftInst.destroy = vi.fn(() => {
+      throw new Error('simulated destroy failure');
+    });
+    // Close should not throw despite destroy failing.
+    expect(() => el.closeFile('a.svg')).not.toThrow();
   });
 });

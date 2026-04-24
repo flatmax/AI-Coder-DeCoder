@@ -19,7 +19,8 @@
     "katex": "^0.16.11",
     "lit": "^3.2.0",
     "marked": "^14.1.0",
-    "monaco-editor": "^0.52.0"
+    "monaco-editor": "^0.52.0",
+    "svg-pan-zoom": "^3.6.2"
   },
   "devDependencies": {
     "vite": "^5.4.0",
