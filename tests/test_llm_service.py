@@ -3259,6 +3259,197 @@ class TestBuildTieredContent:
         assert text.index("block-M") < text.index("block-Z")
 
 
+# ---------------------------------------------------------------------------
+# _assemble_tiered — legend dispatch (Layer 2.8.2e)
+# ---------------------------------------------------------------------------
+
+
+class TestAssembleTieredLegendDispatch:
+    """Legend routing in _assemble_tiered based on mode and cross-ref.
+
+    Three scenarios per specs4/3-llm/modes.md and
+    specs4/3-llm/prompt-assembly.md § "Cross-Reference Legend
+    Headers":
+
+    - Code mode, no cross-ref: symbol legend in primary slot,
+      doc_legend empty (suppressed).
+    - Code mode, cross-ref on: symbol legend primary, doc legend
+      secondary.
+    - Doc mode, no cross-ref: doc legend in primary slot,
+      doc_legend empty (the assembler already handles the
+      primary routing via mode).
+    - Doc mode, cross-ref on: doc legend primary, symbol legend
+      secondary.
+
+    The tests capture the arguments passed to
+    ``ContextManager.assemble_tiered_messages`` so we can verify
+    the exact strings without running full message assembly. The
+    assembler itself is already tested in test_prompt_assembly.py
+    — here we only verify the plumbing.
+    """
+
+    def _make_service_with_capture(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+        symbol_legend: str = "SYMBOL-LEGEND",
+        doc_legend: str = "DOC-LEGEND",
+    ) -> tuple[LLMService, dict[str, Any]]:
+        """Build a service with captured assembler args.
+
+        Returns (service, capture_dict). The capture_dict holds
+        the last-seen kwargs from assemble_tiered_messages.
+        """
+        fake_symbol_index = _FakeSymbolIndex({"a.py": "block-a"})
+        # Attach a ``get_legend`` method on the fake via a
+        # thin subclass since the base fake doesn't have one.
+
+        class _SymbolIndexWithLegend(_FakeSymbolIndex):
+            def get_legend(self_) -> str:
+                return symbol_legend
+
+            def get_symbol_map(
+                self_, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexWithLegend({"a.py": "block-a"}),
+        )
+        # Attach a get_legend method to the doc index (the real
+        # DocIndex has one; it returns "" on an empty index).
+        # Override it to return the test sentinel.
+        original_doc_get_legend = svc._doc_index.get_legend
+        svc._doc_index.get_legend = lambda: doc_legend  # type: ignore[method-assign]
+
+        # Capture the kwargs passed to assemble_tiered_messages.
+        capture: dict[str, Any] = {}
+        original = svc._context.assemble_tiered_messages
+
+        def _capture_and_call(**kwargs: Any) -> list[dict[str, Any]]:
+            capture.update(kwargs)
+            return original(**kwargs)
+
+        svc._context.assemble_tiered_messages = _capture_and_call  # type: ignore[method-assign]
+
+        # Place a minimal tiered_content with at least one item so
+        # the assembler runs the full path (the caller's
+        # _build_tiered_content produces this in real use).
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+
+        return svc, capture
+
+    def test_code_mode_no_cross_ref_omits_doc_legend(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Code mode + cross-ref off → symbol legend only."""
+        svc, capture = self._make_service_with_capture(
+            config, repo, fake_litellm
+        )
+        # Default state: code mode, cross-ref off.
+        assert svc._context.mode == Mode.CODE
+        assert svc._cross_ref_enabled is False
+
+        tiered = svc._build_tiered_content()
+        assert tiered is not None
+        svc._assemble_tiered("hi", [], tiered)
+
+        assert capture["symbol_legend"] == "SYMBOL-LEGEND"
+        # doc_legend suppressed in code mode without cross-ref.
+        assert capture["doc_legend"] == ""
+
+    def test_code_mode_with_cross_ref_adds_doc_legend_secondary(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Code mode + cross-ref on → symbol primary, doc secondary."""
+        svc, capture = self._make_service_with_capture(
+            config, repo, fake_litellm
+        )
+        # Bypass the set_cross_reference RPC — it has a readiness
+        # gate we don't care about here. Set the flag directly.
+        svc._cross_ref_enabled = True
+
+        tiered = svc._build_tiered_content()
+        assert tiered is not None
+        svc._assemble_tiered("hi", [], tiered)
+
+        # Symbol legend stays in primary; doc legend added as
+        # secondary.
+        assert capture["symbol_legend"] == "SYMBOL-LEGEND"
+        assert capture["doc_legend"] == "DOC-LEGEND"
+
+    def test_doc_mode_no_cross_ref_primary_is_doc_legend(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Doc mode + cross-ref off → doc legend in primary slot.
+
+        In doc mode, the assembler's primary slot carries the
+        doc legend. The context manager uses its mode flag to
+        pick the correct header (DOC_MAP_HEADER). We swap what
+        goes into symbol_legend — the parameter name is
+        historical; it means "primary legend".
+        """
+        svc, capture = self._make_service_with_capture(
+            config, repo, fake_litellm
+        )
+        # Switch to doc mode. Use the Mode enum directly since
+        # switch_mode has broadcast side effects not relevant
+        # here.
+        svc._context.set_mode(Mode.DOC)
+        svc._stability_tracker = svc._trackers.setdefault(
+            Mode.DOC, svc._stability_tracker
+        )
+        # Re-place an item in the new tracker so tiered content
+        # is non-empty.
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+
+        tiered = svc._build_tiered_content()
+        assert tiered is not None
+        svc._assemble_tiered("hi", [], tiered)
+
+        # Primary (symbol_legend kwarg) carries DOC legend.
+        assert capture["symbol_legend"] == "DOC-LEGEND"
+        # No secondary without cross-ref.
+        assert capture["doc_legend"] == ""
+
+    def test_doc_mode_with_cross_ref_adds_symbol_as_secondary(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Doc mode + cross-ref on → doc primary, symbol secondary."""
+        svc, capture = self._make_service_with_capture(
+            config, repo, fake_litellm
+        )
+        svc._context.set_mode(Mode.DOC)
+        svc._stability_tracker = svc._trackers.setdefault(
+            Mode.DOC, svc._stability_tracker
+        )
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        svc._cross_ref_enabled = True
+
+        tiered = svc._build_tiered_content()
+        assert tiered is not None
+        svc._assemble_tiered("hi", [], tiered)
+
+        # Primary is doc legend; secondary is symbol legend.
+        assert capture["symbol_legend"] == "DOC-LEGEND"
+        assert capture["doc_legend"] == "SYMBOL-LEGEND"
+
+
 class _FakeRefIndex:
     """Minimal reference-index stub for rebuild_cache tests.
 

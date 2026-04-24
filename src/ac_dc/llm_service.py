@@ -4007,6 +4007,48 @@ class LLMService:
             )
             symbol_legend = self._symbol_index.get_legend()
 
+        # Doc legend — emitted when the doc index contributes to
+        # the prompt. Two cases per specs4/3-llm/modes.md and
+        # specs4/3-llm/prompt-assembly.md § "Cross-Reference
+        # Legend Headers":
+        #
+        # - Doc mode (primary): legend flows to the context
+        #   manager as the *primary* legend via symbol_legend.
+        #   The context manager's assembler picks the mode-
+        #   appropriate header (DOC_MAP_HEADER) based on
+        #   self._context.mode.
+        # - Code mode + cross-reference: doc is the *secondary*
+        #   index; the assembler places it under the opposite
+        #   mode's header (DOC_MAP_HEADER).
+        #
+        # We compute doc_legend unconditionally when the doc
+        # index has any outlines, but only pass it through when
+        # doc mode is active or cross-reference is enabled. In
+        # code mode without cross-ref, the doc legend would be
+        # noise — suppress it.
+        #
+        # In doc mode, the context manager's mode flag causes
+        # the assembler to use DOC_MAP_HEADER for symbol_legend
+        # (which is misnamed historically but correct in the
+        # primary slot). The doc legend goes to doc_legend only
+        # for cross-ref scenarios.
+        doc_legend = ""
+        if self._context.mode == Mode.DOC:
+            # Doc mode primary: swap the legends so the primary
+            # slot carries the doc legend.
+            doc_legend_text = self._doc_index.get_legend()
+            symbol_legend = doc_legend_text
+            # In cross-reference mode, the symbol index's legend
+            # becomes the *secondary* and goes to doc_legend
+            # (which the assembler routes under REPO_MAP_HEADER,
+            # the opposite of the current mode's primary).
+            if self._cross_ref_enabled and self._symbol_index is not None:
+                doc_legend = self._symbol_index.get_legend()
+        elif self._cross_ref_enabled:
+            # Code mode + cross-ref: symbol legend stays primary;
+            # doc legend is secondary.
+            doc_legend = self._doc_index.get_legend()
+
         # File tree — the flat repo listing, rendered in its own
         # uncached user/assistant pair by the assembler.
         file_tree = ""
@@ -4023,7 +4065,7 @@ class LLMService:
             images=images if images else None,
             symbol_map=symbol_map,
             symbol_legend=symbol_legend,
-            doc_legend="",  # Layer 3.10 adds cross-ref mode
+            doc_legend=doc_legend,
             file_tree=file_tree,
             tiered_content=tiered_content,
         )
