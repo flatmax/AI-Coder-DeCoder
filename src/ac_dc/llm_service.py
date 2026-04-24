@@ -1558,6 +1558,43 @@ class LLMService:
         return list(self._selected_files)
 
     # ------------------------------------------------------------------
+    # Public RPC — TeX preview
+    # ------------------------------------------------------------------
+
+    def is_tex_preview_available(self) -> dict[str, Any]:
+        """Check if make4ht is installed for TeX preview.
+
+        Returns ``{"available": True}`` or
+        ``{"available": False, "install_hint": "..."}`` so the
+        frontend can show or hide the preview toggle immediately
+        on file open.
+        """
+        from ac_dc.repo import Repo
+        available = Repo.is_make4ht_available()
+        result: dict[str, Any] = {"available": available}
+        if not available:
+            result["install_hint"] = (
+                "Install TeX Live or MiKTeX with make4ht. "
+                "On Ubuntu: sudo apt install texlive-full"
+            )
+        return result
+
+    def compile_tex_preview(
+        self,
+        content: str,
+        file_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Compile TeX source to HTML for live preview.
+
+        Delegates to :meth:`Repo.compile_tex_preview`. Returns
+        ``{"html": "..."}`` on success or ``{"error": "..."}``
+        on failure.
+        """
+        if self._repo is None:
+            return {"error": "No repository attached"}
+        return self._repo.compile_tex_preview(content, file_path)
+
+    # ------------------------------------------------------------------
     # Public RPC — cache viewer / map block
     # ------------------------------------------------------------------
 
