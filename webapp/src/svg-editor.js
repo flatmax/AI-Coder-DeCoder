@@ -178,8 +178,28 @@
 //     text AND enters the inline edit. Matches
 //     user intent — double-click is a "focus this" gesture
 //
-// Deferred beyond 3.2c.4:
-//   - Undo stack + copy/paste (3.2c.5)
+// Phase 3.2c.5 adds: undo stack + copy/paste.
+//   - Undo stack captures SVG innerHTML snapshots before
+//     each edit operation (delete, drag commit, text edit
+//     commit). Ctrl+Z pops the stack and restores the SVG
+//     by writing innerHTML back to the root element, then
+//     clearing the selection (the restored DOM has new
+//     element references so prior selection refs are stale)
+//   - Stack bounded to 50 entries — oldest discarded on
+//     overflow. Stack cleared on detach (new file / viewer
+//     switch means a fresh undo context)
+//   - Copy/Paste: Ctrl+C serializes selected element(s) to
+//     an internal clipboard (outerHTML strings). Ctrl+V
+//     deserializes and appends with a slight positional
+//     offset so the paste is visually distinguishable from
+//     the original. Ctrl+D duplicates in place (no offset)
+//   - Paste inserts before the handle group so pasted
+//     elements render below the selection chrome. Each
+//     pasted element is selected (replacing prior selection)
+//   - Copy/paste is internal only — no system clipboard
+//     integration for SVG fragments (system clipboard
+//     would require sanitization and MIME negotiation that's
+//     out of scope)
 //
 // Design:
 //
@@ -262,6 +282,19 @@ export const HANDLE_ROLE_ATTR = 'data-handle-role';
  * that won't render as visually zero at normal zoom.
  */
 const _MIN_RESIZE_DIMENSION = 1;
+
+/**
+ * Maximum undo stack depth. 50 entries per specs4. Oldest
+ * entries are discarded when the stack exceeds this limit.
+ */
+const _UNDO_MAX = 50;
+
+/**
+ * Positional offset (SVG units) applied to pasted elements
+ * so they're visually distinguishable from the originals.
+ * Applied to both x and y.
+ */
+const _PASTE_OFFSET = 10;
 
 /**
  * Minimum marquee drag distance (screen pixels) before
@@ -906,6 +939,22 @@ export class SvgEditor {
      */
     this._textEdit = null;
 
+    /**
+     * Undo stack — array of SVG innerHTML snapshots.
+     * Newest at the end. Bounded to `_UNDO_MAX` entries;
+     * oldest discarded on overflow. Cleared on detach.
+     */
+    this._undoStack = [];
+
+    /**
+     * Internal clipboard for copy/paste. Array of
+     * outerHTML strings, one per copied element. Empty
+     * when nothing has been copied. Survives across
+     * selection changes — the user can copy, deselect,
+     * reselect something else, then paste.
+     */
+    this._clipboard = [];
+
     /** Bound handlers for add/remove symmetry. */
     this._onPointerDown = this._onPointerDown.bind(this);
     this._onPointerMove = this._onPointerMove.bind(this);
@@ -966,6 +1015,10 @@ export class SvgEditor {
     // overlay doesn't orphan on the SVG and the element's
     // original content is restored.
     this.cancelTextEdit();
+    // Clear undo stack and clipboard — new file / viewer
+    // switch means a fresh editing context.
+    this._undoStack = [];
+    this._clipboard = [];
     this._svg.removeEventListener(
       'pointerdown',
       this._onPointerDown,
@@ -1069,6 +1122,7 @@ export class SvgEditor {
    */
   deleteSelection() {
     if (this._selectedSet.size === 0) return;
+    this._pushUndo();
     let removed = 0;
     for (const el of this._selectedSet) {
       const parent = el.parentNode;
@@ -1085,6 +1139,259 @@ export class SvgEditor {
     this._renderHandles();
     this._onSelectionChange();
     if (removed > 0) this._onChange();
+  }
+
+  // ---------------------------------------------------------------
+  // Undo stack
+  // ---------------------------------------------------------------
+
+  /**
+   * Push the current SVG state onto the undo stack.
+   * Called BEFORE a mutation so the pre-mutation state
+   * can be restored. Internally called by deleteSelection,
+   * drag commit (pointerup with committed=true), and
+   * text edit commit. External callers (the viewer) don't
+   * need to call this — the editor manages its own stack.
+   *
+   * Strips the handle group from the snapshot so undo
+   * doesn't restore stale selection chrome. The group is
+   * re-rendered after every undo via _renderHandles.
+   */
+  _pushUndo() {
+    // Temporarily remove the handle group so it doesn't
+    // end up in the snapshot.
+    const handleGroup = this._handleGroup;
+    let parent = null;
+    let nextSib = null;
+    if (handleGroup && handleGroup.parentNode) {
+      parent = handleGroup.parentNode;
+      nextSib = handleGroup.nextSibling;
+      try { parent.removeChild(handleGroup); } catch (_) { parent = null; }
+    }
+    // Also strip any active text-edit foreignObject.
+    const fo = this._textEdit?.foreignObject;
+    let foParent = null;
+    let foNext = null;
+    if (fo && fo.parentNode) {
+      foParent = fo.parentNode;
+      foNext = fo.nextSibling;
+      try { foParent.removeChild(fo); } catch (_) { foParent = null; }
+    }
+    const snapshot = this._svg.innerHTML;
+    // Restore the handle group and foreignObject.
+    if (handleGroup && parent) {
+      try {
+        if (nextSib && nextSib.parentNode === parent) {
+          parent.insertBefore(handleGroup, nextSib);
+        } else {
+          parent.appendChild(handleGroup);
+        }
+      } catch (_) {}
+    }
+    if (fo && foParent) {
+      try {
+        if (foNext && foNext.parentNode === foParent) {
+          foParent.insertBefore(fo, foNext);
+        } else {
+          foParent.appendChild(fo);
+        }
+      } catch (_) {}
+    }
+    this._undoStack.push(snapshot);
+    if (this._undoStack.length > _UNDO_MAX) {
+      this._undoStack.shift();
+    }
+  }
+
+  /**
+   * Undo the most recent edit by restoring the SVG's
+   * innerHTML from the stack. Clears selection (DOM
+   * element references become stale after innerHTML
+   * replacement). Fires onChange so the viewer can
+   * re-serialize. No-op when the stack is empty.
+   *
+   * @returns {boolean} true if an undo was performed
+   */
+  undo() {
+    if (this._undoStack.length === 0) return false;
+    const snapshot = this._undoStack.pop();
+    // Cancel any in-flight state so we don't leave
+    // orphaned drag / marquee / text-edit state.
+    this._cancelDrag();
+    this._cancelMarquee();
+    if (this._textEdit) {
+      // Tear down the overlay without restoring content —
+      // we're about to replace the entire SVG anyway.
+      this._teardownTextEditOverlay(this._textEdit);
+      this._textEdit = null;
+    }
+    // Drop the handle group reference — innerHTML
+    // replacement will destroy the DOM node.
+    this._handleGroup = null;
+    this._svg.innerHTML = snapshot;
+    // Clear selection — old element references are stale.
+    this._selected = null;
+    this._selectedSet = new Set();
+    this._renderHandles();
+    this._onSelectionChange();
+    this._onChange();
+    return true;
+  }
+
+  /**
+   * Whether the undo stack has entries. Exposed for UI
+   * (e.g., graying out an undo button) and tests.
+   */
+  get canUndo() {
+    return this._undoStack.length > 0;
+  }
+
+  // ---------------------------------------------------------------
+  // Copy / Paste / Duplicate
+  // ---------------------------------------------------------------
+
+  /**
+   * Copy the selected element(s) to the internal clipboard
+   * as outerHTML strings. No-op when nothing is selected.
+   * The clipboard persists across selection changes.
+   */
+  copySelection() {
+    if (this._selectedSet.size === 0) return;
+    this._clipboard = [];
+    for (const el of this._selectedSet) {
+      if (el.outerHTML) {
+        this._clipboard.push(el.outerHTML);
+      }
+    }
+  }
+
+  /**
+   * Paste the internal clipboard into the SVG with a
+   * positional offset. Each pasted element becomes the
+   * new selection (replacing prior selection). Fires
+   * onChange. No-op when the clipboard is empty.
+   *
+   * @param {number} [offsetX] — override offset (default _PASTE_OFFSET)
+   * @param {number} [offsetY] — override offset (default _PASTE_OFFSET)
+   */
+  pasteClipboard(offsetX, offsetY) {
+    if (this._clipboard.length === 0) return;
+    const ox = typeof offsetX === 'number' ? offsetX : _PASTE_OFFSET;
+    const oy = typeof offsetY === 'number' ? offsetY : _PASTE_OFFSET;
+    this._pushUndo();
+    const ns = 'http://www.w3.org/2000/svg';
+    const newSelection = new Set();
+    // Insert point — before the handle group so pasted
+    // elements render below the selection chrome.
+    const insertBefore = this._handleGroup || null;
+    for (const html of this._clipboard) {
+      // Parse the outerHTML via a temporary SVG container.
+      // DOMParser with 'image/svg+xml' is the reliable
+      // way to parse SVG fragments; innerHTML on a <g>
+      // also works in browsers but DOMParser is more
+      // explicit.
+      let el;
+      try {
+        const wrapper = document.createElementNS(ns, 'svg');
+        wrapper.innerHTML = html;
+        el = wrapper.firstElementChild;
+        if (!el) continue;
+      } catch (_) {
+        continue;
+      }
+      // Apply offset. Use the same attribute-dispatch
+      // logic as drag-to-move to handle each element
+      // type's positioning attributes.
+      this._applyPasteOffset(el, ox, oy);
+      // Adopt the node into our SVG.
+      if (insertBefore) {
+        this._svg.insertBefore(el, insertBefore);
+      } else {
+        this._svg.appendChild(el);
+      }
+      newSelection.add(el);
+    }
+    if (newSelection.size > 0) {
+      this._selectedSet = newSelection;
+      this._selected = newSelection.values().next().value;
+      this._renderHandles();
+      this._onSelectionChange();
+      this._onChange();
+    }
+  }
+
+  /**
+   * Duplicate the selected element(s) in place (no offset).
+   * Equivalent to copy + paste with zero offset. Fires
+   * onChange. No-op when nothing is selected.
+   */
+  duplicateSelection() {
+    this.copySelection();
+    this.pasteClipboard(0, 0);
+  }
+
+  /**
+   * Apply a positional offset to a pasted element. Uses
+   * the same attribute-based dispatch as drag-to-move
+   * so each element type's positioning attributes are
+   * handled correctly. Elements with no recognized
+   * position attributes (e.g., `<g>` without a transform)
+   * get a transform appended.
+   */
+  _applyPasteOffset(el, dx, dy) {
+    if (!el || !el.tagName || dx === 0 && dy === 0) return;
+    const tag = el.tagName.toLowerCase();
+    switch (tag) {
+      case 'rect':
+      case 'image':
+      case 'use': {
+        const x = _parseNum(el.getAttribute('x'));
+        const y = _parseNum(el.getAttribute('y'));
+        el.setAttribute('x', String(x + dx));
+        el.setAttribute('y', String(y + dy));
+        break;
+      }
+      case 'circle':
+      case 'ellipse': {
+        const cx = _parseNum(el.getAttribute('cx'));
+        const cy = _parseNum(el.getAttribute('cy'));
+        el.setAttribute('cx', String(cx + dx));
+        el.setAttribute('cy', String(cy + dy));
+        break;
+      }
+      case 'line': {
+        const x1 = _parseNum(el.getAttribute('x1'));
+        const y1 = _parseNum(el.getAttribute('y1'));
+        const x2 = _parseNum(el.getAttribute('x2'));
+        const y2 = _parseNum(el.getAttribute('y2'));
+        el.setAttribute('x1', String(x1 + dx));
+        el.setAttribute('y1', String(y1 + dy));
+        el.setAttribute('x2', String(x2 + dx));
+        el.setAttribute('y2', String(y2 + dy));
+        break;
+      }
+      case 'text': {
+        if (el.hasAttribute('transform')) {
+          const base = (el.getAttribute('transform') || '').trim();
+          const t = `translate(${dx} ${dy})`;
+          el.setAttribute('transform', base ? `${base} ${t}` : t);
+        } else {
+          const x = _parseNum(el.getAttribute('x'));
+          const y = _parseNum(el.getAttribute('y'));
+          el.setAttribute('x', String(x + dx));
+          el.setAttribute('y', String(y + dy));
+        }
+        break;
+      }
+      default: {
+        // Fallback — use transform translate for paths,
+        // groups, polygons, polylines, and anything else.
+        const base = (el.getAttribute('transform') || '').trim();
+        const t = `translate(${dx} ${dy})`;
+        el.setAttribute('transform', base ? `${base} ${t}` : t);
+        break;
+      }
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1142,6 +1449,11 @@ export class SvgEditor {
     if (!this._textEdit) return;
     const edit = this._textEdit;
     const newContent = edit.textarea.value;
+    // Push undo before mutating — only if content actually
+    // changed (no-change commits shouldn't pollute the stack).
+    if (newContent !== edit.originalContent) {
+      this._pushUndo();
+    }
     this._teardownTextEditOverlay(edit);
     this._textEdit = null;
     // Replace all children with a single text node.
@@ -1371,7 +1683,24 @@ export class SvgEditor {
   _onPointerDown(event) {
     // Only react to primary button (left-click / touch).
     if (event.button !== 0 && event.pointerType === 'mouse') return;
-    // Handle hit-test runs FIRST — when the pointer is over
+    // Shift key takes priority over handle hit-test.
+    // Shift+click is always "modify selection" (toggle
+    // element in/out of set) or "start marquee" (on empty
+    // space). Without this ordering, a shift+click on a
+    // selected element with handles visible would start a
+    // resize drag instead of toggling selection.
+    if (event.shiftKey) {
+      const shiftTarget = this._hitTest(event.clientX, event.clientY);
+      if (!shiftTarget) {
+        event.stopPropagation();
+        this._beginMarquee(event);
+      } else {
+        event.stopPropagation();
+        this.toggleSelection(shiftTarget);
+      }
+      return;
+    }
+    // Handle hit-test runs NEXT — when the pointer is over
     // one of the selected element's resize handles, start
     // a resize drag rather than a move/select. Only fires
     // when there's already a selection, so a fresh click on
@@ -1392,30 +1721,13 @@ export class SvgEditor {
     }
     const target = this._hitTest(event.clientX, event.clientY);
     if (!target) {
-      // Click on empty space — behavior depends on shift:
-      //   - plain: deselect everything
-      //   - shift: start a marquee (preserve current set
-      //     as the baseline; elements inside the marquee
-      //     are added/toggled relative to it)
-      if (event.shiftKey) {
-        event.stopPropagation();
-        this._beginMarquee(event);
-      } else {
-        this._clearSelection();
-      }
+      this._clearSelection();
       return;
     }
     // Stop propagation so the SvgViewer's pan/zoom doesn't
     // also react. Without this, a click would start a pan
     // on the left panel via the sync callback.
     event.stopPropagation();
-    // Shift+click toggles in/out of the set. Drag never
-    // starts from a shift+click — the gesture is
-    // deliberately "modify selection", not "move".
-    if (event.shiftKey) {
-      this.toggleSelection(target);
-      return;
-    }
     // Plain click — three cases:
     //   1. Click on a member of a multi-selection → start
     //      a group drag. The existing set stays as-is;
@@ -1571,6 +1883,10 @@ export class SvgEditor {
       if (Math.abs(dx) < thresholdSvg && Math.abs(dy) < thresholdSvg) {
         return;
       }
+      // Push undo BEFORE the first mutation. At this point
+      // the element's attributes are still at their
+      // pre-drag values (we haven't applied the delta yet).
+      this._pushUndo();
       this._drag.committed = true;
     }
     if (this._drag.mode === 'resize') {
@@ -1599,9 +1915,6 @@ export class SvgEditor {
     }
     this._drag = null;
     if (wasCommitted) {
-      // The drag actually moved the element; notify the
-      // viewer so it can serialize. Click-without-drag
-      // skips this path.
       this._onChange();
     }
   }
@@ -2719,6 +3032,37 @@ export class SvgEditor {
       }
       return;
     }
+    // Ctrl/Cmd shortcuts.
+    const ctrl = event.ctrlKey || event.metaKey;
+    if (!ctrl) return;
+    if (event.key === 'z' || event.key === 'Z') {
+      if (!event.shiftKey) {
+        event.preventDefault();
+        this.undo();
+      }
+      return;
+    }
+    if (event.key === 'c' || event.key === 'C') {
+      if (this._selectedSet.size > 0) {
+        event.preventDefault();
+        this.copySelection();
+      }
+      return;
+    }
+    if (event.key === 'v' || event.key === 'V') {
+      if (this._clipboard.length > 0) {
+        event.preventDefault();
+        this.pasteClipboard();
+      }
+      return;
+    }
+    if (event.key === 'd' || event.key === 'D') {
+      if (this._selectedSet.size > 0) {
+        event.preventDefault();
+        this.duplicateSelection();
+      }
+      return;
+    }
   }
 
   _clearSelection() {
@@ -3236,7 +3580,9 @@ export class SvgEditor {
 // test-only exports:
 export {
   _NON_SELECTABLE_TAGS,
+  _PASTE_OFFSET,
   _SELECTABLE_TAGS,
+  _UNDO_MAX,
   _computePathControlPoints,
   _computePathEndpoints,
   _parseNum,
