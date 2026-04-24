@@ -473,9 +473,8 @@ class TestLongTextFiltering:
     def test_long_text_dropped_from_headings(
         self, extractor: SvgExtractor
     ) -> None:
-        # 2.8.3c filters text > 80 chars. In 2.8.3e these
-        # become DocProseBlock entries — until then they are
-        # silently dropped so heading leaves stay label-sized.
+        # Long text is filtered out of the heading tree but
+        # preserved as a DocProseBlock entry (2.8.3e).
         long_text = "x" * 120
         svg = _wrap_ns(
             f'<text x="10" y="20">Short</text>'
@@ -489,6 +488,9 @@ class TestLongTextFiltering:
         # Short labels survive.
         assert "Short" in all_texts
         assert "Another Short" in all_texts
+        # Long text becomes a prose block.
+        prose_texts = [p.text for p in out.prose_blocks]
+        assert long_text in prose_texts
 
     def test_threshold_boundary_exact_80_preserved(
         self, extractor: SvgExtractor
@@ -502,6 +504,316 @@ class TestLongTextFiltering:
         out = _extract(extractor, svg)
         assert len(out.headings) == 1
         assert out.headings[0].text == boundary
+        # Not a prose block — exactly 80 chars stays a label.
+        assert out.prose_blocks == []
+
+    def test_threshold_boundary_81_becomes_prose(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # 81 chars crosses the threshold — becomes prose.
+        over = "x" * 81
+        svg = _wrap_ns(
+            f'<text x="10" y="20">{over}</text>'
+        )
+        out = _extract(extractor, svg)
+        # No heading emitted for the long text.
+        assert not any(
+            h.text == over for h in out.all_headings_flat
+        )
+        # Prose block captured.
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].text == over
+
+
+# ---------------------------------------------------------------------------
+# Prose blocks (2.8.3e)
+# ---------------------------------------------------------------------------
+
+
+class TestProseBlocksInShapes:
+    """Long text inside a containing shape becomes a prose block."""
+
+    def test_prose_inside_labeled_box(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Long text attached to a box with an explicit
+        # aria-label. The prose block records the label as
+        # its container.
+        long_text = (
+            "This architecture diagram explains the request "
+            "flow through the backend services with "
+            "responsibilities divided by concern."
+        )
+        svg = _wrap_ns(
+            '<g aria-label="System Overview">'
+            '<rect x="0" y="0" width="200" height="200"/>'
+            f'<text x="20" y="50">{long_text}</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        # Heading carries the explicit label.
+        assert out.headings[0].text == "System Overview"
+        # Long text didn't become a heading child.
+        assert out.headings[0].children == []
+        # Prose block captured with container.
+        assert len(out.prose_blocks) == 1
+        prose = out.prose_blocks[0]
+        assert prose.text == long_text
+        assert prose.container_heading_id == "System Overview"
+        assert prose.keywords == []
+
+    def test_prose_inside_single_text_box(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A box with one short label AND one long text.
+        # Short text → label (single-text inference doesn't
+        # apply because long text is present). Actually:
+        # single-text inference only counts short texts. So
+        # with short_texts=[Short] and long_texts=[long],
+        # single-text inference fires.
+        long_text = "y" * 100
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="30">Label</text>'
+            f'<text x="20" y="60">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        # Short text becomes the label.
+        assert out.headings[0].text == "Label"
+        # Long text becomes prose under the label.
+        assert len(out.prose_blocks) == 1
+        assert (
+            out.prose_blocks[0].container_heading_id == "Label"
+        )
+
+    def test_prose_inside_neutral_box(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A box with multiple short texts AND long text. The
+        # box gets a "(box)" identifier; long text becomes
+        # prose under that identifier.
+        long_text = "z" * 100
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="20">Alpha</text>'
+            '<text x="20" y="50">Beta</text>'
+            f'<text x="20" y="80">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "(box)"
+        # Prose attached to "(box)".
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].container_heading_id == "(box)"
+
+    def test_prose_inside_box_with_only_long_text(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A labeled box whose only content is long text. No
+        # leaf headings, just one prose block.
+        long_text = "q" * 120
+        svg = _wrap_ns(
+            '<g aria-label="Description">'
+            '<rect x="0" y="0" width="200" height="100"/>'
+            f'<text x="20" y="50">{long_text}</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Description"
+        assert out.headings[0].children == []
+        assert len(out.prose_blocks) == 1
+        assert (
+            out.prose_blocks[0].container_heading_id
+            == "Description"
+        )
+
+    def test_prose_inside_nested_box_uses_nearest_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Long text inside an inner box — prose records the
+        # inner box's label, not the outer.
+        long_text = "deep prose content " * 6  # > 80 chars
+        svg = _wrap_ns(
+            '<g aria-label="Outer">'
+            '<rect x="0" y="0" width="200" height="200"/>'
+            '</g>'
+            '<g aria-label="Inner">'
+            '<rect x="20" y="20" width="50" height="50"/>'
+            '</g>'
+            f'<text x="30" y="40">{long_text.strip()}</text>'
+        )
+        out = _extract(extractor, svg)
+        # Text attaches to the smallest containing box → Inner.
+        assert len(out.prose_blocks) == 1
+        assert (
+            out.prose_blocks[0].container_heading_id == "Inner"
+        )
+
+
+class TestProseBlocksAtRoot:
+    """Long text outside any shape becomes root-level prose."""
+
+    def test_root_level_long_text_has_none_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        long_text = "a" * 100
+        # Rect far away so the text is NOT inside it.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="10" height="10"/>'
+            f'<text x="500" y="500">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.prose_blocks) == 1
+        prose = out.prose_blocks[0]
+        assert prose.text == long_text
+        assert prose.container_heading_id is None
+
+    def test_root_level_short_and_long_coexist(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A short and a long text both at root level. Short
+        # becomes a heading; long becomes prose.
+        long_text = "b" * 100
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="10" height="10"/>'
+            f'<text x="500" y="500">Short Label</text>'
+            f'<text x="500" y="600">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        heading_texts = [h.text for h in out.all_headings_flat]
+        assert "Short Label" in heading_texts
+        assert long_text not in heading_texts
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].container_heading_id is None
+
+
+class TestProseBlocksShapeless:
+    """Shape-less SVGs: long text becomes prose with cluster context."""
+
+    def test_shapeless_long_text_attaches_to_nearby_label(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Shape-less SVG: a short label followed by long
+        # prose in the same cluster. The prose block's
+        # container is the cluster's first short label.
+        long_text = "c" * 100
+        svg = _wrap_ns(
+            '<text x="10" y="20">Section Title</text>'
+            f'<text x="10" y="30">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        # Section Title emitted as the cluster's heading.
+        assert out.headings[0].text == "Section Title"
+        # Long text captured as prose under Section Title.
+        assert len(out.prose_blocks) == 1
+        prose = out.prose_blocks[0]
+        assert prose.text == long_text
+        assert prose.container_heading_id == "Section Title"
+
+    def test_shapeless_long_text_only_cluster_has_none_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A cluster with only long text (no short labels)
+        # produces no heading and a prose block with None
+        # container (no nearby heading to attach to).
+        long_text = "d" * 100
+        svg = _wrap_ns(
+            f'<text x="10" y="20">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        # No heading emitted for the long-only cluster.
+        assert out.headings == []
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].container_heading_id is None
+
+    def test_shapeless_long_text_with_root_title(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A shape-less SVG with a root title and a cluster
+        # containing only long text. Prose attaches to the
+        # root title (fallback container).
+        long_text = "e" * 100
+        svg = _wrap_ns(
+            "<title>Overview</title>"
+            f'<text x="10" y="100">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        # Root title is the only heading.
+        assert len(out.headings) == 1
+        assert out.headings[0].text == "Overview"
+        # Prose block attaches to the title.
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].container_heading_id == "Overview"
+
+    def test_shapeless_multiple_clusters_prose_uses_own_cluster(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Two clusters; each has its own short label and long
+        # prose. Each prose block attaches to its own
+        # cluster's label, not some global fallback.
+        long_a = "aaa " * 30  # > 80 chars
+        long_b = "bbb " * 30
+        svg = _wrap_ns(
+            '<text x="10" y="20">Section A</text>'
+            f'<text x="10" y="30">{long_a.strip()}</text>'
+            '<text x="10" y="300">Section B</text>'
+            f'<text x="10" y="310">{long_b.strip()}</text>'
+        )
+        out = _extract(extractor, svg)
+        # Two cluster headings.
+        heading_texts = [h.text for h in out.headings]
+        assert "Section A" in heading_texts
+        assert "Section B" in heading_texts
+        # Two prose blocks, one per cluster.
+        assert len(out.prose_blocks) == 2
+        containers = {p.container_heading_id for p in out.prose_blocks}
+        assert containers == {"Section A", "Section B"}
+
+
+class TestProseBlocksFields:
+    """DocProseBlock fields are populated correctly by the extractor."""
+
+    def test_text_preserved_verbatim(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Whitespace and punctuation inside the text content
+        # pass through untouched (apart from the outer
+        # strip() that element-collection applies).
+        original = (
+            "A paragraph with punctuation, commas, and "
+            "periods. More content to exceed the threshold."
+        )
+        svg = _wrap_ns(
+            f'<text x="10" y="20">{original}</text>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.prose_blocks) == 1
+        assert out.prose_blocks[0].text == original
+
+    def test_keywords_start_empty(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # 2.8.3e doesn't enrich; keywords start empty and
+        # 2.8.4's enricher populates them post-hoc.
+        long_text = "k" * 100
+        svg = _wrap_ns(
+            f'<text x="10" y="20">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.prose_blocks[0].keywords == []
+
+    def test_start_line_default_zero(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # SVG extraction doesn't track line numbers (XML tree
+        # doesn't expose them cleanly). start_line stays 0.
+        # If future work adds line-tracking, this test serves
+        # as a pin that it's optional, not mandatory.
+        long_text = "l" * 100
+        svg = _wrap_ns(
+            f'<text x="10" y="20">{long_text}</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.prose_blocks[0].start_line == 0
 
 
 # ---------------------------------------------------------------------------

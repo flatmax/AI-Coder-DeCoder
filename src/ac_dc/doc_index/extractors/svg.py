@@ -1,9 +1,11 @@
-"""SVG extractor — Layer 2.8.3d (containment-aware).
+"""SVG extractor — Layer 2.8.3e (containment-aware + prose blocks).
 
 Builds a containment tree from shape bounding boxes and attaches
 text elements to their smallest containing box. Three-level
 labeling picks box headings from explicit labels, single-text
-inference, or neutral identifiers.
+inference, or neutral identifiers. Long text elements (exceeding
+the label threshold) become :class:`DocProseBlock` entries for
+keyword enrichment (2.8.4).
 
 Covers:
 
@@ -20,20 +22,22 @@ Covers:
 - **Reading order** — y-then-x sort at each nesting level
 - **Shape-less fallback** — spatial clustering when no shapes
   are present (text-only SVGs)
+- **Long-text prose blocks** — text elements exceeding the label
+  threshold become :class:`DocProseBlock` entries attached to
+  the containing shape (or document root)
 - Text label deduplication
 - Non-visual element filtering
-- Long-text filtering (prose blocks arrive in 2.8.3e)
-
-Deliberately excluded — land in 2.8.3e:
-
-- **Long-text prose blocks** — text elements exceeding the label
-  length threshold. Currently dropped from the heading list;
-  2.8.3e promotes them to :class:`DocProseBlock` entries.
 
 Uses stdlib ``xml.etree.ElementTree`` only — no external XML
 dependencies. Parse failures are caught and produce an empty
 outline rather than propagating: an unparseable SVG should not
 take down indexing of the rest of the repo.
+
+Keyword enrichment (2.8.4) consumes ``outline.prose_blocks`` to
+populate each block's ``keywords`` field. The enricher and this
+extractor share one threshold — :data:`_LONG_TEXT_THRESHOLD` —
+so short labels stay as heading leaves and only body-prose text
+gets enriched.
 
 Governing spec: ``specs4/2-indexing/document-index.md``.
 """
@@ -65,6 +69,7 @@ from ac_dc.doc_index.models import (
     DocHeading,
     DocLink,
     DocOutline,
+    DocProseBlock,
 )
 
 logger = logging.getLogger(__name__)
@@ -573,6 +578,7 @@ def _extract_containment_aware(
         root_texts,
         base_level,
         seen_labels,
+        outline,
     )
 
     # Then emit the shape tree in reading order.
@@ -584,6 +590,7 @@ def _extract_containment_aware(
         parent_idx=None,
         current_level=base_level,
         seen_labels=seen_labels,
+        outline=outline,
     )
 
 
@@ -592,6 +599,7 @@ def _emit_root_texts(
     root_texts: list[_TextElement],
     level: int,
     seen_labels: set[str],
+    outline: DocOutline,
 ) -> None:
     """Emit root-level texts (not contained by any shape).
 
@@ -600,8 +608,10 @@ def _emit_root_texts(
     vertically become one label "Backend Services"), then
     sorted by reading order.
 
-    Long texts (> ``_LONG_TEXT_THRESHOLD``) are dropped —
-    2.8.3e promotes them to prose blocks.
+    Short texts become heading leaves. Long texts (exceeding
+    :data:`_LONG_TEXT_THRESHOLD`) become :class:`DocProseBlock`
+    entries on the outline with ``container_heading_id=None``
+    (root-level prose).
     """
     if not root_texts:
         return
@@ -609,6 +619,15 @@ def _emit_root_texts(
     ordered = _reading_order_sort(joined)
     for text in ordered:
         if len(text.text) > _LONG_TEXT_THRESHOLD:
+            # Promote to prose block. Root-level prose has
+            # no containing heading — None signals document-
+            # root attachment to the formatter.
+            outline.prose_blocks.append(
+                DocProseBlock(
+                    text=text.text,
+                    container_heading_id=None,
+                )
+            )
             continue
         if text.text in seen_labels:
             continue
@@ -626,6 +645,7 @@ def _emit_shape_tree(
     parent_idx: int | None,
     current_level: int,
     seen_labels: set[str],
+    outline: DocOutline,
 ) -> None:
     """Emit one level of the shape tree, recursing into children.
 
@@ -633,6 +653,10 @@ def _emit_shape_tree(
     x). Each shape emits a heading whose text comes from
     three-level labeling; attached texts become children;
     nested shapes become deeper children.
+
+    Long texts among a shape's attached texts become
+    :class:`DocProseBlock` entries on the outline, with
+    ``container_heading_id`` set to the shape's label.
 
     Level clamps at 6 — deeper SVG nesting still emits
     headings, but the level stays at 6 so the compact
@@ -659,19 +683,38 @@ def _emit_shape_tree(
         joined_texts = _join_multiline_labels(texts)
         ordered_texts = _reading_order_sort(joined_texts)
 
+        # Split into short (label candidates) and long (prose
+        # candidates) before label picking. Long texts never
+        # become labels — they're always prose.
+        short_texts = [
+            t for t in ordered_texts
+            if len(t.text) <= _LONG_TEXT_THRESHOLD
+        ]
+        long_texts = [
+            t for t in ordered_texts
+            if len(t.text) > _LONG_TEXT_THRESHOLD
+        ]
+
         label_text, leaf_texts = _pick_shape_label(
-            shape, ordered_texts, seen_labels
+            shape, short_texts, seen_labels
         )
 
-        if label_text is None:
-            # Level 3 case — no label at all, no texts, and
-            # no contained shapes means this shape contributes
-            # nothing. Skip it to avoid ``(box)`` placeholders
-            # for shapes that are really just decoration.
-            if not leaf_texts and not children_of.get(idx):
+        # Decide whether to skip a totally empty shape. An
+        # empty shape with NO contents (no label, no short
+        # texts, no long texts, no children) is pure
+        # decoration and contributes nothing.
+        has_children = bool(children_of.get(idx))
+        if label_text is None and not short_texts and not long_texts:
+            if not has_children:
                 continue
-            # Otherwise use the neutral identifier. Don't add
-            # it to seen_labels — multiple unlabeled boxes
+            # Has nested shapes but no text of its own —
+            # emit a neutral identifier so the children have
+            # somewhere to attach.
+            label_text = "(box)"
+        elif label_text is None:
+            # No explicit label, no single-text-inference
+            # match. Use neutral identifier. Don't add it to
+            # seen_labels — multiple unlabeled boxes
             # legitimately share the identifier.
             label_text = "(box)"
 
@@ -679,16 +722,30 @@ def _emit_shape_tree(
         heading = DocHeading(text=label_text, level=emit_level)
         parent_children.append(heading)
 
-        # Attach leaf texts under this heading.
+        # Attach short leaf texts under this heading. Long
+        # texts become prose blocks on the outline with this
+        # heading as their container.
         leaf_level = min(emit_level + 1, 6)
         for text in leaf_texts:
             if len(text.text) > _LONG_TEXT_THRESHOLD:
+                # Should not happen — leaf_texts comes from
+                # short_texts via _pick_shape_label — but
+                # defensive in case _pick_shape_label's
+                # contract drifts in a future refactor.
                 continue
             if text.text in seen_labels:
                 continue
             seen_labels.add(text.text)
             heading.children.append(
                 DocHeading(text=text.text, level=leaf_level)
+            )
+
+        for long_text in long_texts:
+            outline.prose_blocks.append(
+                DocProseBlock(
+                    text=long_text.text,
+                    container_heading_id=label_text,
+                )
             )
 
         # Recurse into nested shapes.
@@ -700,6 +757,7 @@ def _emit_shape_tree(
             parent_idx=idx,
             current_level=emit_level + 1,
             seen_labels=seen_labels,
+            outline=outline,
         )
 
 
@@ -1165,8 +1223,10 @@ def _attach_clusters_to_outline(
     bottom, then left to right within a row).
 
     Long text elements (exceeding :data:`_LONG_TEXT_THRESHOLD`)
-    are dropped. Sub-commit 2.8.3e promotes them to
-    :class:`DocProseBlock` entries.
+    become :class:`DocProseBlock` entries on the outline with
+    ``container_heading_id`` set to the root title (if any) or
+    the cluster's first short label. Prose without a nearby
+    heading falls back to None.
 
     Duplicates are removed against ``seen_labels`` — a caller-
     provided set that tracks labels already emitted anywhere
@@ -1181,24 +1241,53 @@ def _attach_clusters_to_outline(
         parent = outline.headings
         base_level = 1
 
+    # Root title's text is the fallback container for prose
+    # that doesn't land under a cluster heading.
+    root_container = (
+        outline.headings[0].text
+        if skip_root_heading and outline.headings
+        else None
+    )
+
     for h in outline.all_headings_flat:
         seen_labels.add(h.text)
 
     for cluster in clusters:
-        texts: list[str] = []
+        short_texts: list[str] = []
+        long_texts: list[str] = []
         for el in cluster:
             if len(el.text) > _LONG_TEXT_THRESHOLD:
+                long_texts.append(el.text)
                 continue
             if el.text in seen_labels:
                 continue
-            texts.append(el.text)
+            short_texts.append(el.text)
             seen_labels.add(el.text)
-        if not texts:
-            continue
 
-        head = DocHeading(text=texts[0], level=base_level)
-        parent.append(head)
-        for child_text in texts[1:]:
-            head.children.append(
-                DocHeading(text=child_text, level=base_level + 1)
+        # Cluster's container for prose — the first short
+        # label if present, otherwise the root title, else
+        # None.
+        cluster_container = (
+            short_texts[0] if short_texts else root_container
+        )
+
+        if short_texts:
+            head = DocHeading(
+                text=short_texts[0], level=base_level
+            )
+            parent.append(head)
+            for child_text in short_texts[1:]:
+                head.children.append(
+                    DocHeading(
+                        text=child_text,
+                        level=base_level + 1,
+                    )
+                )
+
+        for long_text in long_texts:
+            outline.prose_blocks.append(
+                DocProseBlock(
+                    text=long_text,
+                    container_heading_id=cluster_container,
+                )
             )
