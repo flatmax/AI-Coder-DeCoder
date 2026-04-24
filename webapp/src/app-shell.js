@@ -780,6 +780,49 @@ export class AppShell extends JRPCClient {
     window.dispatchEvent(new CustomEvent('stream-complete', {
       detail: { requestId, result },
     }));
+    // Post-edit viewer refresh. When the LLM's edit
+    // pipeline writes to disk, open viewers are still
+    // showing the pre-edit content cached in their
+    // internal _files array. Without this call, the
+    // diff viewer's same-file suppression means a
+    // click-away-and-back leaves the stale content
+    // visible — and re-sending the same prompt yields
+    // a confusing "already applied" result against
+    // what looks like unchanged content.
+    //
+    // specs4/5-webapp/diff-viewer.md event routing table:
+    //   "Post-edit refresh — Direct call from app shell"
+    //
+    // We refresh whichever viewer is currently active.
+    // The inactive viewer's files are necessarily stale
+    // too, but they'll re-fetch on next activation
+    // because closeFile/openFile fetch fresh content —
+    // actually no, refreshOpenFiles operates on the
+    // internal _files array and is cheap (skips closed
+    // files), so call it on both. Each viewer's
+    // refreshOpenFiles iterates only its own open files
+    // and no-ops when empty.
+    const modified =
+      result && Array.isArray(result.files_modified)
+        ? result.files_modified
+        : [];
+    if (modified.length > 0) {
+      const diffViewer =
+        this.shadowRoot?.querySelector('ac-diff-viewer');
+      const svgViewer =
+        this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
+        // Fire and forget — viewer handles its own errors.
+        diffViewer.refreshOpenFiles().catch((err) => {
+          console.warn('[app-shell] diff viewer refresh failed', err);
+        });
+      }
+      if (svgViewer && typeof svgViewer.refreshOpenFiles === 'function') {
+        svgViewer.refreshOpenFiles().catch((err) => {
+          console.warn('[app-shell] svg viewer refresh failed', err);
+        });
+      }
+    }
     return true;
   }
 
@@ -804,6 +847,27 @@ export class AppShell extends JRPCClient {
 
   commitResult(result) {
     window.dispatchEvent(new CustomEvent('commit-result', { detail: result }));
+    // Refresh open viewers after a commit. The working
+    // copy is unchanged, but HEAD moved — the diff
+    // viewer's left (original) side is now stale, and
+    // the status LED should flip from "new-file" cyan
+    // to "clean" green for files that just landed in
+    // HEAD. refreshOpenFiles re-fetches both sides so
+    // this falls out naturally.
+    const diffViewer =
+      this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgViewer =
+      this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
+      diffViewer.refreshOpenFiles().catch((err) => {
+        console.warn('[app-shell] diff viewer refresh failed', err);
+      });
+    }
+    if (svgViewer && typeof svgViewer.refreshOpenFiles === 'function') {
+      svgViewer.refreshOpenFiles().catch((err) => {
+        console.warn('[app-shell] svg viewer refresh failed', err);
+      });
+    }
     return true;
   }
 
