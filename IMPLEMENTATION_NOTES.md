@@ -1628,6 +1628,67 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.14 — Phase 3.2c.2a SvgEditor drag-to-move — **delivered**
+
+Adds drag-to-move on top of 3.2c.1's foundation. Click a selected element and drag to move it. Per-element attribute dispatch for every supported tag. Pointer capture so drags continue smoothly off the SVG bounds. Click-without-drag threshold prevents spurious mutations from stray pointer jitter.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_drag` state field — `{pointerId, startX, startY, originAttrs, committed}` or null. Populated on pointerdown that hits the already-selected element. Cleared on pointerup or detach.
+  - `_dragThresholdScreen = 3` — pixel threshold below which a pointermove is treated as click-with-jitter. Converted to SVG units at runtime via `_screenDistToSvgDist` so zoom doesn't make it too sensitive or insensitive.
+  - `attach()` / `detach()` updated — `pointermove`, `pointerup`, `pointercancel` listeners added/removed. `detach()` calls `_cancelDrag()` so a mid-drag detach rolls back to the origin state rather than leaving the element partially moved and the captured pointer orphaned.
+  - `_onPointerDown` — two-branch logic. Click on the already-selected element starts drag via `_beginDrag(event)`. Click on a different element (or first click) falls through to `setSelection`. Matches click-to-select-first, click-to-drag convention used by most editors.
+  - `_beginDrag(event)` — converts pointer position to SVG root coords via `_screenToSvg`, snapshots current element attributes via `_captureDragAttributes`, calls `setPointerCapture` on the SVG. Wraps the capture call in try/catch — not all environments support it, drag still works via bubbling pointermove even without capture.
+  - `_onPointerMove` — guarded by `_drag !== null` and matching pointerId. Computes current SVG position, subtracts start to get delta. Before commit, checks threshold — if both axes under threshold, skip the application. Once committed, every subsequent move applies the delta from origin (not from previous position) so moves never compound.
+  - `_onPointerUp` — releases pointer capture, clears `_drag`. Fires `onChange()` callback only if the drag was committed (moved beyond threshold). Click-without-drag produces zero onChange calls, so the viewer doesn't spuriously mark the file dirty when the user just meant to select.
+  - `_cancelDrag()` — restores original attributes from snapshot, releases capture, clears `_drag`. Used by `detach()`. Does NOT fire onChange — the caller's intent was to abandon the drag.
+  - `_captureDragAttributes(el)` — per-element snapshot dispatch. Returns `{kind, ...fields}` or null. Eight dispatch cases: `rect`/`image`/`use` → `{kind: 'xy', x, y}`; `circle`/`ellipse` → `{kind: 'cxcy', cx, cy}`; `line` → `{kind: 'line', x1, y1, x2, y2}`; `polyline`/`polygon` → `{kind: 'points', points: [[x,y]...]}`; `text` → `{kind: 'xy', x, y}` OR `{kind: 'transform', transform}` depending on whether the element already has a transform attribute; `path`/`g` → `{kind: 'transform', transform}`. Null return for unknown tags — drag silently doesn't start.
+  - `_applyDragDelta(dx, dy)` — switches on the snapshot's `kind`, applies the delta. For `xy` / `cxcy` / `line` / `points` the math is direct. For `transform` — appends `translate(dx dy)` to the existing transform. Browsers parse transform chains left-to-right so our translate is applied AFTER any existing rotation/scale, which gives the user-expected visual result ("move the rendered element by dx,dy regardless of rotation").
+  - `_restoreDragAttributes(el, snapshot)` — mirror of `_applyDragDelta` that writes the origin values back. For `transform`, removes the attribute entirely if it was empty originally, otherwise writes it back verbatim.
+  - Handle overlay re-renders on every committed pointermove via existing `_renderHandles()` call. Bounding box follows the element smoothly during drag.
+  - Module-level `_parseNum(value)` helper — SVG-attribute-to-number. Returns 0 for null/missing/non-numeric. Matches browser SVG behavior (which treats missing numeric attributes as 0).
+  - Module-level `_parsePoints(value)` helper — parses `points` attribute into `[[x, y], ...]`. Accepts whitespace- and comma-separated tokens and mixes. Returns empty array on odd token count or any non-numeric value — caller emits empty `points` which renders as an empty polyline rather than crashing.
+
+- `webapp/src/svg-editor.test.js` — 36 new tests across 9 describe blocks:
+  - `_parseNum` (4 tests): numeric strings, null/missing, non-numeric, scientific notation.
+  - `_parsePoints` (6 tests): whitespace-separated, comma-separated, mixed, empty/null, odd tokens, non-numeric.
+  - Pointerdown routing (6 tests): click on unselected selects, click on selected starts drag, click on empty doesn't cancel non-existent drag, pointer capture on drag start, graceful failure when `setPointerCapture` throws, unsupported element dispatches to no-op.
+  - Threshold (5 tests): tiny pointermove doesn't commit, drag beyond threshold commits, onChange fires only once per drag, pointermove without drag ignored, pointermove with wrong pointerId ignored.
+  - Per-element dispatch:
+    - `rect` (2 tests): moves x/y, handles negative deltas.
+    - `circle` + `ellipse` (2 tests): moves cx/cy, radii unchanged.
+    - `line` (1 test): both endpoints move by same delta.
+    - `polyline` + `polygon` (3 tests): shifts every point, point separators normalize to `x,y` form on output.
+    - `path` + `g` (4 tests): uses transform, preserves existing transform, g uses transform dispatch, path's `d` attribute untouched.
+    - `text` (2 tests): uses x/y without existing transform, uses transform dispatch when transform exists.
+    - `image` + `use` (2 tests): both use x/y dispatch.
+  - Incremental application (1 test): repeated pointermoves compute relative to origin, never compound.
+  - Handle tracking (1 test): handle group repositions during drag.
+  - Lifecycle (5 tests): pointercancel before commit (no onChange), pointercancel after commit (fires onChange), detach rolls back, detach removes transform when it wasn't there originally, detach restores original transform, pointerup releases pointer capture.
+
+Design points pinned by tests:
+
+- **Click-before-drag convention.** The first click on an element only selects; a SECOND click (while already selected) initiates drag. Pinned by `click on unselected element selects it (no drag)` (no drag after first click) AND `click on already-selected element starts drag` (drag after second click). Prevents accidental drags when the user is scanning elements — a small pointer jitter during a selection click doesn't move the element.
+
+- **Click threshold prevents spurious mutations.** `tiny pointermove does not commit drag` dispatches a 1-pixel pointermove and verifies the element's x attribute is unchanged AND onChange doesn't fire. Without the threshold, every real-world click would produce a 0-pixel mutation and mark the file dirty.
+
+- **Transform append preserves existing transforms.** `path with existing transform preserves it` verifies that dragging a `<path transform="rotate(45 5 5)">` produces `rotate(45 5 5) translate(10 20)` — the rotation is unaffected by the drag. If this broke, users would see their rotated shapes unexpectedly flip during a move.
+
+- **Text attribute auto-detection.** `text without transform uses x/y dispatch` and `text with existing transform uses transform dispatch` prove the two paths. Users dragging a plain text element get clean x/y changes (readable in editor output); users dragging a rotated text element get an additional translate (preserves rotation). The alternative (always use transform) would leave plain text elements with cruft that's harder to hand-edit.
+
+- **Delta from origin, not from previous position.** `repeated pointermoves compute relative to drag origin` pins the invariant by dispatching three pointermoves and asserting the element's final position matches `origin + final_delta`, not `origin + dx1 + dx2 + dx3`. Compounding would make fast drags move the element exponentially further than the pointer.
+
+- **Detach mid-drag rolls back.** `detach during drag rolls back and cancels` verifies that an editor detached mid-drag leaves the element at its original position with no onChange fired. If the rollback were absent, a file-switch or component-unmount during an active drag would leave orphaned partial-move mutations the user didn't intend.
+
+- **Capture failure is non-fatal.** `survives setPointerCapture throwing` pins that a runtime without pointer capture (older browsers, some jsdom environments) still starts the drag. Capture is an enhancement for off-SVG pointer tracking, not a requirement.
+
+Open carried over for 3.2c.2b and 3.2c.2c:
+
+- **3.2c.2b — corner/edge resize handles.** Interactive handles for `rect` (eight handles — four corners and four edges), `circle` (four handles at cardinal points for symmetric resize), `ellipse` (four handles — two for rx, two for ry, independently draggable). Handle's drag math pins the opposite corner — e.g. dragging the top-left corner moves x/y AND adjusts width/height so the bottom-right stays fixed. Needs per-handle data (which corner/edge it represents) in a dataset attribute so the pointermove dispatch knows what to adjust.
+
+- **3.2c.2c — line endpoint drag.** `line` elements get two endpoint handles (one per endpoint) — currently the bounding-box handle doesn't allow independent endpoint drag. Differs from the bounding-box dragging that 3.2c.2a provides because each endpoint moves independently; dragging the x1/y1 handle doesn't move x2/y2.
+
+- **Path vertex handles and inline text editing.** Land with 3.2c.3.
+
 ### 5.13 — Phase 3.2c.1 SvgEditor foundation + selection — **delivered**
 
 Introduces the `SvgEditor` class and wires it into the right panel of `SvgViewer`. First sub-phase of 3.2c — foundation layer for visual editing. No move/resize/vertex-edit yet; those come in 3.2c.2. Coexists with pan/zoom — pan/zoom handles viewport navigation, editor handles element selection.

@@ -10,9 +10,23 @@
 //   - Delete key to remove selected element
 //   - tspan → parent text resolution on click
 //
-// Deferred to 3.2c.2+:
-//   - Move / resize / vertex edit (3.2c.2)
-//   - Inline text edit via <foreignObject> (3.2c.3)
+// Phase 3.2c.2a adds: drag-to-move.
+//   - Clicking a selected element and dragging moves it
+//   - Per-element position dispatch (rect uses x/y,
+//     circle/ellipse use cx/cy, line moves both endpoints
+//     together, polylines/polygons shift every point,
+//     paths/groups/text use transform)
+//   - Pointer capture so dragging off the SVG continues
+//     smoothly
+//   - Click-without-drag (< threshold) is treated as pure
+//     selection — no onChange fires, no attribute mutation
+//   - Handle overlay re-renders every pointermove so the
+//     bounding box follows the element
+//
+// Deferred to 3.2c.2b+:
+//   - Corner/edge resize handles
+//   - Line endpoint drag (3.2c.2c)
+//   - Vertex edit / inline text edit (3.2c.3)
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
 //
@@ -75,6 +89,47 @@ export const HANDLE_CLASS = 'svg-editor-handle';
  * above the content.
  */
 export const HANDLE_GROUP_ID = 'svg-editor-handles';
+
+/**
+ * Parse a numeric SVG attribute value to a number. SVG
+ * treats missing / non-numeric values as 0 — matches
+ * browser behavior. Deliberately does not handle units
+ * like `10px` because SVG coordinate attributes don't
+ * accept units (length attributes like stroke-width do,
+ * but drag math doesn't touch those).
+ */
+function _parseNum(value) {
+  if (value == null) return 0;
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Parse a polyline/polygon `points` attribute into an
+ * array of [x, y] pairs. SVG accepts both comma-separated
+ * and whitespace-separated coordinates, and mixes of the
+ * two. We normalize by splitting on any combination of
+ * commas and whitespace.
+ *
+ * Malformed input (odd number of tokens, non-numeric
+ * values) returns an empty array — the drag dispatch
+ * then emits an empty `points` attribute, which the
+ * browser treats as an empty polyline. Better than
+ * throwing and stranding the editor.
+ */
+function _parsePoints(value) {
+  if (!value || typeof value !== 'string') return [];
+  const tokens = value.trim().split(/[\s,]+/).filter(Boolean);
+  if (tokens.length % 2 !== 0) return [];
+  const result = [];
+  for (let i = 0; i < tokens.length; i += 2) {
+    const x = parseFloat(tokens[i]);
+    const y = parseFloat(tokens[i + 1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+    result.push([x, y]);
+  }
+  return result;
+}
 
 /**
  * SVG element tags that should never be considered as
@@ -144,8 +199,37 @@ export class SvgEditor {
     /** Handle overlay group, lazily created on first render. */
     this._handleGroup = null;
 
+    /**
+     * Drag state. Null when not dragging; populated on
+     * pointerdown that hits the already-selected element.
+     * Cleared on pointerup.
+     *
+     * Fields:
+     *   pointerId — id of the captured pointer
+     *   startX, startY — pointer position in SVG root
+     *     coords at drag start
+     *   originAttrs — snapshot of the element's positional
+     *     attributes at drag start, used to compute new
+     *     values from the absolute delta
+     *   committed — set true on first pointermove beyond
+     *     threshold, triggers onChange on pointerup
+     */
+    this._drag = null;
+
+    /**
+     * Click-to-drag threshold in SVG-root units. A
+     * pointermove whose cumulative delta stays under this
+     * is treated as a click-with-jitter rather than a
+     * drag — no attributes are mutated, no onChange
+     * fires. Measured in SVG units but set in screen
+     * pixels and converted on first move.
+     */
+    this._dragThresholdScreen = 3;
+
     /** Bound handlers for add/remove symmetry. */
     this._onPointerDown = this._onPointerDown.bind(this);
+    this._onPointerMove = this._onPointerMove.bind(this);
+    this._onPointerUp = this._onPointerUp.bind(this);
     this._onKeyDown = this._onKeyDown.bind(this);
 
     /** Whether `attach()` has been called. */
@@ -165,9 +249,13 @@ export class SvgEditor {
     this._attached = true;
     // Pointer events on the root SVG. Using 'pointerdown'
     // rather than 'click' so we can react before focus
-    // shifts and to prepare for drag handling in later
-    // sub-phases.
+    // shifts and so drags can begin from the initial press.
     this._svg.addEventListener('pointerdown', this._onPointerDown);
+    // Pointer move/up are attached during drag only via
+    // setPointerCapture. See _beginDrag.
+    this._svg.addEventListener('pointermove', this._onPointerMove);
+    this._svg.addEventListener('pointerup', this._onPointerUp);
+    this._svg.addEventListener('pointercancel', this._onPointerUp);
     // Keyboard events on document so Escape / Delete work
     // regardless of which element has focus.
     document.addEventListener('keydown', this._onKeyDown);
@@ -180,9 +268,25 @@ export class SvgEditor {
   detach() {
     if (!this._attached) return;
     this._attached = false;
+    // Cancel any in-flight drag. Without this, a detach
+    // during a drag would leave the element partially
+    // moved and the captured pointer orphaned.
+    this._cancelDrag();
     this._svg.removeEventListener(
       'pointerdown',
       this._onPointerDown,
+    );
+    this._svg.removeEventListener(
+      'pointermove',
+      this._onPointerMove,
+    );
+    this._svg.removeEventListener(
+      'pointerup',
+      this._onPointerUp,
+    );
+    this._svg.removeEventListener(
+      'pointercancel',
+      this._onPointerUp,
     );
     document.removeEventListener('keydown', this._onKeyDown);
     this._clearSelection();
@@ -246,7 +350,288 @@ export class SvgEditor {
     // also react. Without this, a click would start a pan
     // on the left panel via the sync callback.
     event.stopPropagation();
-    this.setSelection(target);
+    // Two cases:
+    //   1. Click on the already-selected element → start
+    //      drag. The existing selection stays as-is.
+    //   2. Click on a different element → select it. Drag
+    //      would require a second click; matches most
+    //      editors' click-to-select-first, click-to-drag
+    //      behavior and prevents accidental drags when
+    //      the user is just trying to select.
+    if (target === this._selected) {
+      this._beginDrag(event);
+    } else {
+      this.setSelection(target);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Drag machinery
+  // ---------------------------------------------------------------
+
+  /**
+   * Start a drag on the selected element. Captures the
+   * pointer so subsequent move events flow here even when
+   * the pointer leaves the SVG bounds.
+   */
+  _beginDrag(event) {
+    if (!this._selected) return;
+    const origin = this._screenToSvg(event.clientX, event.clientY);
+    const originAttrs = this._captureDragAttributes(this._selected);
+    if (!originAttrs) {
+      // Element isn't draggable (no supported attribute
+      // dispatch). Silently drop; selection stays.
+      return;
+    }
+    this._drag = {
+      pointerId: event.pointerId,
+      startX: origin.x,
+      startY: origin.y,
+      originAttrs,
+      committed: false,
+    };
+    try {
+      this._svg.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer capture not supported or pointer already
+      // released. The drag still works via the bubbling
+      // pointermove handler; capture is an enhancement,
+      // not a requirement.
+    }
+  }
+
+  _onPointerMove(event) {
+    if (!this._drag) return;
+    if (event.pointerId !== this._drag.pointerId) return;
+    const current = this._screenToSvg(event.clientX, event.clientY);
+    const dx = current.x - this._drag.startX;
+    const dy = current.y - this._drag.startY;
+    // Click-without-drag threshold. Convert the screen-px
+    // threshold to SVG units on first move so zoom doesn't
+    // make a 3px screen threshold require 300 SVG units.
+    if (!this._drag.committed) {
+      const thresholdSvg = this._screenDistToSvgDist(
+        this._dragThresholdScreen,
+      );
+      if (Math.abs(dx) < thresholdSvg && Math.abs(dy) < thresholdSvg) {
+        return;
+      }
+      this._drag.committed = true;
+    }
+    this._applyDragDelta(dx, dy);
+    this._renderHandles();
+  }
+
+  _onPointerUp(event) {
+    if (!this._drag) return;
+    if (event.pointerId !== this._drag.pointerId) return;
+    const wasCommitted = this._drag.committed;
+    try {
+      this._svg.releasePointerCapture(event.pointerId);
+    } catch (_) {
+      // Capture may never have been granted or may have
+      // been released already.
+    }
+    this._drag = null;
+    if (wasCommitted) {
+      // The drag actually moved the element; notify the
+      // viewer so it can serialize. Click-without-drag
+      // skips this path.
+      this._onChange();
+    }
+  }
+
+  /**
+   * Cancel an in-flight drag without committing. Rolls
+   * back to the original attribute values and releases
+   * pointer capture. Used by detach().
+   */
+  _cancelDrag() {
+    if (!this._drag) return;
+    // Roll back to the snapshot.
+    this._restoreDragAttributes(this._selected, this._drag.originAttrs);
+    try {
+      this._svg.releasePointerCapture(this._drag.pointerId);
+    } catch (_) {}
+    this._drag = null;
+  }
+
+  // ---------------------------------------------------------------
+  // Per-element position dispatch
+  // ---------------------------------------------------------------
+
+  /**
+   * Capture the current positional attributes of an
+   * element into a snapshot that can be used as the
+   * origin for a drag operation. Returns null when the
+   * element doesn't match any supported dispatch case.
+   *
+   * The snapshot shape depends on the element type:
+   *   - rect/image/use → {x, y}
+   *   - circle → {cx, cy}
+   *   - ellipse → {cx, cy}
+   *   - line → {x1, y1, x2, y2}
+   *   - polyline/polygon → {points: [[x, y], ...]}
+   *   - text → {x, y} OR {transform: origText}
+   *     (auto-detected: transform wins if present)
+   *   - path/g → {transform: origText}
+   *
+   * All numeric values are captured as numbers so delta
+   * math works uniformly; string attributes like transform
+   * are captured verbatim so we can append/replace a
+   * translate() without losing any pre-existing transforms.
+   */
+  _captureDragAttributes(el) {
+    if (!el || !el.tagName) return null;
+    const tag = el.tagName.toLowerCase();
+    switch (tag) {
+      case 'rect':
+      case 'image':
+      case 'use':
+        return {
+          kind: 'xy',
+          x: _parseNum(el.getAttribute('x')),
+          y: _parseNum(el.getAttribute('y')),
+        };
+      case 'circle':
+      case 'ellipse':
+        return {
+          kind: 'cxcy',
+          cx: _parseNum(el.getAttribute('cx')),
+          cy: _parseNum(el.getAttribute('cy')),
+        };
+      case 'line':
+        return {
+          kind: 'line',
+          x1: _parseNum(el.getAttribute('x1')),
+          y1: _parseNum(el.getAttribute('y1')),
+          x2: _parseNum(el.getAttribute('x2')),
+          y2: _parseNum(el.getAttribute('y2')),
+        };
+      case 'polyline':
+      case 'polygon':
+        return {
+          kind: 'points',
+          points: _parsePoints(el.getAttribute('points')),
+        };
+      case 'text': {
+        // text can use either x/y attributes or a
+        // transform. Auto-detect: if the element has a
+        // transform attribute, use that (preserves
+        // existing transform like rotate()); otherwise
+        // use x/y.
+        if (el.hasAttribute('transform')) {
+          return {
+            kind: 'transform',
+            transform: el.getAttribute('transform') || '',
+          };
+        }
+        return {
+          kind: 'xy',
+          x: _parseNum(el.getAttribute('x')),
+          y: _parseNum(el.getAttribute('y')),
+        };
+      }
+      case 'path':
+      case 'g':
+        return {
+          kind: 'transform',
+          transform: el.getAttribute('transform') || '',
+        };
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Apply a translation delta to the currently-dragging
+   * element. Uses the snapshot stored on `_drag.originAttrs`
+   * as the origin (so repeated pointermoves don't compound
+   * — each move is relative to the drag start, not the
+   * previous position).
+   */
+  _applyDragDelta(dx, dy) {
+    if (!this._drag || !this._selected) return;
+    const el = this._selected;
+    const o = this._drag.originAttrs;
+    switch (o.kind) {
+      case 'xy':
+        el.setAttribute('x', String(o.x + dx));
+        el.setAttribute('y', String(o.y + dy));
+        break;
+      case 'cxcy':
+        el.setAttribute('cx', String(o.cx + dx));
+        el.setAttribute('cy', String(o.cy + dy));
+        break;
+      case 'line':
+        el.setAttribute('x1', String(o.x1 + dx));
+        el.setAttribute('y1', String(o.y1 + dy));
+        el.setAttribute('x2', String(o.x2 + dx));
+        el.setAttribute('y2', String(o.y2 + dy));
+        break;
+      case 'points': {
+        const shifted = o.points
+          .map(([x, y]) => `${x + dx},${y + dy}`)
+          .join(' ');
+        el.setAttribute('points', shifted);
+        break;
+      }
+      case 'transform': {
+        // Append a translate(dx, dy) to the existing
+        // transform. Browsers parse a chain of transforms
+        // left-to-right; our translate is applied after
+        // any existing transforms, which is what the user
+        // intends (the drag should move the rendered
+        // element by dx/dy regardless of its existing
+        // rotation/scale).
+        const base = o.transform.trim();
+        const delta = `translate(${dx} ${dy})`;
+        const combined = base ? `${base} ${delta}` : delta;
+        el.setAttribute('transform', combined);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Restore the element to its pre-drag attribute state.
+   * Used on drag cancel (e.g., editor detach mid-drag).
+   */
+  _restoreDragAttributes(el, snapshot) {
+    if (!el || !snapshot) return;
+    switch (snapshot.kind) {
+      case 'xy':
+        el.setAttribute('x', String(snapshot.x));
+        el.setAttribute('y', String(snapshot.y));
+        break;
+      case 'cxcy':
+        el.setAttribute('cx', String(snapshot.cx));
+        el.setAttribute('cy', String(snapshot.cy));
+        break;
+      case 'line':
+        el.setAttribute('x1', String(snapshot.x1));
+        el.setAttribute('y1', String(snapshot.y1));
+        el.setAttribute('x2', String(snapshot.x2));
+        el.setAttribute('y2', String(snapshot.y2));
+        break;
+      case 'points':
+        el.setAttribute(
+          'points',
+          snapshot.points.map(([x, y]) => `${x},${y}`).join(' '),
+        );
+        break;
+      case 'transform':
+        if (snapshot.transform) {
+          el.setAttribute('transform', snapshot.transform);
+        } else {
+          el.removeAttribute('transform');
+        }
+        break;
+      default:
+        break;
+    }
   }
 
   _onKeyDown(event) {
@@ -524,4 +909,9 @@ export class SvgEditor {
 
 // Exported constants are re-exported above. Additional
 // test-only exports:
-export { _NON_SELECTABLE_TAGS, _SELECTABLE_TAGS };
+export {
+  _NON_SELECTABLE_TAGS,
+  _SELECTABLE_TAGS,
+  _parseNum,
+  _parsePoints,
+};
