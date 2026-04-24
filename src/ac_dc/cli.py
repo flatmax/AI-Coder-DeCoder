@@ -128,6 +128,21 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(verbose=args.verbose)
     logger.debug("ac-dc invoked with args=%s", args)
     _print_banner()
+
+    # Launch the full startup orchestrator.
+    import asyncio
+    from ac_dc.main import run
+
+    asyncio.run(run(
+        repo_path=args.repo_path,
+        server_port=args.server_port,
+        webapp_port=args.webapp_port,
+        no_browser=args.no_browser,
+        dev=args.dev,
+        preview=args.preview,
+        verbose=args.verbose,
+        collab=args.collab,
+    ))
     return 0
 
 

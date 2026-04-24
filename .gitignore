@@ -28,3 +28,4 @@ uv.lock
 # Editor / tooling scratch directories
 .aicoder/
 safeZone/
+.ac-dc4/
