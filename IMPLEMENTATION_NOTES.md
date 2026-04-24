@@ -1628,6 +1628,40 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.17 — Phase 3.2c.3a SvgEditor polyline/polygon vertex edit — **delivered**
+
+Polylines and polygons get one draggable handle per vertex. Each handle moves a single point; other vertices stay put. Reuses the resize-drag machinery with two new snapshot kinds (`polyline-vertices` / `polygon-vertices`) and one new dispatch (`_applyVertexResize`). Path vertex handles deferred to 3.2c.3b where the `d`-attribute parser lives.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_renderResizeHandles` — new `polyline` / `polygon` branch. Parses the `points` attribute via `_parsePoints`, emits one handle dot per vertex with role `v{N}`. Handle position is the vertex coordinate verbatim — same reasoning as line endpoint handles: bbox-corner handles would be the wrong drag targets on non-rectangular shapes.
+  - `_captureResizeAttributes` — new `polyline` / `polygon` cases producing `{kind: 'polyline-vertices', points: [...]}` or `{kind: 'polygon-vertices', ...}`. Kinds distinct from the move-drag `'points'` kind in `_captureDragAttributes` so dispatch branches never collide.
+  - `_applyResizeDelta` — new `polyline-vertices` / `polygon-vertices` → `_applyVertexResize`.
+  - New method `_applyVertexResize(el, o, role, dx, dy)`. Parses the role via `parseInt(role.slice(1), 10)`. Validates the index bounds. Clones the snapshot's points array and updates only the Nth point, leaving others unchanged. Serializes with the canonical `x,y` form (comma between components, space between points) matching the move-drag output.
+  - `_restoreResizeAttributes` — new `polyline-vertices` / `polygon-vertices` cases restoring the `points` attribute from the snapshot.
+
+- `webapp/src/svg-editor.test.js` — 1 existing test updated plus 16 new tests:
+  - Updated: `polyline selection produces no resize handles` → `polyline selection produces one handle per vertex`. Previously scoped to 3.2c.2b; now flipped.
+  - **Handle rendering** (2 tests): polyline produces N vertex handles at actual vertex coords (not bbox corners); polygon produces N vertex handles with sequential roles v0..v{N-1}.
+  - **Per-vertex dispatch** (4 tests): v0 / v1 / v2 each move only their own vertex, leaving others unchanged. Polygon variant proves the dispatch works regardless of shape.
+  - **No clamping** (1 test): dragging one vertex onto another produces coincident vertices — legal SVG (a zero-length edge renders invisibly), fully recoverable.
+  - **Separator normalization** (1 test): input with mixed comma-space separators normalizes to canonical `x,y` form on output. Matches the move-drag path's behavior.
+  - **Origin-relative deltas** (1 test): repeated pointermoves recompute from snapshot, not from previous position — prevents runaway compounding.
+  - **Negative deltas** (1 test): leftward / upward vertex drags work symmetrically with rightward / downward.
+  - **Lifecycle** (3 tests for polyline, 1 for polygon): clicking a vertex handle starts a resize drag with the correct kind + role; onChange fires after committed drag; tiny move below threshold doesn't commit; detach rolls back all points.
+  - **Defensive error paths** (2 tests): malformed role (not `v{N}`) is a no-op; out-of-range index (e.g., `v99` on a 2-point polyline) is a no-op. Shouldn't happen in practice because roles come from our own handle rendering, but defensive against future refactors that might feed a snapshot from an external source.
+
+Design points pinned by tests:
+
+- **Origin-relative delta application.** `handles repeated pointermoves relative to origin` pins the invariant: every pointermove recomputes the Nth point from the snapshot, never from the previous move's result. Mirrors the move-drag's compounding prevention from 3.2c.2a. If this broke, dragging a vertex would produce exponential movement (each frame applying its delta on top of the previous delta's mutation), and the handle would fly away from the pointer.
+
+- **Canonical output format regardless of input.** `handles comma-space-mixed input by normalizing on output` pins that input format variety doesn't contaminate output. SVG accepts many separator forms (`x,y` / `x y` / `x, y` / `x , y`); `_parsePoints` handles all of them. Re-serialization uses `x,y` with single space between pairs — same format the move-drag produces, so re-serialised polylines are visually stable across edit operations.
+
+- **Defensive bounds checking.** `ignores out-of-range vertex index` and `ignores malformed role` both exercise the parseInt / validation paths. These shouldn't fire in production (roles come from our own handle rendering), but if a future refactor introduced a dispatch from an external source (e.g., undo-stack replay), a malformed role would silently corrupt the points attribute without the guards. Treating the invalid case as a no-op means the drag completes cleanly and the user's work isn't lost.
+
+- **Snapshot kinds distinct per shape.** The polygon case uses `polygon-vertices` rather than `polyline-vertices` even though the serialization logic is identical. Keeping them separate matches the pattern established by `line-endpoints` vs `line` (the move-drag kind) — dispatch branches in `_applyResizeDelta` and `_restoreResizeAttributes` read cleanly without inspecting drag mode. If a future rendering difference emerges (e.g., polygons need implicit-close handling in some edge case), the dispatch already has a dedicated branch.
+
+Phase 3.2c.3a is complete. 3.2c.3b adds path vertex editing (requires parsing the `d` attribute into command objects — M/L/H/V/C/S/Q/T/A/Z — and producing draggable handles at each command's endpoint and control points). 3.2c.3c adds inline text editing via foreignObject textarea on double-click.
+
 ### 5.16 — Phase 3.2c.2c SvgEditor line endpoint drag — **delivered**
 
 Line elements get two handles — one at each endpoint — that drag independently. Closes out the 3.2c.2 resize-handle work. Reuses the `_beginResizeDrag` machinery with a new `line-endpoints` snapshot kind and a `_applyLineEndpointResize` dispatch.

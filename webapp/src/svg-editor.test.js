@@ -1631,7 +1631,7 @@ describe('SvgEditor resize handle rendering', () => {
     expect(new Set(roles)).toEqual(new Set(['p1', 'p2']));
   });
 
-  it('polyline selection produces no resize handles', () => {
+  it('polyline selection produces one handle per vertex', () => {
     const poly = makeChild('polyline', { points: '10,10 30,20 50,10' });
     poly.getBBox = () => ({
       x: 10,
@@ -1643,7 +1643,12 @@ describe('SvgEditor resize handle rendering', () => {
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.setSelection(poly);
-    expect(getHandles(svg)).toHaveLength(0);
+    const handles = getHandles(svg);
+    expect(handles).toHaveLength(3);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toEqual(['v0', 'v1', 'v2']);
   });
 
   it('path selection produces no resize handles', () => {
@@ -2521,5 +2526,456 @@ describe('SvgEditor resize drag: line endpoints', () => {
     expect(line.getAttribute('y1')).toBe('10');
     expect(line.getAttribute('x2')).toBe('50');
     expect(line.getAttribute('y2')).toBe('50');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Polyline and polygon vertex resize
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor resize drag: polyline vertices', () => {
+  function getHandles(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(
+      group.querySelectorAll('[data-handle-role]'),
+    );
+  }
+
+  it('handles positioned at actual vertex coords', () => {
+    // Not at bbox corners — each handle should sit
+    // exactly on its vertex.
+    const poly = makeChild('polyline', {
+      points: '10,20 50,40 90,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 80,
+      height: 30,
+    });
+    const svg = track(makeSvg([poly]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    const handles = getHandles(svg);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole.v0).toEqual({ cx: 10, cy: 20 });
+    expect(byRole.v1).toEqual({ cx: 50, cy: 40 });
+    expect(byRole.v2).toEqual({ cx: 90, cy: 10 });
+  });
+
+  it('v0 drag moves only the first vertex', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20 50,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v0', { x: 10, y: 10 }, { x: 20, y: 15 });
+    // v0 moved by (10, 5); v1 and v2 unchanged.
+    expect(poly.getAttribute('points')).toBe('20,15 30,20 50,10');
+  });
+
+  it('v1 drag moves only the middle vertex', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20 50,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v1', { x: 30, y: 20 }, { x: 35, y: 35 });
+    expect(poly.getAttribute('points')).toBe('10,10 35,35 50,10');
+  });
+
+  it('v2 drag moves only the last vertex', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20 50,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v2', { x: 50, y: 10 }, { x: 60, y: 25 });
+    expect(poly.getAttribute('points')).toBe('10,10 30,20 60,25');
+  });
+
+  it('handles repeated pointermoves relative to origin', () => {
+    // Each pointermove recomputes from the snapshot, not
+    // from the previous position — otherwise vertex
+    // moves would compound and the user's drag would
+    // run away from the pointer.
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v1');
+    firePointer(svg, 'pointerdown', 30, 20);
+    // Move to (50, 30) — delta (20, 10). v1 at (50, 30).
+    firePointer(svg, 'pointermove', 50, 30);
+    expect(poly.getAttribute('points')).toBe('10,10 50,30');
+    // Move to (60, 40) — delta (30, 20) from origin.
+    // v1 should be at (60, 40), NOT (80, 50) which would
+    // be the result of compounding.
+    firePointer(svg, 'pointermove', 60, 40);
+    expect(poly.getAttribute('points')).toBe('10,10 60,40');
+    firePointer(svg, 'pointerup', 60, 40);
+  });
+
+  it('negative deltas work', () => {
+    const poly = makeChild('polyline', {
+      points: '50,50 80,80',
+    });
+    poly.getBBox = () => ({
+      x: 50,
+      y: 50,
+      width: 30,
+      height: 30,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v0', { x: 50, y: 50 }, { x: 30, y: 40 });
+    expect(poly.getAttribute('points')).toBe('30,40 80,80');
+  });
+
+  it('dragging one vertex onto another is allowed', () => {
+    // Coincident vertices produce a degenerate edge but
+    // the shape is still legal SVG and recoverable.
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20 50,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v0', { x: 10, y: 10 }, { x: 30, y: 20 });
+    // v0 dragged onto v1.
+    expect(poly.getAttribute('points')).toBe('30,20 30,20 50,10');
+  });
+
+  it('handles comma-space-mixed input by normalizing on output', () => {
+    // Input separator variety shouldn't matter — output
+    // uses the canonical comma-between-xy / space-between-
+    // pairs form regardless.
+    const poly = makeChild('polyline', {
+      points: '10, 10 30, 20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v0', { x: 10, y: 10 }, { x: 15, y: 15 });
+    expect(poly.getAttribute('points')).toBe('15,15 30,20');
+  });
+
+  it('clicking a v0 handle starts a resize drag', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v0');
+    firePointer(svg, 'pointerdown', 10, 10);
+    expect(editor._drag).not.toBe(null);
+    expect(editor._drag.mode).toBe('resize');
+    expect(editor._drag.role).toBe('v0');
+    expect(editor._drag.originAttrs.kind).toBe('polyline-vertices');
+  });
+
+  it('fires onChange after committed vertex drag', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v0');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 30, 30);
+    firePointer(svg, 'pointerup', 30, 30);
+    expect(changeListener).toHaveBeenCalledOnce();
+  });
+
+  it('tiny vertex move does not commit', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v0');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 11, 10);
+    firePointer(svg, 'pointerup', 11, 10);
+    // Below threshold — points unchanged.
+    expect(poly.getAttribute('points')).toBe('10,10 30,20');
+    expect(changeListener).not.toHaveBeenCalled();
+  });
+
+  it('detach mid-vertex-drag restores all points', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20 50,10',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v1');
+    firePointer(svg, 'pointerdown', 30, 20);
+    firePointer(svg, 'pointermove', 60, 45);
+    // Mid-drag: v1 has moved.
+    expect(poly.getAttribute('points')).toBe('10,10 60,45 50,10');
+    editor.detach();
+    // Restored — all three points back to origin.
+    expect(poly.getAttribute('points')).toBe('10,10 30,20 50,10');
+  });
+
+  it('ignores malformed role', () => {
+    // A snapshot kind of 'polyline-vertices' but a role
+    // that isn't `v{N}` should be a no-op rather than
+    // crash. Defensive — shouldn't happen in practice
+    // because roles come from our own handle rendering.
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    // Force a bogus role. _applyVertexResize should bail
+    // without mutation.
+    editor._drag = {
+      mode: 'resize',
+      role: 'not-a-vertex',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'polyline-vertices',
+        points: [[10, 10], [30, 20]],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(poly.getAttribute('points')).toBe('10,10 30,20');
+    editor._drag = null;
+  });
+
+  it('ignores out-of-range vertex index', () => {
+    const poly = makeChild('polyline', {
+      points: '10,10 30,20',
+    });
+    poly.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    editor._drag = {
+      mode: 'resize',
+      role: 'v99',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'polyline-vertices',
+        points: [[10, 10], [30, 20]],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(poly.getAttribute('points')).toBe('10,10 30,20');
+    editor._drag = null;
+  });
+});
+
+describe('SvgEditor resize drag: polygon vertices', () => {
+  function getHandles(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(
+      group.querySelectorAll('[data-handle-role]'),
+    );
+  }
+
+  it('polygon selection produces one handle per vertex', () => {
+    const poly = makeChild('polygon', {
+      points: '0,0 10,0 10,10 0,10',
+    });
+    poly.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    const handles = getHandles(svg);
+    expect(handles).toHaveLength(4);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toEqual(['v0', 'v1', 'v2', 'v3']);
+  });
+
+  it('v2 drag moves only one vertex of a polygon', () => {
+    const poly = makeChild('polygon', {
+      points: '0,0 10,0 10,10 0,10',
+    });
+    poly.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, poly, 'v2', { x: 10, y: 10 }, { x: 15, y: 20 });
+    // v2 at (10, 10) → (15, 20). Others unchanged.
+    expect(poly.getAttribute('points')).toBe('0,0 10,0 15,20 0,10');
+  });
+
+  it('polygon uses polygon-vertices snapshot kind', () => {
+    const poly = makeChild('polygon', {
+      points: '0,0 10,0 10,10',
+    });
+    poly.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v0');
+    firePointer(svg, 'pointerdown', 0, 0);
+    expect(editor._drag.originAttrs.kind).toBe('polygon-vertices');
+    firePointer(svg, 'pointerup', 0, 0);
+  });
+
+  it('detach mid-polygon-drag restores all points', () => {
+    const poly = makeChild('polygon', {
+      points: '0,0 10,0 10,10 0,10',
+    });
+    poly.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([poly]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(poly);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('v2');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 40, 40);
+    expect(poly.getAttribute('points')).toBe('0,0 10,0 40,40 0,10');
+    editor.detach();
+    expect(poly.getAttribute('points')).toBe('0,0 10,0 10,10 0,10');
   });
 });

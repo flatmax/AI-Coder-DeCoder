@@ -52,8 +52,18 @@
 //     `_restoreResizeAttributes` machinery with a
 //     `line-endpoints` snapshot kind
 //
-// Deferred to 3.2c.3+:
-//   - Vertex edit / inline text edit (3.2c.3)
+// Phase 3.2c.3a adds: polyline and polygon vertex edit.
+//   - One handle per vertex with role `v{N}` (v0, v1, ...)
+//   - Dragging a vertex moves only that point; other
+//     vertices unchanged
+//   - No clamping — vertices may coincide, cross, or
+//     produce self-intersecting shapes
+//   - Snapshot kind `polyline-vertices` / `polygon-vertices`
+//     (distinct from move-drag's `points` kind)
+//
+// Deferred to 3.2c.3b+:
+//   - Path command parsing + vertex handles (3.2c.3b)
+//   - Inline text edit via foreignObject textarea (3.2c.3c)
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
 //
@@ -840,6 +850,21 @@ export class SvgEditor {
           x2: _parseNum(el.getAttribute('x2')),
           y2: _parseNum(el.getAttribute('y2')),
         };
+      case 'polyline':
+      case 'polygon':
+        // Distinct kind from move-drag's 'points' kind.
+        // Move-drag shifts every point by a uniform delta;
+        // vertex resize mutates a single point's coords
+        // while leaving the rest alone. Keeping the kinds
+        // separate means `_applyResizeDelta` and
+        // `_restoreResizeAttributes` dispatch cleanly
+        // without needing to inspect drag mode.
+        return {
+          kind: tag === 'polygon'
+            ? 'polygon-vertices'
+            : 'polyline-vertices',
+          points: _parsePoints(el.getAttribute('points')),
+        };
       default:
         return null;
     }
@@ -886,6 +911,10 @@ export class SvgEditor {
         break;
       case 'line-endpoints':
         this._applyLineEndpointResize(el, o, role, dx, dy);
+        break;
+      case 'polyline-vertices':
+      case 'polygon-vertices':
+        this._applyVertexResize(el, o, role, dx, dy);
         break;
       default:
         break;
@@ -1017,6 +1046,44 @@ export class SvgEditor {
   }
 
   /**
+   * Polyline / polygon vertex resize — one point moves,
+   * others unchanged. Role format is `v{N}` where N is
+   * the zero-indexed position in the points array.
+   *
+   * Serialization uses `x,y` form (comma-separated pair,
+   * space-separated pairs) — same format as the move-drag
+   * path. Alternative separators (whitespace between x/y)
+   * would render identically, but `x,y` is the
+   * conventional form and matches the move-drag output
+   * so re-serialised polylines are visually stable across
+   * edit operations.
+   *
+   * No clamping: vertices may coincide (collapsing an
+   * edge to zero length), cross (producing a
+   * self-intersecting polygon), or walk outside the
+   * original bounding box. All are legal SVG and
+   * recoverable — the user can drag the vertex back.
+   */
+  _applyVertexResize(el, o, role, dx, dy) {
+    if (typeof role !== 'string' || !role.startsWith('v')) return;
+    const idx = parseInt(role.slice(1), 10);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= o.points.length) {
+      return;
+    }
+    // Clone the snapshot's points array so repeated
+    // pointermove calls don't compound — each call
+    // recomputes the Nth point from origin, not from
+    // the previous move's result.
+    const next = o.points.map(([x, y], i) =>
+      i === idx ? [x + dx, y + dy] : [x, y],
+    );
+    el.setAttribute(
+      'points',
+      next.map(([x, y]) => `${x},${y}`).join(' '),
+    );
+  }
+
+  /**
    * Restore resize-drag snapshot on cancel. Mirror of
    * `_applyRect/Circle/EllipseResize`; writes the origin
    * values back.
@@ -1046,6 +1113,13 @@ export class SvgEditor {
         el.setAttribute('y1', String(snapshot.y1));
         el.setAttribute('x2', String(snapshot.x2));
         el.setAttribute('y2', String(snapshot.y2));
+        break;
+      case 'polyline-vertices':
+      case 'polygon-vertices':
+        el.setAttribute(
+          'points',
+          snapshot.points.map(([x, y]) => `${x},${y}`).join(' '),
+        );
         break;
       default:
         break;
@@ -1355,6 +1429,20 @@ export class SvgEditor {
       const y2 = _parseNum(el.getAttribute('y2'));
       group.appendChild(this._makeHandleDot(x1, y1, 'p1'));
       group.appendChild(this._makeHandleDot(x2, y2, 'p2'));
+      return;
+    }
+    if (tag === 'polyline' || tag === 'polygon') {
+      // One handle per vertex. Points parsed from the
+      // `points` attribute; handles placed at the exact
+      // coordinate of each point (same reasoning as line
+      // endpoints — bbox corners would be wrong targets).
+      // Role format is `v{N}` so the resize dispatch can
+      // parse the index and update only that vertex.
+      const points = _parsePoints(el.getAttribute('points'));
+      for (let i = 0; i < points.length; i += 1) {
+        const [px, py] = points[i];
+        group.appendChild(this._makeHandleDot(px, py, `v${i}`));
+      }
       return;
     }
     // Other tags get no resize handles in this sub-phase.
