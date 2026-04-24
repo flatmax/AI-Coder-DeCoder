@@ -421,26 +421,51 @@ async def run(
     # server.add_service(llm_service) above.
     def _make_real_callback() -> Any:
         async def _cb(event_name: str, *args: Any) -> None:
+            # Try both get_call() (method form) and .call
+            # (attribute form) — jrpc-oo's injection shape
+            # varies by version.
+            call = None
             try:
                 call = llm_service.get_call()
             except AttributeError:
-                # get_call not yet injected or no client connected.
-                # Silently drop — happens between startup and first
-                # browser connection.
-                return
+                call = getattr(llm_service, "call", None)
             if call is None:
+                logger.warning(
+                    "Event callback: no call proxy available for %s",
+                    event_name,
+                )
+                return
+            method_key = f"AcApp.{event_name}"
+            try:
+                method = call[method_key]
+            except (KeyError, TypeError) as exc:
+                logger.warning(
+                    "Event callback: no remote method %s (%s)",
+                    method_key, exc,
+                )
                 return
             try:
-                await call[f"AcApp.{event_name}"](*args)
+                result = method(*args)
+                # jrpc-oo methods may return coroutines or
+                # plain values; await when awaitable.
+                if hasattr(result, "__await__"):
+                    await result
             except Exception as exc:
-                # Log at debug so we can diagnose missing events
-                # without spamming the console on normal disconnects.
-                logger.debug(
-                    "Event callback %s failed: %s", event_name, exc
+                logger.warning(
+                    "Event callback %s raised: %s",
+                    event_name, exc,
                 )
+        return _cb
 
     event_callback_ref[0] = _make_real_callback()
-    logger.debug("Event callback wired")
+    logger.info("Event callback wired (llm_service=%s)", type(llm_service).__name__)
+    # Log what jrpc-oo has injected so we can diagnose which
+    # form of the call proxy is available.
+    logger.info(
+        "llm_service attributes: get_call=%s call=%s",
+        hasattr(llm_service, "get_call"),
+        hasattr(llm_service, "call"),
+    )
 
     # Step 8: Open browser
     url = f"http://localhost:{webapp_port}/?port={server_port}"
