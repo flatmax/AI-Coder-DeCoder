@@ -2682,10 +2682,24 @@ class _FakeSymbolIndexWithRefs:
         self._blocks = dict(blocks or {})
         self._ref_index = _FakeRefIndex(ref_counts, components)
         self._legend = legend
-        # _all_symbols is consumed by _update_stability's
-        # step-3 loop. Rebuild doesn't touch it, but keeping a
-        # dict here keeps the stub faithful to the real shape.
-        self._all_symbols = dict(all_symbols or {})
+        # _all_symbols is consumed by both _update_stability's
+        # step-3 loop AND _rebuild_cache_impl's indexed-files
+        # filter (`path in self._symbol_index._all_symbols`).
+        # When callers don't supply all_symbols explicitly, we
+        # default to the same key set as blocks — matching the
+        # real SymbolIndex invariant that every indexed file
+        # appears in both _all_symbols (FileSymbols objects)
+        # and is queryable via get_file_symbol_block. A test
+        # that wants to desync them (e.g., to exercise an
+        # error path) can pass all_symbols=... explicitly.
+        if all_symbols is None:
+            # Mirror blocks so rebuild's filter admits the
+            # same files the stub says it can render blocks
+            # for. None values are a cheap sentinel — rebuild
+            # only tests membership, not the value shape.
+            self._all_symbols = {k: None for k in self._blocks}
+        else:
+            self._all_symbols = dict(all_symbols)
 
     def get_file_symbol_block(self, path: str) -> str | None:
         return self._blocks.get(path)

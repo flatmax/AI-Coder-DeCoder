@@ -167,6 +167,29 @@ export class AppShell extends JRPCClient {
      * dialog renders with explicit pixel positioning.
      */
     _undockedPos: { type: Object, state: true },
+    /**
+     * Current primary mode — 'code' or 'doc'. Drives the
+     * segmented toggle in the header. Synced with the
+     * backend via get_current_state and mode-changed
+     * broadcasts. Defaults to 'code' matching the
+     * backend's default.
+     */
+    _mode: { type: String, state: true },
+    /**
+     * Cross-reference overlay toggle. Resets to false on
+     * every mode switch per specs4/3-llm/modes.md. When
+     * true, the other index's blocks participate in tier
+     * assembly alongside the primary.
+     */
+    _crossRefEnabled: { type: Boolean, state: true },
+    /**
+     * Whether the current caller is localhost. Non-localhost
+     * participants cannot initiate mode switches per
+     * specs4/4-features/collaboration.md. Disables the
+     * toggle UI when false. Defaults true so the UI is
+     * live in single-user mode without a collab check.
+     */
+    _isLocalhost: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -291,7 +314,6 @@ export class AppShell extends JRPCClient {
       cursor: pointer;
     }
     .dialog-header .minimize-button {
-      margin-left: auto;
       background: transparent;
       border: 1px solid transparent;
       color: var(--text-primary, #c9d1d9);
@@ -304,6 +326,73 @@ export class AppShell extends JRPCClient {
     .dialog-header .minimize-button:hover {
       opacity: 1;
       background: rgba(240, 246, 252, 0.05);
+    }
+
+    /* Mode toggle — segmented code/doc buttons plus a
+     * separate cross-ref overlay toggle. Sits between
+     * the tab buttons and the minimize button. Pushed
+     * right by margin-left: auto on the group wrapper
+     * so it hugs the minimize button regardless of how
+     * many tab buttons are present. */
+    .mode-toggle {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .mode-segmented {
+      display: inline-flex;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .mode-segmented .mode-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0.6rem;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      opacity: 0.65;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .mode-segmented .mode-btn:hover:not([disabled]) {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.05);
+    }
+    .mode-segmented .mode-btn.active {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .mode-segmented .mode-btn[disabled] {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    .crossref-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0.55rem;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      opacity: 0.65;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .crossref-btn:hover:not([disabled]) {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.05);
+    }
+    .crossref-btn.active {
+      opacity: 1;
+      background: rgba(210, 153, 34, 0.15);
+      border-color: rgba(210, 153, 34, 0.4);
+      color: #d29922;
+    }
+    .crossref-btn[disabled] {
+      opacity: 0.3;
+      cursor: not-allowed;
     }
 
     /* Resize handles — invisible hit zones at the edges.
@@ -494,6 +583,15 @@ export class AppShell extends JRPCClient {
     this._activeViewer = 'diff';
     this._repoName = '';
     this._initComplete = false;
+    // Mode toggle state. Hydrated from get_current_state
+    // once the backend snapshot arrives, and kept in sync
+    // via mode-changed window events.
+    this._mode = 'code';
+    this._crossRefEnabled = false;
+    // Assume localhost until the backend tells us
+    // otherwise. A future collab probe could flip this;
+    // for now single-user mode is always localhost.
+    this._isLocalhost = true;
     // Whether a file reopen is pending (waiting for the
     // startup overlay to dismiss before issuing the RPC).
     this._pendingReopen = false;
@@ -527,6 +625,7 @@ export class AppShell extends JRPCClient {
     this._onGridKeyDown = this._onGridKeyDown.bind(this);
     this._onGridKeyUp = this._onGridKeyUp.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
     // Dialog drag/resize handlers. Bound so add/remove
     // across document scope works on the same instance.
     this._onHeaderPointerDown =
@@ -576,6 +675,11 @@ export class AppShell extends JRPCClient {
     );
     window.addEventListener('beforeunload', this._onBeforeUnload);
     window.addEventListener('resize', this._onWindowResize);
+    // mode-changed fires when any client (including us)
+    // successfully switches modes or toggles cross-ref.
+    // Spec is explicit: all clients follow the server's
+    // authoritative mode via this broadcast.
+    window.addEventListener('mode-changed', this._onModeChanged);
   }
 
   disconnectedCallback() {
@@ -608,6 +712,7 @@ export class AppShell extends JRPCClient {
       this._onLoadDiffPanel,
     );
     window.removeEventListener('beforeunload', this._onBeforeUnload);
+    window.removeEventListener('mode-changed', this._onModeChanged);
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -671,6 +776,15 @@ export class AppShell extends JRPCClient {
         document.title = state.repo_name;
       }
       this._initComplete = !!state.init_complete;
+      // Hydrate mode state from the snapshot. Defaults
+      // cover older backends that don't report these
+      // fields yet.
+      if (typeof state.mode === 'string') {
+        this._mode = state.mode;
+      }
+      if (typeof state.cross_ref_enabled === 'boolean') {
+        this._crossRefEnabled = state.cross_ref_enabled;
+      }
       // If the backend reports init is already complete,
       // dismiss the startup overlay. Handles the common
       // race where Phase 2 finishes before the browser
@@ -1869,6 +1983,129 @@ export class AppShell extends JRPCClient {
   }
 
   // ---------------------------------------------------------------
+  // Mode toggle
+  // ---------------------------------------------------------------
+
+  /**
+   * Handle mode-changed broadcasts. Fires for our own
+   * switches and for any other admitted client's switches
+   * — collaborators follow the server's authoritative
+   * mode.
+   *
+   * Payload shape (per specs4/4-features/collaboration.md):
+   *   { mode: 'code' | 'doc', cross_ref_enabled?: bool }
+   * Cross-ref flag is only present on cross-ref toggle
+   * events; mode-only switches omit it and we leave the
+   * UI state alone (backend resets it to false on mode
+   * switch, but the follow-up broadcast carries the new
+   * mode value — the reset is implicit).
+   */
+  _onModeChanged(event) {
+    const detail = event.detail || {};
+    if (typeof detail.mode === 'string') {
+      if (detail.mode !== this._mode) {
+        // Mode actually changed — cross-ref resets per
+        // spec. Backend does the reset; we mirror it so
+        // the UI stays in sync without an extra RPC.
+        this._mode = detail.mode;
+        this._crossRefEnabled = false;
+      }
+    }
+    if (typeof detail.cross_ref_enabled === 'boolean') {
+      this._crossRefEnabled = detail.cross_ref_enabled;
+    }
+  }
+
+  /**
+   * Switch to the given primary mode. No-op if already
+   * in that mode (backend would also no-op, but saves an
+   * RPC). Disabled for non-localhost callers — the button
+   * is visually disabled, but we guard here too.
+   */
+  async _switchMode(mode) {
+    if (mode !== 'code' && mode !== 'doc') return;
+    if (mode === this._mode) return;
+    if (!this.call) return;
+    if (!this._isLocalhost) return;
+    const fn = this.call['LLMService.switch_mode'];
+    if (typeof fn !== 'function') return;
+    try {
+      const result = await fn(mode);
+      // Unwrap single-key envelope.
+      let payload = result;
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        const keys = Object.keys(result);
+        if (keys.length === 1) {
+          const inner = result[keys[0]];
+          if (inner && typeof inner === 'object') payload = inner;
+        }
+      }
+      if (payload && payload.error) {
+        const reason = payload.reason || payload.error;
+        this._showToast(`Mode switch failed: ${reason}`, 'warning');
+        return;
+      }
+      // mode-changed broadcast will update _mode; don't
+      // set it optimistically or we'll race the broadcast.
+      this._showToast(
+        mode === 'doc' ? 'Switched to document mode'
+                       : 'Switched to code mode',
+        'info',
+      );
+    } catch (err) {
+      this._showToast(
+        `Mode switch failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Toggle cross-reference mode. The backend holds
+   * authoritative state; we fire the RPC and let the
+   * mode-changed broadcast flip _crossRefEnabled.
+   */
+  async _toggleCrossRef() {
+    if (!this.call) return;
+    if (!this._isLocalhost) return;
+    const fn = this.call['LLMService.set_cross_reference'];
+    if (typeof fn !== 'function') return;
+    const next = !this._crossRefEnabled;
+    try {
+      const result = await fn(next);
+      let payload = result;
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        const keys = Object.keys(result);
+        if (keys.length === 1) {
+          const inner = result[keys[0]];
+          if (inner && typeof inner === 'object') payload = inner;
+        }
+      }
+      if (payload && payload.error) {
+        const reason = payload.reason || payload.error;
+        this._showToast(
+          `Cross-reference toggle failed: ${reason}`,
+          'warning',
+        );
+        return;
+      }
+      if (next) {
+        this._showToast(
+          'Cross-reference enabled — both indexes active',
+          'info',
+        );
+      } else {
+        this._showToast('Cross-reference disabled', 'info');
+      }
+    } catch (err) {
+      this._showToast(
+        `Cross-reference toggle failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Tabs
   // ---------------------------------------------------------------
 
@@ -1952,6 +2189,34 @@ export class AppShell extends JRPCClient {
             class="tab-button ${this.activeTab === 'settings' ? 'active' : ''}"
             @click=${() => this._switchTab('settings')}
           >⚙️ Settings</button>
+          <div class="mode-toggle">
+            <div class="mode-segmented" role="group"
+              aria-label="Context mode">
+              <button
+                class="mode-btn ${this._mode === 'code' ? 'active' : ''}"
+                ?disabled=${!this.call || !this._isLocalhost}
+                title="Code mode — symbol index feeds context"
+                aria-pressed=${this._mode === 'code'}
+                @click=${() => this._switchMode('code')}
+              >💻 Code</button>
+              <button
+                class="mode-btn ${this._mode === 'doc' ? 'active' : ''}"
+                ?disabled=${!this.call || !this._isLocalhost}
+                title="Document mode — doc index feeds context"
+                aria-pressed=${this._mode === 'doc'}
+                @click=${() => this._switchMode('doc')}
+              >📄 Doc</button>
+            </div>
+            <button
+              class="crossref-btn ${this._crossRefEnabled ? 'active' : ''}"
+              ?disabled=${!this.call || !this._isLocalhost}
+              title=${this._crossRefEnabled
+                ? 'Cross-reference ON — both indexes active (click to disable)'
+                : 'Cross-reference OFF — click to add the other index alongside'}
+              aria-pressed=${this._crossRefEnabled}
+              @click=${this._toggleCrossRef}
+            >🔀 ${this._crossRefEnabled ? 'Cross-ref ON' : 'Cross-ref'}</button>
+          </div>
           <button
             class="minimize-button"
             title=${this._minimized ? 'Expand' : 'Minimize'}

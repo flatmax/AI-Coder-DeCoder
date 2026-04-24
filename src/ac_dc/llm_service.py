@@ -2195,6 +2195,15 @@ class LLMService:
         # places every indexed file as a symbol: (code mode) or
         # doc: (doc mode) entry distributed across L0-L3 via
         # clustering. Keys use the mode-appropriate prefix.
+        #
+        # Filter the full repo file list to only files the
+        # active mode's index recognized. In code mode, that's
+        # the symbol index's _all_symbols. In doc mode, it will
+        # be the doc index's recognized files once Layer 2's
+        # doc-index sub-layer lands; for now doc mode produces
+        # an empty init list (no spurious doc: entries for .py,
+        # .js, etc.) and subsequent init + cascade leave the
+        # tracker empty until the doc index arrives.
         ref_index = self._symbol_index._ref_index
         file_list_raw = self._repo.get_flat_file_list()
         file_list = [f for f in file_list_raw.split("\n") if f]
@@ -2203,13 +2212,20 @@ class LLMService:
 
         if mode == Mode.DOC:
             prefix = "doc:"
+            # Doc index not yet available — no files qualify
+            # for doc: prefix. Leaves indexed_files empty.
+            indexed_files: list[str] = []
         else:
             prefix = "symbol:"
-        keys = [f"{prefix}{path}" for path in file_list]
+            indexed_files = [
+                path for path in file_list
+                if path in self._symbol_index._all_symbols
+            ]
+        keys = [f"{prefix}{path}" for path in indexed_files]
         tracker.initialize_with_keys(
             ref_index,
             keys=keys,
-            files=file_list,
+            files=indexed_files,
             l0_target_tokens=cache_target,
         )
 
@@ -3155,12 +3171,25 @@ class LLMService:
             file_list = [f for f in file_list_raw.split("\n") if f]
             self._symbol_index.index_repo(file_list)
 
-            # Step 2: Initialize tier assignments from reference graph.
+            # Step 2: Initialize tier assignments from reference
+            # graph. The tracker's key prefix must match the
+            # content type — symbol: only for files the symbol
+            # index actually recognized. Passing the raw file
+            # list would prefix every .md, .json, image, etc.
+            # with symbol:, producing spurious entries in the
+            # cache viewer and polluting cross-reference mode
+            # down the line. We intersect the full file list
+            # with _all_symbols (the authoritative indexed set)
+            # to produce the symbol-mode init list.
             ref_index = self._symbol_index._ref_index
             cache_target = self._config.cache_target_tokens_for_model()
             self._stability_tracker.set_cache_target_tokens(cache_target)
+            indexed_files = [
+                path for path in file_list
+                if path in self._symbol_index._all_symbols
+            ]
             self._stability_tracker.initialize_from_reference_graph(
-                ref_index, file_list, l0_target_tokens=cache_target
+                ref_index, indexed_files, l0_target_tokens=cache_target
             )
 
             # Step 3: Seed system prompt into L0.

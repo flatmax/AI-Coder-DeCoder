@@ -9,6 +9,7 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 - Structural extraction alone is insufficient when heading text is generic or repeated
 - API references, spec suites, compliance checklists, template-based reports share subheading patterns across sections
 - Semantic keywords per section let the LLM distinguish between structurally identical sections
+- SVG prose blocks (text elements exceeding the label-length threshold — see [document-index.md § Long Text Elements](document-index.md#long-text-elements--prose-blocks-for-enrichment)) flow through the same pipeline as markdown sections
 
 ## Underlying Technique
 
@@ -19,11 +20,12 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 
 ## Pipeline
 
-- Structural extraction produces an outline with headings, links, and raw section text
+- Structural extraction produces an outline with headings, links, and raw section text (or prose blocks for SVG)
 - Enricher receives the outline and the full document text
-- Eligible sections (above minimum character threshold) are collected into a batch
+- Eligible sections (above minimum character threshold) are collected into a batch — markdown sections and SVG prose blocks are mixed into the same batch when both are present in a single document
 - Batched extraction — all sections encoded in one forward pass for speed
-- Keywords attached to their respective headings
+- Keywords attached to their respective headings or prose blocks
+- Per-document TF-IDF corpus includes all eligible text from the document regardless of source (markdown sections and SVG prose blocks share the corpus), so contrastive scoring works uniformly
 
 ## Configuration Surface
 

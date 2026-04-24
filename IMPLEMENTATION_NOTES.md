@@ -2593,6 +2593,116 @@ Open carried over for later sub-layers:
 - **URL tier items.** `url:*` items are tracked as active items but the tier-builder doesn't yet render them. Layer 4.1 (URL service) will add the render path once the URL service exposes `get_url_content_by_hash` or an equivalent dispatch.
 - **Cross-reference mode activation.** `_assemble_tiered` passes `doc_legend=""` unconditionally. Layer 3.10 will thread the cross-ref state through to populate the second legend when the toggle is active. The assembly side already handles non-empty `doc_legend` correctly; the missing piece is just the service-level state.
 
+## Layer 2.8 — Document index (planned)
+
+Layer 2's deferred piece. specs4/2-indexing/document-index.md and specs4/2-indexing/keyword-enrichment.md spec the full design; the SVG section was revised in a recent commit to use geometric containment instead of font-size heuristics (see the latest state of document-index.md § SVG Extraction).
+
+The frontend mode toggle (code/doc/cross-ref) is live in `app-shell.js` and calls `LLMService.switch_mode` and `LLMService.set_cross_reference` successfully. Both backend RPCs accept the call and broadcast `modeChanged`. However doc mode produces an empty context because no doc index exists, and cross-reference toggle logs "doc index not available; toggle will take effect once Layer 2 doc-index lands." Layer 2.8 fills these in.
+
+### Motivation
+
+The user's request — "doc indexing so I can click doc mode or code mode AND have the ability to add indexes or symbols depending on the mode" — is only half delivered. Backend accepts mode switching, frontend toggle works, but doc mode produces no content and cross-reference is a no-op. This layer makes both materially useful.
+
+### Build order (one commit per numbered item)
+
+**2.8.1 — Doc index scaffold (markdown only, no keyword enrichment).** The narrowest slice that puts content in doc mode.
+
+- `src/ac_dc/doc_index/__init__.py` — package marker + public surface exports
+- `src/ac_dc/doc_index/models.py` — `DocHeading`, `DocLink`, `DocSectionRef`, `DocOutline` dataclasses per specs4's data model. Mutable (mirrors `Symbol`); caller code treats outline as read-only within a request boundary (D10 snapshot discipline)
+- `src/ac_dc/doc_index/extractors/__init__.py` — extractor registry `EXTRACTORS = {'.md': MarkdownExtractor, '.markdown': MarkdownExtractor}`. SVG added in 2.8.3
+- `src/ac_dc/doc_index/extractors/base.py` — `BaseDocExtractor` with `extract(path) -> DocOutline` contract
+- `src/ac_dc/doc_index/extractors/markdown.py` — regex line scanner. Extracts `#`..`######` headings with correct nesting, inline link references `[text](path)` and `![alt](path)`, content-type markers (`[table]`/`[code]`/`[formula]` via separator/fence/math detection), section line counts. Doc type detection via filename + path + heading patterns (`readme`, `spec`, `guide`, `reference`, `decision`, `notes`, `unknown`)
+- `src/ac_dc/doc_index/cache.py` — `DocCache(BaseCache[DocOutline])` with disk persistence (JSON sidecar per file in `.ac-dc/doc_cache/`, filename derived from path via `__` replacement, mtime + content_hash + keyword_model + outline). Unlike `SymbolCache` (in-memory only), doc cache persists because enrichment is expensive when it lands
+- `src/ac_dc/doc_index/reference_index.py` — `DocReferenceIndex`. Exposes the same `connected_components()` and `file_ref_count(path)` protocol the stability tracker consumes via `initialize_with_keys`. Builds heading-level incoming ref counts from `DocLink` source/target pairs with GitHub-style anchor slugging (lowercase, spaces→hyphens, strip punctuation). Image references produce `DocLink` entries with `is_image=True` so doc→SVG edges participate in clustering
+- `src/ac_dc/doc_index/compact_format.py` — `DocFormatter(BaseFormatter)`. Emits `path [type]:` header, indented heading tree with `(kw1, kw2)` keywords (omitted in 2.8.1 since no enrichment yet), `[content-type]` markers, `~Nln` size (omit when <5 lines), `←N` incoming refs (omit zero), `→target.md#Section` outgoing section refs indented under source heading, `→src/file.py` doc→code refs, final `links:` line with deduplicated document-level targets. Legend method returns doc-specific kind codes
+- `src/ac_dc/doc_index/index.py` — `DocIndex` orchestrator mirroring `SymbolIndex`. Methods: `index_file`, `index_repo`, `invalidate_file`, `get_doc_map(exclude_files=None)`, `get_legend()`, `get_file_doc_block(path)`, `get_signature_hash(path)`, `_all_outlines` dict keyed by repo-relative path
+- `tests/test_doc_index_markdown_extractor.py` — full test coverage mirroring `test_symbol_index_python_extractor.py` discipline. Heading extraction (all levels, ordering, line numbers), link extraction (inline, reference-style, image refs with extension scan), doc type detection matrix, content-type detection (table/code/formula), section size computation, edge cases (empty file, heading-only, prose-only, malformed)
+- `tests/test_doc_index_cache.py` — mtime round-trip, signature hash stability, disk persistence round-trip, corrupt sidecar cleanup, model-name mismatch triggers re-extraction, `keyword_model=None` accepts any entry (structure-only lookup)
+- `tests/test_doc_index_reference_index.py` — connected components, file_ref_count, heading-level incoming ref resolution, anchor slugging, image-link edges, unresolved anchors fall back to document-level
+- `tests/test_doc_index_formatter.py` — output shape matches specs4 examples, legend rendering, alias behavior inherited from `BaseFormatter` works correctly
+- `tests/test_doc_index_orchestrator.py` — per-file pipeline, multi-file with stale removal, cache hit/miss, read methods are snapshot-safe (D10)
+
+Ships markdown support. Doc mode with just markdown is already useful — many repos are markdown-heavy.
+
+**2.8.2 — Wire doc index into LLMService.** Makes doc mode and cross-reference produce content.
+
+- `src/ac_dc/llm_service.py` constructor — construct `DocIndex(repo_root=repo.root if repo else None)` alongside `SymbolIndex`. Don't make it optional; it always exists even when `symbol_index=None`
+- `_try_initialize_stability` — when in doc mode on first run (unlikely at startup but defensive), filter file list by doc index's recognized set. Apply `doc:` prefix to keys passed to `initialize_from_reference_graph`. In code mode, behavior unchanged (symbol files only with `symbol:` prefix per 5.12's bug fix)
+- `_rebuild_cache_impl` — replace the current `indexed_files: list[str] = []` stub for DOC mode with real dispatch. When `mode == Mode.DOC`, iterate `self._doc_index._all_outlines.keys()` to get recognized doc paths. Same logic applies to orphan distribution
+- `_build_tiered_content` — extend key-prefix dispatch. Add `doc:` branch that calls `self._doc_index.get_file_doc_block(path)` and appends to the tier's symbol fragments (shared list because doc blocks render alongside symbol blocks in the same content section). Currently `doc:` is silently skipped with a TODO
+- `_update_stability` — extend active-items construction with doc index entries (parallel to the existing symbol index loop). For every path in `doc_index._all_outlines` not in `_selected_files`, add `doc:{path}` with signature hash and formatted-block tokens. Removal on selection same as symbol side
+- `_assemble_tiered` — pass `doc_legend=self._doc_index.get_legend() if cross_ref_or_doc_mode else ""` so cross-reference mode and doc mode both get the appropriate legend in L0
+- `set_cross_reference` — remove the "doc index not available" log and actually wire enable/disable. On enable, add `doc:*` entries (code mode) or `symbol:*` entries (doc mode) to the active tracker. On disable, remove them via the tracker's key removal and mark affected tiers broken
+- `get_mode` — populate `doc_index_ready: True` once index_repo completes, `doc_index_building: bool` during the background index build, `cross_ref_ready: True` alongside
+- `get_current_state` — already includes `mode` and `cross_ref_enabled`; no changes needed
+- `get_file_map_block` — already handles `system:prompt` specially; add doc index dispatch so cache-tab map-block view shows doc outlines
+- Background build of doc index — add `_build_doc_index_background` method that runs in `_aux_executor` after `_try_initialize_stability` completes. Sends `startupProgress('doc_index', ...)` events so frontend shows progress
+- `tests/test_llm_service.py` — extend `TestBuildTieredContent` with doc-prefix dispatch tests. Add `TestDocIndexIntegration` covering startup ingestion, doc mode empty-then-populated, cross-reference enable adds items, cross-reference disable removes them
+- `tests/test_prompt_assembly.py` — extend with doc-legend rendering under the other-header, mixed symbol+doc tiers in cross-ref mode
+
+After 2.8.2 ships, doc mode actually works and cross-reference toggle has material effect. User-visible.
+
+**2.8.3 — SVG extractor.** Adds architecture diagrams and flowcharts to doc mode.
+
+- `src/ac_dc/doc_index/extractors/svg.py` — implement the design in specs4/2-indexing/document-index.md § SVG Extraction
+  - Containment model: parse rects/circles/ellipses/polygons/paths, compute root-canvas bounding boxes via transform composition (translate, scale, rotate, matrix), build containment tree by sorting shapes by area descending
+  - Text attachment: each text element attached to smallest containing box; root-level texts become document leaves
+  - Labeling: three-level priority (aria-label > inkscape:label > filtered id, then single-text-in-box, then neutral `(box)` identifier for multi-text unlabeled boxes). Auto-id regex: `^(g|group|path|rect|text|layer)(_?)\d+$`
+  - Long text handling: elements > 80 chars captured as prose blocks attached to the containing box (or at document root when no container exists). Prose blocks carry their raw text so 2.8.4's enrichment pipeline can process them. The outline structure itself emits `[prose]` leaves indented under their container; the text attachment lets enrichment round-trip keywords back without a separate data path
+  - Reading order: y-then-x sort at each nesting level (applies to prose blocks too — prose is emitted in reading order alongside its sibling boxes and labels)
+  - Shape-less fallback: spatial clustering by y-gap (2× median line height)
+  - Image links (`<a xlink:href=...>`) captured as `DocLink` with non-fragment filtering
+  - `DocOutline.prose_blocks` field — list of `{text, container_id, start_line?}` entries accessible to the enricher. Parallel to how markdown sections carry their text for enrichment
+- `src/ac_dc/doc_index/models.py` — add `DocProseBlock` dataclass (text, container_heading_id, keywords list) and a `prose_blocks` field on `DocOutline`
+- `src/ac_dc/doc_index/extractors/__init__.py` — register `.svg` → `SvgExtractor`
+- `tests/test_doc_index_svg_extractor.py` — test the documented cases from specs4 (labeled box nesting example, shape-less clustering example), plus edge cases (nested transforms, rotated shapes, path bounding boxes, anonymous group transparency, prose block capture with correct container attachment, prose at document root when no container, polygon containment, circle containment)
+- `src/ac_dc/doc_index/index.py` — SVG files with zero prose blocks skip the enrichment queue (common case — architecture diagrams are almost all short labels). Files with prose blocks go through enrichment just like markdown. Replace the originally-planned `is_enrichable(path)` with a per-outline check: `needs_enrichment(outline)` returns True when the outline has any markdown sections above `min_section_chars` OR any prose blocks
+- `src/ac_dc/doc_index/compact_format.py` — render prose blocks as `[prose] (kw1, kw2, kw3)` entries indented under their container box, matching the indentation level used for label leaves. Unenriched prose (before 2.8.4 completes or when KeyBERT unavailable) renders as `[prose]` alone
+
+After 2.8.3, doc mode includes architecture diagrams. Prose-bearing SVGs (rare — usually only in annotated tutorial diagrams) are ready for enrichment as soon as 2.8.4 lands. Label-only SVGs (the common case) produce enrichment-free outlines that ship immediately. Cross-reference mode in code mode shows markdown+SVG outlines alongside code symbols.
+
+**2.8.4 — Keyword enrichment via KeyBERT.** Adds the disambiguation layer for markdown sections AND SVG prose blocks.
+
+- Optional dependency — update `pyproject.toml` with `[project.optional-dependencies].docs = ["keybert>=0.8", "sentence-transformers>=3.0"]`
+- `src/ac_dc/doc_index/keyword_enricher.py` — implement specs4/2-indexing/keyword-enrichment.md
+  - Lazy model load with tristate `_available` flag (not-checked / True / False)
+  - Cache probe via `huggingface_hub.try_to_load_from_cache` for distinct "downloading" vs "loading" progress messages
+  - Batched extraction — single call to `KeyBERT.extract_keywords` with all eligible text (markdown sections AND SVG prose blocks) for transformer batch encoding. Prose blocks and sections mix freely in the batch; the enricher doesn't care about the source
+  - MMR diversity via `diversity=0.5` parameter
+  - Code stripping before extraction (fenced blocks, inline spans) — markdown only, prose blocks pass through verbatim
+  - Corpus-aware document-frequency filter (max_doc_freq threshold) — corpus is all eligible text from the document (sections + prose blocks)
+  - TF-IDF fallback for sections and prose blocks below `tfidf_fallback_chars`
+  - Adaptive top_n (+2 for sections ≥ 15 lines) — applies to prose blocks too when they're long enough
+  - Keywords attached back to source: markdown → `DocHeading.keywords`; SVG → `DocProseBlock.keywords`. The formatter reads from whichever field the outline carries
+- `src/ac_dc/doc_index/index.py` — two-phase extraction. Structure-only pass (instant, always available), enrichment pass (per-file, yields between files via `await asyncio.sleep(0)`). `enrich_single_file` method for the per-file background loop, replaces unenriched cache entry in-place. `queue_enrichment` method returns files needing enrichment for the caller to drive — includes SVG files that have prose blocks, skips SVG files that are label-only
+- `src/ac_dc/llm_service.py` — background enrichment loop after structure extraction. Progress events via `compactionEvent` with stages `doc_enrichment_queued`, `doc_enrichment_file_done`, `doc_enrichment_complete`. Eager pre-initialization of the model so first mode switch isn't blocked
+- `tests/test_doc_index_keyword_enricher.py` — batched extraction (mixed sections + prose blocks in one batch), MMR diversity, code stripping (markdown only), corpus filter with mixed-source corpus, TF-IDF fallback, graceful degradation when KeyBERT unavailable, SVG prose block enrichment round-trip (extract → enrich → formatter output contains keywords)
+- Frontend — app-shell and dialog updates to show header progress bar during enrichment (not a blocking overlay, specs4/5-webapp/shell.md § doc enrichment progress)
+
+After 2.8.4, document mode reaches feature parity with the spec. Repeated subheadings (API references, spec suites) become disambiguated via keywords. Annotated SVG diagrams (flowcharts with paragraph-style explanations, architecture docs with prose callouts) surface their prose content as searchable keywords in the outline rather than appearing as opaque `[prose]` placeholders.
+
+### Dependencies between commits
+
+- 2.8.1 has no dependencies; can ship standalone
+- 2.8.2 depends on 2.8.1 (wires the module into the service)
+- 2.8.3 depends on 2.8.1 (adds a new extractor to the registry)
+- 2.8.4 depends on 2.8.1 (enriches the outlines the extractor produced)
+
+2.8.3 and 2.8.4 are independent of each other. Ship in any order after 2.8.2.
+
+### Deferred for later (not part of 2.8)
+
+- SVG indexing progress bar in frontend — enrichment progress only, since SVG doesn't enrich
+- Alt+D keyboard shortcut for mode toggle — nice-to-have, specs4 doesn't mention it
+- Doc convert integration — already a separate feature (Layer 4.6); doc index picks up converted `.md` files automatically
+- Incremental re-enrichment on file save — users manually editing markdown get lazy re-extraction on next chat; specs4 calls this out as acceptable
+
+### Resumption protocol for 2.8
+
+A contributor restarting mid-Layer-2.8 reads this section, identifies which sub-commit is in progress from the file tree (e.g., `doc_index/extractors/markdown.py` present means 2.8.1 is underway), runs the relevant test file to see what's passing, and continues from the last known good state.
+
+---
+
 ## Deferred cleanup
 
 Temporary scaffolding installed to keep a test/output path quiet, with the fix scheduled for a specific future phase. Grep `TODO(phase-` across the tree to find markers.
