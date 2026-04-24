@@ -2098,19 +2098,33 @@ class LLMService:
         """Return current mode and cross-reference state.
 
         The frontend polls this to re-sync on reconnect and to
-        gate the doc-mode toggle button on doc-index readiness.
-        ``doc_index_ready`` reflects whether the doc index has
-        been built — currently always False since the doc
-        index hasn't landed.
+        gate the cross-reference toggle on doc-index readiness.
+
+        Readiness flags reflect the two-phase principle from
+        specs4/2-indexing/document-index.md § Two-Phase:
+
+        - ``doc_index_ready`` — structural extraction complete;
+          cross-reference toggle can activate.
+        - ``doc_index_building`` — structural extraction in
+          progress; UI can show a progress indicator.
+        - ``doc_index_enriched`` — keyword enrichment complete
+          (2.8.4). Always False in 2.8.2; outlines work
+          without keywords but annotations are empty.
+        - ``cross_ref_ready`` — currently mirrors
+          ``doc_index_ready``. Structural extraction is the
+          minimum readiness for cross-reference to produce
+          content; enrichment improves the quality of the
+          output but isn't a gate.
 
         Returned shape matches the specs4 RPC contract and is
         stable across both code and doc modes.
         """
         return {
             "mode": self._context.mode.value,
-            "doc_index_ready": False,  # Layer 2 doc-index pending
-            "doc_index_building": False,
-            "cross_ref_ready": False,  # Depends on doc index
+            "doc_index_ready": self._doc_index_ready,
+            "doc_index_building": self._doc_index_building,
+            "doc_index_enriched": self._doc_index_enriched,
+            "cross_ref_ready": self._doc_index_ready,
             "cross_ref_enabled": self._cross_ref_enabled,
         }
 

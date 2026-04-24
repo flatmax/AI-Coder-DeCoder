@@ -1388,12 +1388,18 @@ class TestMode:
     def test_get_mode_default_shape(
         self, service: LLMService
     ) -> None:
-        """get_mode returns the documented shape in default state."""
+        """get_mode returns the documented shape in default state.
+
+        Default state has all readiness flags False — tracker
+        hasn't run the background build yet, enrichment is
+        never complete in 2.8.2.
+        """
         result = service.get_mode()
         assert result == {
             "mode": "code",
             "doc_index_ready": False,
             "doc_index_building": False,
+            "doc_index_enriched": False,
             "cross_ref_ready": False,
             "cross_ref_enabled": False,
         }
@@ -1405,6 +1411,78 @@ class TestMode:
         state = service.get_current_state()
         assert "cross_ref_enabled" in state
         assert state["cross_ref_enabled"] is False
+
+    async def test_get_mode_reflects_doc_index_ready(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """After background build completes, ready flags flip True."""
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        # Pre-build: all readiness flags False.
+        before = svc.get_mode()
+        assert before["doc_index_ready"] is False
+        assert before["doc_index_building"] is False
+        assert before["cross_ref_ready"] is False
+
+        # Run the background build.
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Post-build: structural flags flip True, cross_ref_ready
+        # mirrors doc_index_ready.
+        after = svc.get_mode()
+        assert after["doc_index_ready"] is True
+        assert after["doc_index_building"] is False
+        assert after["cross_ref_ready"] is True
+
+    def test_get_mode_enriched_stays_false_in_2_8_2(
+        self, service: LLMService
+    ) -> None:
+        """doc_index_enriched is always False in 2.8.2.
+
+        Enrichment lands in 2.8.4. Until then the flag is
+        hardcoded False regardless of structural readiness.
+        Matches the two-phase principle from specs4 — structural
+        extraction and enrichment are independent phases.
+        """
+        # Fake a post-build state to prove enriched stays False
+        # even when structure is ready.
+        service._doc_index_ready = True
+        service._doc_index_building = False
+        # Enrichment hasn't run.
+        assert service._doc_index_enriched is False
+        result = service.get_mode()
+        assert result["doc_index_enriched"] is False
+
+    def test_get_mode_cross_ref_ready_mirrors_doc_index_ready(
+        self, service: LLMService
+    ) -> None:
+        """cross_ref_ready follows doc_index_ready.
+
+        Structural extraction is the minimum readiness for
+        cross-reference to produce content. Enrichment improves
+        output quality but isn't a gate — the toggle is available
+        once structure is ready, regardless of enrichment state.
+        """
+        # Initial state — both False.
+        result = service.get_mode()
+        assert result["cross_ref_ready"] == result["doc_index_ready"]
+        # Flip structural readiness without enrichment.
+        service._doc_index_ready = True
+        result = service.get_mode()
+        assert result["cross_ref_ready"] is True
+        assert result["doc_index_enriched"] is False
 
     def test_switch_to_same_mode_is_noop(
         self,
