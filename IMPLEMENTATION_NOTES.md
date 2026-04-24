@@ -1465,7 +1465,7 @@ Layer 5 (webapp) is the largest remaining surface. Delivering in sub-phases to k
 - **Phase 1 — Minimum viable shell** (delivered): AppShell root component, WebSocket connection via JRPCClient, startup overlay, reconnection with exponential backoff, dialog container with tab placeholders, toast system, server-push callbacks as window events.
 - **Phase 2 — Essential tabs** (delivered): Chat panel (send/receive/streaming/markdown/edit blocks/images/file mentions/retry prompts/compaction events/message action buttons), Files tab (file picker tree, selection sync), action bar with session controls.
 - **Phase 2e — Search and refinements** (delivered): message search, file search with test coverage, speech-to-text, history browser refinements (per-message action buttons, image thumbnails, context menu).
-- **Phase 3 — Richer components**: Diff viewer (Monaco), SVG viewer, Context/Cache tabs, Settings tab, file navigation grid, TeX preview, Doc convert tab.
+- **Phase 3 — Richer components** (delivered): Diff viewer (Monaco) with markdown preview + TeX preview + LSP + markdown link provider, SVG viewer with pan/zoom + SvgEditor (selection, drag, resize, vertex edit, path edit, inline text edit, multi-selection, marquee, undo, copy/paste) + presentation mode + context menu + copy-as-PNG + SVG↔text toggle + embedded image resolution, Context/Cache tabs, Settings tab, file navigation grid, Token HUD.
 
 ### 5.1 — Phase 1 Minimum viable shell — **delivered**
 
@@ -1646,6 +1646,19 @@ Floating transient overlay showing per-request token breakdown after each LLM re
   - Handles missing/partial data gracefully (placeholder text for each section)
 
 - `webapp/src/app-shell.js` — imports `token-hud.js`, renders `<ac-token-hud>` after the toast layer
+
+## Layer 5 — Phase 3 complete
+
+Phase 3 (richer components) is complete. All of: Monaco diff viewer with markdown preview, TeX preview, LSP integration, and markdown link provider; SVG viewer with synchronized pan/zoom, full SvgEditor visual editing surface (selection, drag-to-move, resize handles, vertex edit, path command parsing, inline text editing, multi-selection with marquee, undo stack, copy/paste/duplicate), presentation mode, context menu, copy-as-PNG, SVG↔text mode toggle, embedded image resolution; Context tab with Budget and Cache sub-views; Settings tab; file navigation grid with Alt+Arrow traversal and fullscreen HUD; Token HUD floating overlay.
+
+Remaining Layer 5 work:
+- **Doc Convert tab** — frontend UI for the DocConvert backend (Layer 4.6). Scan display, status badges, conversion progress, clean-tree gate rendering. The backend is complete; this is the UI surface.
+- **Dialog polish** — dragging, resizing, minimizing, position persistence to localStorage. Currently the dialog is fixed left-docked at 50% width.
+- **File picker enhancements** — git status badges (M/S/U/D), branch badge at root, context menu (stage/unstage/rename/delete/new file), three-state checkbox with exclusion, keyboard navigation, sort modes (mtime/size), active-file highlight from viewer events, middle-click path insertion.
+- **App shell polish** — state restoration cascade (get_current_state on setupDone), file/viewport persistence to localStorage, window resize handling, global keyboard shortcuts (Alt+1..4 for tabs, Alt+M for minimize, Ctrl+Shift+F prefill from selection).
+- **Collaboration UI** — admission flow (pending screen, admission toast), participant UI restrictions, connected users indicator, collab popover with share link.
+
+These are enhancement-level items that build on the working foundation. The core interaction loop (chat + file selection + file viewing + editing + search) is fully functional.
 
 ### 5.28 — Phase 3.5 File navigation grid — **delivered**
 
