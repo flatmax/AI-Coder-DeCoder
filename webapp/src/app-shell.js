@@ -312,6 +312,7 @@ export class AppShell extends JRPCClient {
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
+    this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
   }
 
   connectedCallback() {
@@ -327,6 +328,14 @@ export class AppShell extends JRPCClient {
     // another collaborator opens a file). Extension-based
     // routing picks the right viewer.
     window.addEventListener('navigate-file', this._onNavigateFile);
+    // toggle-svg-mode is dispatched by the SVG viewer's
+    // "</>" button (visual → text diff) and by the diff
+    // viewer's "🎨 Visual" button (text → visual). The
+    // app shell orchestrates the viewer swap.
+    window.addEventListener(
+      'toggle-svg-mode',
+      this._onToggleSvgMode,
+    );
     // load-diff-panel comes from the history browser's
     // context menu (Phase 2e.4). The diff viewer's
     // loadPanel method does the actual ad-hoc
@@ -344,6 +353,10 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'navigate-file',
       this._onNavigateFile,
+    );
+    window.removeEventListener(
+      'toggle-svg-mode',
+      this._onToggleSvgMode,
     );
     window.removeEventListener(
       'load-diff-panel',
@@ -623,6 +636,81 @@ export class AppShell extends JRPCClient {
         return;
       }
       viewer.loadPanel(content, panel, label);
+    });
+  }
+
+  /**
+   * Handle `toggle-svg-mode` from either viewer. Switches
+   * between the visual SVG viewer and the Monaco text diff
+   * editor for the same file, carrying content and dirty
+   * state across.
+   */
+  _onToggleSvgMode(event) {
+    const detail = event.detail || {};
+    const { path, target, modified, savedContent } = detail;
+    if (!path || !target) return;
+    this.updateComplete.then(() => {
+      const diffViewer =
+        this.shadowRoot?.querySelector('ac-diff-viewer');
+      const svgViewer =
+        this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (target === 'diff') {
+        // Visual → text diff.
+        this._activeViewer = 'diff';
+        if (diffViewer) {
+          diffViewer.closeFile(path);
+          diffViewer.openFile({
+            path,
+            virtualContent: undefined,
+          }).then(() => {
+            // If we have modified content from the SVG
+            // editor, update the diff viewer's file so
+            // visual edits appear as dirty in text mode.
+            if (typeof modified === 'string') {
+              const file = diffViewer._files?.find(
+                (f) => f.path === path,
+              );
+              if (file) {
+                file.modified = modified;
+                if (typeof savedContent === 'string') {
+                  file.savedContent = savedContent;
+                }
+                diffViewer._recomputeDirtyCount();
+                diffViewer._showEditor?.();
+              }
+            }
+          });
+        }
+      } else if (target === 'visual') {
+        // Text diff → visual.
+        this._activeViewer = 'svg';
+        if (svgViewer && diffViewer) {
+          // Read latest content from the diff viewer.
+          const diffFile = diffViewer._files?.find(
+            (f) => f.path === path,
+          );
+          const latestModified = diffFile?.modified;
+          const latestSaved = diffFile?.savedContent;
+          diffViewer.closeFile(path);
+          svgViewer.closeFile(path);
+          svgViewer.openFile({
+            path,
+            ...(typeof latestModified === 'string'
+              ? { modified: latestModified }
+              : {}),
+          }).then(() => {
+            if (typeof latestSaved === 'string') {
+              const svgFile = svgViewer._files?.find(
+                (f) => f.path === path,
+              );
+              if (svgFile) {
+                svgFile.savedContent = latestSaved;
+                svgViewer._recomputeDirtyCount();
+              }
+            }
+          });
+        }
+      }
     });
   }
 

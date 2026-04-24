@@ -76,6 +76,20 @@ import { SvgEditor } from './svg-editor.js';
 const _EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>';
 
 /**
+ * Interaction mode for the viewer. Controls which panel
+ * layout is rendered and how the right panel behaves.
+ *
+ *   - 'select' — default. Side-by-side panels, right
+ *     panel has SvgEditor for visual editing, left panel
+ *     has pan/zoom for reference.
+ *   - 'present' — full-width right panel only, left panel
+ *     hidden. Editor stays active so all editing operations
+ *     work. Used for focused editing or presenting.
+ */
+const _MODE_SELECT = 'select';
+const _MODE_PRESENT = 'present';
+
+/**
  * Pan/zoom configuration shared by both panels. Matches
  * specs4/5-webapp/svg-viewer.md#synchronized-panzoom —
  * mouse wheel zoom, click-drag pan, zoom bounds.
@@ -113,6 +127,8 @@ export class SvgViewer extends LitElement {
     _files: { type: Array, state: true },
     _activeIndex: { type: Number, state: true },
     _dirtyCount: { type: Number, state: true },
+    /** Interaction mode — 'select' (default) or 'present'. */
+    _mode: { type: String, state: true },
   };
 
   static styles = css`
@@ -177,6 +193,22 @@ export class SvgViewer extends LitElement {
       height: 100%;
     }
 
+    /* Presentation mode — left pane hidden, right pane
+     * fills the full width. The split container stays in
+     * the DOM; CSS hides the left pane so the editor's
+     * SVG element isn't detached (which would destroy
+     * the SvgEditor's event listeners and selection
+     * state). */
+    .split.present .pane-left {
+      display: none;
+    }
+    .split.present .pane-right {
+      flex: 1 1 100%;
+    }
+    .split.present .pane-right + .pane-right {
+      border-left: none;
+    }
+
     /* Pane labels — shown at the top-left of each panel
      * so users can tell which side is HEAD vs working. */
     .pane-label {
@@ -234,14 +266,20 @@ export class SvgViewer extends LitElement {
       50% { opacity: 0.55; }
     }
 
-    /* Fit button — floating overlay in the bottom-right
-     * corner. Sized similarly to the status LED so the
-     * two controls feel like siblings visually. Clicking
-     * resets both panels to their fit+center state. */
-    .fit-button {
+
+    /* Floating action buttons stack — presentation toggle
+     * and text-diff toggle sit above the fit button in
+     * the bottom-right corner. */
+    .floating-actions {
       position: absolute;
       bottom: 12px;
       right: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 10;
+    }
+    .float-btn {
       width: 28px;
       height: 28px;
       padding: 0;
@@ -255,14 +293,48 @@ export class SvgViewer extends LitElement {
       justify-content: center;
       font-size: 0.875rem;
       line-height: 1;
-      z-index: 10;
       backdrop-filter: blur(4px);
       transition: background 120ms ease, border-color 120ms ease;
     }
-    .fit-button:hover {
+    .float-btn:hover {
       background: rgba(240, 246, 252, 0.1);
       border-color: rgba(240, 246, 252, 0.4);
       color: var(--text-primary, #c9d1d9);
+    }
+    .float-btn.active {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: rgba(88, 166, 255, 0.4);
+      color: var(--accent-primary, #58a6ff);
+    }
+
+    /* Context menu — positioned fixed at click point. */
+    .context-menu {
+      position: fixed;
+      z-index: 200;
+      background: rgba(22, 27, 34, 0.98);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      padding: 0.25rem 0;
+      min-width: 180px;
+      display: flex;
+      flex-direction: column;
+    }
+    .context-menu-item {
+      background: transparent;
+      border: none;
+      color: var(--text-primary, #c9d1d9);
+      text-align: left;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.8125rem;
+      font-family: inherit;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .context-menu-item:hover {
+      background: rgba(88, 166, 255, 0.12);
     }
   `;
 
@@ -271,6 +343,7 @@ export class SvgViewer extends LitElement {
     this._files = [];
     this._activeIndex = -1;
     this._dirtyCount = 0;
+    this._mode = _MODE_SELECT;
     // Concurrent-openFile guard. Same pattern as diff viewer.
     this._openingPath = null;
     // Last-rendered content per side. Lets `updated()`
@@ -300,8 +373,16 @@ export class SvgViewer extends LitElement {
     // Bound editor change handler — syncs edited SVG back
     // to the file's modified content and recomputes dirty.
     this._onEditorChange = this._onEditorChange.bind(this);
+    /**
+     * Context menu state. Null when closed; `{x, y}` in
+     * viewport coordinates when open. Only rendered when
+     * the right panel is visible and has content.
+     */
+    this._contextMenu = null;
     // Bound handlers for add/remove symmetry.
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onContextMenu = this._onContextMenu.bind(this);
+    this._onContextDismiss = this._onContextDismiss.bind(this);
     this._onLeftPan = this._onLeftPan.bind(this);
     this._onLeftZoom = this._onLeftZoom.bind(this);
     this._onRightPan = this._onRightPan.bind(this);
@@ -316,10 +397,12 @@ export class SvgViewer extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     document.addEventListener('keydown', this._onKeyDown);
+    document.addEventListener('click', this._onContextDismiss);
   }
 
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
+    document.removeEventListener('click', this._onContextDismiss);
     this._disposeEditor();
     this._disposePanZoom();
     super.disconnectedCallback();
@@ -378,6 +461,8 @@ export class SvgViewer extends LitElement {
       this._activeIndex = -1;
       this._lastLeftContent = null;
       this._lastRightContent = null;
+      this._mode = _MODE_SELECT;
+      this._contextMenu = null;
     } else if (wasActive) {
       this._activeIndex = Math.min(idx, newFiles.length - 1);
     } else if (idx < this._activeIndex) {
@@ -529,11 +614,16 @@ export class SvgViewer extends LitElement {
     }
     const file = this._files[this._activeIndex];
     if (!file) return;
-    const leftContainer =
-      this.shadowRoot?.querySelector('.pane-left .svg-container');
     const rightContainer =
       this.shadowRoot?.querySelector('.pane-right .svg-container');
-    if (!leftContainer || !rightContainer) return;
+    if (!rightContainer) return;
+    // In presentation mode the left pane is display:none.
+    // Skip its injection and pan-zoom init to avoid wasted
+    // work on a hidden element.
+    const isPresent = this._mode === _MODE_PRESENT;
+    const leftContainer = isPresent
+      ? null
+      : this.shadowRoot?.querySelector('.pane-left .svg-container');
     const leftContent = file.original || _EMPTY_SVG;
     const rightContent = file.modified || _EMPTY_SVG;
     // Track whether either side actually changed. If yes,
@@ -544,8 +634,8 @@ export class SvgViewer extends LitElement {
     // Skip reassignment when content hasn't changed —
     // innerHTML assignment forces a full SVG re-parse
     // which flashes the visual.
-    if (leftContent !== this._lastLeftContent) {
-      leftContainer.innerHTML = leftContent;
+    if (!isPresent && leftContent !== this._lastLeftContent) {
+      if (leftContainer) leftContainer.innerHTML = leftContent;
       this._lastLeftContent = leftContent;
       changed = true;
     }
@@ -569,7 +659,13 @@ export class SvgViewer extends LitElement {
       // Dispose any prior editor before re-init — the old
       // editor's SVG reference is about to become stale.
       this._disposeEditor();
-      this._initPanZoom(leftContainer, rightContainer);
+      if (!isPresent && leftContainer) {
+        this._initPanZoom(leftContainer, rightContainer);
+      } else {
+        // Presentation mode — no left panel to sync. Dispose
+        // any existing pan-zoom so stale refs don't linger.
+        this._disposePanZoom();
+      }
       this._initEditor(rightSvg);
     }
   }
@@ -874,15 +970,248 @@ export class SvgViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Presentation mode
+  // ---------------------------------------------------------------
+
+  _togglePresentation() {
+    if (this._activeIndex < 0) return;
+    this._mode =
+      this._mode === _MODE_PRESENT ? _MODE_SELECT : _MODE_PRESENT;
+    this._contextMenu = null;
+    // Content caches cleared so _injectSvgContent re-injects
+    // into the new layout. In presentation mode the left pane
+    // is display:none, so we skip its injection and pan-zoom
+    // init to avoid wasted work on a hidden element.
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    // Re-inject after Lit commits the new template. The
+    // updated() hook's _injectSvgContent call will fire
+    // automatically because _mode is reactive.
+  }
+
+  // ---------------------------------------------------------------
+  // Context menu
+  // ---------------------------------------------------------------
+
+  _onContextMenu(event) {
+    if (this._activeIndex < 0) return;
+    event.preventDefault();
+    this._contextMenu = {
+      x: event.clientX,
+      y: event.clientY,
+    };
+    this.requestUpdate();
+  }
+
+  _onContextDismiss(event) {
+    if (!this._contextMenu) return;
+    const path = event.composedPath ? event.composedPath() : [];
+    for (const el of path) {
+      if (
+        el &&
+        el.classList &&
+        el.classList.contains('context-menu')
+      ) {
+        return;
+      }
+    }
+    this._contextMenu = null;
+    this.requestUpdate();
+  }
+
+  // ---------------------------------------------------------------
+  // Copy as PNG
+  // ---------------------------------------------------------------
+
+  /**
+   * Render the current modified SVG to a PNG and copy to
+   * clipboard. Falls back to a download when clipboard
+   * write isn't available. Emits a toast event for user
+   * feedback.
+   */
+  async _copyAsPng() {
+    this._contextMenu = null;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    const svgText = file.modified || '';
+    if (!svgText) return;
+    try {
+      // Parse dimensions from the SVG.
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const svgEl = doc.querySelector('svg');
+      let width = 1920;
+      let height = 1080;
+      if (svgEl) {
+        const vb = svgEl.getAttribute('viewBox');
+        if (vb) {
+          const parts = vb.split(/[\s,]+/).map(Number);
+          if (parts.length >= 4 && parts[2] > 0 && parts[3] > 0) {
+            width = parts[2];
+            height = parts[3];
+          }
+        }
+        const w = parseFloat(svgEl.getAttribute('width'));
+        const h = parseFloat(svgEl.getAttribute('height'));
+        if (w > 0 && h > 0) {
+          width = w;
+          height = h;
+        }
+      }
+      // Scale for quality.
+      const maxDim = Math.max(width, height);
+      let scale = maxDim < 1024 ? 4 : 2;
+      const maxPx = 4096;
+      if (maxDim * scale > maxPx) {
+        scale = maxPx / maxDim;
+      }
+      const canvasWidth = Math.round(width * scale);
+      const canvasHeight = Math.round(height * scale);
+      // Render to canvas.
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+      const blob = new Blob([svgText], {
+        type: 'image/svg+xml;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+      URL.revokeObjectURL(url);
+      // Try clipboard write.
+      if (
+        navigator.clipboard &&
+        typeof navigator.clipboard.write === 'function' &&
+        typeof ClipboardItem !== 'undefined'
+      ) {
+        try {
+          const item = new ClipboardItem({
+            'image/png': new Promise((resolve) => {
+              canvas.toBlob(
+                (b) => resolve(b),
+                'image/png',
+              );
+            }),
+          });
+          await navigator.clipboard.write([item]);
+          this._emitToast('Image copied to clipboard', 'success');
+          return;
+        } catch (_) {
+          // Fall through to download.
+        }
+      }
+      // Download fallback.
+      canvas.toBlob((b) => {
+        if (!b) {
+          this._emitToast('Failed to create image', 'error');
+          return;
+        }
+        const a = document.createElement('a');
+        const basename = (file.path || 'image')
+          .split('/')
+          .pop()
+          .replace(/\.svg$/i, '');
+        a.download = `${basename}.png`;
+        a.href = URL.createObjectURL(b);
+        a.click();
+        URL.revokeObjectURL(a.href);
+        this._emitToast('Image downloaded as PNG', 'info');
+      }, 'image/png');
+    } catch (err) {
+      this._emitToast(
+        `Failed to copy image: ${err?.message || 'unknown error'}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // SVG ↔ text diff toggle
+  // ---------------------------------------------------------------
+
+  /**
+   * Dispatch a toggle-svg-mode event to switch from the
+   * visual SVG viewer to the Monaco text diff editor.
+   * The app shell handles the actual viewer swap.
+   */
+  _switchToTextDiff() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    // Capture latest content from the editor before
+    // switching. The SvgEditor may have mutations not
+    // yet serialized to file.modified.
+    this._onEditorChange();
+    this.dispatchEvent(
+      new CustomEvent('toggle-svg-mode', {
+        detail: {
+          path: file.path,
+          target: 'diff',
+          modified: file.modified,
+          savedContent: file.savedContent,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  _emitToast(message, type = 'info') {
+    window.dispatchEvent(
+      new CustomEvent('ac-toast', {
+        detail: { message, type },
+        bubbles: false,
+      }),
+    );
+  }
+
+  // ---------------------------------------------------------------
   // Keyboard shortcuts
   // ---------------------------------------------------------------
 
   _onKeyDown(event) {
     if (!this.isConnected) return;
     if (this._activeIndex < 0) return;
+    // F11 toggles presentation mode (no Ctrl needed).
+    if (event.key === 'F11') {
+      if (this._eventTargetInsideUs(event)) {
+        event.preventDefault();
+        this._togglePresentation();
+      }
+      return;
+    }
+    // Escape exits presentation mode.
+    if (
+      event.key === 'Escape' &&
+      this._mode === _MODE_PRESENT
+    ) {
+      if (this._eventTargetInsideUs(event)) {
+        event.preventDefault();
+        this._togglePresentation();
+      }
+      return;
+    }
     const ctrl = event.ctrlKey || event.metaKey;
     if (!ctrl) return;
     if (!this._eventTargetInsideUs(event)) return;
+    // Ctrl+Shift+C — copy as PNG.
+    if (
+      (event.key === 'c' || event.key === 'C') &&
+      event.shiftKey
+    ) {
+      event.preventDefault();
+      this._copyAsPng();
+      return;
+    }
     if (event.key === 's' || event.key === 'S') {
       event.preventDefault();
       const file = this._files[this._activeIndex];
@@ -951,13 +1280,16 @@ export class SvgViewer extends LitElement {
       `;
     }
     const ledClass = this._statusLedClass();
+    const isPresent = this._mode === _MODE_PRESENT;
     return html`
-      <div class="split">
+      <div class="split ${isPresent ? 'present' : ''}">
         <div class="pane pane-left">
           <div class="pane-label">Original</div>
           <div class="svg-container"></div>
         </div>
-        <div class="pane pane-right">
+        <div class="pane pane-right"
+          @contextmenu=${this._onContextMenu}
+        >
           <div class="pane-label">Modified</div>
           <div class="svg-container"></div>
         </div>
@@ -967,15 +1299,54 @@ export class SvgViewer extends LitElement {
           aria-label=${this._statusLedTitle()}
           @click=${this._onStatusLedClick}
         ></div>
-        <button
-          class="fit-button"
-          title="Fit to view"
-          aria-label="Fit SVG to view"
-          @click=${this._onFitClick}
-        >
-          ⊡
-        </button>
+        <div class="floating-actions">
+          <button
+            class="float-btn ${isPresent ? 'active' : ''}"
+            title=${isPresent
+              ? 'Exit presentation (Escape)'
+              : 'Presentation mode (F11)'}
+            aria-label=${isPresent
+              ? 'Exit presentation mode'
+              : 'Enter presentation mode'}
+            @click=${this._togglePresentation}
+          >
+            ◱
+          </button>
+          <button
+            class="float-btn"
+            title="Switch to text diff view"
+            aria-label="Switch to text diff view"
+            @click=${this._switchToTextDiff}
+          >
+            &lt;/&gt;
+          </button>
+          <button
+            class="float-btn"
+            title="Fit to view"
+            aria-label="Fit SVG to view"
+            @click=${this._onFitClick}
+          >
+            ⊡
+          </button>
+        </div>
       </div>
+      ${this._contextMenu
+        ? html`
+            <div
+              class="context-menu"
+              style="left: ${this._contextMenu.x}px; top: ${this._contextMenu.y}px;"
+              role="menu"
+            >
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                @click=${this._copyAsPng}
+              >
+                📋 Copy as PNG
+              </button>
+            </div>
+          `
+        : ''}
     `;
   }
 }

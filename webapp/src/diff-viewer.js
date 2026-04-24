@@ -2018,6 +2018,43 @@ export class DiffViewer extends LitElement {
     );
   }
 
+  /**
+   * Whether the active file is an SVG — the "🎨 Visual"
+   * button is rendered only for these.
+   */
+  _isSvgFile(file) {
+    if (!file || typeof file.path !== 'string') return false;
+    return file.path.toLowerCase().endsWith('.svg');
+  }
+
+  /**
+   * Dispatch toggle-svg-mode to switch from the text diff
+   * editor to the visual SVG viewer.
+   */
+  _switchToVisualSvg() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    // Read live content from the editor.
+    const modifiedEditor = this._getModifiedEditor();
+    let content = file.modified;
+    try {
+      content = modifiedEditor?.getValue?.() ?? file.modified;
+    } catch (_) {}
+    this.dispatchEvent(
+      new CustomEvent('toggle-svg-mode', {
+        detail: {
+          path: file.path,
+          target: 'visual',
+          modified: content,
+          savedContent: file.savedContent,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _onContentChange() {
     if (this._activeIndex < 0) return;
     const file = this._files[this._activeIndex];
@@ -2690,6 +2727,15 @@ export class DiffViewer extends LitElement {
             title="Toggle markdown preview"
             aria-label="Toggle markdown preview"
           >👁 Preview</button>`
+        : ''}
+      ${this._isSvgFile(activeFile)
+        ? html`<button
+            class="preview-button"
+            style="right: ${showPreviewButton ? '110px' : '46px'}"
+            @click=${this._switchToVisualSvg}
+            title="Switch to visual SVG editor"
+            aria-label="Switch to visual SVG editor"
+          >🎨 Visual</button>`
         : ''}
       <div
         class="status-led ${ledClass}"

@@ -1007,14 +1007,14 @@ describe('SvgViewer fit button', () => {
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const btn = el.shadowRoot.querySelector('.fit-button');
+    const btn = el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]');
     expect(btn).toBeTruthy();
   });
 
   it('does not render the fit button in empty state', async () => {
     const el = mountViewer();
     await settle(el);
-    expect(el.shadowRoot.querySelector('.fit-button')).toBe(null);
+    expect(el.shadowRoot.querySelector('.floating-actions')).toBe(null);
   });
 
   it('click calls fit and center on both panels', async () => {
@@ -1023,7 +1023,7 @@ describe('SvgViewer fit button', () => {
     await el.openFile({ path: 'a.svg' });
     await settle(el);
     const [leftInst, rightInst] = svgPanZoom._instances;
-    el.shadowRoot.querySelector('.fit-button').click();
+    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
     expect(leftInst.fit).toHaveBeenCalled();
     expect(leftInst.center).toHaveBeenCalled();
     expect(rightInst.fit).toHaveBeenCalled();
@@ -1039,7 +1039,7 @@ describe('SvgViewer fit button', () => {
     await el.openFile({ path: 'a.svg' });
     await settle(el);
     const [leftInst, rightInst] = svgPanZoom._instances;
-    el.shadowRoot.querySelector('.fit-button').click();
+    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
     expect(leftInst.resize).toHaveBeenCalled();
     expect(rightInst.resize).toHaveBeenCalled();
   });
@@ -1070,7 +1070,7 @@ describe('SvgViewer fit button', () => {
         cascaded = true;
       }
     });
-    el.shadowRoot.querySelector('.fit-button').click();
+    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
     expect(cascaded).toBe(false);
   });
 
@@ -1084,7 +1084,7 @@ describe('SvgViewer fit button', () => {
     el._panZoomRight = null;
     // Should not throw.
     expect(() =>
-      el.shadowRoot.querySelector('.fit-button').click(),
+      el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click(),
     ).not.toThrow();
   });
 });

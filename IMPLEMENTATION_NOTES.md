@@ -1628,6 +1628,40 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.24 — Phase 3.2d SVG viewer presentation, context menu, copy-as-PNG, mode toggle — **delivered**
+
+Adds four features to the SVG viewer surface:
+
+1. **Presentation mode** — `◱` button (or F11) toggles left panel hidden, right panel full-width. Editor stays active. Escape exits. CSS `display: none` on the left pane rather than DOM removal so the editor's SVG element and event listeners survive the toggle. Pan-zoom skipped in presentation mode (no left panel to sync). Mode resets to select when the last file closes.
+
+2. **Context menu** — right-click on the right panel shows a "📋 Copy as PNG" item. Positioned at click coordinates via `position: fixed`. Dismissed on click outside (document-level listener with `composedPath()` containment check) or on Escape.
+
+3. **Copy as PNG** — renders the current modified SVG to a canvas with white background and quality scaling (up to 4× for small SVGs, capped at 4096px). Clipboard write via `ClipboardItem` with a promise-of-blob (preserves user-gesture context across async). Download fallback when clipboard API unavailable. Toast feedback via `ac-toast` window event.
+
+4. **SVG ↔ text diff mode toggle** — `</>` button on the SVG viewer dispatches `toggle-svg-mode` with `target: 'diff'`. `🎨 Visual` button on the diff viewer dispatches `toggle-svg-mode` with `target: 'visual'`. App shell handler orchestrates the swap: captures content + savedContent from the source viewer, closes the file on both viewers, opens on the target with carried state so dirty tracking survives the transition.
+
+- `webapp/src/svg-viewer.js` — additions:
+  - `_MODE_SELECT` / `_MODE_PRESENT` constants and `_mode` reactive property
+  - `_togglePresentation()` — flips mode, clears content caches so re-injection fires
+  - `.split.present` CSS hides left pane, expands right to 100%
+  - `.floating-actions` stack replaces the standalone fit button — three buttons (presentation toggle, text-diff toggle, fit)
+  - `_onContextMenu` / `_onContextDismiss` — context menu lifecycle
+  - `_copyAsPng()` — full pipeline: parse dimensions → scale → canvas → clipboard or download
+  - `_switchToTextDiff()` — captures editor content and dispatches `toggle-svg-mode`
+  - `_emitToast` routes through `ac-toast` window event (matches app shell's toast layer)
+  - F11 and Escape keyboard handling in `_onKeyDown`
+  - Ctrl+Shift+C for copy-as-PNG
+  - Presentation mode skips left-panel SVG injection and pan-zoom init
+
+- `webapp/src/diff-viewer.js` — additions:
+  - `_isSvgFile(file)` helper
+  - `_switchToVisualSvg()` — reads live editor content and dispatches `toggle-svg-mode`
+  - `🎨 Visual` button rendered when active file is `.svg`
+
+- `webapp/src/app-shell.js` — additions:
+  - `_onToggleSvgMode` handler — catches `toggle-svg-mode` window events, routes content between viewers with dirty-state preservation
+  - Event listener wiring in connectedCallback/disconnectedCallback
+
 ### 5.23 — Phase 3.2c.5 SvgEditor undo stack + copy/paste — **delivered**
 
 Adds undo stack (SVG innerHTML snapshots before each mutation, Ctrl+Z to restore, bounded to 50 entries) and internal copy/paste (Ctrl+C/V/D). Completes the Phase 3.2c editing surface.
