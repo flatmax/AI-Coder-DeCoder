@@ -1628,6 +1628,26 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.28 — Phase 3.5 File navigation grid — **delivered**
+
+Implements the 2D spatial file navigation grid with Alt+Arrow traversal and fullscreen HUD overlay. Every file-open action creates a new node adjacent to the current node; Alt+Arrow keys traverse spatially; a semi-transparent HUD appears while Alt is held showing the grid structure with connector lines and travel counts.
+
+- `webapp/src/file-nav.js` — `FileNav` LitElement component with:
+  - Grid data model: `_nodes` Map, `_gridIndex` position→id lookup, `_travelCounts` per-edge, `_currentNodeId`, auto-incrementing `_nextId`
+  - `openFile(path)` — same-file suppression, adjacent same-file reuse (increments travel count), placement in PLACEMENT_ORDER priority (right → up → down → left), replacement when surrounded (REPLACEMENT_ORDER tie-break: left → down → up → right)
+  - `navigateDirection(dir)` — adjacent lookup with edge wrapping (left wraps to rightmost on same row, etc.), travel count increment
+  - `show()` / `hide()` — HUD visibility with fade-out
+  - `clear()` — resets grid, keeps current file as root
+  - Replacement undo — 3-second toast with Undo button, restores removed node + travel counts
+  - HUD rendering — centered on current node, connector lines between adjacent nodes, travel counts at midpoints, file-type-colored node cards with truncated basenames, current-node highlight, same-file glow
+  - File type colors following visible spectrum by language family
+  - Click-to-teleport on any node (dispatches navigate-file with `_fromNav` flag)
+- `webapp/src/app-shell.js` — integration:
+  - Imports `file-nav.js`, renders `<ac-file-nav>` before the dialog
+  - `_onGridKeyDown` (capture phase) — Alt+Arrow consumed when grid has nodes, navigates direction, shows HUD, routes to viewer; Escape hides HUD
+  - `_onGridKeyUp` — Alt release hides HUD
+  - `_onNavigateFile` — registers files with the grid unless `_fromNav` or `_refresh` flags are set
+
 ### 5.27 — Phase 3.4 Context tab (Budget sub-view) — **delivered**
 
 Wires the Context dialog tab to `LLMService.get_context_breakdown`. Budget/Cache pill toggle at the top; active sub-view persisted to localStorage. Both sub-views listen for `stream-complete`, `files-changed`, and `mode-changed` window events — refresh when visible, mark stale when hidden, auto-refresh on `onTabVisible()`.

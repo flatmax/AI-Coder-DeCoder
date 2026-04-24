@@ -29,6 +29,7 @@ import './diff-viewer.js';
 import './svg-viewer.js';
 import './settings-tab.js';
 import './context-tab.js';
+import './file-nav.js';
 import { viewerForPath } from './viewer-routing.js';
 
 /**
@@ -315,6 +316,8 @@ export class AppShell extends JRPCClient {
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
     this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
+    this._onGridKeyDown = this._onGridKeyDown.bind(this);
+    this._onGridKeyUp = this._onGridKeyUp.bind(this);
   }
 
   connectedCallback() {
@@ -330,6 +333,10 @@ export class AppShell extends JRPCClient {
     // another collaborator opens a file). Extension-based
     // routing picks the right viewer.
     window.addEventListener('navigate-file', this._onNavigateFile);
+    // Alt+Arrow file navigation grid — capture phase so
+    // we intercept before Monaco's word-navigation bindings.
+    document.addEventListener('keydown', this._onGridKeyDown, true);
+    document.addEventListener('keyup', this._onGridKeyUp, true);
     // toggle-svg-mode is dispatched by the SVG viewer's
     // "</>" button (visual → text diff) and by the diff
     // viewer's "🎨 Visual" button (text → visual). The
@@ -356,6 +363,8 @@ export class AppShell extends JRPCClient {
       'navigate-file',
       this._onNavigateFile,
     );
+    document.removeEventListener('keydown', this._onGridKeyDown, true);
+    document.removeEventListener('keyup', this._onGridKeyUp, true);
     window.removeEventListener(
       'toggle-svg-mode',
       this._onToggleSvgMode,
@@ -599,6 +608,13 @@ export class AppShell extends JRPCClient {
     if (typeof path !== 'string' || !path) return;
     const target = viewerForPath(path);
     if (!target) return;
+    // Register with the file navigation grid unless the
+    // event came from the grid itself or is a programmatic
+    // refresh.
+    if (!detail._fromNav && !detail._refresh) {
+      const nav = this._getFileNav();
+      if (nav) nav.openFile(path);
+    }
     // Defer until the viewers exist in the DOM. Normally
     // they're rendered from the first template commit and
     // this is synchronous; the guard protects against
@@ -716,6 +732,89 @@ export class AppShell extends JRPCClient {
     });
   }
 
+  // ---------------------------------------------------------------
+  // File navigation grid (Alt+Arrow)
+  // ---------------------------------------------------------------
+
+  _getFileNav() {
+    return this.shadowRoot?.querySelector('ac-file-nav') || null;
+  }
+
+  /**
+   * Alt+Arrow keydown — navigate the file grid. When the
+   * grid has nodes, all Alt+Arrow events are consumed
+   * (preventDefault + stopPropagation) to prevent Monaco's
+   * word-navigation and line-move bindings from firing.
+   *
+   * Escape while the HUD is visible hides it immediately.
+   *
+   * Capture phase (`true` in addEventListener) ensures we
+   * intercept before Monaco sees the event.
+   */
+  _onGridKeyDown(event) {
+    const nav = this._getFileNav();
+    if (!nav) return;
+
+    // Escape hides the HUD if visible.
+    if (event.key === 'Escape' && nav.visible) {
+      event.preventDefault();
+      event.stopPropagation();
+      nav.visible = false;
+      nav.classList.remove('fading');
+      return;
+    }
+
+    // Only process Alt+Arrow.
+    if (!event.altKey) return;
+    const dirMap = {
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+      ArrowUp: 'up',
+      ArrowDown: 'down',
+    };
+    const dir = dirMap[event.key];
+    if (!dir) return;
+
+    // When the grid has nodes, consume the event regardless
+    // of whether a neighbor exists — prevents Monaco's
+    // Alt+Arrow bindings from firing while the HUD is
+    // potentially visible.
+    if (!nav.hasNodes) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const targetPath = nav.navigateDirection(dir);
+    nav.show();
+    nav.requestUpdate();
+
+    if (targetPath) {
+      // Route to the appropriate viewer.
+      const target = viewerForPath(targetPath);
+      if (target) {
+        this.updateComplete.then(() => {
+          const viewer =
+            target === 'svg'
+              ? this.shadowRoot?.querySelector('ac-svg-viewer')
+              : this.shadowRoot?.querySelector('ac-diff-viewer');
+          if (viewer) {
+            viewer.openFile({ path: targetPath });
+          }
+        });
+      }
+    }
+  }
+
+  /**
+   * Alt keyup — hide the HUD when Alt is released.
+   */
+  _onGridKeyUp(event) {
+    if (event.key !== 'Alt') return;
+    const nav = this._getFileNav();
+    if (nav && nav.visible) {
+      nav.hide();
+    }
+  }
+
   /**
    * Handle `active-file-changed` bubbling up from either
    * viewer. When a viewer reports it has an active file,
@@ -795,6 +894,10 @@ export class AppShell extends JRPCClient {
           @active-file-changed=${this._onActiveFileChanged}
         ></ac-svg-viewer>
       </div>
+
+      <ac-file-nav
+        @navigate-file=${this._onNavigateFile}
+      ></ac-file-nav>
 
       <div class="dialog">
         ${this.connectionState === 'disconnected' ? html`
