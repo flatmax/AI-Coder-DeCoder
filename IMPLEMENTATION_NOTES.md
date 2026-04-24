@@ -1628,6 +1628,16 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.25 — Phase 3.2e SVG embedded image resolution — **delivered**
+
+Resolves relative `<image href="...">` references in SVG files rendered by the viewer. PDF/PPTX-converted SVGs produced by doc-convert reference sibling raster images with relative paths (e.g., `<image href="01_slide_img1.png"/>`). When injected into the webapp DOM, the browser resolves these against the webapp's origin URL — which doesn't serve repo files — so images silently fail to load.
+
+- `webapp/src/svg-viewer.js` — additions:
+  - `_resolveImageHrefs(container, svgPath)` — scans a `.svg-container` for `<image>` elements, skips data URIs and absolute URLs, resolves relative paths against the SVG file's directory, fetches via `Repo.get_file_base64`, rewrites `href` and `xlink:href` in-place. Runs in parallel via `Promise.all`. Non-blocking — panels are interactive immediately, images appear as fetches complete. Failed fetches log a warning.
+  - `_resolveOneImageHref(imgEl, repoPath, call)` — per-image fetch + rewrite. Handles both `href` and `xlink:href` attribute forms.
+  - `_extractBase64Uri(result)` — unwraps Repo.get_file_base64 responses (plain string, `{data_uri}`, `{content}`, jrpc-oo envelope).
+  - Called from `_injectSvgContent` after SVG injection on both panels (left skipped in presentation mode).
+
 ### 5.24 — Phase 3.2d SVG viewer presentation, context menu, copy-as-PNG, mode toggle — **delivered**
 
 Adds four features to the SVG viewer surface:

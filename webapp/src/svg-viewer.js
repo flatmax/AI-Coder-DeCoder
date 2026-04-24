@@ -667,6 +667,17 @@ export class SvgViewer extends LitElement {
         this._disposePanZoom();
       }
       this._initEditor(rightSvg);
+      // Resolve relative image references in both panels.
+      // PDF/PPTX-converted SVGs reference sibling raster
+      // images via `<image href="01_slide_img1.png"/>`.
+      // The browser resolves these against the webapp's
+      // origin URL — which doesn't serve repo files — so
+      // they silently fail. Fetch via Repo.get_file_base64
+      // and rewrite in-place.
+      if (!isPresent && leftContainer) {
+        this._resolveImageHrefs(leftContainer, file.path);
+      }
+      this._resolveImageHrefs(rightContainer, file.path);
     }
   }
 
@@ -758,6 +769,118 @@ export class SvgViewer extends LitElement {
       this._lastRightContent = html;
       this._recomputeDirtyCount();
     }
+  }
+
+  /**
+   * Resolve relative image references inside an SVG
+   * container. Finds all `<image>` elements, skips those
+   * with absolute or data URIs, resolves relative paths
+   * against the SVG file's directory, fetches binary
+   * content via `Repo.get_file_base64`, and rewrites the
+   * href attribute in-place.
+   *
+   * Runs in parallel for all images in the container.
+   * Non-blocking — the SVG panels initialize and become
+   * interactive immediately; images appear as base64
+   * fetches complete. Failed fetches log a warning but
+   * do not prevent the SVG from displaying.
+   *
+   * @param {HTMLElement} container — the `.svg-container` div
+   * @param {string} svgPath — repo-relative path of the SVG file
+   */
+  async _resolveImageHrefs(container, svgPath) {
+    if (!container || !svgPath) return;
+    const call = this._getRpcCall();
+    if (!call) return;
+    const images = container.querySelectorAll('image');
+    if (images.length === 0) return;
+    // Derive the SVG file's directory for relative path
+    // resolution. "docs/slides/01_slide.svg" → "docs/slides".
+    const lastSlash = svgPath.lastIndexOf('/');
+    const baseDir = lastSlash >= 0 ? svgPath.slice(0, lastSlash) : '';
+    const tasks = [];
+    for (const img of images) {
+      // Check both href and xlink:href — SVG uses both
+      // attribute forms depending on the generator.
+      const href =
+        img.getAttribute('href') ||
+        img.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+        '';
+      if (!href) continue;
+      // Skip absolute URLs and data URIs — already resolved.
+      if (
+        href.startsWith('data:') ||
+        href.startsWith('http://') ||
+        href.startsWith('https://') ||
+        href.startsWith('blob:')
+      ) {
+        continue;
+      }
+      // Resolve relative path against the SVG's directory.
+      const resolved = baseDir ? `${baseDir}/${href}` : href;
+      tasks.push(
+        this._resolveOneImageHref(img, resolved, call),
+      );
+    }
+    if (tasks.length > 0) {
+      await Promise.all(tasks).catch(() => {
+        // Individual failures handled inside
+        // _resolveOneImageHref; this catch prevents
+        // unhandled rejection if the gather itself throws.
+      });
+    }
+  }
+
+  /**
+   * Fetch a single image via Repo.get_file_base64 and
+   * rewrite the `<image>` element's href attribute with
+   * the resulting data URI.
+   */
+  async _resolveOneImageHref(imgEl, repoPath, call) {
+    try {
+      const result = await call['Repo.get_file_base64'](repoPath);
+      const dataUri = this._extractBase64Uri(result);
+      if (!dataUri) {
+        console.warn(
+          `[svg-viewer] image resolution failed for ${repoPath}: empty response`,
+        );
+        return;
+      }
+      // Rewrite both href forms so the browser picks up
+      // the change regardless of which attribute the SVG
+      // generator used.
+      imgEl.setAttribute('href', dataUri);
+      if (imgEl.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')) {
+        imgEl.setAttributeNS(
+          'http://www.w3.org/1999/xlink',
+          'href',
+          dataUri,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[svg-viewer] image resolution failed for ${repoPath}:`,
+        err?.message || err,
+      );
+    }
+  }
+
+  /**
+   * Extract a data URI from a Repo.get_file_base64
+   * response. Handles plain string, object with
+   * `data_uri` field, and jrpc-oo single-key envelope.
+   */
+  _extractBase64Uri(result) {
+    if (typeof result === 'string') return result;
+    if (result && typeof result === 'object') {
+      if (typeof result.data_uri === 'string') return result.data_uri;
+      if (typeof result.content === 'string') return result.content;
+      const keys = Object.keys(result);
+      if (keys.length === 1) {
+        return this._extractBase64Uri(result[keys[0]]);
+      }
+    }
+    return '';
   }
 
   /**
