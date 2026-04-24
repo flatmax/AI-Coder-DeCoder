@@ -1628,6 +1628,33 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.27 — Phase 3.4 Context tab (Budget sub-view) — **delivered**
+
+Wires the Context dialog tab to `LLMService.get_context_breakdown`. Budget/Cache pill toggle at the top; active sub-view persisted to localStorage. Both sub-views listen for `stream-complete`, `files-changed`, and `mode-changed` window events — refresh when visible, mark stale when hidden, auto-refresh on `onTabVisible()`.
+
+Budget sub-view shows:
+- Model name + cache hit rate + mode indicator
+- Token budget bar (green ≤75%, amber 75–90%, red >90%)
+- Proportional stacked horizontal bar by category (system/symbol-map/files/URLs/history) with colored segments
+- Legend row with per-category token counts
+- Per-category detail rows with proportional bars
+- Session totals grid (prompt in, completion out, total, cache read/write when non-zero)
+
+Cache sub-view is a placeholder — lands in Phase 3.5.
+
+- `webapp/src/context-tab.js` — new `ContextTab(RpcMixin(LitElement))` component:
+  - `_subview` persisted to `ac-dc-context-subview` localStorage key
+  - `_refresh()` fetches via `get_context_breakdown`, guarded by loading flag
+  - `_isTabActive()` checks parent `.tab-panel.active` class
+  - Stale detection on `stream-complete` / `files-changed` / `mode-changed` when hidden
+  - `onTabVisible()` public hook for the dialog to call on tab switch
+  - `_fmtTokens(n)` formats with K suffix
+  - `_budgetColor(pct)` returns green/amber/red by threshold
+  - `_COLORS` map for category segments
+  - Handles missing/partial backend data gracefully (empty state, field defaults)
+
+- `webapp/src/app-shell.js` — imports `context-tab.js`, renders `<ac-context-tab>` when `activeTab === 'context'`. Removes the last placeholder tab fallback.
+
 ### 5.26 — Phase 3.3 Settings tab — **delivered**
 
 Wires the Settings dialog tab to the `Settings` RPC service (Layer 4.5). Card grid of eight whitelisted config types; clicking a card opens an inline monospace textarea editor. Save writes via `Settings.save_config_content`; reloadable configs (LLM, App) auto-trigger their reload RPC on save. Ctrl+S shortcut within the textarea. Info banner shows model names and config directory from `Settings.get_config_info`.
