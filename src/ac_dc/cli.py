@@ -118,16 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     Returns
     -------
     int
-        Process exit code. Always 0 in Layer 0.
+        Process exit code. 0 on success.
     """
     parser = _build_parser()
     # Parse (and validate) arguments — argparse will exit on --help/--version
     # or on parse errors.
     args = parser.parse_args(argv)
-    # Install logging before anything else that might want to log. The
-    # CLI itself does nothing yet beyond printing a banner, but the
-    # moment a Layer 1+ call path runs (config load, repo init), we
-    # want its warnings and errors on stderr.
+    # Install logging before anything else that might want to log.
     configure_logging(verbose=args.verbose)
     logger.debug("ac-dc invoked with args=%s", args)
     _print_banner()
