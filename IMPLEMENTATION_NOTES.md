@@ -1628,6 +1628,37 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.16 — Phase 3.2c.2c SvgEditor line endpoint drag — **delivered**
+
+Line elements get two handles — one at each endpoint — that drag independently. Closes out the 3.2c.2 resize-handle work. Reuses the `_beginResizeDrag` machinery with a new `line-endpoints` snapshot kind and a `_applyLineEndpointResize` dispatch.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_renderResizeHandles` now handles `line` tag: emits two `_makeHandleDot` instances at `(x1, y1)` and `(x2, y2)` with roles `p1` and `p2`. Reads endpoint coords directly from the element rather than from the bounding box — a diagonal line's handles sit on the line itself, not at the enclosing rect's corners, which would be the wrong drag-target positions.
+  - `_captureResizeAttributes` extended with `case 'line'`: snapshot `{kind: 'line-endpoints', x1, y1, x2, y2}`. Kind name chosen not to collide with the existing `'line'` kind in `_captureDragAttributes` (which covers the move-drag case where both endpoints translate together).
+  - `_applyResizeDelta` gains a `'line-endpoints'` dispatch branch → `_applyLineEndpointResize`.
+  - `_applyLineEndpointResize(el, o, role, dx, dy)` — pure role dispatch. `p1` sets `x1 = o.x1 + dx; y1 = o.y1 + dy`. `p2` sets `x2/y2` similarly. No clamping.
+  - `_restoreResizeAttributes` extended with `'line-endpoints'` case — writes all four attributes back. x2/y2 are written even when p1 was dragged (and vice versa), matching the pattern of other shapes' restore which always writes the full snapshot.
+
+- `webapp/src/svg-editor.test.js` — 10 new tests plus one existing test updated:
+  - Updated: `line selection produces no resize handles` renamed to `line selection produces two endpoint handles`. The previous behavior (no handles on line) was scoped to 3.2c.2b; this sub-phase reverses that.
+  - **Handle positioning** (1 test): handles land at actual `(x1, y1)` and `(x2, y2)` coords for a diagonal line, not at bbox corners.
+  - **Per-endpoint dispatch** (2 tests): p1 drag moves x1/y1 only (x2/y2 unchanged); p2 drag moves x2/y2 only (x1/y1 unchanged).
+  - **No clamping** (2 tests): p1 dragged past p2 works without mutation; p1 dragged exactly onto p2 produces a degenerate zero-length line (legal SVG, renders invisible, handles remain grabbable).
+  - **Negative deltas** (1 test): endpoints handle leftward/upward drags symmetrically with the rightward/downward cases.
+  - **Lifecycle** (4 tests): clicking a `p1` handle initiates resize drag with correct role + snapshot kind; onChange fires after a committed p2 drag; tiny p1 move below threshold doesn't commit; detach mid-drag restores all four attributes (including the ones that shouldn't have changed — the restore path is consistent).
+
+Design points pinned by tests:
+
+- **No clamping.** `dragging p1 past p2 is allowed` pins that lines aren't clamped. Rects and ellipses clamp at 1 to prevent flipping (a flipped shape would leave the user holding the wrong handle mid-drag and the visual would be broken). Lines have no "front face" that flips — a line from (80, 80) to (50, 50) renders identically to one from (50, 50) to (80, 80), and the handles move with their endpoint coordinates regardless of ordering. Trying to clamp would complicate the code for no user-visible benefit.
+
+- **Degenerate line allowed.** `dragging to same point produces degenerate line` pins that a zero-length line is legal and recoverable. Handles at identical coordinates visually overlap but both remain grabbable (the top handle wins the click; the user can drag it off to separate them). Unlike a zero-width rect (which would hide all 8 handles and strand the user), a zero-length line only loses visibility of the rendered stroke — the handle overlay stays at the point.
+
+- **Endpoints read from attributes, not bounding box.** `handles positioned at actual endpoint coords` pins this explicitly with a diagonal line where bbox corners differ from endpoint coords. If this invariant broke (e.g., someone "simplified" by treating line handles like rect corners), the user would see handles floating in empty space next to the line — frustrating and inverse math would be needed to translate bbox-corner drags back to endpoint coords.
+
+- **Snapshot kind distinct from move-drag kind.** The `_captureDragAttributes` path already uses `kind: 'line'` for the move case where the drag translates both endpoints together. Endpoint resize uses `kind: 'line-endpoints'` to keep the dispatch branches in `_applyResizeDelta` and `_restoreResizeAttributes` from colliding with the move-drag handlers. Pinned by `editor._drag.originAttrs.kind` equality in the click-starts-drag test.
+
+Phase 3.2c.2 (resize handles for rect/circle/ellipse/line) is now complete. Ready to proceed to 3.2c.3 — vertex edit for polylines/polygons/paths plus inline text editing via foreignObject textarea.
+
 ### 5.15 — Phase 3.2c.2b SvgEditor resize handles — **delivered**
 
 Adds corner/edge resize handles for rect, circle, and ellipse on top of 3.2c.2a's drag-to-move. Rect gets eight handles (four corners + four edges), circle and ellipse get four cardinal handles. Per-handle drag math pins the opposite corner/edge. Width/height/r/rx/ry clamped to a positive minimum so dragging past the opposite edge collapses to a small shape rather than flipping.

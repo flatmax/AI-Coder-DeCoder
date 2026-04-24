@@ -1610,7 +1610,7 @@ describe('SvgEditor resize handle rendering', () => {
     expect(handles).toHaveLength(4);
   });
 
-  it('line selection produces no resize handles', () => {
+  it('line selection produces two endpoint handles', () => {
     const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
     line.getBBox = () => ({
       x: 10,
@@ -1622,10 +1622,13 @@ describe('SvgEditor resize handle rendering', () => {
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.setSelection(line);
-    // Line endpoint handles come in 3.2c.2c; for 3.2c.2b
-    // the bbox outline is present but no resize handles.
     const handles = getHandles(svg);
-    expect(handles).toHaveLength(0);
+    // Two handles: one at each endpoint.
+    expect(handles).toHaveLength(2);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(new Set(roles)).toEqual(new Set(['p1', 'p2']));
   });
 
   it('polyline selection produces no resize handles', () => {
@@ -2252,5 +2255,271 @@ describe('SvgEditor resize drag: lifecycle', () => {
     editor.detach();
     expect(ell.getAttribute('rx')).toBe('20');
     expect(ell.getAttribute('ry')).toBe('10');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Line endpoint resize
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor resize drag: line endpoints', () => {
+  function getHandles(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(
+      group.querySelectorAll('[data-handle-role]'),
+    );
+  }
+
+  it('handles positioned at actual endpoint coords', () => {
+    // A diagonal line's handles should sit at (x1,y1) and
+    // (x2,y2), not at the bounding-box corners. Critical
+    // because bbox corners aren't on the line itself and
+    // dragging them would require inverse math to map
+    // back to endpoint coordinates.
+    const line = makeChild('line', { x1: 10, y1: 20, x2: 50, y2: 80 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 60,
+    });
+    const svg = track(makeSvg([line]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(line);
+    const handles = getHandles(svg);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole.p1.cx).toBeCloseTo(10);
+    expect(byRole.p1.cy).toBeCloseTo(20);
+    expect(byRole.p2.cx).toBeCloseTo(50);
+    expect(byRole.p2.cy).toBeCloseTo(80);
+  });
+
+  it('p1 drag moves x1 and y1 only', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, line, 'p1', { x: 10, y: 10 }, { x: 25, y: 30 });
+    expect(line.getAttribute('x1')).toBe('25');
+    expect(line.getAttribute('y1')).toBe('30');
+    // p2 endpoint unchanged.
+    expect(line.getAttribute('x2')).toBe('50');
+    expect(line.getAttribute('y2')).toBe('50');
+  });
+
+  it('p2 drag moves x2 and y2 only', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, line, 'p2', { x: 50, y: 50 }, { x: 70, y: 40 });
+    expect(line.getAttribute('x2')).toBe('70');
+    expect(line.getAttribute('y2')).toBe('40');
+    // p1 endpoint unchanged.
+    expect(line.getAttribute('x1')).toBe('10');
+    expect(line.getAttribute('y1')).toBe('10');
+  });
+
+  it('dragging p1 past p2 is allowed (no clamping)', () => {
+    // Rect/ellipse clamp at 1 to prevent flipping. Lines
+    // don't need clamping: a line whose x1 > x2 renders
+    // identically — there's no "visible front face" that
+    // would flip. Test proves the drag completes without
+    // clamping.
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      line,
+      'p1',
+      { x: 10, y: 10 },
+      { x: 80, y: 80 },
+    );
+    // p1 crossed past p2.
+    expect(line.getAttribute('x1')).toBe('80');
+    expect(line.getAttribute('y1')).toBe('80');
+    expect(line.getAttribute('x2')).toBe('50');
+    expect(line.getAttribute('y2')).toBe('50');
+  });
+
+  it('dragging to same point produces degenerate line', () => {
+    // p1 dragged exactly onto p2 — zero-length line. Legal
+    // SVG (renders as invisible). Handles still land at
+    // identical positions; the user can drag them apart.
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      line,
+      'p1',
+      { x: 10, y: 10 },
+      { x: 50, y: 50 },
+    );
+    expect(line.getAttribute('x1')).toBe('50');
+    expect(line.getAttribute('y1')).toBe('50');
+    expect(line.getAttribute('x2')).toBe('50');
+    expect(line.getAttribute('y2')).toBe('50');
+  });
+
+  it('negative deltas work on both endpoints', () => {
+    const line = makeChild('line', { x1: 50, y1: 50, x2: 80, y2: 80 });
+    line.getBBox = () => ({
+      x: 50,
+      y: 50,
+      width: 30,
+      height: 30,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      line,
+      'p1',
+      { x: 50, y: 50 },
+      { x: 30, y: 40 },
+    );
+    // p1 delta is (-20, -10).
+    expect(line.getAttribute('x1')).toBe('30');
+    expect(line.getAttribute('y1')).toBe('40');
+  });
+
+  it('clicking a p1 handle starts a resize drag', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(line);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    expect(editor._drag).not.toBe(null);
+    expect(editor._drag.mode).toBe('resize');
+    expect(editor._drag.role).toBe('p1');
+    expect(editor._drag.originAttrs.kind).toBe('line-endpoints');
+  });
+
+  it('fires onChange after a committed p2 drag', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(line);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p2');
+    firePointer(svg, 'pointerdown', 50, 50);
+    firePointer(svg, 'pointermove', 70, 40);
+    firePointer(svg, 'pointerup', 70, 40);
+    expect(changeListener).toHaveBeenCalledOnce();
+  });
+
+  it('tiny p1 move does not commit', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(line);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 11, 10);
+    firePointer(svg, 'pointerup', 11, 10);
+    // Unchanged — below threshold.
+    expect(line.getAttribute('x1')).toBe('10');
+    expect(line.getAttribute('y1')).toBe('10');
+    expect(changeListener).not.toHaveBeenCalled();
+  });
+
+  it('detach mid-line-resize restores all four attributes', () => {
+    const line = makeChild('line', { x1: 10, y1: 10, x2: 50, y2: 50 });
+    line.getBBox = () => ({
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 40,
+    });
+    const svg = track(makeSvg([line]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(line);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 30, 30);
+    // Mid-drag mutation visible.
+    expect(line.getAttribute('x1')).toBe('30');
+    expect(line.getAttribute('y1')).toBe('30');
+    editor.detach();
+    // All four attributes restored (x2/y2 shouldn't have
+    // changed in the first place but the restore path
+    // writes them anyway for consistency).
+    expect(line.getAttribute('x1')).toBe('10');
+    expect(line.getAttribute('y1')).toBe('10');
+    expect(line.getAttribute('x2')).toBe('50');
+    expect(line.getAttribute('y2')).toBe('50');
   });
 });

@@ -40,8 +40,19 @@
 //     group remains `pointer-events: none`) so clicks route
 //     to them rather than the underlying element
 //
-// Deferred to 3.2c.2c+:
-//   - Line endpoint drag (3.2c.2c)
+// Phase 3.2c.2c adds: line endpoint drag.
+//   - Two handles per line at (x1,y1) and (x2,y2) with
+//     roles `p1` and `p2`
+//   - Each endpoint moves independently — dragging one
+//     doesn't affect the other
+//   - No clamping: endpoints may coincide (degenerate
+//     zero-length line) or cross without visual
+//     corruption
+//   - Reuses `_beginResizeDrag` / `_applyResizeDelta` /
+//     `_restoreResizeAttributes` machinery with a
+//     `line-endpoints` snapshot kind
+//
+// Deferred to 3.2c.3+:
 //   - Vertex edit / inline text edit (3.2c.3)
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
@@ -816,6 +827,19 @@ export class SvgEditor {
           rx: _parseNum(el.getAttribute('rx')),
           ry: _parseNum(el.getAttribute('ry')),
         };
+      case 'line':
+        // Distinct kind from the move-drag 'line' kind
+        // (which lives in _captureDragAttributes) — move
+        // stores both endpoints for a translation, endpoint
+        // resize stores both endpoints for independent
+        // edit of one.
+        return {
+          kind: 'line-endpoints',
+          x1: _parseNum(el.getAttribute('x1')),
+          y1: _parseNum(el.getAttribute('y1')),
+          x2: _parseNum(el.getAttribute('x2')),
+          y2: _parseNum(el.getAttribute('y2')),
+        };
       default:
         return null;
     }
@@ -859,6 +883,9 @@ export class SvgEditor {
         break;
       case 'ellipse':
         this._applyEllipseResize(el, o, role, dx, dy);
+        break;
+      case 'line-endpoints':
+        this._applyLineEndpointResize(el, o, role, dx, dy);
         break;
       default:
         break;
@@ -967,6 +994,29 @@ export class SvgEditor {
   }
 
   /**
+   * Line endpoint resize — each endpoint moves
+   * independently. Role `p1` adjusts x1/y1; role `p2`
+   * adjusts x2/y2. Other endpoint unchanged.
+   *
+   * No clamping: endpoints may coincide (producing a
+   * degenerate zero-length line, invisible but legal SVG)
+   * or cross without visual corruption. Unlike rects and
+   * ellipses where a zero dimension would strand the user
+   * with no visible handle, line handles are always at
+   * actual endpoint coordinates — the user can drag them
+   * back apart as easily.
+   */
+  _applyLineEndpointResize(el, o, role, dx, dy) {
+    if (role === 'p1') {
+      el.setAttribute('x1', String(o.x1 + dx));
+      el.setAttribute('y1', String(o.y1 + dy));
+    } else if (role === 'p2') {
+      el.setAttribute('x2', String(o.x2 + dx));
+      el.setAttribute('y2', String(o.y2 + dy));
+    }
+  }
+
+  /**
    * Restore resize-drag snapshot on cancel. Mirror of
    * `_applyRect/Circle/EllipseResize`; writes the origin
    * values back.
@@ -990,6 +1040,12 @@ export class SvgEditor {
         el.setAttribute('cy', String(snapshot.cy));
         el.setAttribute('rx', String(snapshot.rx));
         el.setAttribute('ry', String(snapshot.ry));
+        break;
+      case 'line-endpoints':
+        el.setAttribute('x1', String(snapshot.x1));
+        el.setAttribute('y1', String(snapshot.y1));
+        el.setAttribute('x2', String(snapshot.x2));
+        el.setAttribute('y2', String(snapshot.y2));
         break;
       default:
         break;
@@ -1282,6 +1338,23 @@ export class SvgEditor {
       for (const p of positions) {
         group.appendChild(this._makeHandleDot(p.cx, p.cy, p.role));
       }
+      return;
+    }
+    if (tag === 'line') {
+      // Two handles at the actual endpoints, not the
+      // bounding-box corners. Reads x1/y1/x2/y2 directly
+      // from the element so a diagonal line gets handles
+      // on the line itself rather than at the enclosing
+      // rectangle's corners (which would be misleading
+      // since those aren't draggable positions — dragging
+      // a bbox corner on a line would need inverse math
+      // to map back to endpoint coords).
+      const x1 = _parseNum(el.getAttribute('x1'));
+      const y1 = _parseNum(el.getAttribute('y1'));
+      const x2 = _parseNum(el.getAttribute('x2'));
+      const y2 = _parseNum(el.getAttribute('y2'));
+      group.appendChild(this._makeHandleDot(x1, y1, 'p1'));
+      group.appendChild(this._makeHandleDot(x2, y2, 'p2'));
       return;
     }
     // Other tags get no resize handles in this sub-phase.
