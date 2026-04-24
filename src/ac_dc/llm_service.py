@@ -89,6 +89,7 @@ Numeric reference: ``specs3/3-llm-engine/streaming_lifecycle.md``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -107,9 +108,14 @@ from ac_dc.edit_protocol import (
 )
 from ac_dc.file_context import FileContext
 from ac_dc.history_compactor import HistoryCompactor, TopicBoundary
-from ac_dc.stability_tracker import StabilityTracker
+from ac_dc.stability_tracker import StabilityTracker, Tier, _TIER_CONFIG
 from ac_dc.token_counter import TokenCounter
 from ac_dc.url_service import URLCache, URLService
+
+# Tier config lookup for get_context_breakdown — maps Tier enum to
+# the entry_n / promote_n config dict. Imported from the tracker
+# module so the numbers stay in sync.
+_TIER_CONFIG_LOOKUP: dict[Tier, dict[str, int]] = _TIER_CONFIG
 
 if TYPE_CHECKING:
     from ac_dc.config import ConfigManager
@@ -474,6 +480,14 @@ class LLMService:
         # tracker with items from the opposite index.
         self._cross_ref_enabled = False
 
+        # Stability initialization flag. Set to True after
+        # _try_initialize_stability() succeeds. Prevents
+        # re-initialization on subsequent requests. The
+        # streaming handler checks this to decide whether
+        # to attempt lazy initialization on the first chat
+        # request (when eager init during startup failed).
+        self._stability_initialized = False
+
         # Edit pipeline — validates and applies edit blocks parsed
         # from the LLM response. Constructed only when a repo is
         # attached; without one there's nothing to write to.
@@ -614,12 +628,23 @@ class LLMService:
         finishes. Does NOT re-run session restore — that happened
         at construction. Safe to call multiple times; subsequent
         calls are no-ops.
+
+        After wiring the symbol index, attempts eager stability
+        initialization — if it succeeds, the cache tab shows
+        populated tiers from the first page load, not only after
+        the first chat message. If it fails, lazy initialization
+        on the first chat request catches it.
         """
         if self._init_complete and self._symbol_index is not None:
             return
         self._symbol_index = symbol_index
         self._init_complete = True
         logger.info("Deferred init complete; chat is ready")
+
+        # Attempt eager stability initialization. Non-blocking —
+        # failure is logged and the lazy path catches it on the
+        # first chat request.
+        self._try_initialize_stability()
 
     def shutdown(self) -> None:
         """Release executor resources. Called on server shutdown."""
@@ -1533,6 +1558,111 @@ class LLMService:
         return list(self._selected_files)
 
     # ------------------------------------------------------------------
+    # Public RPC — cache viewer / map block
+    # ------------------------------------------------------------------
+
+    def get_file_map_block(
+        self, path: str
+    ) -> dict[str, Any]:
+        """Return the index block for a file or special key.
+
+        Used by the cache viewer's item-click-to-view feature.
+        Dispatches based on a priority chain:
+
+        1. Special keys — ``system:prompt`` returns the system
+           prompt + legend for the current mode.
+        2. Current mode's index tried first.
+        3. Cross-mode fallback — if primary has no data, try the
+           other index (handles cross-reference mode).
+        4. Error if neither has data.
+        """
+        # Special key: system prompt.
+        if path == "system:prompt":
+            if self._context.mode == Mode.DOC:
+                prompt = self._config.get_doc_system_prompt()
+            else:
+                prompt = self._config.get_system_prompt()
+            legend = ""
+            if self._symbol_index is not None:
+                try:
+                    legend = self._symbol_index.get_legend()
+                except Exception:
+                    pass
+            return {
+                "path": "system:prompt",
+                "content": prompt + ("\n\n" + legend if legend else ""),
+                "mode": self._context.mode.value,
+            }
+
+        # Try the current mode's index first.
+        if self._symbol_index is not None:
+            block = self._symbol_index.get_file_symbol_block(path)
+            if block:
+                return {
+                    "path": path,
+                    "content": block,
+                    "mode": "code",
+                }
+
+        # Doc index fallback would go here when Layer 2 doc-index
+        # lands. For now, return error.
+        return {
+            "error": f"No index data found for {path}",
+            "path": path,
+        }
+
+    # ------------------------------------------------------------------
+    # Public RPC — LSP delegation
+    # ------------------------------------------------------------------
+
+    def lsp_get_hover(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> dict[str, Any] | None:
+        """Delegate to SymbolIndex.lsp_get_hover."""
+        if self._symbol_index is None:
+            return None
+        return self._symbol_index.lsp_get_hover(path, line, col)
+
+    def lsp_get_definition(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> dict[str, Any] | None:
+        """Delegate to SymbolIndex.lsp_get_definition."""
+        if self._symbol_index is None:
+            return None
+        return self._symbol_index.lsp_get_definition(path, line, col)
+
+    def lsp_get_references(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> list[dict[str, Any]]:
+        """Delegate to SymbolIndex.lsp_get_references."""
+        if self._symbol_index is None:
+            return []
+        return self._symbol_index.lsp_get_references(path, line, col)
+
+    def lsp_get_completions(
+        self,
+        path: str,
+        line: int,
+        col: int,
+        prefix: str = "",
+    ) -> list[dict[str, Any]]:
+        """Delegate to SymbolIndex.lsp_get_completions."""
+        if self._symbol_index is None:
+            return []
+        return self._symbol_index.lsp_get_completions(
+            path, line, col, prefix
+        )
+
+    # ------------------------------------------------------------------
     # Public RPC — mode and cross-reference
     # ------------------------------------------------------------------
 
@@ -1889,6 +2019,13 @@ class LLMService:
                 # against a crashed exit that left stale
                 # context on the manager.
                 self._context.clear_review_context()
+
+            # Lazy stability initialization — if eager init
+            # during startup failed (or was skipped), try now
+            # on the first chat request. Once initialized, the
+            # flag prevents re-runs.
+            if not self._stability_initialized:
+                self._try_initialize_stability()
 
             # Assemble the message array. Tiered assembly is the
             # primary path — it returns None only when the
@@ -2367,6 +2504,423 @@ class LLMService:
         )
 
     # ------------------------------------------------------------------
+    # Stability tracker initialization
+    # ------------------------------------------------------------------
+
+    def _try_initialize_stability(self) -> None:
+        """Seed the stability tracker from the reference graph.
+
+        Called eagerly during deferred startup (Phase 2) or lazily
+        on the first chat request if eager init failed. Runs
+        index_repo on the full file list, builds the reference
+        graph, initializes tier assignments (including L0 seeding),
+        measures real token counts for all tier items, and seeds
+        the system prompt into L0.
+
+        Safe to call multiple times — sets _stability_initialized
+        to True on the first successful run. Subsequent calls are
+        no-ops.
+        """
+        if getattr(self, "_stability_initialized", False):
+            return
+        if self._symbol_index is None or self._repo is None:
+            return
+
+        try:
+            # Step 1: Index the repository.
+            file_list_raw = self._repo.get_flat_file_list()
+            file_list = [f for f in file_list_raw.split("\n") if f]
+            self._symbol_index.index_repo(file_list)
+
+            # Step 2: Initialize tier assignments from reference graph.
+            ref_index = self._symbol_index._ref_index
+            cache_target = self._config.cache_target_tokens_for_model()
+            self._stability_tracker.set_cache_target_tokens(cache_target)
+            self._stability_tracker.initialize_from_reference_graph(
+                ref_index, file_list, l0_target_tokens=cache_target
+            )
+
+            # Step 3: Seed system prompt into L0.
+            import hashlib
+            system_prompt = self._config.get_system_prompt()
+            legend = self._symbol_index.get_legend()
+            prompt_hash = hashlib.sha256(
+                system_prompt.encode("utf-8")
+            ).hexdigest()
+            prompt_tokens = self._counter.count(system_prompt + legend)
+            self._stability_tracker.register_system_prompt(
+                prompt_hash, prompt_tokens
+            )
+
+            # Step 4: Measure real token counts for all tier items,
+            # replacing placeholders from initialization.
+            self._measure_tracker_tokens()
+
+            self._stability_initialized = True
+            logger.info(
+                "Stability tracker initialized: %d items",
+                len(self._stability_tracker.get_all_items()),
+            )
+
+            # Print a startup init HUD to the terminal.
+            self._print_init_hud()
+
+        except Exception as exc:
+            logger.warning(
+                "Stability tracker initialization failed: %s", exc
+            )
+
+    def _measure_tracker_tokens(self) -> None:
+        """Replace placeholder token counts with real measured values.
+
+        Iterates all symbol: items and replaces their placeholder
+        tokens (400) with the actual token count of the formatted
+        symbol block. Also updates content hashes from signature
+        hashes for accurate stability tracking.
+        """
+        if self._symbol_index is None:
+            return
+        all_items = self._stability_tracker.get_all_items()
+        for key in all_items:
+            if key.startswith("symbol:"):
+                path = key[len("symbol:"):]
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    tokens = self._counter.count(block)
+                    self._stability_tracker.measure_tokens(key, tokens)
+
+    def _print_init_hud(self) -> None:
+        """Print the one-time startup tier distribution to stderr."""
+        all_items = self._stability_tracker.get_all_items()
+        tier_counts: dict[str, int] = {}
+        for item in all_items.values():
+            tier_name = item.tier.value
+            tier_counts[tier_name] = tier_counts.get(tier_name, 0) + 1
+
+        if not tier_counts:
+            return
+
+        import sys
+        lines = ["╭─ Initial Tier Distribution ─╮"]
+        total = 0
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
+            count = tier_counts.get(tier.value, 0)
+            if count > 0:
+                lines.append(f"│ {tier.value:<10} {count:>4} items{' ' * 11}│")
+                total += count
+        lines.append("├─────────────────────────────┤")
+        lines.append(f"│ Total: {total:<4} items{' ' * 12}│")
+        lines.append("╰─────────────────────────────╯")
+        print("\n".join(lines), file=sys.stderr)
+
+    def _print_post_response_hud(self) -> None:
+        """Print the three-section terminal HUD after each response.
+
+        Sections per specs3/5-webapp/viewers_and_hud.md:
+        1. Cache blocks (boxed) — per-tier token counts + cache hit %
+        2. Token usage — model, per-category, total, last request, session
+        3. Tier changes — promotions and demotions
+        """
+        import sys
+
+        all_items = self._stability_tracker.get_all_items()
+        if not all_items:
+            return
+
+        # Section 1: Cache Blocks
+        tier_data: list[tuple[str, int, int, bool]] = []  # (name, entry_n, tokens, cached)
+        tier_order = [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]
+        total_tokens = 0
+        cached_tokens = 0
+        for tier in tier_order:
+            items = [it for it in all_items.values() if it.tier == tier]
+            if not items:
+                continue
+            tokens = sum(it.tokens for it in items)
+            total_tokens += tokens
+            is_cached = tier != Tier.ACTIVE
+            if is_cached:
+                cached_tokens += tokens
+            entry_n = _TIER_CONFIG.get(tier, {}).get("entry_n", 0)
+            tier_data.append((tier.value, entry_n, tokens, is_cached))
+
+        if tier_data:
+            cache_pct = (
+                round(cached_tokens / total_tokens * 100)
+                if total_tokens > 0
+                else 0
+            )
+            # Compute max line width for the box.
+            content_lines: list[str] = []
+            for name, entry_n, tokens, cached in tier_data:
+                if cached:
+                    line = f"│ {name:<10} ({entry_n}+) {tokens:>8,} tokens [cached] │"
+                else:
+                    line = f"│ {name:<10}       {tokens:>8,} tokens          │"
+                content_lines.append(line)
+
+            max_width = max(len(l) for l in content_lines) if content_lines else 40
+            header = f"╭─ Cache Blocks {'─' * (max_width - 17)}╮"
+            separator = f"├{'─' * (max_width - 2)}┤"
+            footer_text = f"│ Total: {total_tokens:,} | Cache hit: {cache_pct}%"
+            footer_text = footer_text.ljust(max_width - 1) + "│"
+            bottom = f"╰{'─' * (max_width - 2)}╯"
+
+            lines = [header, *content_lines, separator, footer_text, bottom]
+            print("\n".join(lines), file=sys.stderr)
+
+        # Section 2: Token Usage
+        st = self._session_totals
+        model = self._config.model
+        system_tokens = self._counter.count(
+            self._context.get_system_prompt()
+        )
+        symbol_map_tokens = 0
+        if self._symbol_index is not None:
+            try:
+                smap = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                symbol_map_tokens = self._counter.count(smap) if smap else 0
+            except Exception:
+                pass
+        files_tokens = self._file_context.count_tokens(self._counter)
+        history_tokens = self._context.history_token_count()
+        total_est = system_tokens + symbol_map_tokens + files_tokens + history_tokens
+        max_input = self._counter.max_input_tokens
+
+        usage_lines = [
+            f"Model: {model}",
+            f"System:    {system_tokens:>10,}",
+            f"Symbol Map:{symbol_map_tokens:>10,}",
+            f"Files:     {files_tokens:>10,}",
+            f"History:   {history_tokens:>10,}",
+            f"Total:     {total_est:>10,} / {max_input:,}",
+        ]
+        input_tok = st.get("input_tokens", 0)
+        output_tok = st.get("output_tokens", 0)
+        if input_tok or output_tok:
+            usage_lines.append(
+                f"Last request: {input_tok:,} in, {output_tok:,} out"
+            )
+        cache_read = st.get("cache_read_tokens", 0)
+        cache_write = st.get("cache_write_tokens", 0)
+        if cache_read or cache_write:
+            usage_lines.append(
+                f"Cache:     read: {cache_read:,}, write: {cache_write:,}"
+            )
+        session_total = sum(st.values())
+        if session_total:
+            usage_lines.append(f"Session total: {session_total:,}")
+        print("\n".join(usage_lines), file=sys.stderr)
+
+        # Section 3: Tier Changes
+        changes = self._stability_tracker.get_changes()
+        if changes:
+            for change in changes:
+                if "promoted" in change:
+                    print(f"📈 {change}", file=sys.stderr)
+                elif "active" in change:
+                    print(f"📉 {change}", file=sys.stderr)
+                else:
+                    print(f"   {change}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Context breakdown (RPC)
+    # ------------------------------------------------------------------
+
+    def get_context_breakdown(self) -> dict[str, Any]:
+        """Return the full context/token/tier breakdown for the UI.
+
+        Called by the Context tab (Budget + Cache sub-views) and
+        the Token HUD. Synchronizes the in-memory FileContext with
+        the current selected-files list before computing so the
+        breakdown reflects what the next LLM request would look like.
+
+        Shape matches specs3/5-webapp/viewers_and_hud.md.
+        """
+        import hashlib
+        from ac_dc.stability_tracker import Tier
+
+        # Sync file context with current selection so the breakdown
+        # reflects the next request's state, not a stale snapshot.
+        self._sync_file_context()
+
+        mode = self._context.mode.value
+        model = self._config.model
+
+        # System prompt tokens — mode-aware.
+        if self._context.mode == Mode.DOC:
+            system_prompt = self._config.get_doc_system_prompt()
+        else:
+            system_prompt = self._config.get_system_prompt()
+        system_tokens = self._counter.count(system_prompt)
+
+        # Legend tokens.
+        legend = ""
+        if self._symbol_index is not None:
+            try:
+                legend = self._symbol_index.get_legend()
+            except Exception:
+                pass
+        legend_tokens = self._counter.count(legend) if legend else 0
+
+        # Symbol map tokens.
+        symbol_map = ""
+        symbol_map_files = 0
+        if self._symbol_index is not None:
+            try:
+                exclude = set(self._selected_files)
+                symbol_map = self._symbol_index.get_symbol_map(
+                    exclude_files=exclude
+                )
+                symbol_map_files = len(self._symbol_index._all_symbols)
+            except Exception:
+                pass
+        symbol_map_tokens = self._counter.count(symbol_map) if symbol_map else 0
+
+        # File tokens — per-file detail.
+        file_details: list[dict[str, Any]] = []
+        files_tokens = 0
+        for path in self._file_context.get_files():
+            content = self._file_context.get_content(path)
+            if content:
+                tokens = self._counter.count(content)
+                files_tokens += tokens
+                name = path.rsplit("/", 1)[-1] if "/" in path else path
+                file_details.append({
+                    "name": name,
+                    "path": path,
+                    "tokens": tokens,
+                })
+
+        # URL tokens.
+        url_details: list[dict[str, Any]] = []
+        url_tokens = 0
+        url_context = self._context.get_url_context()
+        if url_context:
+            joined = "\n---\n".join(url_context)
+            url_tokens = self._counter.count(joined)
+
+        # History tokens.
+        history = self._context.get_history()
+        history_tokens = self._context.history_token_count()
+
+        # Total.
+        total_tokens = (
+            system_tokens + legend_tokens + symbol_map_tokens
+            + files_tokens + url_tokens + history_tokens
+        )
+        max_input = self._counter.max_input_tokens
+
+        # Cache hit rate from tier data.
+        cached_tokens = 0
+        all_tier_tokens = 0
+        all_items = self._stability_tracker.get_all_items()
+        for item in all_items.values():
+            all_tier_tokens += item.tokens
+            if item.tier not in (Tier.ACTIVE,):
+                cached_tokens += item.tokens
+        cache_hit_rate = (
+            cached_tokens / all_tier_tokens if all_tier_tokens > 0 else 0.0
+        )
+
+        # Provider cache rate from session totals.
+        st = self._session_totals
+        provider_cache_rate = None
+        total_input = st.get("input_tokens", 0)
+        cache_read = st.get("cache_read_tokens", 0)
+        if total_input > 0:
+            provider_cache_rate = cache_read / total_input
+
+        # Per-tier blocks with contents detail.
+        blocks: list[dict[str, Any]] = []
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
+            tier_items = self._stability_tracker.get_tier_items(tier)
+            if not tier_items:
+                continue
+            tier_tokens = sum(it.tokens for it in tier_items.values())
+            contents: list[dict[str, Any]] = []
+            for key, item in sorted(tier_items.items()):
+                entry: dict[str, Any] = {
+                    "name": key,
+                    "path": key.split(":", 1)[1] if ":" in key else key,
+                    "tokens": item.tokens,
+                }
+                # Classify type from prefix.
+                if key.startswith("system:"):
+                    entry["type"] = "system"
+                elif key.startswith("symbol:"):
+                    entry["type"] = "symbols"
+                elif key.startswith("doc:"):
+                    entry["type"] = "doc_symbols"
+                elif key.startswith("file:"):
+                    entry["type"] = "files"
+                elif key.startswith("url:"):
+                    entry["type"] = "urls"
+                elif key.startswith("history:"):
+                    entry["type"] = "history"
+                else:
+                    entry["type"] = "other"
+                # N value and promotion threshold.
+                entry["n"] = item.n_value
+                promote_n = None
+                tier_cfg = _TIER_CONFIG_LOOKUP.get(item.tier)
+                if tier_cfg is not None:
+                    promote_n = tier_cfg.get("promote_n")
+                entry["threshold"] = promote_n
+                contents.append(entry)
+            blocks.append({
+                "name": tier.value,
+                "tier": tier.value,
+                "tokens": tier_tokens,
+                "count": len(tier_items),
+                "cached": tier != Tier.ACTIVE,
+                "contents": contents,
+            })
+
+        # Promotions and demotions from the most recent update.
+        changes = self._stability_tracker.get_changes()
+        promotions = [c for c in changes if "promoted" in c or "→ L" in c]
+        demotions = [c for c in changes if "active" in c and "→" in c and "promoted" not in c]
+
+        return {
+            "model": model,
+            "mode": mode,
+            "cross_ref_enabled": self._cross_ref_enabled,
+            "total_tokens": total_tokens,
+            "max_input_tokens": max_input,
+            "cache_hit_rate": cache_hit_rate,
+            "provider_cache_rate": provider_cache_rate,
+            "blocks": blocks,
+            "breakdown": {
+                "system": system_tokens,
+                "legend": legend_tokens,
+                "symbol_map": symbol_map_tokens,
+                "symbol_map_files": symbol_map_files,
+                "files": files_tokens,
+                "file_count": len(file_details),
+                "file_details": file_details,
+                "urls": url_tokens,
+                "url_details": url_details,
+                "history": history_tokens,
+                "history_messages": len(history),
+            },
+            "promotions": promotions,
+            "demotions": demotions,
+            "session_totals": {
+                "prompt": st.get("input_tokens", 0),
+                "completion": st.get("output_tokens", 0),
+                "total": (
+                    st.get("input_tokens", 0)
+                    + st.get("output_tokens", 0)
+                ),
+                "cache_hit": st.get("cache_read_tokens", 0),
+                "cache_write": st.get("cache_write_tokens", 0),
+            },
+        }
+
+    # ------------------------------------------------------------------
     # Tiered content builder
     # ------------------------------------------------------------------
 
@@ -2670,11 +3224,13 @@ class LLMService:
     # ------------------------------------------------------------------
 
     async def _post_response(self, request_id: str) -> None:
-        """Stability tracker update, compaction, event dispatch."""
-        # Stability update — build the active items list and run
-        # the tracker. 3.7's minimal build only tracks history
-        # messages; 3.8/3.10 will add file, symbol, doc, url items.
+        """Stability tracker update, compaction, terminal HUD."""
+        # Stability update — builds the full active items list
+        # and runs the tracker update cycle.
         self._update_stability()
+
+        # Print terminal HUD — three sections per specs3.
+        self._print_post_response_hud()
 
         # Compaction — runs after the response, gated on the
         # current history token count. Events communicate progress
@@ -2719,20 +3275,134 @@ class LLMService:
     def _update_stability(self) -> None:
         """Build active items and run the tracker update.
 
-        3.7 minimal build — only history items. File/symbol/doc/url
-        items land with 3.8 (prompt assembly) and 3.10 (modes).
+        Full implementation per specs4/3-llm/streaming.md —
+        _update_stability pseudocode. Builds the active-items dict
+        from all content categories (system prompt, selected files,
+        index entries for non-selected files, cross-reference items,
+        history messages), removes user-excluded items, and runs
+        the tracker update with the current repo file set for
+        stale-removal.
+
+        Order of operations (from specs3/3-llm-engine/
+        streaming_lifecycle.md — Post-Response Processing):
+
+        0. System prompt + legend — always present, should
+           stabilize to L0. Hash only the prompt text (not legend)
+           for stability — the legend includes path aliases that
+           change with exclude_files. Token count includes both.
+        1. Selected files — full content hash.
+        2. Remove symbol/doc entries for selected files from the
+           tracker (full content present → index block redundant).
+        3. Index entries for ALL indexed files NOT in selected
+           files (tracked for stability; appear in the main
+           symbol map or in cached tiers).
+        4. Cross-reference items when cross-ref mode is enabled.
+        5. History messages.
+        6. Remove excluded items from tracker.
+        7. Run tracker.update().
         """
         active_items: dict[str, dict[str, Any]] = {}
 
-        # History items. Each message is hashed on role+content
-        # (stable — same text produces same hash).
+        # Step 0 — System prompt + legend.
+        # Hash only the system prompt text for stability (legend
+        # includes path aliases that change when file selections
+        # change, which would prevent the prompt from stabilizing).
+        # Token count includes both prompt + legend.
+        if self._context.mode == Mode.DOC:
+            system_prompt = self._config.get_doc_system_prompt()
+        else:
+            system_prompt = self._config.get_system_prompt()
+        if system_prompt:
+            legend = ""
+            if self._symbol_index is not None:
+                try:
+                    legend = self._symbol_index.get_legend()
+                except Exception:
+                    pass
+            system_content = system_prompt + legend
+            prompt_hash = hashlib.sha256(
+                system_prompt.encode("utf-8")
+            ).hexdigest()
+            active_items["system:prompt"] = {
+                "hash": prompt_hash,
+                "tokens": self._counter.count(system_content),
+            }
+
+        # Step 1 — Selected files: full content hash.
+        for path in self._selected_files:
+            content = self._file_context.get_content(path)
+            if content:
+                h = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
+                active_items[f"file:{path}"] = {
+                    "hash": h,
+                    "tokens": self._counter.count(content),
+                }
+
+        # Step 2 — Remove symbol/doc entries for selected files
+        # from the tracker. Selected files have full content in
+        # context — their index blocks are redundant. Both symbol:
+        # and doc: entries are removed (handles cross-reference
+        # mode correctly). Affected tiers are marked as broken.
+        for path in self._selected_files:
+            for prefix in ("symbol:", "doc:"):
+                entry_key = prefix + path
+                if self._stability_tracker.has_item(entry_key):
+                    # Get the item's tier before removing it.
+                    all_items = self._stability_tracker.get_all_items()
+                    item = all_items.get(entry_key)
+                    if item is not None:
+                        tier = item.tier
+                        # Remove by directly manipulating the
+                        # tracker's internal state. The tracker
+                        # doesn't expose a remove method, so we
+                        # use the same approach as the test suite:
+                        # delete from _items and mark tier broken.
+                        self._stability_tracker._items.pop(entry_key, None)
+                        self._stability_tracker._broken_tiers.add(tier)
+
+        # Step 3 — Index entries for ALL indexed files NOT in
+        # selected files. These are symbol/doc blocks for the
+        # structural map. They are tracked for stability but NOT
+        # rendered separately — they appear in the main symbol
+        # map or are in cached tiers.
+        #
+        # Use signature hash (from raw symbol data) rather than
+        # hashing the formatted block — formatted output changes
+        # when path aliases or exclude_files change, causing
+        # spurious hash mismatches.
+        selected_set = set(self._selected_files)
+        if self._symbol_index is not None:
+            for path in list(self._symbol_index._all_symbols.keys()):
+                if path in selected_set:
+                    continue
+                block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    sig_hash = self._symbol_index.get_signature_hash(path)
+                    active_items[f"symbol:{path}"] = {
+                        "hash": sig_hash or hashlib.sha256(
+                            block.encode("utf-8")
+                        ).hexdigest(),
+                        "tokens": self._counter.count(block),
+                    }
+
+        # Step 4 — Cross-reference items (when cross-ref enabled).
+        # Add the other index's items so they participate in
+        # N-value tracking. Only items already in the tracker
+        # (from initialization) are included. Currently a no-op
+        # because the doc index hasn't landed yet.
+        # (When doc index lands, this will iterate doc_index or
+        # symbol_index depending on mode and add matching items.)
+
+        # Step 5 — History messages (all — the tracker handles
+        # graduated history internally via its own tier checks).
         history = self._context.get_history()
         for i, msg in enumerate(history):
             role = msg.get("role", "user")
             content = msg.get("content", "") or ""
             if not isinstance(content, str):
                 content = str(content)
-            import hashlib
             h = hashlib.sha256(
                 f"{role}:{content}".encode("utf-8")
             ).hexdigest()
@@ -2741,11 +3411,26 @@ class LLMService:
                 "tokens": self._counter.count(msg),
             }
 
-        # Existing files — tell the tracker which paths still exist
-        # so stale removal works. Only relevant when tier items
-        # reference files; in 3.7 they don't, so passing None is
-        # fine. Left here as a hook for 3.8.
-        self._stability_tracker.update(active_items)
+        # Step 6 — Remove excluded items from tracker before the
+        # update cycle. They exist on disk so remove_stale won't
+        # catch them, but they must not occupy tier slots or
+        # appear in context.
+        # (excluded_index_files not yet implemented — when it
+        # lands, iterate the excluded set and remove symbol:/doc:
+        # /file: entries from the tracker here.)
+
+        # Step 7 — Run tracker update. Pass existing_files so
+        # Phase 0 stale removal works.
+        existing_files: set[str] | None = None
+        if self._repo is not None:
+            try:
+                flat = self._repo.get_flat_file_list()
+                existing_files = set(flat.split("\n")) if flat else set()
+            except Exception:
+                pass
+        self._stability_tracker.update(
+            active_items, existing_files=existing_files
+        )
 
     # ------------------------------------------------------------------
     # Commit and reset

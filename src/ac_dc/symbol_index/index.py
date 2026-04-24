@@ -535,3 +535,293 @@ class SymbolIndex:
         """
         rel = self._normalise_rel_path(path)
         return self._cache.get_signature_hash(rel)
+
+    # ------------------------------------------------------------------
+    # LSP queries
+    # ------------------------------------------------------------------
+
+    def _find_symbol_at(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> "tuple[Symbol | None, FileSymbols | None]":
+        """Find the deepest symbol containing (line, col).
+
+        Coordinates are 1-indexed (Monaco convention).
+        Searches nested children for the deepest match.
+        Returns ``(symbol, file_symbols)`` or ``(None, None)``.
+        """
+        from ac_dc.symbol_index.models import Symbol
+
+        rel = self._normalise_rel_path(path)
+        fs = self._all_symbols.get(rel)
+        if fs is None:
+            return None, None
+
+        # Convert to 0-indexed for range comparison.
+        line0 = line - 1
+        col0 = col - 1
+
+        best: Symbol | None = None
+
+        def _search(symbols: list["Symbol"]) -> None:
+            nonlocal best
+            for sym in symbols:
+                if sym.range is None:
+                    continue
+                start_line, start_col, end_line, end_col = sym.range
+                # Check containment.
+                if (
+                    (line0 > start_line or (line0 == start_line and col0 >= start_col))
+                    and (line0 < end_line or (line0 == end_line and col0 <= end_col))
+                ):
+                    best = sym
+                    # Search children for a deeper match.
+                    if sym.children:
+                        _search(sym.children)
+
+        _search(fs.symbols)
+
+        # If no symbol matched, check if the cursor is on a
+        # call site within a function/method body.
+        if best is not None and best.call_sites:
+            for cs in best.call_sites:
+                if cs.line == line:  # call_sites use 1-indexed lines
+                    # Return the containing symbol — the call site
+                    # itself isn't a symbol, but the caller can use
+                    # the call site info from the symbol.
+                    return best, fs
+
+        # Check imports by line.
+        if best is None:
+            for imp in fs.imports:
+                if imp.line == line:
+                    # Synthetic — return None symbol but valid fs
+                    # so the caller can use import info.
+                    return None, fs
+
+        return best, fs
+
+    def lsp_get_hover(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> dict[str, object] | None:
+        """Return hover info for the symbol at (path, line, col).
+
+        Coordinates are 1-indexed. Returns
+        ``{"contents": [str]}`` on hit, or ``None`` when nothing
+        is found. The ``contents`` list holds markdown-formatted
+        strings suitable for Monaco's hover widget.
+        """
+        sym, fs = self._find_symbol_at(path, line, col)
+        if sym is None:
+            return None
+
+        parts: list[str] = []
+
+        # Build signature string.
+        kind = sym.kind or "symbol"
+        prefix = f"({kind}) " if kind else ""
+        sig = f"{prefix}**{sym.name}**"
+        if sym.parameters:
+            params = ", ".join(
+                (("*" if p.is_vararg else "**" if p.is_kwarg else "")
+                 + p.name
+                 + (f": {p.type}" if p.type else "")
+                 + ("?" if p.is_optional else ""))
+                for p in sym.parameters
+            )
+            sig += f"({params})"
+        if sym.return_type:
+            sig += f" → {sym.return_type}"
+        if sym.bases:
+            sig += f" extends {', '.join(sym.bases)}"
+        parts.append(sig)
+
+        if sym.file_path:
+            parts.append(f"*{sym.file_path}*")
+
+        return {"contents": parts}
+
+    def lsp_get_definition(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> dict[str, object] | None:
+        """Return definition location for the symbol at position.
+
+        Returns ``{"file": str, "range": {"startLineNumber": int,
+        "startColumn": int, "endLineNumber": int,
+        "endColumn": int}}`` or ``None``.
+
+        Coordinates are 1-indexed (Monaco convention).
+        """
+        rel = self._normalise_rel_path(path)
+        fs = self._all_symbols.get(rel)
+        if fs is None:
+            return None
+
+        # Check call sites first — if the cursor is on a call
+        # that has a resolved target, jump there.
+        sym, _ = self._find_symbol_at(path, line, col)
+        if sym is not None:
+            for cs in sym.call_sites:
+                if cs.line == line and cs.target_file:
+                    target_fs = self._all_symbols.get(cs.target_file)
+                    if target_fs is not None and cs.target_symbol:
+                        # Find the target symbol in the target file.
+                        for target_sym in target_fs.all_symbols_flat:
+                            if target_sym.name == cs.target_symbol and target_sym.range:
+                                sl, sc, el, ec = target_sym.range
+                                return {
+                                    "file": cs.target_file,
+                                    "range": {
+                                        "startLineNumber": max(1, sl + 1),
+                                        "startColumn": max(1, sc + 1),
+                                        "endLineNumber": max(1, el + 1),
+                                        "endColumn": max(1, ec + 1),
+                                    },
+                                }
+                    # Target file exists but symbol not found — jump
+                    # to top of file.
+                    if cs.target_file:
+                        return {
+                            "file": cs.target_file,
+                            "range": {
+                                "startLineNumber": 1,
+                                "startColumn": 1,
+                                "endLineNumber": 1,
+                                "endColumn": 1,
+                            },
+                        }
+
+        # Check imports — if cursor is on an import line, resolve it.
+        for imp in fs.imports:
+            if imp.line == line:
+                target = getattr(imp, "resolved_target", None)
+                if target:
+                    return {
+                        "file": target,
+                        "range": {
+                            "startLineNumber": 1,
+                            "startColumn": 1,
+                            "endLineNumber": 1,
+                            "endColumn": 1,
+                        },
+                    }
+
+        # Local symbol — return its own definition.
+        if sym is not None and sym.range:
+            sl, sc, el, ec = sym.range
+            return {
+                "file": rel,
+                "range": {
+                    "startLineNumber": max(1, sl + 1),
+                    "startColumn": max(1, sc + 1),
+                    "endLineNumber": max(1, el + 1),
+                    "endColumn": max(1, ec + 1),
+                },
+            }
+
+        return None
+
+    def lsp_get_references(
+        self,
+        path: str,
+        line: int,
+        col: int,
+    ) -> list[dict[str, object]]:
+        """Return all reference locations for the symbol at position.
+
+        Returns a list of ``{"file": str, "range": {...}}`` dicts.
+        Empty list when nothing is found.
+        """
+        sym, _ = self._find_symbol_at(path, line, col)
+        if sym is None:
+            return []
+
+        refs = self._ref_index.references_to_symbol(sym.name)
+        results: list[dict[str, object]] = []
+        for ref_file, ref_line in refs:
+            results.append({
+                "file": ref_file,
+                "range": {
+                    "startLineNumber": max(1, ref_line),
+                    "startColumn": 1,
+                    "endLineNumber": max(1, ref_line),
+                    "endColumn": 1,
+                },
+            })
+        return results
+
+    def lsp_get_completions(
+        self,
+        path: str,
+        line: int,
+        col: int,
+        prefix: str = "",
+    ) -> list[dict[str, object]]:
+        """Return completion suggestions at the given position.
+
+        Filters by ``prefix`` (case-insensitive substring match
+        on the symbol name). Returns up to 50 suggestions, each
+        with ``label``, ``kind``, ``detail``, ``insertText``.
+
+        Kind values follow Monaco's CompletionItemKind enum:
+        1=Method, 2=Function, 5=Variable, 6=Class, 9=Property,
+        17=Keyword.
+        """
+        rel = self._normalise_rel_path(path)
+        fs = self._all_symbols.get(rel)
+        if fs is None:
+            return []
+
+        kind_map = {
+            "class": 6,
+            "function": 2,
+            "method": 1,
+            "variable": 5,
+            "property": 9,
+        }
+
+        candidates: list[dict[str, object]] = []
+        prefix_lower = prefix.lower()
+
+        # File-local symbols.
+        for sym in fs.all_symbols_flat:
+            if prefix_lower and prefix_lower not in sym.name.lower():
+                continue
+            candidates.append({
+                "label": sym.name,
+                "kind": kind_map.get(sym.kind, 0),
+                "detail": sym.kind or "",
+                "insertText": sym.name,
+            })
+
+        # Imported symbols — names from imports that match.
+        for imp in fs.imports:
+            for name in imp.names:
+                if name and name != "*":
+                    if prefix_lower and prefix_lower not in name.lower():
+                        continue
+                    candidates.append({
+                        "label": name,
+                        "kind": 17,  # Keyword as fallback
+                        "detail": f"from {imp.module}" if imp.module else "",
+                        "insertText": name,
+                    })
+
+        # Deduplicate by label.
+        seen: set[str] = set()
+        unique: list[dict[str, object]] = []
+        for c in candidates:
+            label = str(c["label"])
+            if label not in seen:
+                seen.add(label)
+                unique.append(c)
+
+        return unique[:50]
