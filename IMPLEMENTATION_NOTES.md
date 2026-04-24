@@ -1628,6 +1628,35 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.10 — Phase 3.1e Markdown link provider — **delivered**
+
+Closes out Phase 3.1. Makes `[text](relative-path)` links Ctrl+clickable inside the Monaco editor for markdown files. Mirrors the preview pane's click-based link navigation (delivered in 3.1b) for users who stay in the source view.
+
+- `webapp/src/markdown-link-provider.js` — pure module with `installMarkdownLinkProvider(monaco, getActivePath, onNavigate)`, `buildMarkdownLinkProvider(getText)`, `buildMarkdownLinkOpener(onNavigate)`, plus helpers `findLinks`, `findLinksInLine`, `buildNavigateUri`, `parseNavigateUri`, `shouldSkip`. Idempotent install guard via module-scoped `WeakSet` (same pattern as `lsp-providers.js`). No Monaco mount required for testing.
+- `webapp/src/diff-viewer.js` — imports `installMarkdownLinkProvider`, calls it from `_createEditor` alongside `installLspProviders`. The `onNavigate` callback reads the active file's path via closure, resolves relative paths via the existing `resolveRelativePath` helper, and dispatches `navigate-file` events with `bubbles: true, composed: true` so the app shell's handler catches them.
+- `webapp/src/markdown-link-provider.test.js` — 48 tests across 8 describe blocks covering `shouldSkip` (http/data/blob/mailto/tel/protocol-relative/fragment/root-anchored/empty/null → true; relative paths → false), `findLinksInLine` (empty/null handling, simple link, 1-indexed columns, multiple per line, skip absolute URLs, skip fragment-only, accept relative+fragment, accept parent dirs, empty link text, reference-style links skipped), `findLinks` multi-line (line numbers 1-indexed, ac-navigate URI emission, tooltip preservation, mixed absolute+relative filtering, empty-line tolerance), `buildNavigateUri` + `parseNavigateUri` round-trips (path preservation, fragment preservation, Monaco Uri object form, wrong scheme → null, type guards), `buildMarkdownLinkProvider` (callback dispatch, model passthrough, getValue fallback), `buildMarkdownLinkOpener` (ac-navigate dispatch, other schemes pass through, Monaco Uri objects, fragment strip, error swallow, null/undefined guards), and `installMarkdownLinkProvider` (registers for markdown language, registers opener, idempotent, `registerOpener` fallback for older Monaco versions, individual registration failures don't block others).
+- `webapp/src/diff-viewer.test.js` — extended Monaco mock with `registerLinkProvider` + `registerEditorOpener`; new `monacoState.linkProviders` and `monacoState.linkOpeners` arrays; `_resetLinkGuard` imported and called in the global `beforeEach`. New `DiffViewer markdown link provider` describe block with 8 integration tests: provider registered on first editor build, opener registered, no re-registration on file switch, opener resolves relative path + dispatches navigate-file with bubbles+composed, opener handles parent-directory references via active-file context, opener ignores non-ac-navigate URIs, opener no-op when no active file, provider finds links in markdown content, provider skips absolute URLs.
+
+Design points pinned by tests:
+
+- **Line-by-line scanning, not multi-line regex.** `findLinks` splits on `\n` and processes each line independently. Alternative (single regex with `gm` flags) would need multi-line handling for line-number computation; line-by-line gives natural 1-indexed line/column construction with no offset bookkeeping.
+
+- **ac-navigate scheme.** Deliberately non-standard (`ac-navigate:///{path}`) so Monaco's default link handler never accidentally hands these to the OS. The scheme is unique to our app; no external URI handler registration could intercept them. Pinned by `test_returns_false_for_wrong_scheme` (the opener doesn't claim non-ac-navigate URIs) and by `test_link_opener_ignores_non-ac-navigate_URIs` (integration test proving fallthrough works).
+
+- **Resolution at click time, not scan time.** The provider emits the verbatim relative path inside the URI; the opener resolves it against the currently-active file's directory when the user clicks. Alternative (pre-resolving during `provideLinks`) would couple the provider to file state and force re-scans on every file switch. Callback-based resolution means the provider is registered once and works across arbitrary file switches.
+
+- **Fragment stripping at open time, not scan time.** The scan preserves fragments in the URI (`buildNavigateUri('x.md#sec')` → `'ac-navigate:///x.md#sec'`) so the tooltip shows them correctly, but the opener strips `#section` before dispatching `navigate-file` because the app shell navigates by path only. A future enhancement could forward the fragment for scroll-to-heading support.
+
+- **Error swallow in the opener.** `onNavigate` wrapped in try/catch — a broken callback shouldn't crash Monaco's opener chain and leave every subsequent link click dead. Debug-log + continue is the right shape here (same pattern as the LSP providers).
+
+- **`registerEditorOpener` vs `registerOpener` fallback.** Some Monaco versions expose `registerEditorOpener`, some expose `registerOpener`. The installer probes both. Covered by `test_falls_back_to_registerOpener_when_registerEditorOpener_is_missing`. If neither is present (very old Monaco), link provider registration still succeeds; clicks fall through to Monaco's default behavior (which tries to open as external URL and fails).
+
+- **Skipping root-anchored paths.** A link like `[root](/docs/spec.md)` is skipped rather than navigated because the repo has no concept of an absolute-root anchor. The preview pane's click handler has the same rule for symmetry.
+
+Open carried over:
+
+- **Forwarding fragments.** Today the opener strips `#section` before dispatch. A future enhancement could forward the fragment to the `navigate-file` event's detail, letting the app shell route to the destination viewer's scroll-to-anchor logic. Not blocking any current flow — users typically navigate to the file and then scroll, which is what the current behavior supports.
+
 ### 5.9 — Phase 3.1d LSP integration — **delivered**
 
 Adds four Monaco language-service providers wired to the backend's `Repo.lsp_*` RPCs. Hover, definition, references, completions. Registered once against the `'*'` wildcard selector — one provider per type handles every language, with backend-side dispatch by file extension via the symbol index.

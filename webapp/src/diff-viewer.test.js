@@ -39,6 +39,8 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
       reference: [],
       completion: [],
     },
+    linkProviders: [],
+    linkOpeners: [],
   };
 
   function _makeModel(content, language) {
@@ -210,6 +212,10 @@ vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
           return { dispose: vi.fn() };
         },
       ),
+      registerLinkProvider: vi.fn((language, provider) => {
+        monacoState.linkProviders.push({ language, provider });
+        return { dispose: vi.fn() };
+      }),
     },
     Uri: {
       file: (path) => ({
@@ -221,6 +227,13 @@ vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
       }),
     },
   };
+  // Extend editor namespace with link opener
+  // registration. Lives on monaco.editor per Monaco's
+  // real API.
+  monaco.editor.registerEditorOpener = vi.fn((opener) => {
+    monacoState.linkOpeners.push(opener);
+    return { dispose: vi.fn() };
+  });
   return { default: monaco, ...monaco };
 });
 
@@ -232,6 +245,8 @@ function resetMonacoState() {
   monacoState.lspProviders.definition = [];
   monacoState.lspProviders.reference = [];
   monacoState.lspProviders.completion = [];
+  monacoState.linkProviders = [];
+  monacoState.linkOpeners = [];
   // Don't clear registeredLanguages — matlab is registered
   // at module load and stays across tests. But do reset
   // the editors and models.
@@ -259,6 +274,7 @@ function clearFakeRpc() {
 
 import './diff-viewer.js';
 import { _resetInstallGuard } from './lsp-providers.js';
+import { _resetInstallGuard as _resetLinkGuard } from './markdown-link-provider.js';
 // Grab a reference to the mocked monaco namespace so
 // tests can reset the LSP install guard between cases.
 import { monaco as _mockedMonaco } from './monaco-setup.js';
@@ -287,6 +303,7 @@ beforeEach(() => {
   resetMonacoState();
   clearFakeRpc();
   _resetInstallGuard(_mockedMonaco);
+  _resetLinkGuard(_mockedMonaco);
 });
 
 afterEach(() => {
@@ -2619,5 +2636,132 @@ describe('DiffViewer LSP integration', () => {
     expect(monacoState.lspProviders.definition).toHaveLength(1);
     expect(monacoState.lspProviders.reference).toHaveLength(1);
     expect(monacoState.lspProviders.completion).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Markdown link provider (Phase 3.1e)
+// ---------------------------------------------------------------------------
+
+describe('DiffViewer markdown link provider', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+    });
+  });
+
+  it('registers markdown link provider on first editor build', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    expect(monacoState.linkProviders).toHaveLength(1);
+    expect(monacoState.linkProviders[0].language).toBe('markdown');
+  });
+
+  it('registers link opener on first editor build', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    expect(monacoState.linkOpeners).toHaveLength(1);
+  });
+
+  it('does not re-register on file switch', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    await el.openFile({ path: 'README.md' });
+    await settle(el);
+    expect(monacoState.linkProviders).toHaveLength(1);
+    expect(monacoState.linkOpeners).toHaveLength(1);
+  });
+
+  it('link opener resolves relative path and dispatches navigate-file', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'docs/spec.md' });
+    await settle(el);
+    const listener = vi.fn();
+    el.addEventListener('navigate-file', listener);
+    const opener = monacoState.linkOpeners[0];
+    const result = opener.open('ac-navigate:///other.md');
+    expect(result).toBe(true);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].detail.path).toBe('docs/other.md');
+  });
+
+  it('link opener handles parent-directory references', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'docs/nested/page.md' });
+    await settle(el);
+    const listener = vi.fn();
+    el.addEventListener('navigate-file', listener);
+    const opener = monacoState.linkOpeners[0];
+    opener.open('ac-navigate:///../top.md');
+    expect(listener.mock.calls[0][0].detail.path).toBe('docs/top.md');
+  });
+
+  it('link opener ignores non-ac-navigate URIs', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'docs/spec.md' });
+    await settle(el);
+    const listener = vi.fn();
+    el.addEventListener('navigate-file', listener);
+    const opener = monacoState.linkOpeners[0];
+    const result = opener.open('https://example.com');
+    expect(result).toBe(false);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('link opener is a no-op when no active file', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'docs/spec.md' });
+    await settle(el);
+    el.closeFile('docs/spec.md');
+    await settle(el);
+    // No active file now — opener call shouldn't throw.
+    const listener = vi.fn();
+    el.addEventListener('navigate-file', listener);
+    const opener = monacoState.linkOpeners[0];
+    // Returns true (claims the URI) but dispatches
+    // nothing because there's no active file to
+    // resolve against.
+    opener.open('ac-navigate:///other.md');
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('link provider finds links in markdown content', async () => {
+    // Call the provider directly with a fake model.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'README.md' });
+    await settle(el);
+    const provider = monacoState.linkProviders[0].provider;
+    const model = {
+      getValue: () => 'See [the spec](spec.md) for details.',
+    };
+    const result = provider.provideLinks(model);
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0].url).toBe('ac-navigate:///spec.md');
+  });
+
+  it('link provider skips absolute URLs', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'README.md' });
+    await settle(el);
+    const provider = monacoState.linkProviders[0].provider;
+    const model = {
+      getValue: () =>
+        '[external](https://x.com) and [local](local.md)',
+    };
+    const result = provider.provideLinks(model);
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0].url).toBe('ac-navigate:///local.md');
   });
 });

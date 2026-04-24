@@ -83,6 +83,7 @@ import {
   renderTexMath,
 } from './tex-preview.js';
 import { installLspProviders } from './lsp-providers.js';
+import { installMarkdownLinkProvider } from './markdown-link-provider.js';
 import { SharedRpc } from './rpc.js';
 
 // KaTeX CSS — imported as a raw string via Vite's ?raw
@@ -1077,6 +1078,34 @@ export class DiffViewer extends LitElement {
         return active?.path || '';
       },
       () => this._getRpcCall(),
+    );
+    // Markdown link provider — makes [text](relative)
+    // links Ctrl+clickable inside the editor. Mirrors
+    // the preview pane's link navigation (Phase 3.1b).
+    // The onNavigate callback resolves the path against
+    // the current file's directory and dispatches a
+    // navigate-file event for the app shell to route.
+    installMarkdownLinkProvider(
+      monaco,
+      () => {
+        if (this._activeIndex < 0) return '';
+        const active = this._files[this._activeIndex];
+        return active?.path || '';
+      },
+      (relPath) => {
+        if (this._activeIndex < 0) return;
+        const active = this._files[this._activeIndex];
+        if (!active) return;
+        const resolved = resolveRelativePath(active.path, relPath);
+        if (!resolved) return;
+        this.dispatchEvent(
+          new CustomEvent('navigate-file', {
+            detail: { path: resolved },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
     );
     try {
       this._editor = monaco.editor.createDiffEditor(
