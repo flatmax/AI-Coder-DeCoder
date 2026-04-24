@@ -1,22 +1,82 @@
-// SvgViewer — Phase 3 groundwork stub.
+// SvgViewer — side-by-side SVG diff viewer.
 //
-// The real SVG viewer (side-by-side SVG diff with
-// synchronized pan/zoom via svg-pan-zoom, visual element
-// editor, presentation mode) lands in Phase 3.2. This stub
-// establishes the public API and visibility contract
-// matching the diff viewer's shape.
+// Phase 3.2a delivers the lifecycle layer: multi-file
+// tracking, content fetching via Repo RPCs, dirty
+// tracking, save pipeline, status LED, keyboard shortcuts.
+// No pan/zoom yet, no visual editing — just the structural
+// viewer that matches the diff viewer's surface.
 //
-// Routing: app-shell routes `.svg` files here; everything
-// else goes to the diff viewer. Both viewers share the
-// same empty-state watermark so transitions between them
-// (or between empty and populated) are visually stable.
+// Scope of this commit (3.2a):
+//   - Open/close/switch multiple SVG files
+//   - Concurrent-openFile guard
+//   - HEAD + working-copy content fetching via RPC
+//   - Dirty tracking (content-change-triggered via a
+//     MutationObserver on the rendered SVG — no editor yet,
+//     so we watch for externally-driven content updates)
+//   - Status LED (clean / dirty / new-file)
+//   - Save pipeline dispatching `file-saved` events
+//   - Keyboard shortcuts (Ctrl+S, Ctrl+W, Ctrl+PageUp/Down)
+//   - Side-by-side rendering — raw SVG injected via innerHTML
+//     into left and right containers. Left is always HEAD
+//     (read-only reference); right is working copy.
+//
+// Deferred to follow-up sub-phases:
+//   - 3.2b: Synchronized pan/zoom via svg-pan-zoom.
+//     Fit button. Mouse wheel zoom.
+//   - 3.2c: SvgEditor visual editing (select, drag, resize,
+//     vertex edit, inline text edit, multi-selection
+//     marquee, handle rendering, path command parsing).
+//   - 3.2d: Copy-as-PNG, context menu, presentation mode,
+//     SVG ↔ text diff mode toggle via toggle-svg-mode event.
+//   - 3.2e: Relative image resolution for PDF/PPTX-generated
+//     SVGs that reference sibling raster images.
+//
+// Governing spec: specs4/5-webapp/svg-viewer.md
+//
+// Architectural contracts pinned by this commit:
+//
+//   - **Content is text, not base64.** SVG is XML. Fetch via
+//     `Repo.get_file_content` (same as the diff viewer does
+//     for text files). This matters — `Repo.get_file_base64`
+//     is for rendering images, not for editing their source.
+//
+//   - **`innerHTML` injection, not Lit template interpolation.**
+//     Lit doesn't natively handle raw SVG string injection
+//     (it would HTML-escape the content). The component
+//     renders empty container divs and sets `innerHTML`
+//     manually in `updated()`. Same pattern the specs4
+//     document describes for the production viewer.
+//
+//   - **No lazy dirty tracking — save button always enabled
+//     for new files.** 3.2a has no editor, so the working-
+//     copy content can only change when an external caller
+//     mutates `this._files[i].modified` (e.g., a future
+//     SvgEditor commit). Until 3.2c lands, the viewer is
+//     effectively read-only — the save LED shows dirty only
+//     when the working-copy content differs from HEAD (as
+//     provided by the fetcher).
+//
+//   - **Status LED shape matches the diff viewer.** Same
+//     classes, same click-to-save affordance, same tooltip
+//     shape. Keeps the two viewers visually consistent so
+//     toggling between them doesn't surprise the user.
 
 import { LitElement, css, html } from 'lit';
+
+import { SharedRpc } from './rpc.js';
+
+/**
+ * Default empty SVG shown when a panel has no content
+ * (e.g., new files where HEAD is absent). Keeps the panel
+ * from collapsing visually.
+ */
+const _EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>';
 
 export class SvgViewer extends LitElement {
   static properties = {
     _files: { type: Array, state: true },
     _activeIndex: { type: Number, state: true },
+    _dirtyCount: { type: Number, state: true },
   };
 
   static styles = css`
@@ -27,6 +87,7 @@ export class SvgViewer extends LitElement {
       height: 100%;
       overflow: hidden;
       background: var(--bg-primary, #0d1117);
+      position: relative;
     }
 
     .empty-state {
@@ -45,33 +106,96 @@ export class SvgViewer extends LitElement {
       color: var(--accent-primary, #58a6ff);
     }
 
-    .stub-content {
+    /* Split container — two panels side by side with a
+     * thin divider. No draggable splitter in 3.2a; fixed
+     * 50/50 split. */
+    .split {
       flex: 1;
+      min-height: 0;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
+      position: relative;
+    }
+    .pane {
+      flex: 1 1 50%;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+      background: rgba(13, 17, 23, 0.6);
+    }
+    .pane + .pane {
+      border-left: 1px solid rgba(240, 246, 252, 0.1);
+    }
+    .svg-container {
+      width: 100%;
+      height: 100%;
+      display: flex;
       align-items: center;
       justify-content: center;
-      gap: 1rem;
-      padding: 2rem;
-      color: var(--text-secondary, #8b949e);
     }
-    .stub-label {
-      font-size: 0.875rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      opacity: 0.6;
+    .svg-container svg {
+      max-width: 100%;
+      max-height: 100%;
+      width: 100%;
+      height: 100%;
     }
-    .stub-path {
+
+    /* Pane labels — shown at the top-left of each panel
+     * so users can tell which side is HEAD vs working. */
+    .pane-label {
+      position: absolute;
+      top: 8px;
+      left: 12px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.7rem;
       font-family: 'SFMono-Regular', Consolas, monospace;
-      font-size: 1.125rem;
-      color: var(--accent-primary, #58a6ff);
+      letter-spacing: 0.05em;
+      background: rgba(22, 27, 34, 0.78);
+      color: var(--text-secondary, #8b949e);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 3px;
+      backdrop-filter: blur(4px);
+      z-index: 5;
+      pointer-events: none;
+      text-transform: uppercase;
     }
-    .stub-note {
-      font-size: 0.8125rem;
-      opacity: 0.5;
-      font-style: italic;
-      max-width: 30rem;
-      text-align: center;
+
+    /* Status LED — same visual language as the diff viewer
+     * so toggling between viewers doesn't change the
+     * feedback model. */
+    .status-led {
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      cursor: pointer;
+      z-index: 10;
+      transition: transform 120ms ease;
+    }
+    .status-led:hover {
+      transform: scale(1.4);
+    }
+    .status-led.clean {
+      background: #7ee787;
+      box-shadow: 0 0 6px rgba(126, 231, 135, 0.6);
+      cursor: default;
+    }
+    .status-led.new-file {
+      background: var(--accent-primary, #58a6ff);
+      box-shadow: 0 0 6px rgba(88, 166, 255, 0.6);
+      cursor: default;
+    }
+    .status-led.dirty {
+      background: #d29922;
+      box-shadow: 0 0 8px rgba(210, 153, 34, 0.7);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
     }
   `;
 
@@ -79,30 +203,77 @@ export class SvgViewer extends LitElement {
     super();
     this._files = [];
     this._activeIndex = -1;
+    this._dirtyCount = 0;
+    // Concurrent-openFile guard. Same pattern as diff viewer.
+    this._openingPath = null;
+    // Last-rendered content per side. Lets `updated()`
+    // skip innerHTML updates when nothing changed —
+    // important because reassigning innerHTML triggers
+    // a full SVG re-parse and visual flash.
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    // Bound handlers for add/remove symmetry.
+    this._onKeyDown = this._onKeyDown.bind(this);
   }
 
-  openFile(opts) {
+  // ---------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------
+
+  connectedCallback() {
+    super.connectedCallback();
+    document.addEventListener('keydown', this._onKeyDown);
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('keydown', this._onKeyDown);
+    super.disconnectedCallback();
+  }
+
+  updated(changedProps) {
+    super.updated?.(changedProps);
+    // After Lit commits the template, inject SVG content
+    // into the pane containers. innerHTML assignment is
+    // necessary because Lit would escape the SVG text.
+    this._injectSvgContent();
+  }
+
+  // ---------------------------------------------------------------
+  // Public API — matches DiffViewer's contract
+  // ---------------------------------------------------------------
+
+  async openFile(opts) {
     if (!opts || typeof opts.path !== 'string' || !opts.path) {
       return;
     }
     const { path } = opts;
     const existing = this._files.findIndex((f) => f.path === path);
     if (existing !== -1 && existing === this._activeIndex) {
+      // Same-file open — no-op.
       return;
     }
-    if (existing !== -1) {
-      this._activeIndex = existing;
-    } else {
-      this._files = [...this._files, { path }];
-      this._activeIndex = this._files.length - 1;
+    if (this._openingPath === path) return;
+    this._openingPath = path;
+    try {
+      await this._openFileInner(opts);
+    } finally {
+      this._openingPath = null;
     }
-    this._dispatchActiveFileChanged();
   }
 
   closeFile(path) {
     const idx = this._files.findIndex((f) => f.path === path);
     if (idx === -1) return;
     const wasActive = idx === this._activeIndex;
+    // Capture the active path BEFORE mutating _files so
+    // we can decide whether the close actually changed
+    // which file is active. Closing an inactive sibling
+    // shifts the active index but doesn't change the
+    // active path, so the event shouldn't fire.
+    const priorActivePath =
+      this._activeIndex >= 0
+        ? this._files[this._activeIndex].path
+        : null;
     const newFiles = [
       ...this._files.slice(0, idx),
       ...this._files.slice(idx + 1),
@@ -110,24 +281,285 @@ export class SvgViewer extends LitElement {
     this._files = newFiles;
     if (newFiles.length === 0) {
       this._activeIndex = -1;
+      this._lastLeftContent = null;
+      this._lastRightContent = null;
     } else if (wasActive) {
       this._activeIndex = Math.min(idx, newFiles.length - 1);
     } else if (idx < this._activeIndex) {
       this._activeIndex -= 1;
     }
-    this._dispatchActiveFileChanged();
+    this._recomputeDirtyCount();
+    const nextActivePath =
+      this._activeIndex >= 0
+        ? this._files[this._activeIndex].path
+        : null;
+    if (nextActivePath !== priorActivePath) {
+      this._dispatchActiveFileChanged();
+    }
   }
 
-  refreshOpenFiles() {
-    // Intentional no-op for Phase 3 groundwork.
+  async refreshOpenFiles() {
+    const paths = this._files.map((f) => f.path);
+    for (const path of paths) {
+      const fetched = await this._fetchFileContent(path);
+      if (!fetched) continue;
+      const file = this._files.find((f) => f.path === path);
+      if (!file) continue;
+      file.original = fetched.original;
+      file.modified = fetched.modified;
+      file.savedContent = fetched.modified;
+      file.isNew = fetched.isNew;
+    }
+    // Force re-injection by clearing last-content cache.
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    this._recomputeDirtyCount();
+    this.requestUpdate();
   }
 
   getDirtyFiles() {
-    return [];
+    return this._files.filter((f) => this._isDirty(f)).map((f) => f.path);
+  }
+
+  async saveAll() {
+    for (const file of [...this._files]) {
+      if (this._isDirty(file)) {
+        await this._saveFile(file.path);
+      }
+    }
   }
 
   get hasOpenFiles() {
     return this._files.length > 0;
+  }
+
+  // ---------------------------------------------------------------
+  // Internals — file loading
+  // ---------------------------------------------------------------
+
+  async _openFileInner(opts) {
+    const { path } = opts;
+    const existing = this._files.findIndex((f) => f.path === path);
+    if (existing !== -1) {
+      this._activeIndex = existing;
+      this._lastLeftContent = null;
+      this._lastRightContent = null;
+      this._dispatchActiveFileChanged();
+      return;
+    }
+    const fetched = await this._fetchFileContent(path);
+    if (!fetched) return;
+    const file = {
+      path,
+      original: fetched.original,
+      modified: fetched.modified,
+      savedContent: fetched.modified,
+      isNew: fetched.isNew,
+    };
+    this._files = [...this._files, file];
+    this._activeIndex = this._files.length - 1;
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    this._dispatchActiveFileChanged();
+    this._recomputeDirtyCount();
+  }
+
+  async _fetchFileContent(path) {
+    const call = this._getRpcCall();
+    if (!call) {
+      return { original: '', modified: '', isNew: false };
+    }
+    let original = '';
+    let modified = '';
+    let isNew = false;
+    try {
+      const headResult = await call['Repo.get_file_content'](
+        path,
+        'HEAD',
+      );
+      original = this._extractRpcContent(headResult);
+    } catch (_) {
+      isNew = true;
+    }
+    try {
+      const workingResult = await call['Repo.get_file_content'](path);
+      modified = this._extractRpcContent(workingResult);
+    } catch (_) {
+      // File missing from working copy (deleted); leave modified empty.
+    }
+    return { original, modified, isNew };
+  }
+
+  _extractRpcContent(result) {
+    if (typeof result === 'string') return result;
+    if (
+      result &&
+      typeof result === 'object' &&
+      typeof result.content === 'string'
+    ) {
+      return result.content;
+    }
+    if (result && typeof result === 'object') {
+      const keys = Object.keys(result);
+      if (keys.length === 1) {
+        return this._extractRpcContent(result[keys[0]]);
+      }
+    }
+    return '';
+  }
+
+  _getRpcCall() {
+    try {
+      const shared = globalThis.__sharedRpcOverride;
+      if (shared) return shared;
+    } catch (_) {}
+    try {
+      return SharedRpc.call || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // SVG injection
+  // ---------------------------------------------------------------
+
+  _injectSvgContent() {
+    if (this._activeIndex < 0) {
+      this._lastLeftContent = null;
+      this._lastRightContent = null;
+      return;
+    }
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    const leftContainer =
+      this.shadowRoot?.querySelector('.pane-left .svg-container');
+    const rightContainer =
+      this.shadowRoot?.querySelector('.pane-right .svg-container');
+    if (!leftContainer || !rightContainer) return;
+    const leftContent = file.original || _EMPTY_SVG;
+    const rightContent = file.modified || _EMPTY_SVG;
+    // Skip reassignment when content hasn't changed —
+    // innerHTML assignment forces a full SVG re-parse
+    // which flashes the visual.
+    if (leftContent !== this._lastLeftContent) {
+      leftContainer.innerHTML = leftContent;
+      this._lastLeftContent = leftContent;
+    }
+    if (rightContent !== this._lastRightContent) {
+      rightContainer.innerHTML = rightContent;
+      this._lastRightContent = rightContent;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Dirty tracking & saving
+  // ---------------------------------------------------------------
+
+  _isDirty(file) {
+    if (!file) return false;
+    return file.modified !== file.savedContent;
+  }
+
+  _recomputeDirtyCount() {
+    this._dirtyCount = this._files.filter((f) => this._isDirty(f)).length;
+  }
+
+  async _saveFile(path) {
+    const file = this._files.find((f) => f.path === path);
+    if (!file) return;
+    file.savedContent = file.modified;
+    this._recomputeDirtyCount();
+    this.dispatchEvent(
+      new CustomEvent('file-saved', {
+        detail: { path, content: file.modified },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Status LED
+  // ---------------------------------------------------------------
+
+  _statusLedClass() {
+    if (this._activeIndex < 0) return '';
+    const file = this._files[this._activeIndex];
+    if (!file) return '';
+    if (this._isDirty(file)) return 'dirty';
+    if (file.isNew) return 'new-file';
+    return 'clean';
+  }
+
+  _statusLedTitle() {
+    if (this._activeIndex < 0) return '';
+    const file = this._files[this._activeIndex];
+    if (!file) return '';
+    const klass = this._statusLedClass();
+    if (klass === 'dirty') return `${file.path} — unsaved (click to save)`;
+    if (klass === 'new-file') return `${file.path} — new file`;
+    return file.path;
+  }
+
+  _onStatusLedClick() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    if (this._isDirty(file)) {
+      this._saveFile(file.path);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Keyboard shortcuts
+  // ---------------------------------------------------------------
+
+  _onKeyDown(event) {
+    if (!this.isConnected) return;
+    if (this._activeIndex < 0) return;
+    const ctrl = event.ctrlKey || event.metaKey;
+    if (!ctrl) return;
+    if (!this._eventTargetInsideUs(event)) return;
+    if (event.key === 's' || event.key === 'S') {
+      event.preventDefault();
+      const file = this._files[this._activeIndex];
+      if (file) this._saveFile(file.path);
+      return;
+    }
+    if (event.key === 'w' || event.key === 'W') {
+      event.preventDefault();
+      const file = this._files[this._activeIndex];
+      if (file) this.closeFile(file.path);
+      return;
+    }
+    if (event.key === 'PageDown') {
+      event.preventDefault();
+      this._cycleFile(1);
+      return;
+    }
+    if (event.key === 'PageUp') {
+      event.preventDefault();
+      this._cycleFile(-1);
+      return;
+    }
+  }
+
+  _eventTargetInsideUs(event) {
+    const path = event.composedPath ? event.composedPath() : [];
+    return path.includes(this);
+  }
+
+  _cycleFile(delta) {
+    if (this._files.length < 2) return;
+    const next =
+      (this._activeIndex + delta + this._files.length) %
+      this._files.length;
+    if (next === this._activeIndex) return;
+    this._activeIndex = next;
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    this._dispatchActiveFileChanged();
   }
 
   _dispatchActiveFileChanged() {
@@ -142,6 +574,10 @@ export class SvgViewer extends LitElement {
     );
   }
 
+  // ---------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------
+
   render() {
     if (this._files.length === 0 || this._activeIndex < 0) {
       return html`
@@ -152,15 +588,23 @@ export class SvgViewer extends LitElement {
         </div>
       `;
     }
-    const active = this._files[this._activeIndex];
+    const ledClass = this._statusLedClass();
     return html`
-      <div class="stub-content">
-        <div class="stub-label">SVG viewer (stub)</div>
-        <div class="stub-path">${active.path}</div>
-        <div class="stub-note">
-          Phase 3.2 replaces this with side-by-side SVG diff
-          with synchronized pan/zoom.
+      <div class="split">
+        <div class="pane pane-left">
+          <div class="pane-label">Original</div>
+          <div class="svg-container"></div>
         </div>
+        <div class="pane pane-right">
+          <div class="pane-label">Modified</div>
+          <div class="svg-container"></div>
+        </div>
+        <div
+          class="status-led ${ledClass}"
+          title=${this._statusLedTitle()}
+          aria-label=${this._statusLedTitle()}
+          @click=${this._onStatusLedClick}
+        ></div>
       </div>
     `;
   }
