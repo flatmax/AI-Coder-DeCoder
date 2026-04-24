@@ -284,13 +284,26 @@ async def run(
             webbrowser.open(f"file://{page}")
         return
 
-    # Step 2: Find available ports
+    # Step 2: Find available ports. Both the WebSocket and
+    # webapp ports are probed so two concurrent AC-DC
+    # instances don't silently collide on the default port.
+    # Without probing the webapp port, a second instance
+    # would fail to bind (OSError in the static-server
+    # thread or Vite crash-loop) but still open a browser
+    # pointing at the *first* instance's webapp — producing
+    # the confusing "AC-DC4 title bar, AC-DC code" bug.
     try:
         server_port = find_available_port(start=server_port)
     except RuntimeError as exc:
         logger.error("Could not find server port: %s", exc)
         return
     logger.info("WebSocket server port: %d", server_port)
+    try:
+        webapp_port = find_available_port(start=webapp_port)
+    except RuntimeError as exc:
+        logger.error("Could not find webapp port: %s", exc)
+        return
+    logger.info("Webapp server port: %d", webapp_port)
 
     # Step 3: Initialize lightweight services
     config = ConfigManager(repo_root=repo_path)

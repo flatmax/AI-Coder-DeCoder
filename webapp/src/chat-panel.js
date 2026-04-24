@@ -595,6 +595,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
       opacity: 0.6;
       margin-bottom: 0.375rem;
     }
+    .finish-reason-badge {
+      display: inline-block;
+      margin-left: 0.5rem;
+      padding: 0.05rem 0.4rem;
+      font-size: 0.7rem;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: normal;
+      border-radius: 3px;
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.3);
+      opacity: 1;
+    }
 
     /* Message action toolbars — hover-only copy and paste
      * buttons, at top-right and bottom-right of each card.
@@ -1581,6 +1595,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       const editResults = Array.isArray(result?.edit_results)
         ? result.edit_results
         : undefined;
+      const finishReason = result?.finish_reason || '';
       this.messages = [
         ...this.messages,
         error
@@ -1592,6 +1607,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
               role: 'assistant',
               content: finalContent,
               editResults,
+              ...(finishReason && finishReason !== 'stop' &&
+                finishReason !== 'end_turn'
+                ? { finishReason }
+                : {}),
             },
       ];
       this._streaming = false;
@@ -3901,6 +3920,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const images = Array.isArray(msg.images) ? msg.images : [];
     const toolbar = this._renderMessageToolbar(msg);
     const highlightClass = isHighlighted ? ' search-highlight' : '';
+    // Finish-reason badge — only shown for non-normal stop
+    // reasons (length, content_filter, etc.). Normal
+    // completions (stop, end_turn) don't carry the field.
+    const finishBadge =
+      msg.finishReason
+        ? html`<span class="finish-reason-badge"
+            title="LLM finish reason: ${msg.finishReason}"
+            >${msg.finishReason}</span>`
+        : '';
     // File summary section — settled assistant messages
     // only. Per specs4/5-webapp/chat.md: "Section only
     // shown for final rendered messages, never during
@@ -3918,7 +3946,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
         data-msg-index=${index}
       >
         <div class="message-toolbar top">${toolbar}</div>
-        <div class="role-label">${roleLabel}</div>
+        <div class="role-label">${roleLabel}${finishBadge}</div>
         ${bodyHtml}
         ${images.length > 0
           ? this._renderMessageImages(images)

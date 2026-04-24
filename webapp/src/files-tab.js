@@ -681,6 +681,69 @@ export class FilesTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Chat panel emits `file-chip-click` when the user
+   * clicks a chip in the "Files Referenced" summary
+   * section at the bottom of an assistant message. The
+   * chips toggle selection state but do NOT navigate —
+   * per specs4/5-webapp/chat.md, summary chips are for
+   * context management, distinct from inline prose
+   * mentions which also navigate. A user scanning the
+   * chip list to curate context shouldn't be yanked
+   * into the viewer on every click.
+   *
+   * The `navigate: false` field on the event detail is
+   * always set to false by the chat panel, but we
+   * preserve the check so a future dispatcher that
+   * wants navigation can flip the flag without changing
+   * the handler shape.
+   */
+  _onFileChipClick(event) {
+    const path = event.detail?.path;
+    if (typeof path !== 'string' || !path) return;
+    const next = new Set(this._selectedFiles);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    this._applySelection(next, /* notifyServer */ true);
+    // Navigate only when the dispatcher explicitly asks
+    // for it. Summary chips always pass navigate:false;
+    // this branch is here for symmetry and future use.
+    if (event.detail?.navigate === true) {
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path },
+          bubbles: false,
+        }),
+      );
+    }
+  }
+
+  /**
+   * Chat panel emits `file-chips-add-all` with a paths
+   * array when the user clicks "+ Add All (N)" in the
+   * file summary header. The chat panel has already
+   * filtered to unselected paths only, so we just add
+   * them all to the selection in one batch — a single
+   * `set_selected_files` RPC round-trip instead of N.
+   *
+   * Idempotent — if any of the paths are somehow
+   * already selected (race between render and click,
+   * unlikely but defensive), the Set add is a no-op
+   * for those entries.
+   */
+  _onFileChipsAddAll(event) {
+    const paths = event.detail?.paths;
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    const next = new Set(this._selectedFiles);
+    for (const path of paths) {
+      if (typeof path === 'string' && path) next.add(path);
+    }
+    this._applySelection(next, /* notifyServer */ true);
+  }
+
   // ---------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------
@@ -732,6 +795,8 @@ export class FilesTab extends RpcMixin(LitElement) {
       <div class="chat-pane">
         <ac-chat-panel
           @file-mention-click=${this._onFileMentionClick}
+          @file-chip-click=${this._onFileChipClick}
+          @file-chips-add-all=${this._onFileChipsAddAll}
           @file-search-changed=${this._onFileSearchChanged}
           @file-search-scroll=${this._onFileSearchScroll}
         ></ac-chat-panel>
