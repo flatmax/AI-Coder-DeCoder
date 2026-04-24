@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -21,8 +22,22 @@ def test_main_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     Asserts only the stable identity strings (product name and expansion)
     — not the banner wording itself, which changes as development
     progresses.
+
+    ``main()`` now dispatches to ``ac_dc.main.run`` which launches the
+    webapp and RPC servers, opens a browser, and then waits on
+    ``asyncio.Event().wait()`` to keep the process alive. Unit tests
+    want the argparse + banner behaviour only, so we mock the launcher.
+    ``run`` is patched where it's imported inside ``cli.main``
+    (``ac_dc.main.run``), not at the import site in ``ac_dc.cli``
+    (because ``cli.py`` imports it lazily inside the function).
     """
-    exit_code = main([])
+    with patch("ac_dc.main.run") as mock_run:
+        # Replace the coroutine with a no-op async function so
+        # asyncio.run can await it without raising.
+        async def _noop(**_kwargs):
+            return None
+        mock_run.side_effect = _noop
+        exit_code = main([])
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "AC-DC" in captured.err
@@ -53,10 +68,13 @@ def test_main_help_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
 def test_main_accepts_all_documented_flags() -> None:
     """All flags listed in specs4/6-deployment/startup.md parse without error.
 
-    Layer 0 accepts them but ignores their values — full behavior lands in
-    Layer 6. This test is the contract that the flag set is stable.
+    This test is the contract that the flag set is stable. ``main()``
+    now launches real servers via ``ac_dc.main.run``, so we mock that
+    launcher — this test's scope is argparse plumbing, not the full
+    startup orchestration (covered by Layer 6 tests). Each flag set
+    should parse cleanly and reach the launcher; we don't verify what
+    the launcher does with the values.
     """
-    # Each combination should parse and exit 0.
     flag_sets = [
         ["--server-port", "19000"],
         ["--webapp-port", "19001"],
@@ -69,8 +87,21 @@ def test_main_accepts_all_documented_flags() -> None:
         # Composite — several at once.
         ["--server-port", "19000", "--no-browser", "--verbose"],
     ]
+
+    async def _noop(**_kwargs):
+        return None
+
     for flags in flag_sets:
-        assert main(flags) == 0, f"flags {flags!r} did not parse cleanly"
+        with patch("ac_dc.main.run") as mock_run:
+            mock_run.side_effect = _noop
+            assert main(flags) == 0, (
+                f"flags {flags!r} did not parse cleanly"
+            )
+            # Sanity check — the launcher was invoked, which
+            # confirms main() actually reached past argparse.
+            assert mock_run.called, (
+                f"flags {flags!r} never reached the launcher"
+            )
 
 
 def test_main_rejects_unknown_flag() -> None:

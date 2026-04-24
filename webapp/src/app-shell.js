@@ -51,6 +51,43 @@ function _repoKey(key, repoName) {
 const _LAST_OPEN_FILE_KEY = 'ac-last-open-file';
 const _LAST_VIEWPORT_KEY = 'ac-last-viewport';
 
+// ---------------------------------------------------------------
+// Dialog persistence keys and sizing constants
+// ---------------------------------------------------------------
+//
+// specs4/5-webapp/shell.md pins these four keys and the default
+// dock behaviour. `ac-dc-dialog-width` is the docked width (a
+// single number); `ac-dc-dialog-pos` is the full undocked rect
+// (JSON with left/top/width/height). They're separate so the
+// docked width survives an undock-then-redock cycle without
+// being clobbered by stale position data.
+
+const _DIALOG_WIDTH_KEY = 'ac-dc-dialog-width';
+const _DIALOG_POS_KEY = 'ac-dc-dialog-pos';
+const _DIALOG_MIN_KEY = 'ac-dc-minimized';
+const _ACTIVE_TAB_KEY = 'ac-dc-active-tab';
+
+// Minimum size during resize. Keep these generous — below
+// ~300 wide the tab buttons start wrapping, and below ~200
+// tall the dialog body collapses unusably.
+const _DIALOG_MIN_WIDTH = 300;
+const _DIALOG_MIN_HEIGHT = 200;
+// When restoring an undocked position, at least this many
+// pixels must remain inside the viewport on both axes.
+// Otherwise the dialog may be stranded off-screen after a
+// monitor disconnect or resolution change.
+const _DIALOG_VISIBLE_MARGIN = 100;
+// Drag threshold (px). Below this, treat header pointerdown +
+// pointerup as a click. Matches the specs4 convention of 5px.
+const _DIALOG_DRAG_THRESHOLD = 5;
+
+// Which edge/corner a resize handle represents. Drives the
+// delta math: right moves the right edge, bottom moves the
+// bottom edge, corner moves both.
+const _RESIZE_RIGHT = 'right';
+const _RESIZE_BOTTOM = 'bottom';
+const _RESIZE_CORNER = 'corner';
+
 /**
  * Read the WebSocket port from the URL, falling back to 18080.
  *
@@ -116,6 +153,20 @@ export class AppShell extends JRPCClient {
     _activeViewer: { type: String, state: true },
     _repoName: { type: String, state: true },
     _initComplete: { type: Boolean, state: true },
+    /** Dialog minimize state — persisted to localStorage. */
+    _minimized: { type: Boolean, state: true },
+    /**
+     * Docked width when in docked mode. Applied as an inline
+     * style override so the CSS `width: 50%` default still
+     * governs the never-resized case.
+     */
+    _dockedWidth: { type: Number, state: true },
+    /**
+     * Undocked rectangle. null means "still docked". Set on
+     * first drag or first bottom/corner resize. Once set, the
+     * dialog renders with explicit pixel positioning.
+     */
+    _undockedPos: { type: Object, state: true },
   };
 
   static styles = css`
@@ -169,7 +220,22 @@ export class AppShell extends JRPCClient {
 
     /* Dialog — foreground panel. Explicit z-index keeps
      * it above the viewer background regardless of what
-     * internal positioning the viewer components use. */
+     * internal positioning the viewer components use.
+     *
+     * Two layout modes:
+     *   Docked (default)   — top/left/bottom anchored to
+     *                        viewport edges, width as a %
+     *                        (overridable via inline style
+     *                        for docked-width persistence).
+     *   Undocked (.floating) — all four edges set by inline
+     *                        style from _undockedPos; the
+     *                        CSS "bottom: 0" is disabled by
+     *                        "bottom: auto".
+     *
+     * Minimized collapses to the header only. We force a
+     * fixed height rather than relying on content-hugging
+     * because the body has "flex: 1" and would otherwise
+     * pull the dialog to full height even with no children. */
     .dialog {
       position: absolute;
       top: 0;
@@ -184,12 +250,101 @@ export class AppShell extends JRPCClient {
       backdrop-filter: blur(8px);
       z-index: 10;
     }
+    .dialog.floating {
+      /* Undocked: disable the docked bottom anchor so the
+       * inline height style takes effect. Shadow gives
+       * visual separation from the viewer background. */
+      bottom: auto;
+      min-width: unset;
+      border-right: 1px solid rgba(240, 246, 252, 0.1);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    }
+    .dialog.minimized {
+      height: auto !important;
+      bottom: auto;
+    }
+    .dialog.minimized .dialog-body,
+    .dialog.minimized .reconnect-banner {
+      display: none;
+    }
+    .dialog.dragging,
+    .dialog.resizing {
+      /* Disable text selection and remove the transition
+       * during a drag so the pointer tracks 1:1. */
+      user-select: none;
+      transition: none;
+    }
     .dialog-header {
       display: flex;
       gap: 0.25rem;
       padding: 0.5rem;
       border-bottom: 1px solid rgba(240, 246, 252, 0.1);
       align-items: center;
+      /* The header background (not its buttons) is the drag
+       * handle. Buttons override cursor:default. */
+      cursor: grab;
+    }
+    .dialog.dragging .dialog-header {
+      cursor: grabbing;
+    }
+    .dialog-header .tab-button {
+      cursor: pointer;
+    }
+    .dialog-header .minimize-button {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.4rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      opacity: 0.7;
+    }
+    .dialog-header .minimize-button:hover {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.05);
+    }
+
+    /* Resize handles — invisible hit zones at the edges.
+     * Right and bottom handles take a single axis; the
+     * corner handle takes both. Hover shows a subtle
+     * accent line so the handle is discoverable without
+     * being distracting. */
+    .resize-handle {
+      position: absolute;
+      z-index: 11;
+      background: transparent;
+      transition: background 120ms ease;
+    }
+    .resize-handle.right {
+      top: 0;
+      bottom: 0;
+      right: -4px;
+      width: 8px;
+      cursor: ew-resize;
+    }
+    .resize-handle.bottom {
+      left: 0;
+      right: 0;
+      bottom: -4px;
+      height: 8px;
+      cursor: ns-resize;
+    }
+    .resize-handle.corner {
+      right: -4px;
+      bottom: -4px;
+      width: 14px;
+      height: 14px;
+      cursor: nwse-resize;
+      z-index: 12;
+    }
+    .resize-handle:hover {
+      background: rgba(88, 166, 255, 0.25);
+    }
+    .dialog.minimized .resize-handle.bottom,
+    .dialog.minimized .resize-handle.corner {
+      display: none;
     }
     .tab-button {
       background: transparent;
@@ -321,7 +476,17 @@ export class AppShell extends JRPCClient {
     this.startupMessage = 'Connecting…';
     this.startupPercent = 0;
     this.overlayVisible = true;
-    this.activeTab = 'files';
+    // Hydrate persisted dialog state synchronously in the
+    // constructor. Reading later (e.g. in connectedCallback
+    // or setupDone) causes a visible flash where the dialog
+    // renders at defaults before jumping to the saved
+    // state. specs4/5-webapp/shell.md#state-restoration
+    // calls for "no visible flicker" on reconnect; same
+    // principle applies to first paint.
+    this.activeTab = this._loadActiveTab();
+    this._minimized = this._loadMinimized();
+    this._dockedWidth = this._loadDockedWidth();
+    this._undockedPos = this._loadUndockedPos();
     this.toasts = [];
     this.reconnectAttempt = 0;
     // Default to diff viewer — most files route there.
@@ -339,6 +504,19 @@ export class AppShell extends JRPCClient {
     this._wasConnected = false;
     // Pending reconnect timeout handle.
     this._reconnectTimer = null;
+
+    // Drag/resize interaction state. null when idle;
+    // populated during an active drag with the origin
+    // coords and the dialog's rect at drag start. Kept
+    // out of reactive properties so mid-drag updates
+    // don't trigger re-renders — we mutate inline styles
+    // directly for smooth tracking, then commit to
+    // _dockedWidth / _undockedPos on pointerup.
+    this._drag = null;
+    // RAF handle for window resize throttling. One call
+    // per animation frame, cancelled on unmount.
+    this._resizeRAF = null;
+
     // Global toast event listener binding.
     this._onToastEvent = this._onToastEvent.bind(this);
     // Navigate-file routing. Bound so add/remove match.
@@ -349,6 +527,16 @@ export class AppShell extends JRPCClient {
     this._onGridKeyDown = this._onGridKeyDown.bind(this);
     this._onGridKeyUp = this._onGridKeyUp.bind(this);
     this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    // Dialog drag/resize handlers. Bound so add/remove
+    // across document scope works on the same instance.
+    this._onHeaderPointerDown =
+      this._onHeaderPointerDown.bind(this);
+    this._onHandlePointerDown =
+      this._onHandlePointerDown.bind(this);
+    this._onPointerMove = this._onPointerMove.bind(this);
+    this._onPointerUp = this._onPointerUp.bind(this);
+    // Window resize — RAF-throttled.
+    this._onWindowResize = this._onWindowResize.bind(this);
   }
 
   connectedCallback() {
@@ -387,10 +575,24 @@ export class AppShell extends JRPCClient {
       this._onLoadDiffPanel,
     );
     window.addEventListener('beforeunload', this._onBeforeUnload);
+    window.addEventListener('resize', this._onWindowResize);
   }
 
   disconnectedCallback() {
     window.removeEventListener(TOAST_EVENT, this._onToastEvent);
+    window.removeEventListener('resize', this._onWindowResize);
+    // Cancel any pending RAF callback — leaking it would fire
+    // after the element is gone and try to query a detached
+    // shadow root.
+    if (this._resizeRAF) {
+      cancelAnimationFrame(this._resizeRAF);
+      this._resizeRAF = null;
+    }
+    // If a drag was in progress at unmount (unusual but
+    // possible during hot reload), remove document-scope
+    // listeners so they don't keep the stale handler alive.
+    document.removeEventListener('pointermove', this._onPointerMove);
+    document.removeEventListener('pointerup', this._onPointerUp);
     window.removeEventListener(
       'navigate-file',
       this._onNavigateFile,
@@ -1173,16 +1375,472 @@ export class AppShell extends JRPCClient {
   }
 
   // ---------------------------------------------------------------
+  // Dialog persistence
+  // ---------------------------------------------------------------
+
+  /**
+   * Load the last active tab from localStorage. Returns 'files'
+   * when no preference is stored or the stored value is an
+   * unrecognised string — defending against a stale key written
+   * by an older build that had additional tabs.
+   *
+   * A stale 'search' preference (from before file search was
+   * integrated into the Files tab) migrates to 'files'. Matches
+   * the spec's migration clause.
+   */
+  _loadActiveTab() {
+    try {
+      const stored = localStorage.getItem(_ACTIVE_TAB_KEY);
+      if (stored === 'search') return 'files';
+      if (stored === 'files' || stored === 'context'
+          || stored === 'settings') {
+        return stored;
+      }
+    } catch (_) {}
+    return 'files';
+  }
+
+  _loadMinimized() {
+    try {
+      return localStorage.getItem(_DIALOG_MIN_KEY) === 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _loadDockedWidth() {
+    try {
+      const raw = localStorage.getItem(_DIALOG_WIDTH_KEY);
+      if (!raw) return null;
+      const n = parseInt(raw, 10);
+      if (Number.isNaN(n) || n < _DIALOG_MIN_WIDTH) return null;
+      return n;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Load the undocked position and bounds-check it against the
+   * current viewport. Returns null when:
+   *   - no data stored
+   *   - JSON parse fails
+   *   - the rect would leave fewer than _DIALOG_VISIBLE_MARGIN
+   *     pixels of the dialog inside the viewport (monitor
+   *     disconnect / resolution change stranded it off-screen)
+   *
+   * Clamps valid-but-too-big rects to viewport size.
+   */
+  _loadUndockedPos() {
+    try {
+      const raw = localStorage.getItem(_DIALOG_POS_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const { left, top, width, height } = parsed;
+      if (![left, top, width, height].every(
+        (n) => typeof n === 'number' && Number.isFinite(n),
+      )) {
+        return null;
+      }
+      if (width < _DIALOG_MIN_WIDTH) return null;
+      if (height < _DIALOG_MIN_HEIGHT) return null;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // Must leave a visible handle on both axes for
+      // recovery when the viewport shrinks below the stored
+      // position.
+      if (left > vw - _DIALOG_VISIBLE_MARGIN) return null;
+      if (top > vh - _DIALOG_VISIBLE_MARGIN) return null;
+      if (left + width < _DIALOG_VISIBLE_MARGIN) return null;
+      if (top + height < _DIALOG_VISIBLE_MARGIN) return null;
+      return {
+        left: Math.max(0, left),
+        top: Math.max(0, top),
+        width: Math.min(width, vw),
+        height: Math.min(height, vh),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _saveMinimized() {
+    try {
+      localStorage.setItem(_DIALOG_MIN_KEY, String(this._minimized));
+    } catch (_) {}
+  }
+
+  _saveDockedWidth() {
+    try {
+      if (this._dockedWidth == null) {
+        localStorage.removeItem(_DIALOG_WIDTH_KEY);
+      } else {
+        localStorage.setItem(
+          _DIALOG_WIDTH_KEY, String(this._dockedWidth),
+        );
+      }
+    } catch (_) {}
+  }
+
+  _saveUndockedPos() {
+    try {
+      if (this._undockedPos == null) {
+        localStorage.removeItem(_DIALOG_POS_KEY);
+      } else {
+        localStorage.setItem(
+          _DIALOG_POS_KEY, JSON.stringify(this._undockedPos),
+        );
+      }
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------
+  // Dialog drag, resize, minimize
+  // ---------------------------------------------------------------
+
+  /**
+   * Query the dialog element's current rect. Used at drag
+   * start to snapshot the starting geometry — from there
+   * we apply pointer deltas. Returns null when the shadow
+   * root hasn't rendered yet (shouldn't happen in
+   * practice since the pointer can't target it, but
+   * defensive).
+   */
+  _getDialogRect() {
+    const dialog = this.shadowRoot?.querySelector('.dialog');
+    if (!dialog) return null;
+    return dialog.getBoundingClientRect();
+  }
+
+  /**
+   * Begin dragging from a header pointerdown. Skips when the
+   * pointer is on a button inside the header — tab buttons
+   * and the minimize button handle their own clicks.
+   */
+  _onHeaderPointerDown(event) {
+    if (event.button !== 0) return;
+    // closest('button') lets a click anywhere on a button
+    // (including nested icons if we add them later) skip drag.
+    if (
+      event.target
+      && typeof event.target.closest === 'function'
+      && event.target.closest('button')
+    ) {
+      return;
+    }
+    const rect = this._getDialogRect();
+    if (!rect) return;
+    this._drag = {
+      mode: 'drag',
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: rect.left,
+      originTop: rect.top,
+      originWidth: rect.width,
+      originHeight: rect.height,
+      committed: false,
+    };
+    document.addEventListener('pointermove', this._onPointerMove);
+    document.addEventListener('pointerup', this._onPointerUp);
+  }
+
+  /**
+   * Begin resizing from a handle pointerdown. The handle's
+   * dataset carries which edge/corner it represents.
+   */
+  _onHandlePointerDown(event, which) {
+    if (event.button !== 0) return;
+    // Don't let the pointerdown bubble to the header (which
+    // would also try to start a drag).
+    event.stopPropagation();
+    const rect = this._getDialogRect();
+    if (!rect) return;
+    this._drag = {
+      mode: 'resize',
+      which,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: rect.left,
+      originTop: rect.top,
+      originWidth: rect.width,
+      originHeight: rect.height,
+    };
+    document.addEventListener('pointermove', this._onPointerMove);
+    document.addEventListener('pointerup', this._onPointerUp);
+  }
+
+  /**
+   * Pointer move during drag or resize. Mutates inline styles
+   * directly (not reactive state) so tracking is smooth. The
+   * committed values are written back to reactive state on
+   * pointerup.
+   *
+   * For drag: cross the threshold before committing to an
+   * undock. Below the threshold, treat the gesture as a click
+   * that'll fall through to pointerup with no change — this
+   * is how the minimize-via-header-click behavior would work
+   * if we ever bind that gesture. Currently minimize has a
+   * dedicated button, so below-threshold drags are just no-ops.
+   */
+  _onPointerMove(event) {
+    if (!this._drag) return;
+    const dx = event.clientX - this._drag.startX;
+    const dy = event.clientY - this._drag.startY;
+    const dialog = this.shadowRoot?.querySelector('.dialog');
+    if (!dialog) return;
+
+    if (this._drag.mode === 'drag') {
+      if (!this._drag.committed) {
+        if (
+          Math.abs(dx) < _DIALOG_DRAG_THRESHOLD
+          && Math.abs(dy) < _DIALOG_DRAG_THRESHOLD
+        ) {
+          return;
+        }
+        this._drag.committed = true;
+        dialog.classList.add('dragging');
+      }
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // Clamp so the dialog never fully leaves the viewport.
+      // Using _DIALOG_VISIBLE_MARGIN here gives the user the
+      // same recovery guarantee as the bounds check at
+      // restore time.
+      const newLeft = Math.max(
+        _DIALOG_VISIBLE_MARGIN - this._drag.originWidth,
+        Math.min(
+          vw - _DIALOG_VISIBLE_MARGIN,
+          this._drag.originLeft + dx,
+        ),
+      );
+      const newTop = Math.max(
+        0,
+        Math.min(
+          vh - _DIALOG_VISIBLE_MARGIN,
+          this._drag.originTop + dy,
+        ),
+      );
+      dialog.style.left = `${newLeft}px`;
+      dialog.style.top = `${newTop}px`;
+      dialog.style.right = 'auto';
+      dialog.style.bottom = 'auto';
+      dialog.style.width = `${this._drag.originWidth}px`;
+      dialog.style.height = `${this._drag.originHeight}px`;
+      dialog.classList.add('floating');
+      return;
+    }
+
+    // mode === 'resize'
+    dialog.classList.add('resizing');
+    let newWidth = this._drag.originWidth;
+    let newHeight = this._drag.originHeight;
+    if (
+      this._drag.which === _RESIZE_RIGHT
+      || this._drag.which === _RESIZE_CORNER
+    ) {
+      newWidth = Math.max(
+        _DIALOG_MIN_WIDTH,
+        this._drag.originWidth + dx,
+      );
+    }
+    if (
+      this._drag.which === _RESIZE_BOTTOM
+      || this._drag.which === _RESIZE_CORNER
+    ) {
+      newHeight = Math.max(
+        _DIALOG_MIN_HEIGHT,
+        this._drag.originHeight + dy,
+      );
+    }
+    dialog.style.width = `${newWidth}px`;
+    // Bottom / corner resize forces undock — the docked
+    // height is 100% of the viewport, so there's no way to
+    // express a smaller height while still docked. Match
+    // the spec: "Auto-undocks if still docked" for bottom /
+    // corner handles.
+    if (
+      this._drag.which === _RESIZE_BOTTOM
+      || this._drag.which === _RESIZE_CORNER
+    ) {
+      if (!this._undockedPos) {
+        dialog.style.left = `${this._drag.originLeft}px`;
+        dialog.style.top = `${this._drag.originTop}px`;
+        dialog.style.right = 'auto';
+        dialog.style.bottom = 'auto';
+        dialog.classList.add('floating');
+      }
+      dialog.style.height = `${newHeight}px`;
+    }
+  }
+
+  /**
+   * Release drag / resize. Commits the final geometry to
+   * reactive state and persists it. Below-threshold drags
+   * that never crossed _DIALOG_DRAG_THRESHOLD leave state
+   * unchanged — the class toggles revert on the next render.
+   */
+  _onPointerUp() {
+    document.removeEventListener('pointermove', this._onPointerMove);
+    document.removeEventListener('pointerup', this._onPointerUp);
+    const drag = this._drag;
+    this._drag = null;
+    if (!drag) return;
+    const dialog = this.shadowRoot?.querySelector('.dialog');
+    if (dialog) {
+      dialog.classList.remove('dragging');
+      dialog.classList.remove('resizing');
+    }
+    if (drag.mode === 'drag') {
+      if (!drag.committed) return;
+      const rect = this._getDialogRect();
+      if (!rect) return;
+      this._undockedPos = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+      this._saveUndockedPos();
+      return;
+    }
+    // resize
+    const rect = this._getDialogRect();
+    if (!rect) return;
+    if (drag.which === _RESIZE_RIGHT && !this._undockedPos) {
+      // Docked width change only.
+      this._dockedWidth = rect.width;
+      this._saveDockedWidth();
+      return;
+    }
+    // Bottom / corner always, or right when already undocked.
+    this._undockedPos = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    this._saveUndockedPos();
+  }
+
+  /**
+   * Toggle minimize state. Dedicated button in the header.
+   * Minimized dialogs persist their undocked position — on
+   * restore they reopen at the same spot.
+   */
+  _toggleMinimize() {
+    this._minimized = !this._minimized;
+    this._saveMinimized();
+  }
+
+  // ---------------------------------------------------------------
+  // Window resize
+  // ---------------------------------------------------------------
+
+  /**
+   * RAF-throttled resize handler. Rapid resize events (drag
+   * the window corner, laptop lid reopen) can fire dozens of
+   * times per animation frame; without throttling the
+   * proportional-rescale logic forces reflow faster than the
+   * browser can display and produces visible jank.
+   */
+  _onWindowResize() {
+    if (this._resizeRAF) return;
+    this._resizeRAF = requestAnimationFrame(() => {
+      this._resizeRAF = null;
+      this._handleWindowResize();
+    });
+  }
+
+  /**
+   * Proportionally rescale undocked dialog dimensions so the
+   * dialog keeps the same approximate fraction of the viewport
+   * across resolution changes. Only applies when undocked —
+   * docked dialogs already track viewport size via the CSS
+   * `width: %` + `bottom: 0` rules.
+   *
+   * Also re-clamps position so the dialog never strands
+   * off-screen (same bounds check as at restore time).
+   */
+  _handleWindowResize() {
+    if (!this._undockedPos) {
+      // Docked. Nothing to rescale — CSS handles it.
+      // But still re-clamp if the docked width exceeds the
+      // new viewport, otherwise the user has to resize
+      // manually after a shrink.
+      if (
+        this._dockedWidth != null
+        && this._dockedWidth > window.innerWidth - _DIALOG_VISIBLE_MARGIN
+      ) {
+        this._dockedWidth = Math.max(
+          _DIALOG_MIN_WIDTH,
+          window.innerWidth - _DIALOG_VISIBLE_MARGIN,
+        );
+        this._saveDockedWidth();
+      }
+      return;
+    }
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // If position is still valid, leave it alone. We only
+    // act when the current rect has stranded off-screen.
+    const p = this._undockedPos;
+    const outOfBounds =
+      p.left > vw - _DIALOG_VISIBLE_MARGIN
+      || p.top > vh - _DIALOG_VISIBLE_MARGIN
+      || p.left + p.width < _DIALOG_VISIBLE_MARGIN
+      || p.top + p.height < _DIALOG_VISIBLE_MARGIN;
+    if (!outOfBounds) return;
+    this._undockedPos = {
+      left: Math.max(
+        0, Math.min(p.left, vw - _DIALOG_VISIBLE_MARGIN),
+      ),
+      top: Math.max(
+        0, Math.min(p.top, vh - _DIALOG_VISIBLE_MARGIN),
+      ),
+      width: Math.min(p.width, vw),
+      height: Math.min(p.height, vh),
+    };
+    this._saveUndockedPos();
+  }
+
+  // ---------------------------------------------------------------
   // Tabs
   // ---------------------------------------------------------------
 
   _switchTab(tab) {
     this.activeTab = tab;
+    try {
+      localStorage.setItem(_ACTIVE_TAB_KEY, tab);
+    } catch (_) {
+      // localStorage can throw in private-browsing modes or
+      // when quota is exhausted. Persistence is best-effort.
+    }
   }
 
   // ---------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------
+
+  /**
+   * Build the inline style string for .dialog. When undocked,
+   * the entire rect comes from _undockedPos. When docked but
+   * with a persisted custom width, only the width is overridden.
+   * The default (fresh install) returns empty, letting the CSS
+   * defaults take over.
+   */
+  _dialogInlineStyle() {
+    if (this._undockedPos) {
+      const { left, top, width, height } = this._undockedPos;
+      return `left: ${left}px; top: ${top}px; `
+        + `width: ${width}px; height: ${height}px; `
+        + 'right: auto; bottom: auto;';
+    }
+    if (this._dockedWidth != null) {
+      return `width: ${this._dockedWidth}px;`;
+    }
+    return '';
+  }
 
   render() {
     return html`
@@ -1205,13 +1863,19 @@ export class AppShell extends JRPCClient {
         @navigate-file=${this._onNavigateFile}
       ></ac-file-nav>
 
-      <div class="dialog">
+      <div
+        class="dialog ${this._undockedPos ? 'floating' : ''} ${this._minimized ? 'minimized' : ''}"
+        style=${this._dialogInlineStyle()}
+      >
         ${this.connectionState === 'disconnected' ? html`
           <div class="reconnect-banner">
             Reconnecting… (attempt ${this.reconnectAttempt})
           </div>
         ` : null}
-        <div class="dialog-header">
+        <div
+          class="dialog-header"
+          @pointerdown=${this._onHeaderPointerDown}
+        >
           <button
             class="tab-button ${this.activeTab === 'files' ? 'active' : ''}"
             @click=${() => this._switchTab('files')}
@@ -1224,10 +1888,27 @@ export class AppShell extends JRPCClient {
             class="tab-button ${this.activeTab === 'settings' ? 'active' : ''}"
             @click=${() => this._switchTab('settings')}
           >⚙️ Settings</button>
+          <button
+            class="minimize-button"
+            title=${this._minimized ? 'Expand' : 'Minimize'}
+            @click=${this._toggleMinimize}
+          >${this._minimized ? '▴' : '▾'}</button>
         </div>
         <div class="dialog-body">
           ${this._renderTab()}
         </div>
+        <div
+          class="resize-handle right"
+          @pointerdown=${(e) => this._onHandlePointerDown(e, _RESIZE_RIGHT)}
+        ></div>
+        <div
+          class="resize-handle bottom"
+          @pointerdown=${(e) => this._onHandlePointerDown(e, _RESIZE_BOTTOM)}
+        ></div>
+        <div
+          class="resize-handle corner"
+          @pointerdown=${(e) => this._onHandlePointerDown(e, _RESIZE_CORNER)}
+        ></div>
       </div>
 
       ${this.overlayVisible ? html`
