@@ -77,6 +77,11 @@ import {
   renderMarkdownWithSourceMap,
   resolveRelativePath,
 } from './markdown-preview.js';
+import {
+  extractTexAnchors,
+  injectSourceLines,
+  renderTexMath,
+} from './tex-preview.js';
 import { SharedRpc } from './rpc.js';
 
 // KaTeX CSS — imported as a raw string via Vite's ?raw
@@ -106,6 +111,21 @@ const katexCssText =
  * virtualContent option) and are always read-only.
  */
 const _VIRTUAL_PREFIX = 'virtual://';
+
+/**
+ * Escape HTML-significant characters. Used when building
+ * TeX preview error messages so error text containing
+ * `<`, `>`, `&` doesn't inject into the DOM.
+ */
+function _escapeHtml(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 /**
  * How long to wait for Monaco's async diff computation
@@ -362,6 +382,94 @@ export class DiffViewer extends LitElement {
       padding: 0.35rem 0.6rem;
     }
 
+    /* TeX preview states — placeholder, loading, error,
+     * install-hint. The actual compiled output
+     * (make4ht-generated HTML with section headings,
+     * paragraphs, etc.) flows through the same
+     * .preview-pane rules as markdown. */
+    .preview-pane .tex-preview-placeholder,
+    .preview-pane .tex-preview-loading {
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
+    .preview-pane .tex-preview-loading {
+      opacity: 0.7;
+    }
+    .preview-pane .tex-preview-error {
+      padding: 1rem;
+      background: rgba(248, 81, 73, 0.1);
+      border: 1px solid rgba(248, 81, 73, 0.3);
+      border-radius: 6px;
+      color: #f85149;
+      margin: 1rem 0;
+    }
+    .preview-pane .tex-preview-error strong {
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+    .preview-pane .tex-preview-install-hint {
+      padding: 1rem;
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.25);
+      border-radius: 6px;
+      margin: 1rem 0;
+    }
+    .preview-pane .tex-preview-install-hint strong {
+      display: block;
+      margin-bottom: 0.5rem;
+      color: var(--accent-primary, #58a6ff);
+    }
+    .preview-pane .tex-preview-log {
+      margin: 0.75rem 0;
+      padding: 0.5rem 0.75rem;
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      border-radius: 4px;
+      font-size: 0.8125rem;
+    }
+    .preview-pane .tex-preview-log summary {
+      cursor: pointer;
+      color: var(--text-secondary, #8b949e);
+    }
+    .preview-pane .tex-preview-log pre {
+      margin: 0.5rem 0 0 0;
+      font-size: 0.8125rem;
+      max-height: 200px;
+    }
+    /* make4ht class-name hooks — section heading sizes
+     * roughly match the markdown h1/h2/h3 treatment. */
+    .preview-pane .sectionHead {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 1.5rem 0 0.5rem;
+    }
+    .preview-pane .subsectionHead {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 1.25rem 0 0.5rem;
+    }
+    .preview-pane .subsubsectionHead {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin: 1rem 0 0.4rem;
+    }
+    /* make4ht font-size classes — rough approximations
+     * to Computer Modern variants. make4ht emits these
+     * class names directly; mapping them here keeps the
+     * rendered output visually coherent. */
+    .preview-pane .cmr-17 { font-size: 1.5rem; }
+    .preview-pane .cmr-12 { font-size: 1.125rem; }
+    .preview-pane .cmbx-12,
+    .preview-pane .cmbx-10 { font-weight: 600; }
+    .preview-pane .cmti-10,
+    .preview-pane .cmti-12 { font-style: italic; }
+    .preview-pane .cmtt-10,
+    .preview-pane .cmtt-12 {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+
     /* Highlight decoration for scroll-to-edit anchor
      * matches. Applied via Monaco's deltaDecorations API
      * — the class here just defines the visual. */
@@ -400,6 +508,22 @@ export class DiffViewer extends LitElement {
     // Per-file panel labels (from loadPanel's label
     // parameter). `{left, right}` entries.
     this._panelLabels = new Map();
+    // Per-file TeX compile state. Keyed by path; each
+    // entry holds `{html, error, log, installHint,
+    // loading}`. Persists across file switches so
+    // toggling back to a .tex file shows the last
+    // compile result rather than a blank pane.
+    this._texPreviewStates = new Map();
+    // Availability tristate — null = not yet checked,
+    // true = make4ht installed, false = missing. Probed
+    // lazily on first .tex file interaction with
+    // preview.
+    this._texPreviewAvailable = null;
+    // Generation counter for compile RPC calls — bumped
+    // on each compile start; stale responses check it
+    // before writing state so fast typing + slow server
+    // doesn't clobber fresher results.
+    this._texCompileGeneration = 0;
     // Concurrent-openFile guard. Holds the path that is
     // currently being opened asynchronously; duplicate
     // calls for the same path drop silently.
@@ -548,9 +672,11 @@ export class DiffViewer extends LitElement {
     if (path.startsWith(_VIRTUAL_PREFIX)) {
       this._virtualContents.delete(path);
     }
-    // Drop viewport and panel-label state for this file.
+    // Drop viewport, panel-label, and TeX compile
+    // state for this file.
     this._viewportStates.delete(path);
     this._panelLabels.delete(path);
+    this._texPreviewStates.delete(path);
 
     const newFiles = [
       ...this._files.slice(0, idx),
@@ -706,6 +832,11 @@ export class DiffViewer extends LitElement {
       this._maybeExitPreviewForActiveFile();
       this._showEditor();
       this._dispatchActiveFileChanged();
+      // Same preview refresh as the new-file path below —
+      // switching between two already-open previewable
+      // files must swap the pane content too. For TeX,
+      // uses the cached compile state; no recompile.
+      this._maybeRefreshPreviewAfterSwitch(this._files[existing]);
       return;
     }
     // New file. Capture the outgoing file's viewport
@@ -750,23 +881,51 @@ export class DiffViewer extends LitElement {
     this._showEditor();
     this._dispatchActiveFileChanged();
     this._recomputeDirtyCount();
+    // Preview is still on after the file switch (active
+    // file is previewable). Refresh the pane so it shows
+    // the new file's content rather than the prior
+    // file's. For TeX, trigger a compile if there's no
+    // cached state for this file yet.
+    this._maybeRefreshPreviewAfterSwitch(file);
   }
 
   /**
-   * If preview is on but the active file isn't markdown,
-   * flip it off and tear down the editor so _showEditor
-   * rebuilds in the normal side-by-side layout. No-op
-   * otherwise.
+   * If preview is on but the active file isn't
+   * previewable (markdown or TeX), flip it off and tear
+   * down the editor so _showEditor rebuilds in the
+   * normal side-by-side layout. No-op otherwise.
    */
   _maybeExitPreviewForActiveFile() {
     if (!this._previewMode) return;
     const file =
       this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-    if (this._isMarkdownFile(file)) return;
+    if (this._isPreviewableFile(file)) return;
     this._previewMode = false;
     this._previewPane = null;
     this._disposeEditor();
     this._editorContainer = null;
+  }
+
+  /**
+   * After switching to a new file while preview mode is
+   * already on, refresh the pane content for the new
+   * file. For markdown, re-render from the editor's
+   * current content. For TeX, show the cached compile
+   * state; if no state exists, trigger a compile.
+   *
+   * Runs after Lit has committed the template so the
+   * pane element exists.
+   */
+  _maybeRefreshPreviewAfterSwitch(file) {
+    if (!this._previewMode) return;
+    if (!this._isPreviewableFile(file)) return;
+    this.updateComplete.then(() => {
+      this._updatePreview(file.modified);
+      if (this._isTexFile(file) &&
+          !this._texPreviewStates.has(file.path)) {
+        this._compileTex(file);
+      }
+    });
   }
 
   /**
@@ -1057,7 +1216,7 @@ export class DiffViewer extends LitElement {
   _togglePreview() {
     if (this._activeIndex < 0) return;
     const file = this._files[this._activeIndex];
-    if (!this._isMarkdownFile(file)) return;
+    if (!this._isPreviewableFile(file)) return;
     // Detach any preview-pane scroll listener attached
     // to the OLD pane element before Lit replaces the
     // DOM. The old pane is about to be discarded; the
@@ -1087,15 +1246,27 @@ export class DiffViewer extends LitElement {
       if (this._previewMode) {
         this._updatePreview(file.modified);
         this._attachPreviewScrollListener();
+        // For TeX, entering preview also kicks off the
+        // first compile. Markdown renders synchronously
+        // in _updatePreview; TeX needs the async RPC.
+        if (this._isTexFile(file)) {
+          this._compileTex(file);
+        }
       }
     });
   }
 
   /**
-   * Render markdown into the preview pane via direct DOM
-   * write. Bypasses Lit because per-keystroke re-renders
-   * of the whole component would be wasteful — the
-   * preview pane's innerHTML is the only thing changing.
+   * Render content into the preview pane. Dispatches by
+   * file type — markdown renders live from the current
+   * editor content; TeX renders from the cached compile
+   * state (`_texPreviewStates`) which is updated by
+   * `_compileTex` on preview entry and on save.
+   *
+   * For TeX files without any compile state yet, shows
+   * a "Save to preview" placeholder. The availability
+   * check + first compile run on preview entry via
+   * `_compileTex`; this method just reflects state.
    */
   _updatePreview(content) {
     // Re-acquire the pane reference if Lit just
@@ -1105,6 +1276,14 @@ export class DiffViewer extends LitElement {
         this.shadowRoot?.querySelector('.preview-pane') || null;
     }
     if (!this._previewPane) return;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    if (this._isTexFile(file)) {
+      this._renderTexPreviewFromState(file);
+      return;
+    }
+    // Markdown path — render live from content.
     try {
       const html = renderMarkdownWithSourceMap(content || '');
       this._previewPane.innerHTML = html;
@@ -1121,6 +1300,239 @@ export class DiffViewer extends LitElement {
     // renders.
     this._imageResolveGeneration += 1;
     this._resolvePreviewImages(this._imageResolveGeneration);
+  }
+
+  /**
+   * Write the TeX preview pane's content from the
+   * cached state. Four possible states:
+   *   - loading — show spinner/"Compiling…" message
+   *   - error + installHint — installation instructions
+   *   - error without hint — error message + log
+   *   - html — the compiled output
+   *   - absent — "Save to preview" placeholder
+   */
+  _renderTexPreviewFromState(file) {
+    if (!this._previewPane) {
+      this._previewPane =
+        this.shadowRoot?.querySelector('.preview-pane') || null;
+    }
+    if (!this._previewPane) return;
+    const state = this._texPreviewStates.get(file.path);
+    if (!state) {
+      this._previewPane.innerHTML =
+        '<div class="tex-preview-placeholder">' +
+        'Save the file to compile and preview.</div>';
+      return;
+    }
+    if (state.loading) {
+      this._previewPane.innerHTML =
+        '<div class="tex-preview-loading">Compiling…</div>';
+      return;
+    }
+    if (state.error) {
+      this._previewPane.innerHTML = this._renderTexError(state);
+      return;
+    }
+    if (state.html) {
+      this._previewPane.innerHTML = state.html;
+      return;
+    }
+    this._previewPane.innerHTML =
+      '<div class="tex-preview-placeholder">' +
+      'No preview available.</div>';
+  }
+
+  /**
+   * Build the error HTML for a failed TeX compilation.
+   * Install-hint case gets a distinct style since it's
+   * the "you need to install something" path rather
+   * than a code-level compile error.
+   */
+  _renderTexError(state) {
+    const parts = [];
+    if (state.installHint) {
+      parts.push(
+        '<div class="tex-preview-install-hint">',
+        '<strong>TeX preview requires make4ht.</strong>',
+        '<p>' + _escapeHtml(state.installHint) + '</p>',
+        '</div>',
+      );
+    } else {
+      parts.push(
+        '<div class="tex-preview-error">',
+        '<strong>Compilation failed.</strong>',
+        '<p>' + _escapeHtml(state.error || 'Unknown error') + '</p>',
+        '</div>',
+      );
+    }
+    if (state.log) {
+      parts.push(
+        '<details class="tex-preview-log">',
+        '<summary>Compilation log</summary>',
+        '<pre>' + _escapeHtml(state.log) + '</pre>',
+        '</details>',
+      );
+    }
+    return parts.join('');
+  }
+
+  /**
+   * Compile the active TeX file via `Repo.compile_tex_preview`
+   * and update the preview pane. Runs the availability
+   * probe on first call if not cached.
+   *
+   * Uses a generation counter to discard stale results —
+   * if the user saves quickly twice, only the latest
+   * compile's output lands in the pane.
+   */
+  async _compileTex(file) {
+    if (!this._isTexFile(file)) return;
+    const path = file.path;
+    const gen = ++this._texCompileGeneration;
+    // Show loading state immediately so the pane isn't
+    // blank during the async probe + compile.
+    this._texPreviewStates.set(path, { loading: true });
+    this._renderTexPreviewIfActive(path);
+    // Run availability probe once per session. Cached
+    // outcome applies to every subsequent .tex file.
+    const call = this._getRpcCall();
+    if (!call) {
+      if (gen !== this._texCompileGeneration) return;
+      this._texPreviewStates.set(path, {
+        error: 'RPC unavailable',
+      });
+      this._renderTexPreviewIfActive(path);
+      return;
+    }
+    if (this._texPreviewAvailable === null) {
+      try {
+        const result = await call['Repo.is_tex_preview_available']();
+        const unwrapped = this._unwrapRpc(result);
+        if (unwrapped &&
+            typeof unwrapped === 'object' &&
+            unwrapped.available === false) {
+          this._texPreviewAvailable = false;
+          if (gen !== this._texCompileGeneration) return;
+          this._texPreviewStates.set(path, {
+            error: 'make4ht not installed',
+            installHint:
+              unwrapped.install_hint ||
+              'Install TeX Live or MiKTeX to enable TeX preview.',
+          });
+          this._renderTexPreviewIfActive(path);
+          return;
+        }
+        this._texPreviewAvailable = true;
+      } catch (err) {
+        // Probe failed — treat as unavailable.
+        this._texPreviewAvailable = false;
+        if (gen !== this._texCompileGeneration) return;
+        this._texPreviewStates.set(path, {
+          error: 'Availability check failed',
+          installHint:
+            'Ensure make4ht is installed and on PATH.',
+        });
+        this._renderTexPreviewIfActive(path);
+        return;
+      }
+    }
+    if (this._texPreviewAvailable === false) {
+      if (gen !== this._texCompileGeneration) return;
+      this._texPreviewStates.set(path, {
+        error: 'make4ht not installed',
+        installHint:
+          'Install TeX Live or MiKTeX to enable TeX preview.',
+      });
+      this._renderTexPreviewIfActive(path);
+      return;
+    }
+    // Run the compile.
+    let result;
+    try {
+      result = await call['Repo.compile_tex_preview'](
+        file.modified || '',
+        path,
+      );
+    } catch (err) {
+      if (gen !== this._texCompileGeneration) return;
+      this._texPreviewStates.set(path, {
+        error: err?.message || 'Compilation RPC failed',
+      });
+      this._renderTexPreviewIfActive(path);
+      return;
+    }
+    if (gen !== this._texCompileGeneration) return;
+    const unwrapped = this._unwrapRpc(result);
+    if (unwrapped && unwrapped.error) {
+      this._texPreviewStates.set(path, {
+        error: unwrapped.error,
+        log: unwrapped.log,
+        installHint: unwrapped.install_hint,
+      });
+    } else if (unwrapped && typeof unwrapped.html === 'string') {
+      // Full pipeline: math → source-line annotation.
+      const mathed = renderTexMath(unwrapped.html);
+      const anchors = extractTexAnchors(file.modified || '');
+      const totalLines = (file.modified || '').split('\n').length;
+      const annotated = injectSourceLines(
+        mathed,
+        anchors,
+        totalLines,
+      );
+      this._texPreviewStates.set(path, { html: annotated });
+    } else {
+      this._texPreviewStates.set(path, {
+        error: 'Malformed compile response',
+      });
+    }
+    this._renderTexPreviewIfActive(path);
+  }
+
+  /**
+   * Refresh the preview pane if the given path is the
+   * currently-active file AND preview mode is on.
+   * Avoids writing to the pane for a file that isn't
+   * showing.
+   */
+  _renderTexPreviewIfActive(path) {
+    if (!this._previewMode) return;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file || file.path !== path) return;
+    this._renderTexPreviewFromState(file);
+  }
+
+  /**
+   * Unwrap a jrpc-oo envelope. jrpc-oo returns responses
+   * wrapped as `{uuid: payload}` — a single key whose
+   * value is the real payload. But in tests that inject
+   * a direct-call fake proxy, the RPC function returns
+   * the payload directly (no wrapping). We distinguish
+   * by inspecting the inner value's shape: if the single
+   * key's value is itself an object, treat it as an
+   * envelope and unwrap. Otherwise the outer object IS
+   * the payload (e.g. `{available: true}` or `{html: "..."}`
+   * are payloads, not envelopes).
+   *
+   * This heuristic works because real envelope keys are
+   * UUIDs (opaque strings) wrapping structured dicts,
+   * never wrapping primitives.
+   */
+  _unwrapRpc(result) {
+    if (!result || typeof result !== 'object') return result;
+    if (Array.isArray(result)) return result;
+    const keys = Object.keys(result);
+    if (keys.length !== 1) return result;
+    const inner = result[keys[0]];
+    // Unwrap only if the inner value is a non-array
+    // object — that's the jrpc-oo envelope shape.
+    // Primitive or array inner → the outer object was
+    // the payload (e.g. `{html: "..."}` or `{available:
+    // true}`), return as-is.
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      return inner;
+    }
+    return result;
   }
 
   /**
@@ -1576,8 +1988,12 @@ export class DiffViewer extends LitElement {
     }
     this._recomputeDirtyCount();
     // Live preview — when preview mode is on, re-render
-    // on every keystroke. rendMarkdownWithSourceMap is
-    // pure string work; no RPC, cheap enough per-key.
+    // on every keystroke. Markdown uses renderMarkdownWith
+    // SourceMap which is pure string work, cheap enough
+    // per-key. TeX preview deliberately does NOT live-
+    // update — make4ht compilation is subprocess-bound and
+    // too expensive for keystroke frequency. TeX preview
+    // refreshes on save via _saveFile.
     if (this._previewMode && this._isMarkdownFile(file)) {
       this._updatePreview(file.modified);
     }
@@ -1968,6 +2384,27 @@ export class DiffViewer extends LitElement {
     return lower.endsWith('.md') || lower.endsWith('.markdown');
   }
 
+  /**
+   * Whether the active file is TeX — shows Preview
+   * button, uses the compile-on-save pipeline via
+   * make4ht rather than live keystroke rendering.
+   */
+  _isTexFile(file) {
+    if (!file || typeof file.path !== 'string') return false;
+    const lower = file.path.toLowerCase();
+    return lower.endsWith('.tex') || lower.endsWith('.latex');
+  }
+
+  /**
+   * Whether the active file supports preview at all
+   * (markdown OR TeX). Used to decide whether to render
+   * the Preview button; specific type-dispatch happens
+   * in `_updatePreview` and `_onContentChange`.
+   */
+  _isPreviewableFile(file) {
+    return this._isMarkdownFile(file) || this._isTexFile(file);
+  }
+
   _recomputeDirtyCount() {
     const count = this._files.filter((f) => this._isDirty(f)).length;
     this._dirtyCount = count;
@@ -2006,6 +2443,13 @@ export class DiffViewer extends LitElement {
         composed: true,
       }),
     );
+    // TeX preview recompiles on save. Markdown preview
+    // already updated on each keystroke via
+    // _onContentChange; TeX was holding its last
+    // compiled output until now.
+    if (this._previewMode && this._isTexFile(file)) {
+      this._compileTex(file);
+    }
   }
 
   // ---------------------------------------------------------------
@@ -2157,7 +2601,7 @@ export class DiffViewer extends LitElement {
     const labels = this._currentPanelLabels();
     const activeFile =
       this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-    const showPreviewButton = this._isMarkdownFile(activeFile);
+    const showPreviewButton = this._isPreviewableFile(activeFile);
     if (this._previewMode && showPreviewButton) {
       return html`
         <div class="split-root">
