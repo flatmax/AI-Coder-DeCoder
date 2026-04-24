@@ -39,6 +39,7 @@ from ac_dc.doc_index.models import (
     DocProseBlock,
     DocSectionRef,
 )
+from ac_dc.doc_index.reference_index import DocReferenceIndex
 
 __all__ = [
     "DocCache",
@@ -46,5 +47,6 @@ __all__ = [
     "DocLink",
     "DocOutline",
     "DocProseBlock",
+    "DocReferenceIndex",
     "DocSectionRef",
 ]
