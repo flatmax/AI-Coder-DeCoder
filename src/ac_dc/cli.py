@@ -84,22 +84,11 @@ def _print_banner() -> None:
     """Print the startup banner to stderr.
 
     Uses ASCII only so it works over ssh and in plain terminals. Version
-    reads the baked VERSION file via ``__version__``. In source installs
-    (VERSION == "dev") we add a scaffold notice so developers running
-    ``ac-dc`` know why nothing happens yet. Release builds — where the
-    VERSION file has been baked with a real timestamp+SHA — skip the
-    scaffold notice.
+    reads the baked VERSION file via ``__version__``. Release builds have
+    the VERSION file baked with a real timestamp+SHA; source installs show
+    "dev".
     """
-    if __version__ == "dev":
-        banner = f"""
-  AC-DC  —  AI Coder - DeCoder
-  version {__version__}
-
-  [scaffold build — full startup not yet implemented]
-  See specs4/6-deployment/startup.md for the target startup sequence.
-"""
-    else:
-        banner = f"""
+    banner = f"""
   AC-DC  —  AI Coder - DeCoder
   version {__version__}
 """

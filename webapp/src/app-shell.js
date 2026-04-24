@@ -136,11 +136,19 @@ export class AppShell extends JRPCClient {
      * pointer-events transition gives a smooth cross-fade
      * without rebuilding the inactive viewer's DOM --
      * matters for the diff viewer's Monaco instances,
-     * which are expensive to construct. */
+     * which are expensive to construct.
+     *
+     * Explicit z-index on the background keeps it below
+     * the dialog. Without this, the viewers' internal
+     * position:fixed (Monaco editor) can escape and
+     * cover the dialog entirely — their position:fixed
+     * anchors to the nearest ancestor with a transform
+     * or will-change, or the viewport otherwise. */
     .viewer-background {
       position: absolute;
       inset: 0;
       overflow: hidden;
+      z-index: 0;
     }
     ac-diff-viewer,
     ac-svg-viewer {
@@ -159,8 +167,9 @@ export class AppShell extends JRPCClient {
       z-index: 0;
     }
 
-    /* Dialog — foreground panel. Phase 1 gives it a stub
-     * placeholder; Phase 2 wires up the tabs. */
+    /* Dialog — foreground panel. Explicit z-index keeps
+     * it above the viewer background regardless of what
+     * internal positioning the viewer components use. */
     .dialog {
       position: absolute;
       top: 0;
@@ -173,6 +182,7 @@ export class AppShell extends JRPCClient {
       display: flex;
       flex-direction: column;
       backdrop-filter: blur(8px);
+      z-index: 10;
     }
     .dialog-header {
       display: flex;
@@ -459,6 +469,24 @@ export class AppShell extends JRPCClient {
         document.title = state.repo_name;
       }
       this._initComplete = !!state.init_complete;
+      // If the backend reports init is already complete,
+      // dismiss the startup overlay. Handles the common
+      // race where Phase 2 finishes before the browser
+      // registers AcApp — startupProgress events get
+      // dropped, but get_current_state arrives afterward
+      // with init_complete=true and we can dismiss based
+      // on that.
+      if (this._initComplete && this.overlayVisible) {
+        this.startupPercent = 100;
+        this.startupMessage = 'Ready';
+        setTimeout(() => {
+          this.overlayVisible = false;
+          if (this._pendingReopen) {
+            const path = this._loadLastOpenFile();
+            if (path) this._doReopenLastFile(path);
+          }
+        }, 400);
+      }
       // Dispatch state-loaded so child components restore.
       window.dispatchEvent(
         new CustomEvent('state-loaded', { detail: state }),

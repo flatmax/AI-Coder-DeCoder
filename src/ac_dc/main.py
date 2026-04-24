@@ -354,8 +354,10 @@ async def run(
     from ac_dc.llm_service import LLMService
     from ac_dc.history_store import HistoryStore
 
-    # Create history store in the per-repo working dir
-    ac_dc_dir = repo_path / ".ac-dc"
+    # Create history store in the per-repo working dir.
+    # Use the config-managed path so the name (.ac-dc4) is
+    # defined in exactly one place (config._AC_DC_DIR).
+    ac_dc_dir = config.ac_dc_dir or (repo_path / ".ac-dc4")
     history_store = HistoryStore(ac_dc_dir)
 
     # Event callback — will be wired after the server starts
@@ -414,23 +416,31 @@ async def run(
     # Wire the event callback now that the server is up.
     # The LLM service's event_callback dispatches to
     # AcApp.{event_name}(...) on all connected browsers.
+    # jrpc-oo injects get_call() onto instances registered via
+    # add_class, so llm_service.get_call() is available after
+    # server.add_service(llm_service) above.
     def _make_real_callback() -> Any:
         async def _cb(event_name: str, *args: Any) -> None:
             try:
                 call = llm_service.get_call()
-                if call is not None:
-                    await call[f"AcApp.{event_name}"](*args)
-            except Exception:
-                pass
-        return _cb
+            except AttributeError:
+                # get_call not yet injected or no client connected.
+                # Silently drop — happens between startup and first
+                # browser connection.
+                return
+            if call is None:
+                return
+            try:
+                await call[f"AcApp.{event_name}"](*args)
+            except Exception as exc:
+                # Log at debug so we can diagnose missing events
+                # without spamming the console on normal disconnects.
+                logger.debug(
+                    "Event callback %s failed: %s", event_name, exc
+                )
 
-    # If the server exposes get_call on registered services
-    # (jrpc-oo does this), wire it up. Otherwise the callback
-    # stays as the passthrough we defined above.
-    try:
-        event_callback_ref[0] = _make_real_callback()
-    except Exception:
-        logger.debug("Could not wire real event callback; using passthrough")
+    event_callback_ref[0] = _make_real_callback()
+    logger.debug("Event callback wired")
 
     # Step 8: Open browser
     url = f"http://localhost:{webapp_port}/?port={server_port}"
