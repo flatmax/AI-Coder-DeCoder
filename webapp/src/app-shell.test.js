@@ -24,20 +24,95 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
+  // Richer stub than a bare vi.fn() — DiffViewer's
+  // _createEditor calls setModel on the returned editor
+  // and attaches content-change listeners. Without
+  // working shapes, it logs "Cannot read properties of
+  // undefined (reading 'setModel')" errors that spam
+  // the app-shell test output even though the viewer's
+  // own tests are in a separate file with its own mock.
+  const noopDisposable = { dispose() {} };
+  const makeEditor = () => ({
+    setModel() {},
+    getModel: () => ({ original: null, modified: null }),
+    getModifiedEditor: () => ({
+      onDidChangeModelContent: () => noopDisposable,
+      onDidScrollChange: () => noopDisposable,
+      deltaDecorations: () => [],
+      getModel: () => null,
+      getValue: () => '',
+      setValue() {},
+      revealLine() {},
+      revealLineInCenter() {},
+      setPosition() {},
+      getPosition: () => ({ lineNumber: 1, column: 1 }),
+      getScrollTop: () => 0,
+      getScrollLeft: () => 0,
+      setScrollTop() {},
+      setScrollLeft() {},
+      getOption: () => 19,
+      updateOptions() {},
+      onDidUpdateDiff: () => noopDisposable,
+    }),
+    getOriginalEditor: () => ({
+      onDidChangeModelContent: () => noopDisposable,
+    }),
+    onDidUpdateDiff: () => noopDisposable,
+    layout() {},
+    dispose() {},
+    _codeEditorService: null,
+  });
   const monaco = {
     editor: {
-      createDiffEditor: vi.fn(),
-      createModel: vi.fn(),
+      createDiffEditor: vi.fn(makeEditor),
+      createModel: vi.fn(() => ({
+        dispose() {},
+        getValue: () => '',
+        setValue() {},
+        getLineCount: () => 0,
+      })),
       OverviewRulerLane: { Full: 7 },
     },
     languages: {
       register: vi.fn(),
       setMonarchTokensProvider: vi.fn(),
       getLanguages: vi.fn(() => []),
+      registerHoverProvider: vi.fn(() => noopDisposable),
+      registerDefinitionProvider: vi.fn(() => noopDisposable),
+      registerReferenceProvider: vi.fn(() => noopDisposable),
+      registerCompletionItemProvider: vi.fn(() => noopDisposable),
+      registerLinkProvider: vi.fn(() => noopDisposable),
+      CompletionItemKind: { Text: 0 },
+    },
+    Uri: {
+      file: (path) => ({
+        scheme: 'file',
+        path,
+        toString() { return 'file://' + path; },
+      }),
     },
   };
   return { default: monaco, ...monaco };
 });
+
+// Mock svg-pan-zoom — the SvgViewer's _initPanZoom
+// calls the default export as a function, which fails
+// under vitest SSR without a module-level mock ("default
+// is not a function"). The viewer wraps the call in
+// try/catch and logs a warning, which spams stderr.
+// Returning a noop stub keeps the init path silent.
+vi.mock('svg-pan-zoom', () => ({
+  default: () => ({
+    pan() {},
+    zoom() {},
+    fit() {},
+    center() {},
+    resize() {},
+    destroy() {},
+    getZoom: () => 1,
+    getPan: () => ({ x: 0, y: 0 }),
+  }),
+}));
 
 import { SharedRpc } from './rpc.js';
 

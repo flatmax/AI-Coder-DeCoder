@@ -2253,6 +2253,23 @@ describe('DiffViewer markdown preview — image resolution', () => {
 });
 
 describe('DiffViewer markdown preview — link navigation', () => {
+  // jsdom logs a "Not implemented: navigation" error on
+  // every `.click()` of an anchor with an absolute href.
+  // Two tests below deliberately click external links to
+  // verify we DON'T preventDefault — the logs are noise.
+  // Silence console.error for this block; the test
+  // assertions still use defaultPrevented checks so real
+  // failures surface as test failures, not log output.
+  let _consoleErrorSpy;
+  beforeEach(() => {
+    _consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+  });
+  afterEach(() => {
+    _consoleErrorSpy.mockRestore();
+  });
+
   async function enterPreview(el, path = 'docs/README.md') {
     await el.openFile({ path });
     await settle(el);
