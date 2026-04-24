@@ -261,10 +261,11 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 
 ### Two-Phase Principle
 
-- Structural extraction is synchronous and instant (< 5ms per file)
-- Keyword enrichment is asynchronous and never blocks user-facing operations
+- Structural extraction is synchronous and instant (< 5ms per file); exposed as `doc_index_ready` on the LLM service's mode-state RPC
+- Keyword enrichment is asynchronous and never blocks user-facing operations; completion exposed as `doc_index_enriched`
 - Mode switches are instant — unenriched outlines are available immediately
 - Chat requests never wait for enrichment
+- Features gated on structural readiness only (cross-reference toggle, doc mode activation) check `doc_index_ready`; features that cosmetically benefit from enriched outlines (keyword display in compact format) check `doc_index_enriched` but degrade gracefully when False
 
 ## Disk Persistence
 

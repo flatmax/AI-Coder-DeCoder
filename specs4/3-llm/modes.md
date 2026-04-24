@@ -59,9 +59,18 @@ File tree, conversation history, edit protocol, compaction, review, URL handling
 
 ## Cross-Reference Readiness
 
-- Toggle always available once initial startup completes
-- In code mode: doc index's structural extraction completes within a few hundred milliseconds of the ready signal, before any user interaction is possible; keyword enrichment may still be in progress, but unenriched outlines are sufficient for cross-reference tier assembly
-- In document mode: symbol index is always available (initialized at startup)
+Two distinct readiness phases — structure-ready (minimum for cross-reference to produce content) and enriched-ready (keyword enrichment complete, outlines carry disambiguating annotations):
+
+- **Structure ready** — doc index's structural extraction complete, reference graph built. Exposed as `doc_index_ready` on the mode-state RPC. Cross-reference toggle gates on this flag — enabling before structure is ready returns an error. Typically completes within a second or two after the startup ready signal for any reasonable repo size
+- **Enriched ready** — keyword enrichment complete for all outlines. Exposed as `doc_index_enriched`. When structure is ready but enrichment is still running, cross-reference works with unenriched outlines; as enrichment completes, affected outlines re-hash (keywords contribute to the signature) and the tracker demotes them once. They re-stabilize at their tiers over the next few requests
+
+Symmetric in doc mode — symbol index is always available (initialized synchronously at startup, matching the code-mode baseline), so cross-reference in doc mode never waits on a readiness gate.
+
+UI toggle state:
+
+- Disabled until `doc_index_ready`
+- Enabled and functional once structure is ready, regardless of enrichment state
+- No visual distinction between "enabled with enrichment pending" and "enabled with enrichment complete" — the distinction is invisible to the user beyond the keyword annotations appearing in outlines
 
 ## Mode Switching Mechanics
 
@@ -78,18 +87,20 @@ File tree, conversation history, edit protocol, compaction, review, URL handling
 
 ## Instant Mode Switches
 
-- Structural re-extraction (under a few milliseconds per changed file) produces unenriched outlines immediately usable for tier assembly
-- If any files need keyword re-enrichment (e.g., edited while in the other mode), they are queued for background enrichment
-- The mode switch does not wait for enrichment to complete
+- mtime-based cache makes unchanged files free; only edited files re-parse (under a few milliseconds each)
+- Structural extraction produces unenriched outlines immediately usable for tier assembly
+- If any files need keyword re-enrichment (edited while in the other mode), they are queued for background enrichment
+- The mode switch does not wait for enrichment to complete — the target mode's cached state, enriched or not, is used immediately
 - The keyword model is eagerly pre-initialized during startup so the first mode switch never triggers a multi-second model load
 
 ## Index Lifecycle in the LLM Service
 
 - Both symbol index and doc index are held simultaneously
-- Symbol index built during startup
-- Doc index built eagerly in background after startup completes — structural extraction first, then keyword enrichment asynchronously per file with progress reported
-- Structural extraction completes before any user interaction is possible, so mode toggle and cross-reference toggle are available immediately after startup
-- Once both indexes are built, mode switches are instant
+- Symbol index built during startup (synchronous phase 1 plus deferred phase 2)
+- Doc index built in the background after startup completes — structural extraction first (fast, bounded by file count), then keyword enrichment asynchronously per file with progress reported
+- Mode toggle always available; cross-reference toggle gates on `doc_index_ready` (structural extraction complete) so the user never tries to enable cross-reference against an empty doc index
+- Once both indexes have completed structural extraction, mode switches are instant and cross-reference works
+- Keyword enrichment continues in the background after structure-ready; completions re-hash affected outlines and the tracker handles the demote-and-re-stabilize cycle naturally
 
 ## Dispatch Mechanism
 
