@@ -82,6 +82,7 @@ import {
   injectSourceLines,
   renderTexMath,
 } from './tex-preview.js';
+import { installLspProviders } from './lsp-providers.js';
 import { SharedRpc } from './rpc.js';
 
 // KaTeX CSS — imported as a raw string via Vite's ?raw
@@ -1062,6 +1063,21 @@ export class DiffViewer extends LitElement {
     if (!this._editorContainer) return;
     const file = this._files[this._activeIndex];
     if (!file) return;
+    // Install LSP providers on first editor construction.
+    // Idempotent across re-creations and across viewer
+    // remounts (guard lives on the monaco namespace).
+    // The callbacks close over `this` but read current
+    // state per-invocation, so file switches and
+    // reconnects are picked up automatically.
+    installLspProviders(
+      monaco,
+      () => {
+        if (this._activeIndex < 0) return '';
+        const active = this._files[this._activeIndex];
+        return active?.path || '';
+      },
+      () => this._getRpcCall(),
+    );
     try {
       this._editor = monaco.editor.createDiffEditor(
         this._editorContainer,

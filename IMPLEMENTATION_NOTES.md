@@ -1628,6 +1628,43 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.9 — Phase 3.1d LSP integration — **delivered**
+
+Adds four Monaco language-service providers wired to the backend's `Repo.lsp_*` RPCs. Hover, definition, references, completions. Registered once against the `'*'` wildcard selector — one provider per type handles every language, with backend-side dispatch by file extension via the symbol index.
+
+- `webapp/src/lsp-providers.js` — pure provider module. Exports `installLspProviders(monaco, getActivePath, getCall)` (idempotent install with a `monaco.__acDcLspInstalled` guard), four `build*Provider` functions, plus helpers `unwrapEnvelope`, `pathFromModel`, and the test-only `_resetInstallGuard`. Separated from the viewer so the coordinate / path / shape transformation logic is unit-testable without mounting an editor. Mirrors the layering pattern of `markdown-preview.js` and `tex-preview.js`.
+- `webapp/src/diff-viewer.js` — imports `installLspProviders`, calls it from `_createEditor` with callbacks that read the currently-active file's path and the SharedRpc call proxy. The install function's guard prevents re-registration across editor recreations and viewer remounts.
+- `webapp/src/lsp-providers.test.js` — 68 tests across 8 describe blocks covering `unwrapEnvelope` (null/undefined/primitive/array pass-through, single-key-with-object-inner unwrap, multi-key non-unwrap, primitive-inner non-unwrap, array-inner non-unwrap), `pathFromModel` (leading-slash strip, no-slash pass-through, missing model/uri/path defensive), hover provider (no-path / no-RPC returns null, 1-indexed coordinate passthrough, string-vs-array contents wrapping, empty-string filter, envelope unwrap, RPC error swallow), definition provider (shape validation, snake_case range normalisation, clamp-to-1 for negative/zero coordinates, cross-file URI construction, malformed-payload rejection, envelope unwrap, error swallow), references provider (null → [], non-array → null, malformed entries skipped, envelope unwrap, error swallow), completion provider (trigger character declaration, word-at-position range derivation, fallback empty range, insertText defaults, kind validation + clamping, documentation preservation, malformed entry skip, error swallow), and `installLspProviders` (all four registered, wildcard selector, idempotent, disposable return, null/missing-languages guards, callbacks wired correctly, individual registration failures don't block others).
+- `webapp/src/diff-viewer.test.js` — extended with an `LSP integration` describe block: providers installed on first editor build, wildcard selector, not re-registered on file switch, hover dispatches with active path, hover reflects file switches (same provider instance, fresh state per invocation), no-RPC graceful degradation, definition builds cross-file location, references empty for null, completions empty when no active path, install guard survives viewer dispose/reuse cycles.
+
+Design points pinned by tests:
+
+- **Callbacks, not values.** The providers take `getActivePath` and `getCall` as callbacks — not values — because the viewer's state changes across file switches and reconnects, and the providers are registered once. Pinned by `test_hover_provider_reflects_file_switches` which opens two files in sequence and verifies the hover RPC is called with the SECOND file's path.
+
+- **Wildcard registration matches every language.** Single registration of each provider type handles all languages. Backend's symbol index dispatches by file extension; the provider layer doesn't need to know about language IDs at all. Alternative (per-language registration) would require maintaining a list in sync with `monaco-setup.js`'s extension map — more brittle for no benefit.
+
+- **Idempotent install guard lives on the monaco namespace.** `monaco.__acDcLspInstalled` is set on the first install call. Re-calling from a recreated editor, remounted viewer, or any other retry path is a no-op. Pinned by multiple tests — three consecutive installs produce one registration each; viewer dispose/reuse cycles similarly only produce one.
+
+- **Envelope unwrap is heuristic, not universal.** `unwrapEnvelope` unwraps single-key objects only when the inner value is a non-array object. This matches the jrpc-oo envelope shape (UUID → payload object) without clobbering legitimate single-key payloads like `{file: "path"}` (inner is a primitive) or `{items: [1,2,3]}` (inner is an array). Pinned by three explicit tests for the non-unwrap cases.
+
+- **1-indexed coordinates at the RPC boundary.** Monaco's `Position.lineNumber` and `.column` are 1-indexed; specs4's symbol index stores the same. No conversion — providers pass through unchanged. Pinned by `test_calls_RPC_with_active_path_and_1-indexed_position` which asserts the RPC was called with the exact position values.
+
+- **Range field name normalisation.** Backend may return `startLineNumber`/`startColumn` OR `start_line`/`start_column`. Normaliser accepts both shapes. Pinned by `test_normalizes_snake_case_range_fields_from_backend` — matters because different RPC methods in the backend use different naming conventions and the frontend shouldn't care.
+
+- **Clamp to minimum 1 for range coordinates.** Defensive against backend bugs that might emit 0 or negative values. Monaco rejects such ranges silently; clamping produces a valid (1, 1) zero-width range instead.
+
+- **Error swallow with debug log.** Every RPC rejection is caught, logged at debug level, and returns null/empty. Hover popup and completion list continue to function; transient RPC failures don't blow up the editor. Pinned by one error-swallow test per provider.
+
+- **Word-at-position for completion range.** When the user triggers completions mid-identifier, Monaco needs to know what range to replace with the accepted suggestion. `model.getWordUntilPosition` gives the prefix being typed; the provider uses that as the range. Fallback to empty range at cursor when no word is under the cursor (e.g., user typed `.` to trigger completions on a fresh identifier).
+
+- **Kind clamping for completions.** Backend sends integers matching `monaco.languages.CompletionItemKind`. Invalid values (non-numeric, negative, or out of 0-30 range) degrade to `Text` (0). Pinned by `test_clamps_invalid_kind_to_Text_0` with three variants.
+
+Open carried over for later sub-layers:
+
+- **Markdown link provider (3.1e).** Separate Monaco registration for `.md` files that matches `[text](relative-path)` patterns and emits `ac-navigate:///` URIs with a companion LinkOpener intercepting that scheme. The preview pane's click-based link navigation already works (delivered in 3.1b); 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also navigates.
+
+### 5.8 — Phase 3.1c TeX preview — **delivered** (see separate commit)
+
 ### 5.7 — Phase 3.1a Monaco diff viewer — **delivered**
 
 Replaces the Phase 3 groundwork stub with a real Monaco-based side-by-side diff editor. Core viewer surface — multi-file tracking, content fetching, dirty tracking, save pipeline, status LED, viewport restoration, loadPanel for ad-hoc comparisons, virtual files, keyboard shortcuts. Markdown preview, TeX preview, LSP integration, and markdown link provider deferred to 3.1b–3.1e respectively to keep this commit focused.

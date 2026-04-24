@@ -33,6 +33,12 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
     models: [],
     registeredLanguages: new Set(),
     registeredTokenizers: [],
+    lspProviders: {
+      hover: [],
+      definition: [],
+      reference: [],
+      completion: [],
+    },
   };
 
   function _makeModel(content, language) {
@@ -172,6 +178,47 @@ vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
       getLanguages: vi.fn(() =>
         [...monacoState.registeredLanguages].map((id) => ({ id })),
       ),
+      CompletionItemKind: {
+        Text: 0,
+        Method: 1,
+        Function: 2,
+      },
+      registerHoverProvider: vi.fn((selector, provider) => {
+        monacoState.lspProviders.hover.push({ selector, provider });
+        return { dispose: vi.fn() };
+      }),
+      registerDefinitionProvider: vi.fn((selector, provider) => {
+        monacoState.lspProviders.definition.push({
+          selector,
+          provider,
+        });
+        return { dispose: vi.fn() };
+      }),
+      registerReferenceProvider: vi.fn((selector, provider) => {
+        monacoState.lspProviders.reference.push({
+          selector,
+          provider,
+        });
+        return { dispose: vi.fn() };
+      }),
+      registerCompletionItemProvider: vi.fn(
+        (selector, provider) => {
+          monacoState.lspProviders.completion.push({
+            selector,
+            provider,
+          });
+          return { dispose: vi.fn() };
+        },
+      ),
+    },
+    Uri: {
+      file: (path) => ({
+        scheme: 'file',
+        path: path.startsWith('/') ? path : '/' + path,
+        toString() {
+          return 'file://' + this.path;
+        },
+      }),
     },
   };
   return { default: monaco, ...monaco };
@@ -181,6 +228,10 @@ vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
 function resetMonacoState() {
   monacoState.editors = [];
   monacoState.models = [];
+  monacoState.lspProviders.hover = [];
+  monacoState.lspProviders.definition = [];
+  monacoState.lspProviders.reference = [];
+  monacoState.lspProviders.completion = [];
   // Don't clear registeredLanguages — matlab is registered
   // at module load and stays across tests. But do reset
   // the editors and models.
@@ -207,6 +258,10 @@ function clearFakeRpc() {
 // ---------------------------------------------------------------------------
 
 import './diff-viewer.js';
+import { _resetInstallGuard } from './lsp-providers.js';
+// Grab a reference to the mocked monaco namespace so
+// tests can reset the LSP install guard between cases.
+import { monaco as _mockedMonaco } from './monaco-setup.js';
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -231,6 +286,7 @@ async function settle(el) {
 beforeEach(() => {
   resetMonacoState();
   clearFakeRpc();
+  _resetInstallGuard(_mockedMonaco);
 });
 
 afterEach(() => {
@@ -2354,5 +2410,214 @@ describe('DiffViewer markdown preview — link navigation', () => {
     await settle(el);
     // Still fires — the new pane has a new listener.
     expect(listener).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LSP integration (Phase 3.1d)
+// ---------------------------------------------------------------------------
+
+describe('DiffViewer LSP integration', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+    });
+  });
+
+  it('installs all four LSP providers on first editor build', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    expect(monacoState.lspProviders.hover).toHaveLength(1);
+    expect(monacoState.lspProviders.definition).toHaveLength(1);
+    expect(monacoState.lspProviders.reference).toHaveLength(1);
+    expect(monacoState.lspProviders.completion).toHaveLength(1);
+  });
+
+  it('uses wildcard selector for all providers', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    expect(monacoState.lspProviders.hover[0].selector).toBe('*');
+    expect(monacoState.lspProviders.definition[0].selector).toBe(
+      '*',
+    );
+    expect(monacoState.lspProviders.reference[0].selector).toBe('*');
+    expect(monacoState.lspProviders.completion[0].selector).toBe(
+      '*',
+    );
+  });
+
+  it('does not re-register providers on file switch', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    await el.openFile({ path: 'src/other.py' });
+    await settle(el);
+    // Idempotent — still only one registration per type.
+    expect(monacoState.lspProviders.hover).toHaveLength(1);
+    expect(monacoState.lspProviders.definition).toHaveLength(1);
+    expect(monacoState.lspProviders.reference).toHaveLength(1);
+    expect(monacoState.lspProviders.completion).toHaveLength(1);
+  });
+
+  it('hover provider dispatches to active file path', async () => {
+    const hoverFn = vi.fn().mockResolvedValue({
+      contents: 'def main() -> None',
+    });
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+      'Repo.lsp_get_hover': hoverFn,
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    const provider = monacoState.lspProviders.hover[0].provider;
+    const result = await provider.provideHover(
+      { uri: { path: '/inmemory/model' } },
+      { lineNumber: 10, column: 5 },
+    );
+    expect(hoverFn).toHaveBeenCalledWith('src/main.py', 10, 5);
+    expect(result).toEqual({
+      contents: [{ value: 'def main() -> None' }],
+    });
+  });
+
+  it('hover provider reflects file switches', async () => {
+    const hoverFn = vi.fn().mockResolvedValue({
+      contents: 'x',
+    });
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+      'Repo.lsp_get_hover': hoverFn,
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/first.py' });
+    await settle(el);
+    await el.openFile({ path: 'src/second.py' });
+    await settle(el);
+    // Same provider instance (registered once), but the
+    // callbacks read current state at invocation time.
+    const provider = monacoState.lspProviders.hover[0].provider;
+    await provider.provideHover(
+      { uri: { path: '/inmemory/model' } },
+      { lineNumber: 1, column: 1 },
+    );
+    // Should have used the new active file's path.
+    expect(hoverFn).toHaveBeenCalledWith('src/second.py', 1, 1);
+  });
+
+  it('hover provider returns null when no RPC available', async () => {
+    // No get_file_content or lsp_get_hover in the fake
+    // RPC — simulates the hover method simply being
+    // absent on the proxy.
+    clearFakeRpc();
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    const provider = monacoState.lspProviders.hover[0].provider;
+    const result = await provider.provideHover(
+      { uri: { path: '/inmemory/model' } },
+      { lineNumber: 1, column: 1 },
+    );
+    // No RPC proxy at all — provider returns null cleanly.
+    expect(result).toBe(null);
+  });
+
+  it('definition provider builds cross-file location', async () => {
+    const defFn = vi.fn().mockResolvedValue({
+      file: 'src/other.py',
+      range: {
+        startLineNumber: 10,
+        startColumn: 1,
+        endLineNumber: 10,
+        endColumn: 8,
+      },
+    });
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+      'Repo.lsp_get_definition': defFn,
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    const provider =
+      monacoState.lspProviders.definition[0].provider;
+    const result = await provider.provideDefinition(
+      { uri: { path: '/inmemory/model' } },
+      { lineNumber: 5, column: 12 },
+    );
+    expect(defFn).toHaveBeenCalledWith('src/main.py', 5, 12);
+    expect(result.uri.path).toBe('/src/other.py');
+    expect(result.range.startLineNumber).toBe(10);
+  });
+
+  it('references provider returns empty for null result', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => ''),
+      'Repo.lsp_get_references': vi.fn(async () => null),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    const provider =
+      monacoState.lspProviders.reference[0].provider;
+    const result = await provider.provideReferences(
+      { uri: { path: '/inmemory/model' } },
+      { lineNumber: 1, column: 1 },
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('completion provider returns empty suggestions when no path', async () => {
+    const el = mountViewer();
+    await settle(el);
+    // No file opened — active path is empty.
+    // But the provider is registered on first editor
+    // build, and editor only builds on openFile. So
+    // install providers manually by opening and then
+    // closing a file.
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    el.closeFile('src/main.py');
+    await settle(el);
+    // Now providers exist but active path is empty.
+    const provider =
+      monacoState.lspProviders.completion[0].provider;
+    const result = await provider.provideCompletionItems(
+      { uri: { path: '/inmemory/model' }, getWordUntilPosition: () => null },
+      { lineNumber: 1, column: 1 },
+    );
+    expect(result).toEqual({ suggestions: [] });
+  });
+
+  it('providers survive viewer disposal and reuse', async () => {
+    // Install guard prevents re-registration. After
+    // opening then closing files repeatedly, the
+    // provider count stays at 1 each.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    el.closeFile('a.py');
+    await settle(el);
+    await el.openFile({ path: 'b.py' });
+    await settle(el);
+    el.closeFile('b.py');
+    await settle(el);
+    await el.openFile({ path: 'c.py' });
+    await settle(el);
+    expect(monacoState.lspProviders.hover).toHaveLength(1);
+    expect(monacoState.lspProviders.definition).toHaveLength(1);
+    expect(monacoState.lspProviders.reference).toHaveLength(1);
+    expect(monacoState.lspProviders.completion).toHaveLength(1);
   });
 });
