@@ -649,6 +649,448 @@ class TestDocType:
 
 
 # ---------------------------------------------------------------------------
+# Containment tree (2.8.3d)
+# ---------------------------------------------------------------------------
+
+
+class TestContainmentBasic:
+    """Shapes containing text produce hierarchical headings."""
+
+    def test_text_attached_to_containing_rect(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A rect containing one text — single-text box
+        # labelling picks the text as the label.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">Inside</text>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.headings) == 1
+        assert out.headings[0].text == "Inside"
+
+    def test_text_outside_any_shape_sits_at_root(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Rect at (0,0)-(50,50), text at (200,200) — text is
+        # not contained, becomes a root heading.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="50" height="50"/>'
+            '<text x="200" y="200">Outside</text>'
+        )
+        out = _extract(extractor, svg)
+        # Outside text lands as a root heading; the empty
+        # rect has no label and no contents so it's skipped.
+        texts = [h.text for h in out.all_headings_flat]
+        assert "Outside" in texts
+
+    def test_nested_rects_form_tree(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Outer rect 0-100, inner rect 20-50 (both sides).
+        # Outer gets its label from a single inside-text;
+        # inner does likewise. But a text at (30,40) lands
+        # in the INNER (smaller containing box).
+        svg = _wrap_ns(
+            # Outer group with explicit label.
+            '<g aria-label="Frontend">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+            # Inner group with explicit label.
+            '<g aria-label="Auth">'
+            '<rect x="20" y="20" width="30" height="30"/>'
+            '</g>'
+            # Text at (30, 40) — inside both, but inner wins
+            # (smallest containing).
+            '<text x="30" y="40">OAuth2</text>'
+        )
+        out = _extract(extractor, svg)
+        # Frontend is a top-level heading.
+        assert len(out.headings) == 1
+        frontend = out.headings[0]
+        assert frontend.text == "Frontend"
+        # Auth is nested under Frontend.
+        assert len(frontend.children) == 1
+        auth = frontend.children[0]
+        assert auth.text == "Auth"
+        # OAuth2 is a leaf under Auth.
+        assert len(auth.children) == 1
+        assert auth.children[0].text == "OAuth2"
+
+    def test_sibling_boxes_stay_flat(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Two non-overlapping boxes — siblings, not nested.
+        svg = _wrap_ns(
+            '<g aria-label="Box A">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+            '<g aria-label="Box B">'
+            '<rect x="200" y="0" width="100" height="100"/>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.headings) == 2
+        assert out.headings[0].text == "Box A"
+        assert out.headings[1].text == "Box B"
+
+
+class TestContainmentLabels:
+    """Three-level labeling rule."""
+
+    def test_aria_label_wins_over_text(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Explicit aria-label on the group takes priority
+        # over single-text inference.
+        svg = _wrap_ns(
+            '<g aria-label="Explicit Label">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">Text Inside</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.headings) == 1
+        heading = out.headings[0]
+        assert heading.text == "Explicit Label"
+        # The text becomes a child leaf.
+        assert len(heading.children) == 1
+        assert heading.children[0].text == "Text Inside"
+
+    def test_inkscape_label_used(
+        self, extractor: SvgExtractor
+    ) -> None:
+        svg = _wrap_ns(
+            '<g inkscape:label="Inkscape Label" '
+            'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">A</text>'
+            '<text x="20" y="80">B</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Inkscape Label"
+
+    def test_aria_label_beats_inkscape_label(
+        self, extractor: SvgExtractor
+    ) -> None:
+        svg = _wrap_ns(
+            '<g aria-label="Aria" '
+            'inkscape:label="Inkscape" '
+            'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+        )
+        # Single-text inference doesn't apply (no text), and
+        # aria-label beats inkscape:label.
+        out = _extract(extractor, svg)
+        # The rect has an aria-label, but no contents — it
+        # emits a heading with that label.
+        assert out.headings[0].text == "Aria"
+
+    def test_id_used_when_not_auto_generated(
+        self, extractor: SvgExtractor
+    ) -> None:
+        svg = _wrap_ns(
+            '<g id="user-chosen-name">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="20">A</text>'
+            '<text x="20" y="50">B</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "user-chosen-name"
+
+    def test_auto_generated_id_ignored(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # g123 matches the auto-id regex — not used as a
+        # label. Single-text inference applies instead.
+        svg = _wrap_ns(
+            '<g id="g123">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">Real Label</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Real Label"
+
+    def test_group_underscore_number_auto_id(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Group_42 pattern.
+        svg = _wrap_ns(
+            '<g id="Group_42">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">Genuine</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Genuine"
+
+    def test_single_text_inference(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # No explicit label, rect contains one text → text is
+        # the label.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="50">Single</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Single"
+
+    def test_multi_text_unlabeled_box_uses_neutral_identifier(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # No label, multiple texts → neutral "(box)" with
+        # texts as children.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="20" y="30">Alpha</text>'
+            '<text x="20" y="50">Beta</text>'
+            '<text x="20" y="70">Gamma</text>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.headings) == 1
+        box = out.headings[0]
+        assert box.text == "(box)"
+        child_texts = [c.text for c in box.children]
+        assert "Alpha" in child_texts
+        assert "Beta" in child_texts
+        assert "Gamma" in child_texts
+
+    def test_empty_unlabeled_box_skipped(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A rect with no label and no contents emits nothing.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="100" height="100"/>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings == []
+
+
+class TestContainmentReadingOrder:
+    """Sibling shapes order y-then-x within each level."""
+
+    def test_vertical_stack_ordered_top_to_bottom(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Second declared is lower y — it should emit second.
+        svg = _wrap_ns(
+            '<g aria-label="Top">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+            '<g aria-label="Bottom">'
+            '<rect x="0" y="200" width="100" height="100"/>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert [h.text for h in out.headings] == ["Top", "Bottom"]
+
+    def test_declaration_order_does_not_override_reading_order(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Declare Bottom first in source, but y puts Top first.
+        svg = _wrap_ns(
+            '<g aria-label="Bottom">'
+            '<rect x="0" y="200" width="100" height="100"/>'
+            '</g>'
+            '<g aria-label="Top">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert [h.text for h in out.headings] == ["Top", "Bottom"]
+
+    def test_same_row_ordered_left_to_right(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Same y, different x — left first.
+        svg = _wrap_ns(
+            '<g aria-label="Right">'
+            '<rect x="200" y="50" width="100" height="50"/>'
+            '</g>'
+            '<g aria-label="Left">'
+            '<rect x="0" y="50" width="100" height="50"/>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert [h.text for h in out.headings] == ["Left", "Right"]
+
+
+class TestContainmentShapes:
+    """Circles, ellipses, polygons, paths all act as containers."""
+
+    def test_circle_as_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Circle at (50, 50) radius 40 — bbox (10, 10, 90, 90).
+        # Text at (50, 50) is contained.
+        svg = _wrap_ns(
+            '<g aria-label="CircleGroup">'
+            '<circle cx="50" cy="50" r="40"/>'
+            '</g>'
+            '<text x="50" y="50">Inside Circle</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "CircleGroup"
+        # The text got attached to the circle's box.
+        assert len(out.headings[0].children) == 1
+        assert out.headings[0].children[0].text == "Inside Circle"
+
+    def test_ellipse_as_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        svg = _wrap_ns(
+            '<g aria-label="E">'
+            '<ellipse cx="100" cy="50" rx="80" ry="30"/>'
+            '</g>'
+            '<text x="100" y="50">In</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "E"
+        assert len(out.headings[0].children) == 1
+
+    def test_polygon_as_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Triangle with wide bounding box.
+        svg = _wrap_ns(
+            '<g aria-label="Tri">'
+            '<polygon points="0,0 100,0 50,100"/>'
+            '</g>'
+            '<text x="50" y="30">Inside</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Tri"
+        # Polygon bbox-contains the text's point even though
+        # geometrically the triangle might not. Acceptable
+        # approximation per specs4.
+        assert len(out.headings[0].children) == 1
+
+    def test_path_as_container(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Simple rectangular path.
+        svg = _wrap_ns(
+            '<g aria-label="P">'
+            '<path d="M 0 0 L 100 0 L 100 100 L 0 100 Z"/>'
+            '</g>'
+            '<text x="50" y="50">In Path</text>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "P"
+        assert len(out.headings[0].children) == 1
+
+    def test_zero_dimension_rect_ignored(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # A rect with width=0 doesn't become a container.
+        svg = _wrap_ns(
+            '<rect x="0" y="0" width="0" height="100"/>'
+            '<text x="0" y="50">Text</text>'
+        )
+        out = _extract(extractor, svg)
+        # Shape-less behaviour: text lands as a root heading.
+        assert out.headings[0].text == "Text"
+
+
+class TestContainmentTransforms:
+    """Transforms apply to shape bounding boxes before containment."""
+
+    def test_translated_rect_contains_transformed_text(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Rect declared at (0, 0) but translated to (50, 50).
+        # Text at local (0, 0) translated to (60, 60) — inside
+        # the translated rect (50, 50) to (150, 150).
+        svg = _wrap_ns(
+            '<g transform="translate(50, 50)">'
+            '<g aria-label="Shifted">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '<text x="10" y="10">Shifted Text</text>'
+            '</g>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Shifted"
+        assert len(out.headings[0].children) == 1
+
+    def test_scaled_rect_still_contains_text(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Rect at local (0, 0)-(10, 10) scaled 2×. Bbox
+        # becomes (0, 0)-(20, 20). Text at (5, 5) is inside.
+        svg = _wrap_ns(
+            '<g transform="scale(2)" aria-label="Scaled">'
+            '<rect x="0" y="0" width="10" height="10"/>'
+            '<text x="2.5" y="2.5">Scaled Text</text>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert out.headings[0].text == "Scaled"
+
+
+class TestContainmentRootTitle:
+    """Containment tree attaches under a root title when present."""
+
+    def test_shapes_become_children_of_title(
+        self, extractor: SvgExtractor
+    ) -> None:
+        svg = _wrap_ns(
+            "<title>Architecture</title>"
+            '<g aria-label="Frontend">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+            '<g aria-label="Backend">'
+            '<rect x="200" y="0" width="100" height="100"/>'
+            '</g>'
+        )
+        out = _extract(extractor, svg)
+        assert len(out.headings) == 1
+        title = out.headings[0]
+        assert title.text == "Architecture"
+        # Shape headings attach under the title at level 2.
+        assert len(title.children) == 2
+        assert title.children[0].text == "Frontend"
+        assert title.children[0].level == 2
+        assert title.children[1].text == "Backend"
+
+
+class TestContainmentNestedTexts:
+    """Texts attach to the SMALLEST containing shape."""
+
+    def test_text_goes_to_smaller_of_nested_shapes(
+        self, extractor: SvgExtractor
+    ) -> None:
+        # Outer contains inner contains text.
+        svg = _wrap_ns(
+            '<g aria-label="Outer">'
+            '<rect x="0" y="0" width="100" height="100"/>'
+            '</g>'
+            '<g aria-label="Inner">'
+            '<rect x="20" y="20" width="30" height="30"/>'
+            '</g>'
+            '<text x="30" y="40">Deep</text>'
+        )
+        out = _extract(extractor, svg)
+        # Text attaches to Inner, not Outer.
+        outer = out.headings[0]
+        assert outer.text == "Outer"
+        inner = outer.children[0]
+        assert inner.text == "Inner"
+        assert len(inner.children) == 1
+        assert inner.children[0].text == "Deep"
+        # Outer has no direct text children (only Inner).
+        outer_text_children = [
+            c for c in outer.children if c.text != "Inner"
+        ]
+        assert outer_text_children == []
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

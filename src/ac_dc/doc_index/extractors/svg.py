@@ -1,33 +1,34 @@
-"""SVG extractor — Layer 2.8.3c (minimal baseline).
+"""SVG extractor — Layer 2.8.3d (containment-aware).
 
-Covers the trivial paths only:
+Builds a containment tree from shape bounding boxes and attaches
+text elements to their smallest containing box. Three-level
+labeling picks box headings from explicit labels, single-text
+inference, or neutral identifiers.
+
+Covers:
 
 - ``<title>`` → top-level heading
 - ``<desc>`` → level-2 heading under the document root
-- ``<a xlink:href=...>`` with non-fragment target → DocLink entry
-- Shape-less spatial clustering fallback when no boxes are
-  present (text-only SVGs)
+- ``<a xlink:href=...>`` → ``DocLink`` entry
+- **Containment tree** — shapes (rect, circle, ellipse, polygon,
+  path) form a nesting hierarchy; text elements attach to the
+  smallest containing box
+- **Three-level labeling** — explicit group label → single-text
+  inference → neutral identifier
+- **Auto-id filtering** — Inkscape-style ``g123`` / ``Group_42``
+  ids are treated as if no id were set
+- **Reading order** — y-then-x sort at each nesting level
+- **Shape-less fallback** — spatial clustering when no shapes
+  are present (text-only SVGs)
 - Text label deduplication
-- Non-visual element filtering (defs, style, script, metadata,
-  filter, gradients, clipPath, mask, marker, pattern, symbol)
+- Non-visual element filtering
+- Long-text filtering (prose blocks arrive in 2.8.3e)
 
-Deliberately excluded — land in later sub-commits:
+Deliberately excluded — land in 2.8.3e:
 
-- **Containment tree** (2.8.3d) — building the shape hierarchy
-  from bounding boxes and attaching text to boxes. Without this,
-  multi-box SVGs fall back to flat spatial clustering or produce
-  minimal outlines.
-- **Three-level labeling** (2.8.3d) — explicit labels, single-
-  text inference, neutral identifiers.
-- **Long-text prose blocks** (2.8.3e) — text elements exceeding
-  the label length threshold.
-
-Today's behaviour on an SVG with shapes: the extractor still
-runs shape-less clustering over the text elements. This is
-suboptimal for box-heavy diagrams but correct for the narrow
-subset of SVGs 2.8.3c targets (label-only or text-only files).
-Sub-commit 2.8.3d replaces the shape-less-fallback-only path
-with containment-aware extraction.
+- **Long-text prose blocks** — text elements exceeding the label
+  length threshold. Currently dropped from the heading list;
+  2.8.3e promotes them to :class:`DocProseBlock` entries.
 
 Uses stdlib ``xml.etree.ElementTree`` only — no external XML
 dependencies. Parse failures are caught and produce an empty
@@ -46,9 +47,18 @@ from pathlib import Path
 
 from ac_dc.doc_index.extractors.base import BaseDocExtractor
 from ac_dc.doc_index.extractors.svg_geometry import (
+    BBox,
     Matrix,
+    box_contains,
+    circle_bbox,
     compose,
+    ellipse_bbox,
     parse_transform,
+    path_bbox,
+    point_in_box,
+    polygon_bbox,
+    rect_bbox,
+    transform_bbox,
     transform_point,
 )
 from ac_dc.doc_index.models import (
@@ -71,6 +81,7 @@ logger = logging.getLogger(__name__)
 # the namespace prefix to get bare tag names.
 _SVG_NS = "{http://www.w3.org/2000/svg}"
 _XLINK_NS = "{http://www.w3.org/1999/xlink}"
+_INKSCAPE_NS = "{http://www.inkscape.org/namespaces/inkscape}"
 
 
 # Non-visual tags — elements that don't contribute to the
@@ -93,22 +104,46 @@ _NON_VISUAL_TAGS: frozenset[str] = frozenset({
 })
 
 
+# Shape tags that contribute bounding boxes to the containment
+# tree. Order matters only for readability; all are processed
+# uniformly.
+_SHAPE_TAGS: frozenset[str] = frozenset({
+    "rect",
+    "circle",
+    "ellipse",
+    "polygon",
+    "path",
+})
+
+
 # Label-length threshold for long-text classification. Text
 # elements exceeding this become prose blocks (2.8.3e); shorter
 # ones become heading leaves. The threshold matches the spec's
 # keyword-enrichment minimum section size so SVG prose and
 # markdown sections share the same enrichment cutoff.
 #
-# 2.8.3c doesn't emit prose blocks, but we still use the
+# 2.8.3d doesn't emit prose blocks, but we still use the
 # threshold to drop oversized text from the heading list — it
 # would produce wildly-variable-length heading leaves that
 # dominate siblings in the compact output.
 _LONG_TEXT_THRESHOLD = 80
 
 
+# Auto-generated id pattern for Inkscape, Illustrator, and
+# typical codegen outputs. Matches patterns like ``g123``,
+# ``Group_42``, ``path1``, ``rect_7``. Case-insensitive.
+# Authors who deliberately name something ``Group_42`` see it
+# as a label; this is an acceptable trade-off.
+_AUTO_ID_RE = re.compile(
+    r"^(?:g|group|path|rect|text|layer|use|ellipse|circle|"
+    r"polygon|polyline|line)_?\d+$",
+    re.IGNORECASE,
+)
+
+
 # Spatial-clustering gap multiplier. Text elements separated by
 # a vertical gap greater than this multiple of the median line
-# height start a new cluster.
+# height start a new cluster (shape-less fallback path only).
 _CLUSTER_GAP_MULTIPLIER = 2.0
 
 
@@ -119,9 +154,19 @@ _CLUSTER_GAP_MULTIPLIER = 2.0
 _FALLBACK_LINE_HEIGHT = 16.0
 
 
+# Line-height estimate for multi-line-label joining. Text
+# elements whose vertical centres are within this many units
+# of each other are joined as consecutive lines of one label.
+# Tuned below typical font sizes (18-20 units) so genuinely
+# stacked label lines join but labels laid out with clear
+# visual spacing between them stay distinct.
+_MULTILINE_JOIN_THRESHOLD = 18.0
+
+
 # URL schemes that identify external links. Added to filter
-# out http / https / mailto / etc. from the DocLink capture path
-# (we only want repo-local references in the reference graph).
+# out http / https / mailto / etc. from the DocLink capture
+# path — we only want repo-local references in the reference
+# graph.
 _EXTERNAL_URL_RE = re.compile(
     r"^(https?|ftp|mailto|data|javascript|tel):",
     re.IGNORECASE,
@@ -129,17 +174,17 @@ _EXTERNAL_URL_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Text element internal representation
+# Internal types
 # ---------------------------------------------------------------------------
 
 
 class _TextElement:
     """A text element's content and root-canvas position.
 
-    Internal helper for the extractor. Carries the text content
-    (joined across ``<tspan>`` children) and the root-canvas
-    (x, y) position after transform resolution. Used by the
-    shape-less clustering pass.
+    Carries the text content (joined across ``<tspan>``
+    children) and the root-canvas (x, y) position after
+    transform resolution. The containment-tree builder uses
+    the position to decide which box this text belongs to.
 
     Kept as a plain class rather than a dataclass because it's
     tiny, private, and we don't need __eq__ / __repr__ helpers.
@@ -153,18 +198,45 @@ class _TextElement:
         self.y = y
 
 
+class _ShapeBox:
+    """A containment candidate — one shape's bounding box plus metadata.
+
+    The containment-tree builder consumes these. ``group_label``
+    is the explicit label from the shape's own ``<g>`` wrapper
+    (``aria-label`` > ``inkscape:label`` > filtered ``id``), or
+    None when no explicit label applies.
+
+    Shape boxes are sorted by area descending before tree
+    construction so the "smallest containing ancestor" query is
+    cheap.
+    """
+
+    __slots__ = ("bbox", "group_label", "parent_index")
+
+    def __init__(
+        self,
+        bbox: BBox,
+        group_label: str | None,
+    ) -> None:
+        self.bbox = bbox
+        self.group_label = group_label
+        # Set during tree construction — the index of this
+        # shape's parent in the sorted list, or None for roots.
+        self.parent_index: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # Extractor
 # ---------------------------------------------------------------------------
 
 
 class SvgExtractor(BaseDocExtractor):
-    """Parse an SVG file into a minimal outline.
+    """Parse an SVG file into a containment-aware outline.
 
-    2.8.3c scope — see module docstring for what's included and
-    what's deferred. The extractor is stateless across calls;
-    all traversal state lives in local variables or on the
-    returned :class:`DocOutline`.
+    2.8.3d scope — containment tree + three-level labeling.
+    Prose-block capture lands in 2.8.3e. The extractor is
+    stateless across calls; all traversal state lives in local
+    variables or on the returned :class:`DocOutline`.
     """
 
     extension = ".svg"
@@ -212,16 +284,26 @@ class SvgExtractor(BaseDocExtractor):
                 DocHeading(text=desc_text, level=1)
             )
 
-        # Walk the tree collecting text elements (with their
-        # resolved root-canvas positions) and anchor hrefs.
-        # Skips non-visual subtrees entirely.
+        # Walk the tree collecting shape boxes, text elements,
+        # and anchor hrefs. Skips non-visual subtrees entirely.
+        shape_boxes: list[_ShapeBox] = []
         text_elements: list[_TextElement] = []
-        seen_label_texts: set[str] = set()
         current_heading_for_links = (
             root_heading.text if root_heading is not None else ""
         )
 
-        def _walk(node: ET.Element, parent_matrix: Matrix) -> None:
+        def _walk(
+            node: ET.Element,
+            parent_matrix: Matrix,
+            inherited_label: str | None,
+        ) -> None:
+            """Recursive tree walk collecting shapes, text, anchors.
+
+            ``inherited_label`` is the nearest enclosing ``<g>``'s
+            explicit label (aria-label > inkscape:label > filtered
+            id). Shapes use it as their ``group_label`` unless they
+            sit under a more-specific group.
+            """
             for child in node:
                 tag = _local_name(child.tag)
 
@@ -243,13 +325,9 @@ class SvgExtractor(BaseDocExtractor):
                     )
                     if element is not None:
                         text_elements.append(element)
-                    # Text elements don't have meaningful
-                    # children to recurse into (<tspan> content
-                    # was joined in place).
                     continue
 
                 if tag == "a":
-                    # Capture the href; DocLink emitted below.
                     href = _anchor_href(child)
                     if href:
                         link = _build_doc_link(
@@ -258,19 +336,53 @@ class SvgExtractor(BaseDocExtractor):
                         )
                         if link is not None:
                             outline.links.append(link)
-                    # <a> wraps content — continue into children.
-                    _walk(child, child_matrix)
+                    # <a> wraps content — recurse inheriting the
+                    # same label (anchors aren't group labels).
+                    _walk(child, child_matrix, inherited_label)
                     continue
 
-                # For any other element, descend. Shape
-                # elements (rect / circle / etc.) have no
-                # meaningful children for the minimal 2.8.3c
-                # extractor, but descending is cheap and
-                # correct.
-                _walk(child, child_matrix)
+                if tag == "g":
+                    # The group's label applies to every shape
+                    # inside until a nested <g> overrides it.
+                    own_label = _extract_group_label(child)
+                    effective_label = (
+                        own_label
+                        if own_label is not None
+                        else inherited_label
+                    )
+                    _walk(child, child_matrix, effective_label)
+                    continue
+
+                if tag in _SHAPE_TAGS:
+                    bbox = _shape_bbox(child, child_matrix)
+                    if bbox is not None:
+                        # Check the shape's OWN attributes for a
+                        # label too — some diagrams put the label
+                        # on the shape directly rather than on a
+                        # wrapping <g>.
+                        own_label = _extract_group_label(child)
+                        effective_label = (
+                            own_label
+                            if own_label is not None
+                            else inherited_label
+                        )
+                        shape_boxes.append(
+                            _ShapeBox(bbox, effective_label)
+                        )
+                    # Shape elements don't contain meaningful
+                    # outline content, but we still descend for
+                    # defensive reasons (malformed SVG might
+                    # nest text inside a rect).
+                    _walk(child, child_matrix, inherited_label)
+                    continue
+
+                # Any other element — descend with the same
+                # inherited label.
+                _walk(child, child_matrix, inherited_label)
 
         # Start the walk. Skip the root's own <title>/<desc> —
         # they're already captured above.
+        root_matrix = Matrix(1, 0, 0, 1, 0, 0)
         for child in root:
             tag = _local_name(child.tag)
             if tag in ("title", "desc"):
@@ -279,10 +391,7 @@ class SvgExtractor(BaseDocExtractor):
                 continue
 
             child_transform = parse_transform(child.get("transform"))
-            child_matrix = compose(
-                Matrix(1, 0, 0, 1, 0, 0),
-                child_transform,
-            )
+            child_matrix = compose(root_matrix, child_transform)
 
             if tag == "text":
                 element = _collect_text_element(child, child_matrix)
@@ -298,22 +407,44 @@ class SvgExtractor(BaseDocExtractor):
                     )
                     if link is not None:
                         outline.links.append(link)
-                _walk(child, child_matrix)
+                _walk(child, child_matrix, None)
                 continue
 
-            _walk(child, child_matrix)
+            if tag == "g":
+                own_label = _extract_group_label(child)
+                _walk(child, child_matrix, own_label)
+                continue
 
-        # Shape-less fallback: cluster text elements by
-        # spatial proximity. When 2.8.3d lands its containment
-        # tree, this will be replaced with containment-aware
-        # grouping and this fallback will only fire for truly
-        # shape-less SVGs.
-        if text_elements:
+            if tag in _SHAPE_TAGS:
+                bbox = _shape_bbox(child, child_matrix)
+                if bbox is not None:
+                    own_label = _extract_group_label(child)
+                    shape_boxes.append(
+                        _ShapeBox(bbox, own_label)
+                    )
+                _walk(child, child_matrix, None)
+                continue
+
+            _walk(child, child_matrix, None)
+
+        # Decide which extraction path to use:
+        # - With shapes → containment-aware extraction
+        # - Without shapes but with text → spatial clustering
+        # - Neither → outline is whatever title/desc produced
+        if shape_boxes:
+            _extract_containment_aware(
+                outline,
+                shape_boxes,
+                text_elements,
+                skip_root_heading=root_heading is not None,
+            )
+        elif text_elements:
             clusters = _spatial_cluster(text_elements)
+            seen_labels: set[str] = set()
             _attach_clusters_to_outline(
                 outline,
                 clusters,
-                seen_label_texts,
+                seen_labels,
                 skip_root_heading=root_heading is not None,
             )
 
@@ -321,7 +452,492 @@ class SvgExtractor(BaseDocExtractor):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Containment-aware extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_containment_aware(
+    outline: DocOutline,
+    shape_boxes: list[_ShapeBox],
+    text_elements: list[_TextElement],
+    skip_root_heading: bool,
+) -> None:
+    """Build the containment tree and emit headings.
+
+    Process:
+
+    1. Sort shapes by area descending — largest first so
+       containment queries walk bigger candidates first.
+    2. Build parent indices — for each shape, find the
+       smallest other shape that contains it.
+    3. Attach each text element to its smallest containing
+       shape (or root if none contains it).
+    4. Emit shapes as headings in reading order (y-then-x)
+       at each level, with texts attached as leaves or as
+       the shape's label.
+
+    The emission follows three-level labeling:
+
+    - **Level 1** — explicit group label (aria-label,
+      inkscape:label, filtered id)
+    - **Level 2** — single-text box — the one text becomes
+      the label
+    - **Level 3** — multi-text unlabeled box — neutral
+      identifier ``(box)``, all texts as sibling leaves
+
+    When a root title exists, the tree attaches under it as
+    level-2 children; otherwise at the top level.
+    """
+    # Sort shapes by area descending. Ties broken by position
+    # (y then x) so deterministic ordering survives equal-area
+    # cases.
+    sorted_shapes = sorted(
+        shape_boxes,
+        key=lambda s: (-s.bbox.area, s.bbox.y, s.bbox.x),
+    )
+
+    # Build parent indices. For each shape, walk the list
+    # from its own position forward (shapes later in the
+    # sorted list are smaller) — but that gives smallest-
+    # first children, not parents. What we want is: for each
+    # shape, find the smallest ancestor (= smallest larger
+    # shape that contains it). Walk backwards through larger
+    # shapes.
+    for i, shape in enumerate(sorted_shapes):
+        # Candidates are shapes BEFORE i (larger area).
+        # Among those that contain this shape, pick the
+        # smallest — that's the immediate parent in the tree.
+        parent_idx: int | None = None
+        parent_area = float("inf")
+        for j in range(i):
+            candidate = sorted_shapes[j]
+            if j == i:
+                continue
+            # Exact-same-bbox case: treat the earlier one
+            # (by sort order) as the parent. Avoids a
+            # degenerate tree where two identical shapes
+            # would each be each other's parent.
+            if shape.bbox == candidate.bbox:
+                continue
+            if box_contains(candidate.bbox, shape.bbox):
+                if candidate.bbox.area < parent_area:
+                    parent_idx = j
+                    parent_area = candidate.bbox.area
+        shape.parent_index = parent_idx
+
+    # Attach text elements to their smallest containing box.
+    # Key is the shape's index; value is the list of texts
+    # attached to it. Texts not contained by any shape are
+    # collected under the root (None key).
+    text_attachments: dict[int | None, list[_TextElement]] = {}
+    for text in text_elements:
+        best_idx: int | None = None
+        best_area = float("inf")
+        for i, shape in enumerate(sorted_shapes):
+            if point_in_box(shape.bbox, text.x, text.y):
+                if shape.bbox.area < best_area:
+                    best_idx = i
+                    best_area = shape.bbox.area
+        text_attachments.setdefault(best_idx, []).append(text)
+
+    # Build child index for tree emission. ``children_of[i]``
+    # is the list of shape indices whose parent is i. Root
+    # shapes have parent None.
+    children_of: dict[int | None, list[int]] = {}
+    for i, shape in enumerate(sorted_shapes):
+        children_of.setdefault(
+            shape.parent_index, []
+        ).append(i)
+
+    # Determine where the emitted headings attach: under the
+    # root title if one exists, otherwise at the outline's
+    # top level.
+    if skip_root_heading and outline.headings:
+        parent_children: list[DocHeading] = outline.headings[0].children
+        base_level = 2
+    else:
+        parent_children = outline.headings
+        base_level = 1
+
+    # Track emitted labels globally so duplicates (including
+    # of the root title) are suppressed.
+    seen_labels: set[str] = set()
+    for h in outline.all_headings_flat:
+        seen_labels.add(h.text)
+
+    # First emit root-level texts (not contained by any shape).
+    # These become siblings of the top-level shape headings.
+    root_texts = text_attachments.get(None, [])
+    _emit_root_texts(
+        parent_children,
+        root_texts,
+        base_level,
+        seen_labels,
+    )
+
+    # Then emit the shape tree in reading order.
+    _emit_shape_tree(
+        parent_children,
+        sorted_shapes,
+        children_of,
+        text_attachments,
+        parent_idx=None,
+        current_level=base_level,
+        seen_labels=seen_labels,
+    )
+
+
+def _emit_root_texts(
+    parent_children: list[DocHeading],
+    root_texts: list[_TextElement],
+    level: int,
+    seen_labels: set[str],
+) -> None:
+    """Emit root-level texts (not contained by any shape).
+
+    Joined by proximity first (multi-line labels like
+    ``<text>Backend</text><text>Services</text>`` stacked
+    vertically become one label "Backend Services"), then
+    sorted by reading order.
+
+    Long texts (> ``_LONG_TEXT_THRESHOLD``) are dropped —
+    2.8.3e promotes them to prose blocks.
+    """
+    if not root_texts:
+        return
+    joined = _join_multiline_labels(root_texts)
+    ordered = _reading_order_sort(joined)
+    for text in ordered:
+        if len(text.text) > _LONG_TEXT_THRESHOLD:
+            continue
+        if text.text in seen_labels:
+            continue
+        seen_labels.add(text.text)
+        parent_children.append(
+            DocHeading(text=text.text, level=level)
+        )
+
+
+def _emit_shape_tree(
+    parent_children: list[DocHeading],
+    sorted_shapes: list[_ShapeBox],
+    children_of: dict[int | None, list[int]],
+    text_attachments: dict[int | None, list[_TextElement]],
+    parent_idx: int | None,
+    current_level: int,
+    seen_labels: set[str],
+) -> None:
+    """Emit one level of the shape tree, recursing into children.
+
+    Shapes at this level are sorted by reading order (y then
+    x). Each shape emits a heading whose text comes from
+    three-level labeling; attached texts become children;
+    nested shapes become deeper children.
+
+    Level clamps at 6 — deeper SVG nesting still emits
+    headings, but the level stays at 6 so the compact
+    formatter's clamp matches.
+    """
+    child_indices = children_of.get(parent_idx, [])
+    if not child_indices:
+        return
+
+    # Sort child shapes by reading order — y first, x second.
+    child_indices = sorted(
+        child_indices,
+        key=lambda i: (
+            sorted_shapes[i].bbox.y,
+            sorted_shapes[i].bbox.x,
+        ),
+    )
+
+    emit_level = min(current_level, 6)
+
+    for idx in child_indices:
+        shape = sorted_shapes[idx]
+        texts = text_attachments.get(idx, [])
+        joined_texts = _join_multiline_labels(texts)
+        ordered_texts = _reading_order_sort(joined_texts)
+
+        label_text, leaf_texts = _pick_shape_label(
+            shape, ordered_texts, seen_labels
+        )
+
+        if label_text is None:
+            # Level 3 case — no label at all, no texts, and
+            # no contained shapes means this shape contributes
+            # nothing. Skip it to avoid ``(box)`` placeholders
+            # for shapes that are really just decoration.
+            if not leaf_texts and not children_of.get(idx):
+                continue
+            # Otherwise use the neutral identifier. Don't add
+            # it to seen_labels — multiple unlabeled boxes
+            # legitimately share the identifier.
+            label_text = "(box)"
+
+        seen_labels.add(label_text)
+        heading = DocHeading(text=label_text, level=emit_level)
+        parent_children.append(heading)
+
+        # Attach leaf texts under this heading.
+        leaf_level = min(emit_level + 1, 6)
+        for text in leaf_texts:
+            if len(text.text) > _LONG_TEXT_THRESHOLD:
+                continue
+            if text.text in seen_labels:
+                continue
+            seen_labels.add(text.text)
+            heading.children.append(
+                DocHeading(text=text.text, level=leaf_level)
+            )
+
+        # Recurse into nested shapes.
+        _emit_shape_tree(
+            heading.children,
+            sorted_shapes,
+            children_of,
+            text_attachments,
+            parent_idx=idx,
+            current_level=emit_level + 1,
+            seen_labels=seen_labels,
+        )
+
+
+def _pick_shape_label(
+    shape: _ShapeBox,
+    texts: list[_TextElement],
+    seen_labels: set[str],
+) -> tuple[str | None, list[_TextElement]]:
+    """Apply the three-level labeling rule.
+
+    Returns ``(label, leaf_texts)`` where label is either the
+    chosen heading text or None (meaning "no meaningful
+    label, caller decides"). ``leaf_texts`` is the list of
+    texts that should render as children — empty for the
+    single-text case (the text became the label) and the
+    full list otherwise.
+
+    Long texts (> ``_LONG_TEXT_THRESHOLD``) are never picked
+    as labels — they're headed for prose blocks in 2.8.3e.
+    The current implementation drops them, so single-text
+    boxes where the one text is long fall through to the
+    no-label case.
+    """
+    # Level 1 — explicit group label wins.
+    if shape.group_label is not None:
+        return shape.group_label, texts
+
+    # Filter texts eligible to be labels (short enough).
+    short_texts = [
+        t for t in texts if len(t.text) <= _LONG_TEXT_THRESHOLD
+    ]
+
+    # Level 2 — single short text. It becomes the label; no
+    # leaves remain.
+    if len(short_texts) == 1 and len(texts) == 1:
+        return short_texts[0].text, []
+
+    # Level 3 — multi-text or texts-plus-long. Return None
+    # so the caller decides between the neutral identifier
+    # and a skip.
+    return None, texts
+
+
+def _join_multiline_labels(
+    elements: list[_TextElement],
+) -> list[_TextElement]:
+    """Join tightly-stacked text elements into multi-line labels.
+
+    Consecutive elements whose y-gap is smaller than
+    :data:`_MULTILINE_JOIN_THRESHOLD` are joined space-
+    separated. Operates on the y-sorted list. The (x, y)
+    position of the joined element is the first element's
+    position — reading-order sorting later uses it.
+
+    Does not attempt column detection — two side-by-side
+    labels at the same y don't merge. Only vertical stacking
+    joins.
+    """
+    if len(elements) <= 1:
+        return list(elements)
+
+    # Sort by y ascending; join consecutive close-y items
+    # that share a similar x position (within half a typical
+    # label width).
+    sorted_els = sorted(elements, key=lambda e: (e.y, e.x))
+    result: list[_TextElement] = []
+    current = sorted_els[0]
+    current_parts: list[str] = [current.text]
+
+    for el in sorted_els[1:]:
+        y_gap = el.y - current.y
+        x_gap = abs(el.x - current.x)
+        # Join criteria: close vertically AND roughly aligned
+        # horizontally. The x tolerance prevents joining two
+        # side-by-side labels that happen to be on the same
+        # row.
+        if y_gap < _MULTILINE_JOIN_THRESHOLD and x_gap < 50.0:
+            current_parts.append(el.text)
+            current = _TextElement(
+                text=current.text,
+                x=current.x,
+                y=el.y,
+            )
+            continue
+        # Flush current.
+        result.append(
+            _TextElement(
+                text=" ".join(current_parts),
+                x=current.x,
+                y=current.y,
+            )
+        )
+        current = el
+        current_parts = [el.text]
+
+    result.append(
+        _TextElement(
+            text=" ".join(current_parts),
+            x=current.x,
+            y=current.y,
+        )
+    )
+    return result
+
+
+def _reading_order_sort(
+    elements: list[_TextElement],
+) -> list[_TextElement]:
+    """Sort text elements in reading order: y-primary, x-secondary.
+
+    Texts on the same row (close y values) order left-to-
+    right. Texts on different rows order top-to-bottom.
+    The "same row" tolerance is :data:`_FALLBACK_LINE_HEIGHT`
+    — wider than typical inter-column gaps but tight enough
+    that rows stay distinct.
+    """
+    if len(elements) <= 1:
+        return list(elements)
+
+    # Assign each element a row bucket based on y proximity.
+    by_y = sorted(elements, key=lambda e: e.y)
+    rows: list[list[_TextElement]] = [[by_y[0]]]
+    for el in by_y[1:]:
+        last_row_y = rows[-1][-1].y
+        if el.y - last_row_y < _FALLBACK_LINE_HEIGHT:
+            rows[-1].append(el)
+        else:
+            rows.append([el])
+
+    result: list[_TextElement] = []
+    for row in rows:
+        result.extend(sorted(row, key=lambda e: e.x))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Shape bounding-box dispatch
+# ---------------------------------------------------------------------------
+
+
+def _shape_bbox(
+    node: ET.Element, matrix: Matrix
+) -> BBox | None:
+    """Compute a shape element's root-canvas bounding box.
+
+    Dispatches by tag to the appropriate per-shape helper in
+    :mod:`svg_geometry`, then applies the accumulated
+    transform matrix to project into root coordinates.
+
+    Returns None when the shape's attributes don't describe a
+    valid bounding box (zero area, missing required
+    attributes, malformed numeric strings).
+    """
+    tag = _local_name(node.tag)
+    local_bbox: BBox | None = None
+
+    if tag == "rect":
+        local_bbox = rect_bbox(
+            _parse_float_attr(node, "x"),
+            _parse_float_attr(node, "y"),
+            _parse_float_attr(node, "width"),
+            _parse_float_attr(node, "height"),
+        )
+    elif tag == "circle":
+        local_bbox = circle_bbox(
+            _parse_float_attr(node, "cx"),
+            _parse_float_attr(node, "cy"),
+            _parse_float_attr(node, "r"),
+        )
+    elif tag == "ellipse":
+        local_bbox = ellipse_bbox(
+            _parse_float_attr(node, "cx"),
+            _parse_float_attr(node, "cy"),
+            _parse_float_attr(node, "rx"),
+            _parse_float_attr(node, "ry"),
+        )
+    elif tag == "polygon":
+        local_bbox = polygon_bbox(node.get("points"))
+    elif tag == "path":
+        local_bbox = path_bbox(node.get("d"))
+
+    if local_bbox is None:
+        return None
+    return transform_bbox(matrix, local_bbox)
+
+
+def _parse_float_attr(
+    node: ET.Element, name: str
+) -> float | None:
+    """Parse a float-valued attribute; None for missing / malformed."""
+    value = node.get(name)
+    if value is None:
+        return None
+    try:
+        return float(value.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Label extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_group_label(node: ET.Element) -> str | None:
+    """Return the explicit label for a group, or None.
+
+    Priority per specs4/2-indexing/document-index.md:
+
+    1. ``aria-label`` — explicit accessibility label
+    2. ``inkscape:label`` — Inkscape's editor-set label
+    3. ``id`` — but only when it doesn't match the auto-id
+       regex
+
+    Empty string values are treated as absent. Whitespace-
+    only labels are stripped and, if empty after stripping,
+    treated as absent.
+    """
+    for attr in ("aria-label", _INKSCAPE_NS + "label"):
+        value = node.get(attr)
+        if value is not None:
+            stripped = value.strip()
+            if stripped:
+                return stripped
+
+    raw_id = node.get("id")
+    if raw_id is None:
+        return None
+    stripped = raw_id.strip()
+    if not stripped:
+        return None
+    if _AUTO_ID_RE.match(stripped):
+        return None
+    return stripped
+
+
+# ---------------------------------------------------------------------------
+# Namespace / text / link helpers (unchanged from 2.8.3c)
 # ---------------------------------------------------------------------------
 
 
@@ -485,16 +1101,20 @@ def _build_doc_link(
     )
 
 
+# ---------------------------------------------------------------------------
+# Shape-less fallback (only fires when no shapes present)
+# ---------------------------------------------------------------------------
+
+
 def _spatial_cluster(
     elements: list[_TextElement],
 ) -> list[list[_TextElement]]:
     """Cluster text elements by vertical proximity.
 
-    Used as a fallback when no containment information is
-    available. Sorts elements by y ascending, then groups
-    consecutive elements whose y-gap is less than the
-    clustering threshold (``_CLUSTER_GAP_MULTIPLIER`` × median
-    inter-element gap).
+    Fallback for shape-less SVGs. Sorts elements by y
+    ascending, then groups consecutive elements whose y-gap
+    is less than the clustering threshold
+    (``_CLUSTER_GAP_MULTIPLIER`` × median inter-element gap).
 
     Empty input produces an empty list; a single element
     produces one cluster containing it.
@@ -538,15 +1158,15 @@ def _attach_clusters_to_outline(
 ) -> None:
     """Emit clusters as heading leaves under the outline.
 
-    Each cluster becomes a top-level heading (or a child of the
-    root title when one exists). Texts within a cluster are
-    emitted in the order they appear in the sorted cluster —
-    which is reading order (top to bottom, then left to right
-    within a row).
+    Shape-less fallback path. Each cluster becomes a top-
+    level heading (or a child of the root title when one
+    exists). Texts within a cluster are emitted in the order
+    they appear in the sorted cluster — reading order (top to
+    bottom, then left to right within a row).
 
     Long text elements (exceeding :data:`_LONG_TEXT_THRESHOLD`)
-    are dropped from the heading list for 2.8.3c. Sub-commit
-    2.8.3e promotes them to :class:`DocProseBlock` entries.
+    are dropped. Sub-commit 2.8.3e promotes them to
+    :class:`DocProseBlock` entries.
 
     Duplicates are removed against ``seen_labels`` — a caller-
     provided set that tracks labels already emitted anywhere
@@ -555,21 +1175,16 @@ def _attach_clusters_to_outline(
     parent: list[DocHeading]
     base_level: int
     if skip_root_heading and outline.headings:
-        # Attach under the root title as level-2 children.
         parent = outline.headings[0].children
         base_level = 2
     else:
         parent = outline.headings
         base_level = 1
 
-    # Seed seen_labels with any existing heading texts so a
-    # cluster that duplicates the root title doesn't emit it
-    # twice.
     for h in outline.all_headings_flat:
         seen_labels.add(h.text)
 
     for cluster in clusters:
-        # Filter long text AND duplicates within the cluster.
         texts: list[str] = []
         for el in cluster:
             if len(el.text) > _LONG_TEXT_THRESHOLD:
@@ -581,9 +1196,6 @@ def _attach_clusters_to_outline(
         if not texts:
             continue
 
-        # Multi-text cluster — first text becomes the parent
-        # heading, rest become its children. Single-text
-        # cluster is a leaf heading.
         head = DocHeading(text=texts[0], level=base_level)
         parent.append(head)
         for child_text in texts[1:]:
