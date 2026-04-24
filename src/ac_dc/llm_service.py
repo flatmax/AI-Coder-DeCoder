@@ -4300,23 +4300,46 @@ class LLMService:
                         self._stability_tracker._items.pop(entry_key, None)
                         self._stability_tracker._broken_tiers.add(tier)
 
-        # Step 3 — Index entries for ALL indexed files NOT in
-        # selected files. These are symbol/doc blocks for the
-        # structural map. They are tracked for stability but NOT
-        # rendered separately — they appear in the main symbol
-        # map or are in cached tiers.
+        # Step 3 — Primary index entries for ALL indexed files
+        # NOT in selected files. These are symbol/doc blocks for
+        # the structural map. They are tracked for stability but
+        # NOT rendered separately — they appear in the main
+        # symbol map or are in cached tiers.
         #
-        # Use signature hash (from raw symbol data) rather than
-        # hashing the formatted block — formatted output changes
-        # when path aliases or exclude_files change, causing
-        # spurious hash mismatches.
+        # Mode dispatch: code mode → symbol: entries, doc mode →
+        # doc: entries. Both modes use the same tracker slot for
+        # the primary index; cross-reference (step 4) adds the
+        # opposite mode's entries on top.
+        #
+        # Use signature hash (from raw data) rather than hashing
+        # the formatted block — formatted output changes when
+        # path aliases or exclude_files change, causing spurious
+        # hash mismatches.
         selected_set = set(self._selected_files)
-        if self._symbol_index is not None:
-            for path in list(self._symbol_index._all_symbols.keys()):
+        if self._context.mode == Mode.DOC:
+            # Doc mode primary: iterate doc index outlines.
+            for path in list(self._doc_index._all_outlines.keys()):
                 if path in selected_set:
                     continue
-                block = self._symbol_index.get_file_symbol_block(path)
-                if block:
+                block = self._doc_index.get_file_doc_block(path)
+                if not block:
+                    continue
+                sig_hash = self._doc_index.get_signature_hash(path)
+                active_items[f"doc:{path}"] = {
+                    "hash": sig_hash or hashlib.sha256(
+                        block.encode("utf-8")
+                    ).hexdigest(),
+                    "tokens": self._counter.count(block),
+                }
+        else:
+            # Code mode primary: iterate symbol index.
+            if self._symbol_index is not None:
+                for path in list(self._symbol_index._all_symbols.keys()):
+                    if path in selected_set:
+                        continue
+                    block = self._symbol_index.get_file_symbol_block(path)
+                    if not block:
+                        continue
                     sig_hash = self._symbol_index.get_signature_hash(path)
                     active_items[f"symbol:{path}"] = {
                         "hash": sig_hash or hashlib.sha256(
@@ -4326,12 +4349,60 @@ class LLMService:
                     }
 
         # Step 4 — Cross-reference items (when cross-ref enabled).
-        # Add the other index's items so they participate in
-        # N-value tracking. Only items already in the tracker
-        # (from initialization) are included. Currently a no-op
-        # because the doc index hasn't landed yet.
-        # (When doc index lands, this will iterate doc_index or
-        # symbol_index depending on mode and add matching items.)
+        # Adds the *opposite* index's entries so both indexes
+        # contribute to the prompt. The tier dispatch (already
+        # in place) renders doc: and symbol: items uniformly in
+        # their tier's `symbols` field; this step just ensures
+        # both prefixes end up in active_items so the tracker
+        # updates stability counts for them.
+        #
+        # In code mode + cross-ref: add doc: entries (doc index
+        # becomes the secondary index).
+        # In doc mode + cross-ref: add symbol: entries (symbol
+        # index becomes the secondary).
+        # Selected files excluded from both to honour the
+        # "never appears twice" invariant — their full content
+        # is already in the active "Working Files" section.
+        if self._cross_ref_enabled:
+            if self._context.mode == Mode.CODE:
+                # Add doc: entries as secondary.
+                for path in list(
+                    self._doc_index._all_outlines.keys()
+                ):
+                    if path in selected_set:
+                        continue
+                    block = self._doc_index.get_file_doc_block(path)
+                    if not block:
+                        continue
+                    sig_hash = self._doc_index.get_signature_hash(path)
+                    active_items[f"doc:{path}"] = {
+                        "hash": sig_hash or hashlib.sha256(
+                            block.encode("utf-8")
+                        ).hexdigest(),
+                        "tokens": self._counter.count(block),
+                    }
+            else:
+                # Doc mode + cross-ref: add symbol: as secondary.
+                if self._symbol_index is not None:
+                    for path in list(
+                        self._symbol_index._all_symbols.keys()
+                    ):
+                        if path in selected_set:
+                            continue
+                        block = self._symbol_index.get_file_symbol_block(
+                            path
+                        )
+                        if not block:
+                            continue
+                        sig_hash = self._symbol_index.get_signature_hash(
+                            path
+                        )
+                        active_items[f"symbol:{path}"] = {
+                            "hash": sig_hash or hashlib.sha256(
+                                block.encode("utf-8")
+                            ).hexdigest(),
+                            "tokens": self._counter.count(block),
+                        }
 
         # Step 5 — History messages (all — the tracker handles
         # graduated history internally via its own tier checks).
