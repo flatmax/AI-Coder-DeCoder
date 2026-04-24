@@ -1628,6 +1628,25 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.29 — Phase 3.6 Token HUD — **delivered**
+
+Floating transient overlay showing per-request token breakdown after each LLM response. Appears in the top-right corner of the viewport, auto-hides after 8 seconds with an 800ms fade. Hover pauses the timer; mouse leave restarts. Dismiss button hides immediately. Five collapsible sections with state persisted to localStorage.
+
+- `webapp/src/token-hud.js` — `TokenHud(RpcMixin(LitElement))`:
+  - Listens for `stream-complete` window events; filters out errors and empty results
+  - Extracts `token_usage` from the result immediately for the "This Request" section
+  - Fetches full `get_context_breakdown` asynchronously for tier data, budget, changes, totals
+  - Auto-hide: 8s → 800ms CSS opacity fade → hidden. Hover pauses; mouse leave restarts
+  - Five collapsible sections: Cache Tiers (per-tier bar chart with lock icon), This Request (prompt/completion/cache read/write), History Budget (usage bar with percentage), Tier Changes (promotions/demotions), Session Totals (cumulative)
+  - Section collapse state persisted to `ac-dc-hud-collapsed` as JSON-serialized Set
+  - Cache hit rate badge in header with color coding (≥50% green, ≥20% amber, <20% red)
+  - Prefers `provider_cache_rate` over local `cache_hit_rate` when available
+  - `visible` attribute reflected manually for CSS `:host([visible])` selector
+  - Tier colors follow warm-to-cool spectrum (L0 green, L1 teal, L2 blue, L3 amber, active orange)
+  - Handles missing/partial data gracefully (placeholder text for each section)
+
+- `webapp/src/app-shell.js` — imports `token-hud.js`, renders `<ac-token-hud>` after the toast layer
+
 ### 5.28 — Phase 3.5 File navigation grid — **delivered**
 
 Implements the 2D spatial file navigation grid with Alt+Arrow traversal and fullscreen HUD overlay. Every file-open action creates a new node adjacent to the current node; Alt+Arrow keys traverse spatially; a semi-transparent HUD appears while Alt is held showing the grid structure with connector lines and travel counts.

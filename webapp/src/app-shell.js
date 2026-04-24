@@ -30,6 +30,7 @@ import './svg-viewer.js';
 import './settings-tab.js';
 import './context-tab.js';
 import './file-nav.js';
+import './token-hud.js';
 import { viewerForPath } from './viewer-routing.js';
 
 /**
@@ -946,6 +947,8 @@ export class AppShell extends JRPCClient {
           </div>
         `)}
       </div>
+
+      <ac-token-hud></ac-token-hud>
     `;
   }
 
