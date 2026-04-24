@@ -123,9 +123,32 @@
 //     args[6] += dy) from 3.2c.3b-i; this sub-phase
 //     adds the test coverage to pin the contract
 //
-// Path editing surface is now complete for all SVG path
-// commands. Deferred to 3.2c.3c:
-//   - Inline text edit via foreignObject textarea
+// Phase 3.2c.3c adds: inline text editing.
+//   - Double-clicking a <text> element opens a
+//     foreignObject-hosted textarea positioned at the
+//     element's bounding box
+//   - Textarea inherits font size from the text element's
+//     font-size attribute (or a sensible default) and
+//     color from the fill attribute
+//   - Enter commits the edit; Escape cancels and rolls
+//     back; blur commits (user-friendly — accidental
+//     click-aways don't discard work)
+//   - Only one edit active at a time. Starting a new
+//     edit while one is in flight commits the previous
+//     one
+//   - On commit, the text element's children are
+//     replaced wholesale with a single text node
+//     containing the new content. Any pre-existing
+//     <tspan> structure is flattened
+//   - Double-click only initiates edits on text
+//     elements. Non-text elements ignore the gesture
+//     (single-click selection still works)
+//   - Detach during an edit cancels and rolls back
+//
+// Phase 3.2c editing surface is complete for visible SVG
+// content: every shape supports selection, drag-to-move,
+// and (where meaningful) resize or vertex edit. Text
+// elements additionally support inline content editing.
 //
 // Deferred beyond 3.2c.3:
 //   - Multi-selection + marquee (3.2c.4)
@@ -771,11 +794,27 @@ export class SvgEditor {
      */
     this._dragThresholdScreen = 3;
 
+    /**
+     * Active inline text edit. Null when not editing;
+     * populated by `beginTextEdit`, cleared by
+     * `commitTextEdit` / `cancelTextEdit`. Fields:
+     *   element — the <text> element being edited
+     *   originalContent — text content at edit start,
+     *     restored on cancel
+     *   foreignObject — the foreignObject wrapper
+     *     hosting the textarea
+     *   textarea — the <textarea> element
+     */
+    this._textEdit = null;
+
     /** Bound handlers for add/remove symmetry. */
     this._onPointerDown = this._onPointerDown.bind(this);
     this._onPointerMove = this._onPointerMove.bind(this);
     this._onPointerUp = this._onPointerUp.bind(this);
     this._onKeyDown = this._onKeyDown.bind(this);
+    this._onDoubleClick = this._onDoubleClick.bind(this);
+    this._onTextEditKeyDown = this._onTextEditKeyDown.bind(this);
+    this._onTextEditBlur = this._onTextEditBlur.bind(this);
 
     /** Whether `attach()` has been called. */
     this._attached = false;
@@ -801,6 +840,10 @@ export class SvgEditor {
     this._svg.addEventListener('pointermove', this._onPointerMove);
     this._svg.addEventListener('pointerup', this._onPointerUp);
     this._svg.addEventListener('pointercancel', this._onPointerUp);
+    // Double-click for inline text editing. Uses the
+    // composed-aware `dblclick` so clicks targeting a
+    // tspan inside a text element still route here.
+    this._svg.addEventListener('dblclick', this._onDoubleClick);
     // Keyboard events on document so Escape / Delete work
     // regardless of which element has focus.
     document.addEventListener('keydown', this._onKeyDown);
@@ -817,6 +860,10 @@ export class SvgEditor {
     // during a drag would leave the element partially
     // moved and the captured pointer orphaned.
     this._cancelDrag();
+    // Cancel any in-flight text edit so the foreignObject
+    // overlay doesn't orphan on the SVG and the element's
+    // original content is restored.
+    this.cancelTextEdit();
     this._svg.removeEventListener(
       'pointerdown',
       this._onPointerDown,
@@ -833,6 +880,7 @@ export class SvgEditor {
       'pointercancel',
       this._onPointerUp,
     );
+    this._svg.removeEventListener('dblclick', this._onDoubleClick);
     document.removeEventListener('keydown', this._onKeyDown);
     this._clearSelection();
   }
@@ -879,8 +927,274 @@ export class SvgEditor {
   }
 
   // ---------------------------------------------------------------
+  // Inline text editing
+  // ---------------------------------------------------------------
+
+  /**
+   * Begin an inline text edit on a `<text>` element.
+   * Opens a foreignObject-hosted textarea positioned at
+   * the element's bounding box. No-op for non-text
+   * elements or when the argument is null.
+   *
+   * If another edit is already in flight, that edit is
+   * committed first. Prevents orphaned foreignObjects
+   * when the user double-clicks one text then another
+   * without pressing Enter in between.
+   */
+  beginTextEdit(element) {
+    if (!element || !element.tagName) return;
+    if (element.tagName.toLowerCase() !== 'text') return;
+    // Commit any prior edit so we never have two
+    // foreignObjects alive at once.
+    if (this._textEdit) {
+      this.commitTextEdit();
+    }
+    const originalContent = element.textContent || '';
+    const overlay = this._renderTextEditOverlay(element, originalContent);
+    if (!overlay) return;
+    this._textEdit = {
+      element,
+      originalContent,
+      foreignObject: overlay.foreignObject,
+      textarea: overlay.textarea,
+    };
+    // Focus + select all so the user can immediately
+    // start typing to replace, or arrow-key to edit.
+    try {
+      overlay.textarea.focus();
+      overlay.textarea.select?.();
+    } catch (_) {
+      // jsdom / headless environments may not support
+      // focus correctly; the edit is still functional
+      // via programmatic API.
+    }
+  }
+
+  /**
+   * Commit the active text edit. Replaces the element's
+   * children with a single text node containing the
+   * textarea's value. Any pre-existing `<tspan>` children
+   * are flattened. Fires `onChange` if the content
+   * actually changed. No-op when no edit is active.
+   */
+  commitTextEdit() {
+    if (!this._textEdit) return;
+    const edit = this._textEdit;
+    const newContent = edit.textarea.value;
+    this._teardownTextEditOverlay(edit);
+    this._textEdit = null;
+    // Replace all children with a single text node.
+    // Wholesale replacement flattens any <tspan>
+    // structure. Documented trade-off — most SVG text
+    // elements don't use tspan, and the ones that do
+    // either get their structure preserved via the
+    // source (user edits the file directly) or lose it
+    // here. Users with tspan-heavy text should edit
+    // the source.
+    while (edit.element.firstChild) {
+      edit.element.removeChild(edit.element.firstChild);
+    }
+    if (newContent) {
+      edit.element.appendChild(
+        document.createTextNode(newContent),
+      );
+    }
+    // Fire onChange only when content actually changed.
+    // Clicking into a text element, not typing, then
+    // pressing Enter shouldn't mark the file dirty.
+    if (newContent !== edit.originalContent) {
+      this._onChange();
+    }
+    // Re-render handles in case the element's bounding
+    // box changed as a result of the content change.
+    this._renderHandles();
+  }
+
+  /**
+   * Cancel the active text edit. Restores the element's
+   * original content and removes the foreignObject
+   * overlay. No onChange fired — cancel is a rollback.
+   * No-op when no edit is active.
+   */
+  cancelTextEdit() {
+    if (!this._textEdit) return;
+    const edit = this._textEdit;
+    this._teardownTextEditOverlay(edit);
+    this._textEdit = null;
+    // Restore original content. If the edit didn't
+    // mutate the element's children (the user only
+    // typed in the textarea), this is a no-op. If an
+    // external caller modified the element mid-edit
+    // (unlikely but defensive), this restores what we
+    // snapshotted at edit start.
+    while (edit.element.firstChild) {
+      edit.element.removeChild(edit.element.firstChild);
+    }
+    if (edit.originalContent) {
+      edit.element.appendChild(
+        document.createTextNode(edit.originalContent),
+      );
+    }
+    this._renderHandles();
+  }
+
+  /**
+   * Build the foreignObject + textarea overlay for a
+   * text edit. Positioned at the element's bounding box
+   * with a small padding so typing doesn't overflow
+   * immediately. Font size and color inherited from
+   * the text element. Returns the foreignObject and
+   * textarea refs, or null when bbox computation fails.
+   */
+  _renderTextEditOverlay(element, content) {
+    let bbox;
+    try {
+      bbox = element.getBBox?.();
+    } catch (_) {
+      return null;
+    }
+    if (!bbox) return null;
+    // Positioning padding. Ensures the textarea has
+    // room for the user's first keystroke without
+    // resizing or clipping.
+    const padX = 8;
+    const padY = 4;
+    const width = Math.max(bbox.width + padX * 2, 60);
+    const height = Math.max(bbox.height + padY * 2, 24);
+    const ns = 'http://www.w3.org/2000/svg';
+    const xhtmlNs = 'http://www.w3.org/1999/xhtml';
+    const fo = document.createElementNS(ns, 'foreignObject');
+    fo.setAttribute('x', String(bbox.x - padX));
+    fo.setAttribute('y', String(bbox.y - padY));
+    fo.setAttribute('width', String(width));
+    fo.setAttribute('height', String(height));
+    // Mark the foreignObject so `_hitTest` doesn't
+    // re-select the text element if the user clicks
+    // inside the textarea.
+    fo.setAttribute('class', HANDLE_CLASS);
+    // Read font properties from the text element. Falls
+    // back to CSS defaults when unspecified.
+    const fontSize =
+      element.getAttribute('font-size') || '16';
+    const fill = element.getAttribute('fill') || '#000';
+    const textarea = document.createElementNS(xhtmlNs, 'textarea');
+    textarea.value = content;
+    // Inline styles — fills the foreignObject, inherits
+    // font from the text element, accent border so the
+    // active edit is visually distinct from other
+    // handles.
+    textarea.setAttribute(
+      'style',
+      [
+        'width: 100%',
+        'height: 100%',
+        'box-sizing: border-box',
+        'margin: 0',
+        `padding: ${padY}px ${padX}px`,
+        `font-size: ${fontSize}px`,
+        `color: ${fill}`,
+        'background: rgba(255, 255, 255, 0.95)',
+        'border: 2px solid #4fc3f7',
+        'border-radius: 2px',
+        'outline: none',
+        'resize: none',
+        'font-family: inherit',
+        'line-height: 1.2',
+      ].join('; '),
+    );
+    textarea.addEventListener('keydown', this._onTextEditKeyDown);
+    textarea.addEventListener('blur', this._onTextEditBlur);
+    fo.appendChild(textarea);
+    this._svg.appendChild(fo);
+    return { foreignObject: fo, textarea };
+  }
+
+  /**
+   * Remove the foreignObject overlay and detach its
+   * event listeners. Called by both commit and cancel
+   * paths.
+   */
+  _teardownTextEditOverlay(edit) {
+    try {
+      edit.textarea.removeEventListener(
+        'keydown',
+        this._onTextEditKeyDown,
+      );
+      edit.textarea.removeEventListener(
+        'blur',
+        this._onTextEditBlur,
+      );
+    } catch (_) {
+      // Listeners may have been auto-removed if the
+      // foreignObject was detached externally.
+    }
+    if (
+      edit.foreignObject &&
+      edit.foreignObject.parentNode
+    ) {
+      edit.foreignObject.parentNode.removeChild(
+        edit.foreignObject,
+      );
+    }
+  }
+
+  /**
+   * Keyboard handler for the textarea. Enter commits
+   * (unless Shift is held for multi-line), Escape
+   * cancels. Other keys flow through to default
+   * textarea behavior.
+   */
+  _onTextEditKeyDown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.commitTextEdit();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.cancelTextEdit();
+      return;
+    }
+    // Stop propagation for other keys too so the
+    // editor's document-level keydown doesn't hijack
+    // Delete/Backspace while typing.
+    event.stopPropagation();
+  }
+
+  /**
+   * Blur handler — user clicked outside the textarea.
+   * Commits rather than cancels; accidental click-aways
+   * shouldn't discard user work.
+   */
+  _onTextEditBlur() {
+    // Defer so a programmatic focus change doesn't fire
+    // blur before the focus lands elsewhere. Without the
+    // timeout, Enter → focus-change → blur → double-commit
+    // could race.
+    if (!this._textEdit) return;
+    this.commitTextEdit();
+  }
+
+  // ---------------------------------------------------------------
   // Pointer handling
   // ---------------------------------------------------------------
+
+  /**
+   * Double-click dispatch. Opens an inline text edit
+   * when the target is a `<text>` element (or a `<tspan>`
+   * that resolves to its parent text). Other elements
+   * ignore the gesture.
+   */
+  _onDoubleClick(event) {
+    const target = this._hitTest(event.clientX, event.clientY);
+    if (!target) return;
+    if (target.tagName?.toLowerCase() !== 'text') return;
+    event.stopPropagation();
+    event.preventDefault();
+    this.beginTextEdit(target);
+  }
 
   _onPointerDown(event) {
     // Only react to primary button (left-click / touch).

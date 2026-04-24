@@ -1628,6 +1628,49 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.21 — Phase 3.2c.3c SvgEditor inline text editing — **delivered**
+
+Double-clicking a `<text>` element opens a foreignObject-hosted textarea positioned at the element's bounding box. The textarea inherits the text's font size and color. Enter commits, Escape cancels, blur commits (user-friendly — accidental click-aways don't discard work). Only one edit can be active at a time. Completes the 3.2c editing surface for visible SVG content.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_textEdit` state field in the constructor — `{element, originalContent, foreignObject, textarea}` during an active edit, null otherwise
+  - Three new bound handlers: `_onDoubleClick`, `_onTextEditKeyDown`, `_onTextEditBlur`
+  - `attach` / `detach` wire up the `dblclick` listener; `detach` calls `cancelTextEdit` so a detach during an edit rolls back rather than leaving an orphaned foreignObject
+  - New public methods: `beginTextEdit(element)`, `commitTextEdit()`, `cancelTextEdit()`
+  - New private methods: `_renderTextEditOverlay` (builds the foreignObject + textarea), `_teardownTextEditOverlay` (removes them), `_onDoubleClick` (dispatch gate)
+  - foreignObject carries `HANDLE_CLASS` so `_hitTest` skips it — clicks inside the textarea don't re-hit-test to the underlying text element
+
+- `webapp/src/svg-editor.test.js` — 39 new tests across 7 describe blocks:
+  - **`beginTextEdit`** (11 tests): null argument no-op, non-text element no-op, opens foreignObject overlay for text, textarea value matches element content, overlay positioned from bounding box with padding, font-size inherited, fill color inherited, default font-size when attribute absent, foreignObject has handle class (hit-test exclusion), starting new edit commits prior one, captures original content for rollback
+  - **`commitTextEdit`** (7 tests): no-op when not editing, replaces content with textarea value, removes foreignObject, clears state, fires onChange when changed, does NOT fire onChange when unchanged (clicking in and pressing Enter without typing doesn't mark file dirty), flattens tspan children wholesale, allows empty content
+  - **`cancelTextEdit`** (5 tests): no-op when not editing, restores original content, removes foreignObject, no onChange fired, clears state
+  - **Keyboard handling** (5 tests): Enter commits, Shift+Enter does not commit (multi-line), Escape cancels, other keys flow through, Delete key in textarea does not delete the underlying element (propagation stopped)
+  - **Blur handling** (2 tests): blur commits, blur after commit is a no-op
+  - **Double-click dispatch** (5 tests): text element opens edit, non-text ignored, empty space ignored, tspan resolves to parent text, stopPropagation on text hit
+  - **Lifecycle** (4 tests): detach cancels active edit + restores content, detach doesn't fire onChange, handles re-render after commit, beginTextEdit during active drag doesn't crash
+
+Design points pinned by tests:
+
+- **Single text node replacement flattens tspan structure.** `commitTextEdit` clears all children and appends one text node. A `<text>` element with multiple `<tspan>` children loses the structure on first commit. Pinned by `flattens tspan children on commit`. Documented trade-off — most SVGs use plain text elements; tspan-heavy documents should be edited at the source. Alternative (per-tspan editing) would require a richer UI that's out of 3.2c scope.
+
+- **Blur commits rather than cancels.** Users accidentally clicking outside the textarea shouldn't lose their edits. Pinned by `blur commits the edit`. If the user wants to abandon, Escape is explicit. The cost is that a deliberate click-away acts as an implicit save; the benefit is forgiving behavior for the common case.
+
+- **onChange only fires on actual content change.** Opening an edit and committing without typing is a no-op — the file stays clean. Pinned by `does NOT fire onChange when content unchanged`. Without this, every double-click-to-inspect action would mark the file dirty, defeating dirty-tracking.
+
+- **Enter vs Shift+Enter.** Plain Enter commits (matches IDE / form convention). Shift+Enter falls through to the textarea's default behavior — inserting a newline. Pinned separately. Allows multi-line text in SVG, though rendering multi-line in the committed text element requires the caller to handle the newline (our textarea value round-trips verbatim; the rendered `<text>` shows the content as a single line per standard SVG text rendering unless the caller adds tspan structure).
+
+- **textarea keydown stops propagation for non-commit/cancel keys.** Without this, the document-level keydown handler would hijack Delete/Backspace and delete the selected text element while the user is editing it. Pinned by `textarea Delete key does not delete the element`. The commit/cancel keys do stopPropagation too (for symmetry), but they'd already have fired their action.
+
+- **foreignObject carries HANDLE_CLASS.** `_hitTest` excludes elements with this class, so clicks inside the textarea don't re-hit-test to the text element underneath. Pinned by `foreignObject has handle class`. If this broke, clicking the textarea would fire pointerdown → hit-test returns text → already selected → starts a drag. The drag wouldn't commit (no pointermove) but the state thrash would be confusing.
+
+- **Double-click routes via hit-test.** `_onDoubleClick` calls `_hitTest` which handles tspan → text resolution. Pinned by `double-click routes via tspan → parent text`. Users who double-click on a tspan child (the rendered text run) get the text element opened for editing — which is what they meant.
+
+- **Starting a new edit commits the previous one.** Prevents orphaned foreignObjects stacking on the SVG. Pinned by `commits prior edit when starting a new one`. If the prior textarea had modifications, they're committed to the first element before the second edit opens.
+
+- **Detach rolls back.** Same pattern as detach cancels drag. Pinned by `detach cancels active text edit` which verifies both the overlay removal and the content restoration.
+
+Phase 3.2c editing surface is complete for visible SVG content: selection + drag-to-move + resize or vertex edit where meaningful + inline text editing. Remaining 3.2c work: multi-selection + marquee (3.2c.4), undo stack + copy/paste (3.2c.5).
+
 ### 5.20 — Phase 3.2c.3b-iii SvgEditor path arc endpoint edit (A) — **delivered**
 
 Arc commands get an endpoint handle using the standard `p{N}` role format. Arc shape parameters (rx, ry, rotation, flags) stay fixed during drag — only args[5..6] move. Completes the path editing surface for all SVG path commands.
