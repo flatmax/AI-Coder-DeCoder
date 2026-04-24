@@ -73,7 +73,29 @@ import { LitElement, css, html } from 'lit';
 // effects (worker env, MATLAB registration) must run
 // before any editor construction.
 import { languageForPath, monaco } from './monaco-setup.js';
+import { renderMarkdownWithSourceMap } from './markdown-preview.js';
 import { SharedRpc } from './rpc.js';
+
+// KaTeX CSS — imported as a raw string via Vite's ?raw
+// loader. Injected into the shadow root (not document
+// head) because Monaco's style-cloning loop only sees
+// styles in document.head, and this one isn't. Without
+// this, math in preview renders unstyled (fractions flat,
+// superscripts inline).
+//
+// In environments where the ?raw import doesn't resolve
+// to a string (vitest under some resolver configurations,
+// or stripped-down bundles), we fall back to a minimal
+// sentinel stylesheet. The injection mechanism still runs
+// so test coverage and shadow-DOM integration work
+// identically; math just renders unstyled in those
+// environments, matching the no-CSS fallback the guard
+// used to produce.
+import _rawKatexCss from 'katex/dist/katex.min.css?raw';
+const katexCssText =
+  typeof _rawKatexCss === 'string' && _rawKatexCss
+    ? _rawKatexCss
+    : '/* ac-dc KaTeX CSS placeholder — raw import unavailable */';
 
 /**
  * Virtual path prefix. Files with this prefix are
@@ -104,12 +126,37 @@ const _HIGHLIGHT_DURATION_MS = 3000;
  */
 const _CLONED_STYLE_MARKER = 'acDcMonacoClone';
 
+/**
+ * Dataset marker for the KaTeX stylesheet injected into
+ * the shadow root when preview mode activates. Separate
+ * from the Monaco-clone marker so the style-sync loop
+ * doesn't touch it.
+ */
+const _KATEX_CSS_MARKER = 'acDcKatexCss';
+
+/**
+ * How long the scroll-sync lock stays held after one
+ * side initiates a scroll. During this window the other
+ * side's scroll handler skips (prevents feedback loops).
+ * Long enough to cover Monaco's smooth-scroll animation,
+ * short enough that genuine user scrolling isn't
+ * suppressed.
+ */
+const _SCROLL_LOCK_MS = 120;
+
 export class DiffViewer extends LitElement {
   static properties = {
     _files: { type: Array, state: true },
     _activeIndex: { type: Number, state: true },
     /** Dirty state per file — drives the status LED. */
     _dirtyCount: { type: Number, state: true },
+    /**
+     * Preview mode flag — when true AND the active file
+     * is markdown, the layout switches from side-by-side
+     * diff to split editor+preview. Toggled via the
+     * Preview button in the overlay.
+     */
+    _previewMode: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -205,6 +252,113 @@ export class DiffViewer extends LitElement {
       right: 120px;
     }
 
+    /* Preview button — floats near the status LED in
+     * normal mode, moves to the preview pane's top-right
+     * in split mode so the user can exit preview from
+     * the panel they're reading. */
+    .preview-button {
+      position: absolute;
+      top: 8px;
+      right: 46px;
+      z-index: 10;
+      padding: 0.25rem 0.6rem;
+      font-size: 0.75rem;
+      font-family: inherit;
+      background: rgba(22, 27, 34, 0.88);
+      color: var(--text-primary, #c9d1d9);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 4px;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+    }
+    .preview-button:hover {
+      background: rgba(240, 246, 252, 0.12);
+      border-color: rgba(240, 246, 252, 0.35);
+    }
+    .preview-button-split {
+      right: 46px;
+    }
+
+    /* Split layout for preview mode. Editor on the left,
+     * preview on the right, equal width. */
+    .split-root {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: row;
+      width: 100%;
+      position: relative;
+    }
+    .editor-pane {
+      flex: 1 1 50%;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(240, 246, 252, 0.1);
+    }
+    .editor-pane .editor-container {
+      flex: 1;
+      min-height: 0;
+    }
+    .preview-pane {
+      flex: 1 1 50%;
+      min-width: 0;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 1rem 1.5rem;
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.9375rem;
+      line-height: 1.55;
+    }
+    .preview-pane h1,
+    .preview-pane h2,
+    .preview-pane h3,
+    .preview-pane h4,
+    .preview-pane h5,
+    .preview-pane h6 {
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+      font-weight: 600;
+    }
+    .preview-pane p {
+      margin: 0.75rem 0;
+    }
+    .preview-pane code {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.875em;
+      background: rgba(13, 17, 23, 0.6);
+      border-radius: 3px;
+      padding: 0.1rem 0.35rem;
+    }
+    .preview-pane pre {
+      background: rgba(13, 17, 23, 0.9);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      border-radius: 6px;
+      padding: 0.75rem;
+      overflow-x: auto;
+      margin: 0.75rem 0;
+    }
+    .preview-pane pre code {
+      background: transparent;
+      padding: 0;
+    }
+    .preview-pane blockquote {
+      border-left: 3px solid rgba(240, 246, 252, 0.2);
+      padding-left: 0.75rem;
+      margin: 0.75rem 0;
+      color: var(--text-secondary, #8b949e);
+    }
+    .preview-pane table {
+      border-collapse: collapse;
+      margin: 0.75rem 0;
+    }
+    .preview-pane th,
+    .preview-pane td {
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      padding: 0.35rem 0.6rem;
+    }
+
     /* Highlight decoration for scroll-to-edit anchor
      * matches. Applied via Monaco's deltaDecorations API
      * — the class here just defines the visual. */
@@ -220,6 +374,7 @@ export class DiffViewer extends LitElement {
     this._files = [];
     this._activeIndex = -1;
     this._dirtyCount = 0;
+    this._previewMode = false;
 
     // Monaco editor instance. Created on first openFile,
     // disposed on last closeFile.
@@ -227,6 +382,12 @@ export class DiffViewer extends LitElement {
     // Element reference for the editor host div, read
     // from the shadow root after Lit renders.
     this._editorContainer = null;
+    // Preview pane element — the right side of the split
+    // layout in preview mode. Populated after Lit renders
+    // the split template. Preview HTML is written to this
+    // element's innerHTML directly (not via Lit) so every
+    // keystroke doesn't re-render the whole component.
+    this._previewPane = null;
     // Virtual-file content map. Keyed by path starting
     // with virtual://.
     this._virtualContents = new Map();
@@ -247,6 +408,18 @@ export class DiffViewer extends LitElement {
     // Content-change listener disposable. Attached per
     // editor instance lifetime.
     this._contentChangeDisposable = null;
+    // Editor scroll listener disposable — only attached
+    // in preview mode so we don't pay for scroll events
+    // on every file, only markdown files under preview.
+    this._editorScrollDisposable = null;
+    // Scroll-sync lock. 'editor' or 'preview' identifies
+    // which side initiated the scroll; the other side's
+    // handler skips until the lock clears. null = free.
+    this._scrollLock = null;
+    this._scrollLockTimer = null;
+    // Preview pane scroll listener, bound for add/remove
+    // symmetry.
+    this._onPreviewScroll = this._onPreviewScroll.bind(this);
     // MutationObserver for shadow-DOM style sync after
     // editor creation.
     this._styleObserver = null;
@@ -260,6 +433,7 @@ export class DiffViewer extends LitElement {
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContentChange = this._onContentChange.bind(this);
     this._onHeadMutation = this._onHeadMutation.bind(this);
+    this._onEditorScroll = this._onEditorScroll.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -379,9 +553,24 @@ export class DiffViewer extends LitElement {
       // watermark render cleanly.
       this._disposeEditor();
       this._recomputeDirtyCount();
+      // Preview mode is per-file; reset so the next file
+      // opened (if any) starts in normal diff view.
+      this._previewMode = false;
+      this._previewPane = null;
     } else if (wasActive) {
       // Clamp to remaining range; switch to adjacent file.
       this._activeIndex = Math.min(idx, newFiles.length - 1);
+      // If the next active file isn't markdown, exit
+      // preview mode so the layout falls back to side-by-
+      // side diff. _showEditor below picks up the new
+      // mode via the template re-render.
+      const nextFile = this._files[this._activeIndex];
+      if (this._previewMode && !this._isMarkdownFile(nextFile)) {
+        this._previewMode = false;
+        this._previewPane = null;
+        this._disposeEditor();
+        this._editorContainer = null;
+      }
       this._showEditor();
     } else if (idx < this._activeIndex) {
       this._activeIndex -= 1;
@@ -500,6 +689,10 @@ export class DiffViewer extends LitElement {
       // viewport, switch.
       this._captureViewport();
       this._activeIndex = existing;
+      // If switching to a non-markdown file while preview
+      // is on, exit preview so the layout reverts to the
+      // normal side-by-side diff.
+      this._maybeExitPreviewForActiveFile();
       this._showEditor();
       this._dispatchActiveFileChanged();
       return;
@@ -542,9 +735,27 @@ export class DiffViewer extends LitElement {
     }
     this._files = [...this._files, file];
     this._activeIndex = this._files.length - 1;
+    this._maybeExitPreviewForActiveFile();
     this._showEditor();
     this._dispatchActiveFileChanged();
     this._recomputeDirtyCount();
+  }
+
+  /**
+   * If preview is on but the active file isn't markdown,
+   * flip it off and tear down the editor so _showEditor
+   * rebuilds in the normal side-by-side layout. No-op
+   * otherwise.
+   */
+  _maybeExitPreviewForActiveFile() {
+    if (!this._previewMode) return;
+    const file =
+      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (this._isMarkdownFile(file)) return;
+    this._previewMode = false;
+    this._previewPane = null;
+    this._disposeEditor();
+    this._editorContainer = null;
   }
 
   /**
@@ -688,7 +899,10 @@ export class DiffViewer extends LitElement {
           theme: 'vs-dark',
           minimap: { enabled: false },
           automaticLayout: true,
-          renderSideBySide: true,
+          // Side-by-side for normal diff; inline when the
+          // preview pane takes the right half of the
+          // viewport.
+          renderSideBySide: !this._previewMode,
           originalEditable: false,
           readOnly: false,
           scrollBeyondLastLine: false,
@@ -785,6 +999,355 @@ export class DiffViewer extends LitElement {
       // harmless in tests that don't exercise dirty
       // tracking.
     }
+    // Scroll listener — only useful in preview mode,
+    // only attached when preview is active. Otherwise
+    // we'd pay for scroll events on every file.
+    this._refreshEditorScrollListener();
+  }
+
+  /**
+   * Attach the editor-scroll listener when preview is on;
+   * detach when off. Called from _attachContentChangeListener
+   * (new editor / model swap) and from _togglePreview
+   * (entering / leaving preview without a swap).
+   */
+  _refreshEditorScrollListener() {
+    if (this._editorScrollDisposable) {
+      try {
+        this._editorScrollDisposable.dispose();
+      } catch (_) {}
+      this._editorScrollDisposable = null;
+    }
+    if (!this._previewMode) return;
+    const modifiedEditor = this._getModifiedEditor();
+    if (!modifiedEditor) return;
+    try {
+      this._editorScrollDisposable =
+        modifiedEditor.onDidScrollChange?.(
+          this._onEditorScroll,
+        ) || null;
+    } catch (_) {
+      // Mock without onDidScrollChange — scroll sync
+      // silently unavailable in that environment.
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Internals — preview mode (markdown)
+  // ---------------------------------------------------------------
+
+  /**
+   * Toggle preview mode. Re-renders the template (which
+   * adds or removes the preview pane div), then rebuilds
+   * the Monaco editor because `renderSideBySide` is a
+   * construction-time option — can't be changed on an
+   * existing editor, the editor must be recreated.
+   */
+  _togglePreview() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!this._isMarkdownFile(file)) return;
+    // Detach any preview-pane scroll listener attached
+    // to the OLD pane element before Lit replaces the
+    // DOM. The old pane is about to be discarded; the
+    // listener would leak otherwise.
+    this._detachPreviewScrollListener();
+    this._previewMode = !this._previewMode;
+    // Preview pane reference will be re-acquired after
+    // the next render commits. Drop it now so stale
+    // references don't leak.
+    this._previewPane = null;
+    // Disposing the editor forces a fresh createDiffEditor
+    // call with the new renderSideBySide option. The Lit
+    // render committing `_previewMode` also moves the
+    // editor container div to its new location in the
+    // split layout.
+    this._disposeEditor();
+    this._editorContainer = null;
+    // Schedule a rebuild after Lit commits the new
+    // template. _showEditor handles container lookup + rAF
+    // retries; we just need to trigger it once the DOM
+    // reflects the new layout.
+    this.updateComplete.then(() => {
+      this._showEditor();
+      // If entering preview, populate the pane with
+      // current content and wire up scroll sync.
+      // Leaving preview — no-op, the pane is gone.
+      if (this._previewMode) {
+        this._updatePreview(file.modified);
+        this._attachPreviewScrollListener();
+      }
+    });
+  }
+
+  /**
+   * Render markdown into the preview pane via direct DOM
+   * write. Bypasses Lit because per-keystroke re-renders
+   * of the whole component would be wasteful — the
+   * preview pane's innerHTML is the only thing changing.
+   */
+  _updatePreview(content) {
+    // Re-acquire the pane reference if Lit just
+    // committed a new template (entering preview mode).
+    if (!this._previewPane) {
+      this._previewPane =
+        this.shadowRoot?.querySelector('.preview-pane') || null;
+    }
+    if (!this._previewPane) return;
+    try {
+      const html = renderMarkdownWithSourceMap(content || '');
+      this._previewPane.innerHTML = html;
+    } catch (err) {
+      // Should never fire — renderMarkdownWithSourceMap
+      // catches internally and degrades to escaped text.
+      // Defensive log in case something else throws.
+      console.error('[diff-viewer] preview render failed', err);
+    }
+  }
+
+  /**
+   * Wire up bidirectional scroll sync. The preview pane
+   * emits scroll events we bind directly; the editor
+   * side is wired in _refreshEditorScrollListener. Safe
+   * to call when preview mode is off — it'll be a no-op
+   * because the pane won't exist yet.
+   */
+  _attachPreviewScrollListener() {
+    if (!this._previewPane) {
+      this._previewPane =
+        this.shadowRoot?.querySelector('.preview-pane') || null;
+    }
+    if (!this._previewPane) return;
+    this._previewPane.addEventListener(
+      'scroll',
+      this._onPreviewScroll,
+      { passive: true },
+    );
+    // Scroll listener on the editor side too — scope this
+    // attach to preview mode since the listener is only
+    // meaningful here.
+    this._refreshEditorScrollListener();
+  }
+
+  _detachPreviewScrollListener() {
+    if (this._previewPane) {
+      try {
+        this._previewPane.removeEventListener(
+          'scroll',
+          this._onPreviewScroll,
+        );
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * Acquire the scroll lock for `side` ('editor' or
+   * 'preview') and auto-release after a short window.
+   * During the lock the other side's scroll handler
+   * skips, preventing feedback loops.
+   */
+  _acquireScrollLock(side) {
+    this._scrollLock = side;
+    if (this._scrollLockTimer) {
+      clearTimeout(this._scrollLockTimer);
+    }
+    this._scrollLockTimer = setTimeout(() => {
+      this._scrollLock = null;
+      this._scrollLockTimer = null;
+    }, _SCROLL_LOCK_MS);
+  }
+
+  /**
+   * Collect scroll anchors from the preview pane — one
+   * per block element carrying data-source-line. Returns
+   * a deduped, monotonically-increasing list of
+   * {line, offsetTop} pairs ready for binary search.
+   *
+   * Dedup — first element per source line wins. Some
+   * nested block elements emit the same source-line
+   * attribute; keeping the first is both cheapest and
+   * visually correct (outermost block).
+   *
+   * Monotonicity — sort by offsetTop ascending and drop
+   * any anchor whose offsetTop is less than the running
+   * maximum. Nested containers can have inner children
+   * with earlier offsetTop than an already-seen outer
+   * block; including them would make the binary search
+   * jumpy.
+   */
+  _collectPreviewAnchors() {
+    if (!this._previewPane) return [];
+    const raw = this._previewPane.querySelectorAll(
+      '[data-source-line]',
+    );
+    const seen = new Set();
+    const entries = [];
+    for (const el of raw) {
+      const line = parseInt(el.dataset.sourceLine, 10);
+      if (!Number.isFinite(line)) continue;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      entries.push({ line, offsetTop: el.offsetTop });
+    }
+    entries.sort((a, b) => a.offsetTop - b.offsetTop);
+    let lastTop = -Infinity;
+    return entries.filter((e) => {
+      if (e.offsetTop < lastTop) return false;
+      lastTop = e.offsetTop;
+      return true;
+    });
+  }
+
+  /**
+   * Editor scrolled — map the top visible line to an
+   * anchor in the preview pane and scroll the preview to
+   * match. Skips when the lock is held by the other side.
+   */
+  _onEditorScroll() {
+    if (this._scrollLock === 'preview') return;
+    if (!this._previewMode || !this._previewPane) return;
+    const modifiedEditor = this._getModifiedEditor();
+    if (!modifiedEditor) return;
+    let topLine;
+    try {
+      const scrollTop = modifiedEditor.getScrollTop?.() ?? 0;
+      const lineHeight = this._getLineHeight(modifiedEditor);
+      topLine = Math.floor(scrollTop / lineHeight) + 1;
+    } catch (_) {
+      return;
+    }
+    const anchors = this._collectPreviewAnchors();
+    if (anchors.length === 0) return;
+    const targetTop = this._mapLineToOffsetTop(anchors, topLine);
+    if (targetTop == null) return;
+    this._acquireScrollLock('editor');
+    this._previewPane.scrollTop = targetTop;
+  }
+
+  /**
+   * Preview scrolled — find the anchor at/just before
+   * the current scrollTop and scroll the editor to that
+   * source line. Skips when the lock is held by the
+   * editor side.
+   */
+  _onPreviewScroll() {
+    if (this._scrollLock === 'editor') return;
+    if (!this._previewMode || !this._previewPane) return;
+    const modifiedEditor = this._getModifiedEditor();
+    if (!modifiedEditor) return;
+    const scrollTop = this._previewPane.scrollTop;
+    const anchors = this._collectPreviewAnchors();
+    if (anchors.length === 0) return;
+    const targetLine = this._mapOffsetTopToLine(anchors, scrollTop);
+    if (targetLine == null) return;
+    this._acquireScrollLock('preview');
+    try {
+      const lineHeight = this._getLineHeight(modifiedEditor);
+      const targetScroll = (targetLine - 1) * lineHeight;
+      modifiedEditor.setScrollTop?.(targetScroll);
+    } catch (_) {}
+  }
+
+  /**
+   * Binary-search anchors by source line. Returns the
+   * interpolated offsetTop between the matched anchor
+   * and the next one. Past the last anchor, falls back
+   * to proportional mapping so reaching the editor
+   * bottom scrolls the preview to its bottom too.
+   */
+  _mapLineToOffsetTop(anchors, line) {
+    if (anchors.length === 0) return null;
+    // Below the first anchor — return its position.
+    if (line <= anchors[0].line) return anchors[0].offsetTop;
+    // Past the last — proportional fallback against
+    // remaining preview scroll range.
+    const last = anchors[anchors.length - 1];
+    if (line >= last.line) {
+      if (!this._previewPane) return last.offsetTop;
+      const total = this._previewPane.scrollHeight -
+        this._previewPane.clientHeight;
+      const maxEditorLines = this._getEditorLineCount();
+      if (!maxEditorLines || line >= maxEditorLines) {
+        return total;
+      }
+      const frac = (line - last.line) /
+        (maxEditorLines - last.line);
+      return last.offsetTop +
+        frac * (total - last.offsetTop);
+    }
+    // Interpolate between the two anchors straddling
+    // `line`.
+    let lo = 0;
+    let hi = anchors.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (anchors[mid].line <= line) lo = mid;
+      else hi = mid;
+    }
+    const a = anchors[lo];
+    const b = anchors[hi];
+    if (a.line === b.line) return a.offsetTop;
+    const t = (line - a.line) / (b.line - a.line);
+    return a.offsetTop + t * (b.offsetTop - a.offsetTop);
+  }
+
+  /**
+   * Inverse of _mapLineToOffsetTop — find the source
+   * line corresponding to a preview scroll position.
+   */
+  _mapOffsetTopToLine(anchors, offsetTop) {
+    if (anchors.length === 0) return null;
+    if (offsetTop <= anchors[0].offsetTop) return anchors[0].line;
+    const last = anchors[anchors.length - 1];
+    if (offsetTop >= last.offsetTop) {
+      if (!this._previewPane) return last.line;
+      const total = this._previewPane.scrollHeight -
+        this._previewPane.clientHeight;
+      const maxEditorLines = this._getEditorLineCount();
+      if (!maxEditorLines || total <= last.offsetTop) {
+        return last.line;
+      }
+      const frac = (offsetTop - last.offsetTop) /
+        (total - last.offsetTop);
+      return Math.round(
+        last.line + frac * (maxEditorLines - last.line),
+      );
+    }
+    let lo = 0;
+    let hi = anchors.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (anchors[mid].offsetTop <= offsetTop) lo = mid;
+      else hi = mid;
+    }
+    const a = anchors[lo];
+    const b = anchors[hi];
+    if (a.offsetTop === b.offsetTop) return a.line;
+    const t = (offsetTop - a.offsetTop) /
+      (b.offsetTop - a.offsetTop);
+    return Math.round(a.line + t * (b.line - a.line));
+  }
+
+  _getLineHeight(modifiedEditor) {
+    try {
+      const opts = modifiedEditor.getOption?.(
+        monaco.editor.EditorOption?.lineHeight,
+      );
+      if (typeof opts === 'number' && opts > 0) return opts;
+    } catch (_) {}
+    // Reasonable default — matches Monaco's dark theme.
+    return 19;
+  }
+
+  _getEditorLineCount() {
+    const modifiedEditor = this._getModifiedEditor();
+    if (!modifiedEditor) return 0;
+    try {
+      const model = modifiedEditor.getModel?.();
+      return model?.getLineCount?.() || 0;
+    } catch (_) {
+      return 0;
+    }
   }
 
   _onContentChange() {
@@ -801,6 +1364,12 @@ export class DiffViewer extends LitElement {
       return;
     }
     this._recomputeDirtyCount();
+    // Live preview — when preview mode is on, re-render
+    // on every keystroke. rendMarkdownWithSourceMap is
+    // pure string work; no RPC, cheap enough per-key.
+    if (this._previewMode && this._isMarkdownFile(file)) {
+      this._updatePreview(file.modified);
+    }
   }
 
   _patchCodeEditorService() {
@@ -841,6 +1410,18 @@ export class DiffViewer extends LitElement {
       } catch (_) {}
       this._contentChangeDisposable = null;
     }
+    if (this._editorScrollDisposable) {
+      try {
+        this._editorScrollDisposable.dispose();
+      } catch (_) {}
+      this._editorScrollDisposable = null;
+    }
+    this._detachPreviewScrollListener();
+    if (this._scrollLockTimer) {
+      clearTimeout(this._scrollLockTimer);
+      this._scrollLockTimer = null;
+    }
+    this._scrollLock = null;
     if (this._editor) {
       const models = this._editor.getModel?.();
       try {
@@ -885,6 +1466,34 @@ export class DiffViewer extends LitElement {
       clone.dataset[_CLONED_STYLE_MARKER] = 'true';
       this.shadowRoot.appendChild(clone);
     }
+    this._ensureKatexCss();
+  }
+
+  /**
+   * Inject the KaTeX stylesheet into the shadow root if
+   * not already present. Idempotent — only one copy ever
+   * lives in the shadow root regardless of how many
+   * times _syncAllStyles runs. Content falls back to a
+   * placeholder when the ?raw import didn't resolve (see
+   * module-level import); the mechanism still runs so
+   * tests can verify the injection path.
+   */
+  _ensureKatexCss() {
+    if (!this.shadowRoot) return;
+    // Convert camelCase marker to kebab-case for the
+    // attribute selector.
+    const attrName = _KATEX_CSS_MARKER.replace(
+      /([A-Z])/g,
+      '-$1',
+    ).toLowerCase();
+    const existing = this.shadowRoot.querySelector(
+      `[data-${attrName}]`,
+    );
+    if (existing) return;
+    const style = document.createElement('style');
+    style.dataset[_KATEX_CSS_MARKER] = 'true';
+    style.textContent = katexCssText;
+    this.shadowRoot.appendChild(style);
   }
 
   _ensureStyleObserver() {
@@ -1137,6 +1746,17 @@ export class DiffViewer extends LitElement {
     return file.modified !== file.savedContent;
   }
 
+  /**
+   * Whether the active file is markdown — the Preview
+   * button is rendered only for these. Case-insensitive
+   * extension match to catch `.MD`.
+   */
+  _isMarkdownFile(file) {
+    if (!file || typeof file.path !== 'string') return false;
+    const lower = file.path.toLowerCase();
+    return lower.endsWith('.md') || lower.endsWith('.markdown');
+  }
+
   _recomputeDirtyCount() {
     const count = this._files.filter((f) => this._isDirty(f)).length;
     this._dirtyCount = count;
@@ -1324,6 +1944,36 @@ export class DiffViewer extends LitElement {
     }
     const ledClass = this._statusLedClass();
     const labels = this._currentPanelLabels();
+    const activeFile =
+      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    const showPreviewButton = this._isMarkdownFile(activeFile);
+    if (this._previewMode && showPreviewButton) {
+      return html`
+        <div class="split-root">
+          <div class="editor-pane">
+            <div class="editor-container" role="region"
+              aria-label="Diff editor"></div>
+          </div>
+          <div
+            class="preview-pane"
+            role="region"
+            aria-label="Markdown preview"
+          ></div>
+          <button
+            class="preview-button preview-button-split"
+            @click=${this._togglePreview}
+            title="Exit preview"
+            aria-label="Exit preview"
+          >✕ Preview</button>
+          <div
+            class="status-led ${ledClass}"
+            title=${this._statusLedTitle()}
+            aria-label=${this._statusLedTitle()}
+            @click=${this._onStatusLedClick}
+          ></div>
+        </div>
+      `;
+    }
     return html`
       <div class="editor-container" role="region"
         aria-label="Diff editor"></div>
@@ -1332,6 +1982,14 @@ export class DiffViewer extends LitElement {
         : ''}
       ${labels.right
         ? html`<div class="panel-label right">${labels.right}</div>`
+        : ''}
+      ${showPreviewButton
+        ? html`<button
+            class="preview-button"
+            @click=${this._togglePreview}
+            title="Toggle markdown preview"
+            aria-label="Toggle markdown preview"
+          >👁 Preview</button>`
         : ''}
       <div
         class="status-led ${ledClass}"
