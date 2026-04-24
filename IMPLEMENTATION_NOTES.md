@@ -1628,6 +1628,40 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.23 — Phase 3.2c.5 SvgEditor undo stack + copy/paste — **delivered**
+
+Adds undo stack (SVG innerHTML snapshots before each mutation, Ctrl+Z to restore, bounded to 50 entries) and internal copy/paste (Ctrl+C/V/D). Completes the Phase 3.2c editing surface.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_undoStack` array and `_clipboard` array on the constructor
+  - `_pushUndo()` — snapshots `this._svg.innerHTML` with handle group and text-edit foreignObject temporarily stripped so undo doesn't restore stale selection chrome. Bounded to `_UNDO_MAX` (50) entries
+  - `undo()` — pops the stack, replaces innerHTML, clears selection (DOM element references become stale after innerHTML replacement), fires onChange. Returns boolean indicating whether an undo was performed
+  - `canUndo` getter for UI/test visibility
+  - `copySelection()` — serializes selected elements' outerHTML to the internal clipboard array
+  - `pasteClipboard(offsetX?, offsetY?)` — deserializes clipboard HTML via a temporary SVG wrapper, applies positional offset via `_applyPasteOffset`, inserts before the handle group, selects pasted elements
+  - `duplicateSelection()` — copy + paste with zero offset
+  - `_applyPasteOffset(el, dx, dy)` — per-element-type position dispatch matching the drag-to-move pattern (rect/image/use via x/y, circle/ellipse via cx/cy, line via all four endpoints, text via x/y or transform, path/g/polygon/polyline via transform)
+  - Keyboard handlers for Ctrl+Z (undo), Ctrl+C (copy), Ctrl+V (paste), Ctrl+D (duplicate)
+  - `deleteSelection()`, drag commit (`_onPointerMove` threshold crossing), and `commitTextEdit()` all call `_pushUndo()` before mutating
+  - `detach()` clears both `_undoStack` and `_clipboard`
+  - Shift+click now takes priority over handle hit-test in `_onPointerDown` — prevents accidental resize drags when the user intends to modify the selection set
+
+- `webapp/src/svg-editor.test.js` — 25 new tests across 2 describe blocks:
+  - **Undo stack** (13 tests): undo after delete restores SVG, undo clears selection (stale refs), undo fires onChange, empty stack returns false, undo after drag commit restores pre-drag state, undo after text edit commit restores original text, unchanged text edit doesn't push undo, stack bounded to 50, detach clears stack, Ctrl+Z keyboard trigger, multiple progressive undos, undo snapshot excludes handle group
+  - **Copy/paste** (12 tests): copy populates clipboard, paste inserts with offset, pasted rect has correct offset, paste selects pasted element, paste fires onChange, paste pushes undo, empty clipboard no-op, empty selection copy no-op, Ctrl+C/V keyboard flow, duplicate in place (zero offset), Ctrl+D keyboard, multi-selection copy/paste, circle cx/cy offset, path transform offset, detach clears clipboard
+
+Design points pinned by tests:
+
+- **Undo snapshot excludes handle group.** `_pushUndo` temporarily removes the `<g id="svg-editor-handles">` before reading `innerHTML` and restores it after. Without this, undo would restore stale handle chrome from a prior selection state, and repeated undo/redo would accumulate duplicate handle groups.
+
+- **Undo after innerHTML replacement clears selection.** DOM element references held in `_selected` and `_selectedSet` become stale after `innerHTML` replacement — the old DOM nodes are detached and new ones created. Keeping stale refs would cause subsequent operations (drag, delete, resize) to silently fail or corrupt the SVG. Clearing forces the user to re-select, which is the correct UX after undo.
+
+- **Unchanged text edits don't push undo.** Opening a text edit, not typing, then pressing Enter should not pollute the undo stack. The commit path checks `newContent !== originalContent` before calling `_pushUndo`. This keeps the stack clean so Ctrl+Z always undoes a meaningful change.
+
+- **Paste inserts before the handle group.** Pasted elements render below the selection chrome (handles, bounding boxes) so the user sees both the pasted content and the selection overlay. Without this ordering, the pasted element would render on top of the handles, making them unclickable.
+
+- **Shift+click priority over handle hit-test.** Before this change, shift+click on a selected element with visible handles would fall through to the handle hit-test (which returns null since no handle is exactly under the pointer) and then to the move-drag path. After this change, shift+click always dispatches to `toggleSelection` regardless of handle state. This fixes three test failures where shift+click was starting drags instead of modifying the selection.
+
 ### 5.22 — Phase 3.2c.4 SvgEditor multi-selection + marquee — **delivered**
 
 Adds shift+click toggle, marquee selection (forward=containment, reverse=crossing), group drag, and multi-element delete. Per-element bounding-box rendering in multi-selection mode (no resize handles — those only make sense for single selection). Double-click on text in a multi-selection collapses to single + opens inline edit.
