@@ -77,14 +77,37 @@
 //     subpath start), so no handle emitted for them
 //   - H and V single-axis commands work naturally — the
 //     handle's other-axis drag component is ignored
-//   - Curve (C/S/Q/T) and arc (A) control points deferred
-//     to 3.2c.3b-ii/iii; parser handles all commands
-//     up front so those sub-phases only add rendering
-//     and dispatch
 //
-// Deferred to 3.2c.3b-ii+:
-//   - C/S/Q/T curve handles (control points + endpoint)
-//   - A arc endpoint handles (arc shape parameters stay as-is)
+// Phase 3.2c.3b-ii adds: C/S/Q/T control-point handles.
+//   - C gets two control-point handles (args[0..1] and
+//     args[2..3]) plus its endpoint handle
+//   - S gets one control-point handle (args[0..1]) plus
+//     endpoint. The reflected first control point isn't
+//     draggable — it's derived from the previous command
+//   - Q gets one control-point handle (args[0..1]) plus
+//     endpoint
+//   - T is endpoint-only; its control point is always
+//     reflected from the previous Q/T so there's nothing
+//     to independently drag
+//   - Control-point role format: `c{N}-{K}` where N is
+//     the command index and K is 1 or 2
+//   - Dashed tangent lines rendered from each control
+//     point to its endpoint so users see the curve's
+//     tangent structure (standard vector-editor
+//     convention)
+//   - Tangent lines carry `HANDLE_CLASS` so hit-testing
+//     excludes them — only the control-point dots are
+//     interactive
+//   - Relative-form control point drag: delta added to
+//     command args (same math as relative endpoints in
+//     3.2c.3b-i — the pen position at the command's
+//     start doesn't change, so adding the drag delta to
+//     relative args shifts the absolute control point by
+//     exactly that delta)
+//
+// Deferred to 3.2c.3b-iii+:
+//   - A arc endpoint handles (arc shape parameters
+//     stay as-is)
 //   - Inline text edit via foreignObject textarea (3.2c.3c)
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
@@ -481,6 +504,140 @@ function _computePathEndpoints(commands) {
         // Close back to subpath start. No independently
         // draggable endpoint, but update pen so a
         // following command sees the correct position.
+        penX = subpathStartX;
+        penY = subpathStartY;
+        result.push(null);
+        break;
+      }
+      default:
+        result.push(null);
+        break;
+    }
+  }
+  return result;
+}
+
+/**
+ * Compute absolute control-point positions for each
+ * curve command in a parsed path. Returns an array
+ * aligned with `commands`, each entry either an array
+ * of `{x, y}` control points or null for commands
+ * without independently-draggable control points.
+ *
+ * - M, L, H, V, T, A, Z → null (no draggable control
+ *   points; T's control is reflected from previous, A's
+ *   shape params aren't positional)
+ * - C → [{x, y}, {x, y}] (two control points)
+ * - S → [{x, y}] (one control point; first is reflected)
+ * - Q → [{x, y}] (one control point)
+ *
+ * Shares the pen-walking logic with `_computePathEndpoints`
+ * but tracks a different output shape. Two separate walks
+ * would work; keeping them as separate functions means
+ * each has a clear single purpose and callers pay only
+ * for what they need (handle rendering calls both;
+ * serialization doesn't call either).
+ *
+ * For relative commands, control-point coordinates are
+ * computed from the pen position at the command's start
+ * plus the command's offset args. For absolute commands,
+ * the positions come straight from the args.
+ *
+ * @param {Array<{cmd: string, args: number[]}>} commands
+ * @returns {Array<Array<{x: number, y: number}> | null>}
+ */
+function _computePathControlPoints(commands) {
+  if (!Array.isArray(commands) || commands.length === 0) return [];
+  let penX = 0;
+  let penY = 0;
+  let subpathStartX = 0;
+  let subpathStartY = 0;
+  const result = [];
+  for (const c of commands) {
+    if (!c || typeof c.cmd !== 'string') {
+      result.push(null);
+      continue;
+    }
+    const abs = c.cmd === c.cmd.toUpperCase();
+    const args = Array.isArray(c.args) ? c.args : [];
+    const upper = c.cmd.toUpperCase();
+    switch (upper) {
+      case 'M': {
+        const [x, y] = args;
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        subpathStartX = nx;
+        subpathStartY = ny;
+        result.push(null);
+        break;
+      }
+      case 'L':
+      case 'T': {
+        const [x, y] = args;
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        result.push(null);
+        break;
+      }
+      case 'H': {
+        const [x] = args;
+        penX = abs ? x : penX + x;
+        result.push(null);
+        break;
+      }
+      case 'V': {
+        const [y] = args;
+        penY = abs ? y : penY + y;
+        result.push(null);
+        break;
+      }
+      case 'C': {
+        // Args: cx1, cy1, cx2, cy2, x, y. Two control
+        // points plus endpoint.
+        const c1x = abs ? args[0] : penX + args[0];
+        const c1y = abs ? args[1] : penY + args[1];
+        const c2x = abs ? args[2] : penX + args[2];
+        const c2y = abs ? args[3] : penY + args[3];
+        const ex = abs ? args[4] : penX + args[4];
+        const ey = abs ? args[5] : penY + args[5];
+        result.push([
+          { x: c1x, y: c1y },
+          { x: c2x, y: c2y },
+        ]);
+        penX = ex;
+        penY = ey;
+        break;
+      }
+      case 'S':
+      case 'Q': {
+        // S: cx2, cy2, x, y (one draggable control; the
+        // reflected first control is derived from the
+        // previous command).
+        // Q: cx, cy, x, y (one control point).
+        const cx = abs ? args[0] : penX + args[0];
+        const cy = abs ? args[1] : penY + args[1];
+        const ex = abs ? args[2] : penX + args[2];
+        const ey = abs ? args[3] : penY + args[3];
+        result.push([{ x: cx, y: cy }]);
+        penX = ex;
+        penY = ey;
+        break;
+      }
+      case 'A': {
+        // Endpoint at args[5..6]; shape parameters
+        // aren't positional, no control-point handles.
+        const ex = abs ? args[5] : penX + args[5];
+        const ey = abs ? args[6] : penY + args[6];
+        penX = ex;
+        penY = ey;
+        result.push(null);
+        break;
+      }
+      case 'Z': {
         penX = subpathStartX;
         penY = subpathStartY;
         result.push(null);
@@ -1440,13 +1597,11 @@ export class SvgEditor {
    * horizontally, but accepting both and discarding the
    * irrelevant axis is more forgiving.
    *
-   * C/S/Q/T arrive as endpoint-only here — control point
-   * handles land in 3.2c.3b-ii. Their endpoint arg
-   * positions vary by command (C has endpoint at args[4],
-   * args[5]; S/Q at args[2], args[3]; T at args[0], args[1]),
-   * so the dispatch peeks at the command letter.
+   * C/S/Q endpoint arg positions vary: C has endpoint at
+   * args[4..5]; S/Q at args[2..3]; T at args[0..1]. The
+   * dispatch peeks at the command letter.
    *
-   * A (arc) endpoint is at args[5], args[6]. Arc shape
+   * A (arc) endpoint is at args[5..6]. Arc shape
    * parameters (rx, ry, rotation, flags) are preserved
    * verbatim — 3.2c.3b-iii could add handles for those
    * if needed.
@@ -1458,7 +1613,15 @@ export class SvgEditor {
    * or degenerate shapes, all legal SVG.
    */
   _applyPathEndpointResize(el, o, role, dx, dy) {
-    if (typeof role !== 'string' || !role.startsWith('p')) return;
+    if (typeof role !== 'string') return;
+    // Control-point drag uses `c{N}-{K}` role format.
+    // Dispatch to the control-point handler for those;
+    // fall through to endpoint handling for `p{N}`.
+    if (role.startsWith('c')) {
+      this._applyPathControlPointResize(el, o, role, dx, dy);
+      return;
+    }
+    if (!role.startsWith('p')) return;
     const idx = parseInt(role.slice(1), 10);
     if (
       !Number.isFinite(idx) ||
@@ -1496,9 +1659,10 @@ export class SvgEditor {
         args[0] += dy;
         break;
       case 'C':
-        // Endpoint at args[4], args[5]. 3.2c.3b-ii will
-        // add handles for control points (args[0..1] and
-        // args[2..3]).
+        // Endpoint at args[4], args[5]. Control points
+        // (args[0..1] and args[2..3]) handled by
+        // `_applyPathControlPointResize` via the `c{N}-K`
+        // role format.
         args[4] += dx;
         args[5] += dy;
         break;
@@ -1518,6 +1682,87 @@ export class SvgEditor {
         // reached because handle rendering skips Z.
         return;
       default:
+        return;
+    }
+    el.setAttribute('d', _serializePathData(next));
+  }
+
+  /**
+   * Path control-point resize — one curve's control point
+   * moves, others (including the curve's endpoint and
+   * other commands) unchanged. Role format is `c{N}-{K}`
+   * where N is the zero-indexed command position and K
+   * is the 1-based control-point index.
+   *
+   * Arg positions by command:
+   *   - C with K=1 → args[0..1]
+   *   - C with K=2 → args[2..3]
+   *   - S with K=1 → args[0..1] (only one draggable CP —
+   *     the first control is reflected from the previous
+   *     command)
+   *   - Q with K=1 → args[0..1]
+   *   - T, M, L, H, V, A, Z → no control points, role
+   *     won't reach dispatch (handle rendering skips them)
+   *
+   * Relative vs absolute: same math as endpoints. For
+   * absolute commands, args are absolute positions; we
+   * add the drag delta. For relative commands, args are
+   * deltas from pen; we add the drag delta. Either way
+   * the effective absolute control point shifts by
+   * exactly the drag delta because the pen position at
+   * the command's start is unchanged.
+   *
+   * Invalid roles (malformed, wrong command type) are
+   * silent no-ops. Shouldn't happen in practice because
+   * roles come from our own handle rendering; defensive
+   * guard against a future refactor that might feed
+   * arbitrary role strings.
+   */
+  _applyPathControlPointResize(el, o, role, dx, dy) {
+    // Parse `c{N}-{K}`.
+    const match = /^c(\d+)-(\d+)$/.exec(role);
+    if (!match) return;
+    const idx = parseInt(match[1], 10);
+    const cpIndex = parseInt(match[2], 10);
+    if (
+      !Number.isFinite(idx) ||
+      idx < 0 ||
+      idx >= o.commands.length
+    ) {
+      return;
+    }
+    if (cpIndex !== 1 && cpIndex !== 2) return;
+    const next = o.commands.map((c) => ({
+      cmd: c.cmd,
+      args: [...c.args],
+    }));
+    const target = next[idx];
+    if (!target) return;
+    const upper = target.cmd.toUpperCase();
+    const args = target.args;
+    switch (upper) {
+      case 'C':
+        // Two control points. K=1 → args[0..1]; K=2 →
+        // args[2..3].
+        if (cpIndex === 1) {
+          args[0] += dx;
+          args[1] += dy;
+        } else {
+          args[2] += dx;
+          args[3] += dy;
+        }
+        break;
+      case 'S':
+      case 'Q':
+        // One draggable control point at args[0..1].
+        // K=2 on these commands is invalid — the reflected
+        // first control on S isn't user-draggable.
+        if (cpIndex !== 1) return;
+        args[0] += dx;
+        args[1] += dy;
+        break;
+      default:
+        // Other commands have no draggable control points.
         return;
     }
     el.setAttribute('d', _serializePathData(next));
@@ -1889,29 +2134,53 @@ export class SvgEditor {
       return;
     }
     if (tag === 'path') {
-      // One handle per command endpoint. Z commands
-      // (close-subpath) produce no handle — their
-      // "endpoint" is just the subpath start where the
-      // pen lands after close, which is already reachable
-      // via the preceding M's handle.
+      // One handle per command endpoint plus one handle
+      // per independently-draggable control point (for C,
+      // S, Q curves). Z commands and T commands emit only
+      // their endpoint (or nothing for Z) — their "control
+      // points" are either absent or reflected from the
+      // previous command.
       //
-      // Role format is `p{N}` where N is the command
-      // index in the parsed array. Parser preserves case
-      // and relative vs absolute form, so dispatch can
-      // apply deltas correctly whichever form the command
-      // uses.
+      // Role formats:
+      //   - Endpoint: `p{N}` where N is the command index
+      //   - Control point: `c{N}-{K}` where N is the
+      //     command index and K is 1 or 2
       //
-      // 3.2c.3b-i only surfaces endpoints. Control-point
-      // handles for C/S/Q/T and arc shape parameters land
-      // in 3.2c.3b-ii/iii.
+      // Tangent lines rendered from each control point to
+      // its endpoint so users see the curve's tangent
+      // structure. Lines get HANDLE_CLASS so hit-testing
+      // excludes them — only the control-point dots are
+      // interactive.
+      //
+      // 3.2c.3b-iii will add handles for A arc endpoints
+      // with the same `p{N}` role format.
       const commands = _parsePathData(el.getAttribute('d'));
       const endpoints = _computePathEndpoints(commands);
+      const controls = _computePathControlPoints(commands);
       for (let i = 0; i < endpoints.length; i += 1) {
         const pt = endpoints[i];
-        if (!pt) continue;
-        group.appendChild(
-          this._makeHandleDot(pt.x, pt.y, `p${i}`),
-        );
+        const cps = controls[i];
+        // Render tangent lines and control-point handles
+        // BEFORE the endpoint so the endpoint renders
+        // on top — visually clearer when a control
+        // point sits near its endpoint.
+        if (pt && Array.isArray(cps)) {
+          for (let k = 0; k < cps.length; k += 1) {
+            const cp = cps[k];
+            // Tangent line from control point to
+            // endpoint. Dotted so it doesn't clutter
+            // when multiple curves overlap.
+            group.appendChild(
+              this._makeTangentLine(cp.x, cp.y, pt.x, pt.y),
+            );
+            group.appendChild(
+              this._makeHandleDot(cp.x, cp.y, `c${i}-${k + 1}`),
+            );
+          }
+        }
+        if (pt) {
+          group.appendChild(this._makeHandleDot(pt.x, pt.y, `p${i}`));
+        }
       }
       return;
     }
@@ -1939,6 +2208,35 @@ export class SvgEditor {
     // `pointer-events: none` by default).
     dot.setAttribute('pointer-events', 'auto');
     return dot;
+  }
+
+  /**
+   * Build a dashed tangent line connecting a control
+   * point to its endpoint. Visual hint only — carries
+   * HANDLE_CLASS so hit-testing filters it out, and
+   * explicitly opts out of pointer events so clicks
+   * pass through to whatever's underneath.
+   *
+   * Dash pattern and stroke width scale inversely with
+   * zoom so the line stays visually consistent across
+   * zoom levels.
+   */
+  _makeTangentLine(x1, y1, x2, y2) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('class', HANDLE_CLASS);
+    line.setAttribute('x1', String(x1));
+    line.setAttribute('y1', String(y1));
+    line.setAttribute('x2', String(x2));
+    line.setAttribute('y2', String(y2));
+    line.setAttribute('stroke', '#4fc3f7');
+    line.setAttribute('stroke-opacity', '0.6');
+    const strokeWidth = this._screenDistToSvgDist(1);
+    line.setAttribute('stroke-width', String(strokeWidth));
+    const dashLen = this._screenDistToSvgDist(3);
+    line.setAttribute('stroke-dasharray', `${dashLen},${dashLen}`);
+    line.setAttribute('pointer-events', 'none');
+    return line;
   }
 
   /**
@@ -1993,6 +2291,7 @@ export class SvgEditor {
 export {
   _NON_SELECTABLE_TAGS,
   _SELECTABLE_TAGS,
+  _computePathControlPoints,
   _computePathEndpoints,
   _parseNum,
   _parsePathData,

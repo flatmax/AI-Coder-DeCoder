@@ -37,6 +37,7 @@ import {
   SvgEditor,
   _NON_SELECTABLE_TAGS,
   _SELECTABLE_TAGS,
+  _computePathControlPoints,
   _computePathEndpoints,
   _parseNum,
   _parsePathData,
@@ -3825,5 +3826,643 @@ describe('SvgEditor resize drag: path endpoints', () => {
     editor._applyResizeDelta(5, 5);
     expect(path.getAttribute('d')).toBe('M 0 0 L 10 10');
     editor._drag = null;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path control-point computation
+// ---------------------------------------------------------------------------
+
+describe('_computePathControlPoints', () => {
+  it('returns empty array for empty input', () => {
+    expect(_computePathControlPoints([])).toEqual([]);
+    expect(_computePathControlPoints(null)).toEqual([]);
+  });
+
+  it('returns null for M/L/H/V/T/A/Z commands', () => {
+    const commands = _parsePathData(
+      'M 0 0 L 10 10 H 20 V 30 T 40 40 A 5 5 0 0 1 50 50 Z',
+    );
+    const result = _computePathControlPoints(commands);
+    expect(result).toHaveLength(7);
+    for (const entry of result) {
+      expect(entry).toBe(null);
+    }
+  });
+
+  it('C produces two control points', () => {
+    const commands = _parsePathData('M 0 0 C 5 10 15 10 20 0');
+    const result = _computePathControlPoints(commands);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe(null); // M
+    expect(result[1]).toEqual([
+      { x: 5, y: 10 },
+      { x: 15, y: 10 },
+    ]);
+  });
+
+  it('S produces one control point', () => {
+    const commands = _parsePathData(
+      'M 0 0 C 5 10 15 10 20 0 S 35 10 40 0',
+    );
+    const result = _computePathControlPoints(commands);
+    expect(result).toHaveLength(3);
+    expect(result[2]).toEqual([{ x: 35, y: 10 }]);
+  });
+
+  it('Q produces one control point', () => {
+    const commands = _parsePathData('M 0 0 Q 10 20 20 0');
+    const result = _computePathControlPoints(commands);
+    expect(result).toHaveLength(2);
+    expect(result[1]).toEqual([{ x: 10, y: 20 }]);
+  });
+
+  it('handles relative C commands (control points offset from pen)', () => {
+    // m 10 20 c 5 10 15 10 20 0 — pen at (10, 20),
+    // control points at (15, 30) and (25, 30), endpoint
+    // at (30, 20).
+    const commands = _parsePathData('m 10 20 c 5 10 15 10 20 0');
+    const result = _computePathControlPoints(commands);
+    expect(result[1]).toEqual([
+      { x: 15, y: 30 },
+      { x: 25, y: 30 },
+    ]);
+  });
+
+  it('handles relative Q commands', () => {
+    const commands = _parsePathData('m 10 10 q 10 20 20 0');
+    const result = _computePathControlPoints(commands);
+    // Pen at (10, 10). q 10 20 offsets to (20, 30) for
+    // control, (30, 10) for endpoint.
+    expect(result[1]).toEqual([{ x: 20, y: 30 }]);
+  });
+
+  it('handles relative S commands', () => {
+    const commands = _parsePathData('m 0 0 c 5 10 15 10 20 0 s 15 10 20 0');
+    const result = _computePathControlPoints(commands);
+    // After c, pen at (20, 0). s 15 10 20 0 offsets
+    // control to (35, 10).
+    expect(result[2]).toEqual([{ x: 35, y: 10 }]);
+  });
+
+  it('tracks pen position across non-curve commands', () => {
+    // M 0 0 L 10 10 C ... — pen at (10, 10) when C starts.
+    const commands = _parsePathData(
+      'M 0 0 L 10 10 C 15 15 25 15 30 10',
+    );
+    const result = _computePathControlPoints(commands);
+    expect(result[2]).toEqual([
+      { x: 15, y: 15 },
+      { x: 25, y: 15 },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path control-point handle rendering
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor path control-point handle rendering', () => {
+  function getHandles(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(
+      group.querySelectorAll('[data-handle-role]'),
+    );
+  }
+
+  function getTangentLines(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(group.querySelectorAll('line'));
+  }
+
+  it('C command produces 3 handles (endpoint + 2 CPs)', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    // M → p0. C → c1-1, c1-2, p1. Total 4.
+    expect(handles).toHaveLength(4);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(new Set(roles)).toEqual(
+      new Set(['p0', 'c1-1', 'c1-2', 'p1']),
+    );
+  });
+
+  it('C handle positions match control-point coords', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const byRole = {};
+    for (const h of getHandles(svg)) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole['c1-1']).toEqual({ cx: 5, cy: 10 });
+    expect(byRole['c1-2']).toEqual({ cx: 15, cy: 10 });
+    expect(byRole.p1).toEqual({ cx: 20, cy: 0 });
+  });
+
+  it('S command produces 2 handles (endpoint + 1 CP)', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0 S 35 10 40 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 40, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    // M → p0. C → c1-1, c1-2, p1. S → c2-1, p2. Total 6.
+    expect(handles).toHaveLength(6);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toContain('c2-1');
+    // S never produces c2-2 — only one draggable CP.
+    expect(roles).not.toContain('c2-2');
+  });
+
+  it('Q command produces 2 handles (endpoint + 1 CP)', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    // M → p0. Q → c1-1, p1.
+    expect(handles).toHaveLength(3);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole['c1-1']).toEqual({ cx: 10, cy: 20 });
+    expect(byRole.p1).toEqual({ cx: 20, cy: 0 });
+  });
+
+  it('T command produces no control-point handle', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0 T 40 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 40, height: 20 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const roles = getHandles(svg).map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    // Q at index 1 has c1-1. T at index 2 has only p2.
+    expect(roles).toContain('c1-1');
+    expect(roles).not.toContain('c2-1');
+    expect(roles).toContain('p2');
+  });
+
+  it('relative C control-point handles at computed coords', () => {
+    const path = makeChild('path', {
+      d: 'm 10 20 c 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 10, y: 20, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const byRole = {};
+    for (const h of getHandles(svg)) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    // Pen at (10, 20). Relative c 5 10 → (15, 30);
+    // 15 10 → (25, 30); 20 0 → (30, 20).
+    expect(byRole['c1-1']).toEqual({ cx: 15, cy: 30 });
+    expect(byRole['c1-2']).toEqual({ cx: 25, cy: 30 });
+    expect(byRole.p1).toEqual({ cx: 30, cy: 20 });
+  });
+
+  it('tangent lines rendered from control points to endpoint', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const lines = getTangentLines(svg);
+    // C gets two tangent lines (one per control point).
+    expect(lines).toHaveLength(2);
+  });
+
+  it('tangent lines positioned from CP to endpoint', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const lines = getTangentLines(svg);
+    // Each line's (x2, y2) should match the endpoint
+    // (20, 0); (x1, y1) should be the control point.
+    const linePositions = lines.map((l) => ({
+      x1: parseFloat(l.getAttribute('x1')),
+      y1: parseFloat(l.getAttribute('y1')),
+      x2: parseFloat(l.getAttribute('x2')),
+      y2: parseFloat(l.getAttribute('y2')),
+    }));
+    const cpPositions = new Set(
+      linePositions.map((l) => `${l.x1},${l.y1}`),
+    );
+    expect(cpPositions).toEqual(new Set(['5,10', '15,10']));
+    for (const l of linePositions) {
+      expect(l.x2).toBe(20);
+      expect(l.y2).toBe(0);
+    }
+  });
+
+  it('tangent lines carry handle class (excluded from hit-test)', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const lines = getTangentLines(svg);
+    for (const l of lines) {
+      expect(l.classList.contains(HANDLE_CLASS)).toBe(true);
+      expect(l.getAttribute('pointer-events')).toBe('none');
+    }
+  });
+
+  it('Q produces one tangent line', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const lines = getTangentLines(svg);
+    expect(lines).toHaveLength(1);
+  });
+
+  it('non-curve commands produce no tangent lines', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 10, height: 10 });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    expect(getTangentLines(svg)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path control-point drag
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor resize drag: path control points', () => {
+  it('dragging c1-1 on C moves first control point only', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'c1-1', { x: 5, y: 10 }, { x: 8, y: 15 });
+    // c1-1 moved by (+3, +5) → args[0..1] becomes (8, 15).
+    // args[2..3] and [4..5] unchanged.
+    expect(path.getAttribute('d')).toBe('M 0 0 C 8 15 15 10 20 0');
+  });
+
+  it('dragging c1-2 on C moves second control point only', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'c1-2', { x: 15, y: 10 }, { x: 18, y: 5 });
+    expect(path.getAttribute('d')).toBe('M 0 0 C 5 10 18 5 20 0');
+  });
+
+  it('dragging endpoint leaves control points untouched', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'p1', { x: 20, y: 0 }, { x: 25, y: 5 });
+    // Only args[4..5] change.
+    expect(path.getAttribute('d')).toBe('M 0 0 C 5 10 15 10 25 5');
+  });
+
+  it('dragging c1-1 on Q moves the single control point', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'c1-1', { x: 10, y: 20 }, { x: 15, y: 30 });
+    expect(path.getAttribute('d')).toBe('M 0 0 Q 15 30 20 0');
+  });
+
+  it('dragging c2-1 on S moves the single draggable CP', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0 S 35 10 40 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 40, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'c2-1', { x: 35, y: 10 }, { x: 40, y: 15 });
+    expect(path.getAttribute('d')).toBe(
+      'M 0 0 C 5 10 15 10 20 0 S 40 15 40 0',
+    );
+  });
+
+  it('relative C control-point drag applies delta to args', () => {
+    const path = makeChild('path', {
+      d: 'm 10 20 c 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 10, y: 20, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    // c1-1 absolute at (15, 30). Drag to (25, 40) → delta
+    // (+10, +10). Relative args become (15, 20).
+    runResizeDrag(svg, editor, path, 'c1-1', { x: 15, y: 30 }, { x: 25, y: 40 });
+    expect(path.getAttribute('d')).toBe('m 10 20 c 15 20 15 10 20 0');
+  });
+
+  it('relative Q control-point drag applies delta to args', () => {
+    const path = makeChild('path', {
+      d: 'm 0 0 q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(svg, editor, path, 'c1-1', { x: 10, y: 20 }, { x: 15, y: 25 });
+    expect(path.getAttribute('d')).toBe('m 0 0 q 15 25 20 0');
+  });
+
+  it('repeated pointermoves recompute from origin', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('c1-1');
+    firePointer(svg, 'pointerdown', 10, 20);
+    firePointer(svg, 'pointermove', 20, 30);
+    expect(path.getAttribute('d')).toBe('M 0 0 Q 20 30 20 0');
+    firePointer(svg, 'pointermove', 30, 40);
+    // NOT 40, 50 which would be compounding.
+    expect(path.getAttribute('d')).toBe('M 0 0 Q 30 40 20 0');
+    firePointer(svg, 'pointerup', 30, 40);
+  });
+
+  it('fires onChange after committed CP drag', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('c1-1');
+    firePointer(svg, 'pointerdown', 10, 20);
+    firePointer(svg, 'pointermove', 20, 30);
+    firePointer(svg, 'pointerup', 20, 30);
+    expect(changeListener).toHaveBeenCalledOnce();
+  });
+
+  it('tiny CP move does not commit', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('c1-1');
+    firePointer(svg, 'pointerdown', 10, 20);
+    firePointer(svg, 'pointermove', 11, 20);
+    firePointer(svg, 'pointerup', 11, 20);
+    expect(path.getAttribute('d')).toBe('M 0 0 Q 10 20 20 0');
+    expect(changeListener).not.toHaveBeenCalled();
+  });
+
+  it('detach mid-CP-drag restores d attribute', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('c1-1');
+    firePointer(svg, 'pointerdown', 5, 10);
+    firePointer(svg, 'pointermove', 25, 40);
+    expect(path.getAttribute('d')).toBe('M 0 0 C 25 40 15 10 20 0');
+    editor.detach();
+    expect(path.getAttribute('d')).toBe('M 0 0 C 5 10 15 10 20 0');
+  });
+
+  it('ignores malformed control-point role', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'c1',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'C', args: [5, 10, 15, 10, 20, 0] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 C 5 10 15 10 20 0');
+    editor._drag = null;
+  });
+
+  it('ignores out-of-range CP index', () => {
+    // K=3 doesn't match any command's control points.
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'c1-3',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'C', args: [5, 10, 15, 10, 20, 0] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 C 5 10 15 10 20 0');
+    editor._drag = null;
+  });
+
+  it('ignores K=2 on Q (Q has only one CP)', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 Q 10 20 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 20 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'c1-2',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'Q', args: [10, 20, 20, 0] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 Q 10 20 20 0');
+    editor._drag = null;
+  });
+
+  it('ignores control-point role on non-curve command', () => {
+    // User shouldn't be able to construct this — handle
+    // rendering never emits c-roles for M/L/H/V/T/A/Z —
+    // but defensive against future refactors.
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 10, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'c1-1',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'L', args: [10, 10] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10');
+    editor._drag = null;
+  });
+
+  it('clicking a c1-1 handle starts a resize drag', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 C 5 10 15 10 20 0',
+    });
+    path.getBBox = () => ({ x: 0, y: 0, width: 20, height: 10 });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('c1-1');
+    firePointer(svg, 'pointerdown', 5, 10);
+    expect(editor._drag).not.toBe(null);
+    expect(editor._drag.mode).toBe('resize');
+    expect(editor._drag.role).toBe('c1-1');
+    expect(editor._drag.originAttrs.kind).toBe('path-commands');
   });
 });

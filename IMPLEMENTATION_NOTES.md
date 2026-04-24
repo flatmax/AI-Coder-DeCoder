@@ -1628,6 +1628,43 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.19 — Phase 3.2c.3b-ii SvgEditor path control-point edit (C/S/Q) — **delivered**
+
+Cubic and quadratic Bézier curve commands get draggable control-point handles in addition to the endpoint handles from 3.2c.3b-i. Each control point is independently draggable with dashed tangent lines showing the connection to its endpoint.
+
+- `webapp/src/svg-editor.js` — additions:
+  - New module-level `_computePathControlPoints(commands)` — walks the command list (same pen-tracking machinery as `_computePathEndpoints`) and returns an array aligned with `commands`. Each entry is either an array of `{x, y}` control points (for C/S/Q) or null (for M/L/H/V/T/A/Z). C emits two CPs, S and Q emit one, T emits none (its control is reflected from the previous command, not independently draggable).
+  - `_renderResizeHandles` — `path` branch extended to emit control-point handles with role `c{N}-{K}` (N = command index, K = 1 or 2) plus tangent lines connecting each control point to its endpoint. Tangent lines render BEFORE the endpoint dots so the endpoints visually stack on top when control points sit near them.
+  - New `_makeTangentLine(x1, y1, x2, y2)` factory — dashed SVG line with `HANDLE_CLASS` and `pointer-events="none"`. Dash pattern and stroke width scale inversely with zoom. Carries handle class so `_hitTest` and `_hitTestHandle` both filter it out; only the control-point dots are interactive.
+  - `_applyPathEndpointResize` — dispatch routes `c{N}-{K}` roles to the new `_applyPathControlPointResize` before the existing `p{N}` endpoint logic. Keeps the two paths clean rather than multiplexing everything through one switch.
+  - New `_applyPathControlPointResize(el, o, role, dx, dy)` — parses `c{N}-{K}` via regex, validates the command index and K value, clones the command list, mutates the target command's control-point args (C with K=1 → args[0..1]; C with K=2 → args[2..3]; S/Q with K=1 → args[0..1]; invalid K or non-curve command → silent no-op).
+  - `_computePathControlPoints` exported for tests.
+
+- `webapp/src/svg-editor.test.js` — 38 new tests across 3 describe blocks:
+  - **`_computePathControlPoints`** (8 tests): empty/null input, null for non-curve commands, C produces two CPs, S produces one CP, Q produces one CP, relative C/Q/S offset from pen, pen position tracked across non-curve commands.
+  - **Control-point handle rendering** (10 tests): C produces 3 handles (p0 from M + c1-1 + c1-2 + p1), C handle positions match args, S produces 2 handles (c2-1 + p2 only — no c2-2), Q produces 2 handles, T produces no CP handle, relative C handles at computed coords, tangent lines from CPs to endpoint, tangent line positions (x1/y1 = CP, x2/y2 = endpoint), tangent lines carry HANDLE_CLASS and pointer-events="none", Q produces one tangent line, non-curve commands produce no tangent lines.
+  - **Control-point drag** (16 tests): c1-1 on C moves first CP only, c1-2 on C moves second CP only, endpoint drag leaves CPs untouched, c1-1 on Q moves single CP, c2-1 on S moves single draggable CP, relative C control-point drag applies delta to args, relative Q control-point drag, repeated pointermoves recompute from origin, onChange fires after committed drag, tiny move doesn't commit, detach mid-drag restores `d`, malformed c-role (`c1` without K) no-op, out-of-range K (`c1-3`) no-op, K=2 on Q (only has one CP) no-op, control-point role on non-curve command no-op, click on `c1-1` handle starts resize drag with correct kind+role.
+
+Design points pinned by tests:
+
+- **Tangent lines render before endpoint dots.** The render order is: for each curve command, emit tangent line(s) first, then control-point dot(s), then the endpoint dot. DOM order becomes z-order in SVG — later siblings render on top. When a control point sits very close to its endpoint (e.g., a nearly-straight "curve" that's actually a line-like C), the endpoint dot stays clickable because it's on top of both the tangent line and the CP dot. Pinned indirectly by the click-starts-drag test which relies on `_hitTestHandle` finding the correct handle under the pointer.
+
+- **`c2-1` not `c1-2` for S's control point.** The command index N refers to the command's position in the parsed array, NOT to which control point it is within the path. A path `M 0 0 C ... S ...` has the S at index 2, so its single control point is `c2-1`. Pinned by `S command produces 2 handles` which explicitly asserts `c2-1` and rejects `c2-2`. If the role format encoded the curve-number instead of command-index, dispatch would need a separate lookup table to map back.
+
+- **T has no independently draggable control point.** The T command's control point is the reflection of the previous Q/T's last control through the previous endpoint. Making it draggable would either require mutating the previous command (surprising — the user didn't click on that command) or decoupling the T from its predecessor (violates SVG spec). Pinned by `T command produces no control-point handle`.
+
+- **S has only one draggable control point.** Like T, S's first control point is reflected from the previous C/S. Only args[0..1] (the second control point) is user-draggable. K=2 on S produces a no-op. Pinned by `ignores K=2 on Q` (same rule applies — Q only has one CP) and by `S command produces 2 handles` which confirms the rendered role list contains `c2-1` but never `c2-2`.
+
+- **Control-point role format is regex-matched.** `/^c(\d+)-(\d+)$/` — strict. A malformed role like `c1` (no K) fails the match and the handler returns early. Pinned by `ignores malformed control-point role`. If the regex was looser (e.g., `startsWith('c')` + split on `-`), a role like `c1-1-extra` would match and potentially crash on arg index out-of-bounds.
+
+- **Non-curve commands never receive CP drag.** The dispatch's default case returns without mutation. If a future refactor emitted a `c{N}-{K}` role on an L command (bug), the drag would cleanly no-op rather than crash or silently corrupt the `d` attribute. Pinned by `ignores control-point role on non-curve command`.
+
+- **Relative-form math is identical to endpoints.** The existing relative-command analysis from 3.2c.3b-i carries over: the pen position at the command's start doesn't change when args are mutated (earlier commands are untouched), so adding the drag delta to relative control-point args shifts the effective absolute control point by exactly the delta. Pinned by `relative C control-point drag applies delta to args` and the Q variant. No per-command relative math special-casing needed.
+
+- **Tangent lines are pointer-events: none.** Users dragging near a control point shouldn't have the drag initiate on the line instead of the dot. Lines explicitly opt out; dots explicitly opt in (from 3.2c.2b). Pinned by `tangent lines carry handle class (excluded from hit-test)`.
+
+3.2c.3b-ii completes curve editing. 3.2c.3b-iii will add A (arc) endpoint handles — arc shape parameters (rx, ry, rotation, flags) stay as-is; dragging the arc endpoint preserves the arc's shape while moving its destination.
+
 ### 5.18 — Phase 3.2c.3b-i SvgEditor path endpoint edit (M/L/H/V/Z) — **delivered**
 
 Path elements get one draggable handle per non-Z command endpoint. Reuses the resize-drag machinery with a new `path-commands` snapshot kind. Parser covers all SVG path commands (M/L/H/V/C/S/Q/T/A/Z in both cases) so the follow-up sub-phases 3.2c.3b-ii (C/S/Q/T control points) and 3.2c.3b-iii (A arc parameters) only need to add handle rendering and per-command dispatch.
