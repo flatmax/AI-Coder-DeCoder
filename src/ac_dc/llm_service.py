@@ -91,6 +91,34 @@ def _extract_token_usage(response_or_chunk):
     return usage
 
 
+def _extract_finish_reason(chunk):
+    """Extract finish_reason from a streaming chunk or final response.
+
+    LiteLLM normalizes finish reasons to OpenAI-style strings:
+      - "stop"           — model finished naturally
+      - "length"         — hit max_tokens (response truncated)
+      - "tool_calls"     — model wants to call a tool
+      - "content_filter" — blocked by provider safety filter
+      - "end_turn"       — Anthropic passthrough (sometimes seen)
+
+    Returns None if no finish_reason is present (most streaming chunks
+    only carry finish_reason on the final chunk).
+    """
+    try:
+        choices = getattr(chunk, "choices", None)
+        if not choices and isinstance(chunk, dict):
+            choices = chunk.get("choices")
+        if not choices:
+            return None
+        first = choices[0]
+        reason = getattr(first, "finish_reason", None)
+        if reason is None and isinstance(first, dict):
+            reason = first.get("finish_reason")
+        return reason
+    except Exception:
+        return None
+
+
 class LLMService:
     """RPC service for LLM interactions.
 
@@ -1738,13 +1766,29 @@ class LLMService:
                 )
 
             # Stream LLM completion
-            full_content, was_cancelled, usage = await self._run_llm_stream(
+            full_content, was_cancelled, usage, finish_reason = await self._run_llm_stream(
                 request_id, assembled
             )
 
             if was_cancelled:
                 result["cancelled"] = True
                 full_content = full_content + "\n\n[stopped]" if full_content else "[stopped]"
+
+            # Surface the model's stop reason to the UI and logs.
+            # LiteLLM normalizes these to OpenAI-style values:
+            #   "stop" / "end_turn" — natural completion
+            #   "length"            — hit max_tokens (truncated!)
+            #   "tool_calls"        — model wants to call a tool
+            #   "content_filter"    — blocked by safety filter
+            if finish_reason:
+                result["finish_reason"] = finish_reason
+                if finish_reason not in ("stop", "end_turn"):
+                    logger.warning(
+                        f"LLM finish_reason={finish_reason!r} "
+                        f"(non-natural stop — response may be incomplete)"
+                    )
+                else:
+                    logger.info(f"LLM finish_reason={finish_reason!r}")
 
             # Add assistant response to context (user message already added above)
             self._context.add_message("assistant", full_content)
@@ -2004,22 +2048,34 @@ class LLMService:
     async def _run_llm_stream(self, request_id, messages):
         """Run LLM completion with streaming in a thread pool.
 
-        Returns (full_content, was_cancelled, usage).
+        Returns (full_content, was_cancelled, usage, finish_reason).
+
+        finish_reason is the LiteLLM-normalized stop reason from the
+        final chunk — typically "stop", "length", "tool_calls",
+        "content_filter", or None if the provider didn't report one.
         """
         full_content = ""
         was_cancelled = False
         usage = {}
+        finish_reason = None
 
         loop = self._main_loop
 
         def _stream_sync():
-            nonlocal full_content, was_cancelled, usage
+            nonlocal full_content, was_cancelled, usage, finish_reason
             try:
+                # Determine max output tokens: explicit config overrides
+                # model defaults; fall back to the counter's per-model ceiling.
+                max_output = self._config.max_output_tokens
+                if max_output is None:
+                    max_output = self._context.counter.max_output_tokens
+
                 response = litellm.completion(
                     model=self._config.model,
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
+                    max_tokens=max_output,
                 )
 
                 for chunk in response:
@@ -2053,12 +2109,18 @@ class LLMService:
                     if chunk_usage:
                         usage.update(chunk_usage)
 
+                    # Capture finish_reason — only the final chunk for a
+                    # choice carries it; earlier chunks report None.
+                    chunk_finish = _extract_finish_reason(chunk)
+                    if chunk_finish:
+                        finish_reason = chunk_finish
+
             except Exception as e:
                 logger.error(f"LLM stream error: {e}")
                 raise
 
         await loop.run_in_executor(self._executor, _stream_sync)
-        return full_content, was_cancelled, usage
+        return full_content, was_cancelled, usage, finish_reason
 
     def cancel_streaming(self, request_id):
         """Cancel an active stream."""
@@ -3146,6 +3208,308 @@ class LLMService:
                     measured += 1
         if measured:
             logger.info(f"Measured tokens for {measured} tracker items")
+
+    def rebuild_cache(self):
+        """Rebuild the cache tier distribution from scratch. (RPC)
+
+        Wipes all symbol:/doc: tier assignments and re-runs
+        initialize_from_reference_graph() so symbols/docs are redistributed
+        across L0-L3 based on connectivity clustering.
+
+        History entries are preserved.
+
+        Currently selected files keep their active status (full content in
+        context replaces their symbol/doc entry) — rebuild re-creates the
+        entry first, then the normal _update_stability cycle on the next
+        chat request will remove them. For immediate effect, we remove
+        selected-file entries right after rebuild.
+
+        Returns:
+            {status: str, items_rebuilt: int, message: str}
+        """
+        restricted = self._check_localhost_only()
+        if restricted:
+            return restricted
+
+        # Select tracker/index based on current mode
+        if self._context.mode == Mode.DOC:
+            tracker = self._doc_stability_tracker
+            index = self._doc_index
+            prefix = "doc:"
+        else:
+            tracker = self._stability_tracker
+            index = self._symbol_index
+            prefix = "symbol:"
+
+        if not tracker or not index:
+            return {"error": "Cache tracker or index not available"}
+
+        # Count existing items for reporting
+        items_before = len(tracker._items)
+
+        # Wipe ALL tier items (symbol:, doc:, file:, system:) except history:.
+        # Rebuild starts fresh — every file gets placed based on the
+        # reference graph, with selected files becoming full-content
+        # file: entries distributed across tiers (not dumped into ACTIVE).
+        to_remove = [k for k in tracker._items if not k.startswith("history:")]
+        for key in to_remove:
+            del tracker._items[key]
+
+        # Mark all tiers as broken so the next update cycle can re-cascade
+        for tier in [Tier.L0, Tier.L1, Tier.L2, Tier.L3]:
+            tracker._broken_tiers.add(tier)
+
+        # Ensure FileContext has content loaded for all selected files
+        # BEFORE placing them in tiers — we need real content for hashing
+        # and token counting.
+        if self._repo:
+            current_context_files = set(self._context.file_context.get_files())
+            for path in self._selected_files:
+                if path not in current_context_files:
+                    try:
+                        if (self._repo.file_exists(path)
+                                and not self._repo.is_binary_file(path)):
+                            self._context.file_context.add_file(path)
+                    except Exception as e:
+                        logger.debug(f"Could not load {path} into FileContext: {e}")
+
+        # Re-initialize from reference graph.
+        # This places every indexed file as symbol:/doc: entries in tiers.
+        # Then we replace selected files' entries with file: entries
+        # (full content) in the same tier the symbol/doc entry landed in.
+        try:
+            ref_index = index.reference_index
+            if self._context.mode == Mode.DOC:
+                all_files = list(self._doc_index._all_outlines.keys())
+            else:
+                all_files = list(self._symbol_index._all_symbols.keys())
+
+            tracker.initialize_from_reference_graph(
+                ref_index, all_files, counter=self._context.counter,
+                key_prefix=prefix,
+            )
+        except Exception as e:
+            logger.error(f"Cache rebuild: reinitialization failed: {e}")
+            return {"error": f"Rebuild failed: {e}"}
+
+        # Re-measure token counts for the newly-placed symbol:/doc: items
+        self._measure_tracker_tokens(tracker, index)
+
+        # Swap symbol:/doc: entries → file: entries for selected files.
+        # Selected files keep the tier their index entry was placed in,
+        # but their tracked content becomes the full file (real hash,
+        # real token count). Per spec: "A file never appears twice" —
+        # we remove the symbol/doc entry to avoid duplication.
+        #
+        # For selected files NOT in the index (binary, non-source files,
+        # or path mismatches), we distribute them round-robin across
+        # L1/L2/L3 rather than dumping them into ACTIVE — the whole point
+        # of rebuild is to get files into the cache tiers.
+        selected_set = set(self._selected_files)
+        swapped_files = 0
+        orphan_files = []
+        found_in_index = 0
+        counter = self._context.counter
+
+        # First pass: swap entries for files that are in the index
+        for path in selected_set:
+            index_key = f"{prefix}{path}"
+            existing = tracker._items.get(index_key)
+            if existing is None:
+                # File not in index — defer to second pass
+                orphan_files.append(path)
+                continue
+
+            found_in_index += 1
+            target_tier = existing.tier
+            target_n = existing.n
+            # Remove the symbol/doc entry — it will be replaced by file:
+            del tracker._items[index_key]
+
+            # Load content and create the file: entry
+            content = self._context.file_context.get_content(path)
+            if content is None:
+                continue
+            file_key = f"file:{path}"
+            tracker._items[file_key] = TrackedItem(
+                key=file_key,
+                tier=target_tier,
+                n=target_n,
+                content_hash=StabilityTracker.hash_content(content),
+                tokens=counter.count(content),
+            )
+            swapped_files += 1
+
+        # Second pass: distribute orphan files across L1/L2/L3 by tier token
+        # load, so cache tiers stay balanced instead of dumping to ACTIVE.
+        orphan_tiers = [Tier.L1, Tier.L2, Tier.L3]
+        for path in orphan_files:
+            content = self._context.file_context.get_content(path)
+            if content is None:
+                continue
+            # Place in tier with lowest current token count
+            target_tier = min(
+                orphan_tiers,
+                key=lambda t: tracker.get_tier_tokens(t),
+            )
+            target_n = TIER_CONFIG[target_tier]["entry_n"]
+            file_key = f"file:{path}"
+            tracker._items[file_key] = TrackedItem(
+                key=file_key,
+                tier=target_tier,
+                n=target_n,
+                content_hash=StabilityTracker.hash_content(content),
+                tokens=counter.count(content),
+            )
+            swapped_files += 1
+
+        logger.info(
+            f"Rebuild selected-file placement: {found_in_index} via index, "
+            f"{len(orphan_files)} as orphans (not in {prefix} index), "
+            f"{swapped_files} total placed"
+        )
+        if orphan_files:
+            logger.info(f"  Orphan sample: {orphan_files[:5]}")
+
+        # Re-seed system:prompt into L0 (was wiped above)
+        try:
+            if self._context.mode == Mode.DOC:
+                sys_prompt = self._config.get_doc_system_prompt() or ""
+                sys_legend = self._doc_index.get_legend() if self._doc_index else ""
+            else:
+                sys_prompt = self._config.get_system_prompt() or ""
+                sys_legend = self._symbol_index.get_legend() if self._symbol_index else ""
+            sys_content = sys_prompt + sys_legend
+            if sys_content:
+                tracker._items["system:prompt"] = TrackedItem(
+                    key="system:prompt",
+                    tier=Tier.L0,
+                    n=TIER_CONFIG[Tier.L0]["entry_n"],
+                    content_hash=StabilityTracker.hash_content(sys_prompt),
+                    tokens=self._context.counter.count(sys_content),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to re-seed system prompt: {e}")
+
+        # If cross-reference is enabled, re-seed those entries — they were
+        # wiped above along with other non-history entries. Temporarily flip
+        # the flag and use _enable_cross_reference which handles placement
+        # and token measurement atomically.
+        if self._cross_ref_enabled:
+            try:
+                self._cross_ref_enabled = False
+                self._enable_cross_reference()
+            except Exception as e:
+                logger.warning(f"Cross-ref re-seeding failed: {e}")
+                self._cross_ref_enabled = True  # restore flag on failure
+
+        # Register history entries directly — do NOT call _update_stability()
+        # here. Its cascade and demote-underfilled logic would undo the
+        # deterministic placement we just computed. Mark the trackers as
+        # initialized so the next real chat request skips the init path.
+        self._stability_initialized = True
+        self._doc_stability_initialized = True
+
+        # Register history entries. Rebuild is a disruptive re-distribution
+        # of all content into cache tiers, so history rides along with the
+        # "piggyback graduation" rule: since we're already breaking L3 by
+        # repopulating it, history can graduate to L3 for free.
+        #
+        # Keep the most recent messages (up to cache_target_tokens) in ACTIVE
+        # as the verbatim window, matching _determine_history_graduates logic.
+        try:
+            history = self._context.get_history()
+            cache_target = tracker._cache_target_tokens
+
+            # Build fresh history entries (wipe any preserved ones first so
+            # tier assignments match the current post-rebuild state).
+            for i in range(len(history)):
+                hkey = f"history:{i}"
+                if hkey in tracker._items:
+                    del tracker._items[hkey]
+
+            # Walk newest → oldest; accumulate tokens for the verbatim window.
+            # Entries inside the window stay ACTIVE; older ones go to L3.
+            verbatim_tokens = 0
+            verbatim_cutoff = len(history)  # index of first message leaving ACTIVE
+            for i in range(len(history) - 1, -1, -1):
+                msg_tokens = counter.count_message(history[i])
+                if cache_target > 0 and verbatim_tokens + msg_tokens > cache_target:
+                    verbatim_cutoff = i + 1
+                    break
+                verbatim_tokens += msg_tokens
+            else:
+                verbatim_cutoff = 0  # all history fits in verbatim window
+
+            graduated_history = 0
+            for i, msg in enumerate(history):
+                hkey = f"history:{i}"
+                content_str = f"{msg['role']}:{msg.get('content', '')}"
+                if i < verbatim_cutoff:
+                    # Graduates to L3 (piggyback on rebuild disruption)
+                    tier = Tier.L3
+                    n = TIER_CONFIG[Tier.L3]["entry_n"]
+                    graduated_history += 1
+                else:
+                    # Recent messages stay in ACTIVE (verbatim window)
+                    tier = Tier.ACTIVE
+                    n = 0
+                tracker._items[hkey] = TrackedItem(
+                    key=hkey,
+                    tier=tier,
+                    n=n,
+                    content_hash=StabilityTracker.hash_content(content_str),
+                    tokens=counter.count_message(msg),
+                )
+            if graduated_history:
+                logger.info(
+                    f"Rebuild graduated {graduated_history} history messages to L3 "
+                    f"(verbatim window: {len(history) - graduated_history} most recent, "
+                    f"~{verbatim_tokens:,} tokens)"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to register history entries: {e}")
+
+        items_after = len(tracker._items)
+        # Tally per-tier counts for the result summary
+        tier_counts = {"L0": 0, "L1": 0, "L2": 0, "L3": 0, "ACTIVE": 0}
+        file_tier_counts = {"L0": 0, "L1": 0, "L2": 0, "L3": 0, "ACTIVE": 0}
+        for key, item in tracker._items.items():
+            tname = item.tier.name
+            tier_counts[tname] = tier_counts.get(tname, 0) + 1
+            if key.startswith("file:"):
+                file_tier_counts[tname] = file_tier_counts.get(tname, 0) + 1
+
+        logger.info(
+            f"Cache rebuild ({self._context.mode.value}): "
+            f"{items_before} → {items_after} items | "
+            f"L0={tier_counts['L0']} L1={tier_counts['L1']} "
+            f"L2={tier_counts['L2']} L3={tier_counts['L3']} "
+            f"ACTIVE={tier_counts['ACTIVE']}"
+        )
+        logger.info(
+            f"  file: entries distributed — "
+            f"L0={file_tier_counts['L0']} L1={file_tier_counts['L1']} "
+            f"L2={file_tier_counts['L2']} L3={file_tier_counts['L3']} "
+            f"ACTIVE={file_tier_counts['ACTIVE']}"
+        )
+
+        return {
+            "status": "rebuilt",
+            "mode": self._context.mode.value,
+            "items_before": items_before,
+            "items_after": items_after,
+            "files_distributed": sum(file_tier_counts.values()),
+            "tier_counts": tier_counts,
+            "file_tier_counts": file_tier_counts,
+            "message": (
+                f"Cache rebuilt: {items_after} items placed. "
+                f"Selected files distributed across tiers: "
+                f"L0={file_tier_counts['L0']}, L1={file_tier_counts['L1']}, "
+                f"L2={file_tier_counts['L2']}, L3={file_tier_counts['L3']}, "
+                f"active={file_tier_counts['ACTIVE']}."
+            ),
+        }
 
     def _print_init_hud(self):
         """Print tier distribution after initialization."""

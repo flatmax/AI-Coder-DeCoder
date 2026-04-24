@@ -49,6 +49,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     _filter: { type: String, state: true },
     _stale: { type: Boolean, state: true },
     _sortMode: { type: String, state: true },
+    _rebuilding: { type: Boolean, state: true },
   };
 
   static styles = [theme, scrollbarStyles, css`
@@ -139,6 +140,25 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     .refresh-btn:hover {
       color: var(--text-primary);
       border-color: var(--accent-primary);
+    }
+
+    .rebuild-btn {
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .rebuild-btn:hover {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
+    }
+    .rebuild-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
 
     .sort-btn {
@@ -356,6 +376,7 @@ export class AcCacheTab extends RpcMixin(LitElement) {
     this._filter = '';
     this._stale = false;
     this._sortMode = this._loadSortMode();
+    this._rebuilding = false;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -445,6 +466,39 @@ export class AcCacheTab extends RpcMixin(LitElement) {
       console.warn('Failed to load cache data:', e);
     } finally {
       this._loading = false;
+    }
+  }
+
+  async _rebuild() {
+    if (!this.rpcConnected || this._rebuilding) return;
+    this._rebuilding = true;
+
+    try {
+      const result = await this.rpcExtract('LLMService.rebuild_cache');
+      if (result?.error) {
+        console.warn('Rebuild failed:', result.error);
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true,
+          composed: true,
+          detail: { message: `Rebuild failed: ${result.error}`, type: 'error' },
+        }));
+      } else if (result?.message) {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true,
+          composed: true,
+          detail: { message: result.message, type: 'success' },
+        }));
+      }
+      await this._refresh();
+    } catch (e) {
+      console.warn('Rebuild error:', e);
+      this.dispatchEvent(new CustomEvent('show-toast', {
+        bubbles: true,
+        composed: true,
+        detail: { message: `Rebuild error: ${e.message || e}`, type: 'error' },
+      }));
+    } finally {
+      this._rebuilding = false;
     }
   }
 
@@ -715,6 +769,10 @@ export class AcCacheTab extends RpcMixin(LitElement) {
           title="Sort by ${this._sortMode === 'size' ? 'name' : 'size'}"
         >${this._sortMode === 'size' ? '⬇ Size' : '⬇ Name'}</button>
         ${this._stale ? html`<span class="stale-badge" aria-label="Data is stale">● stale</span>` : nothing}
+        <button class="rebuild-btn" @click=${() => this._rebuild()}
+          ?disabled=${this._rebuilding || this._loading}
+          title="Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
+          aria-label="Rebuild cache">${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}</button>
         <button class="refresh-btn" @click=${() => this._refresh()}
           ?disabled=${this._loading}
           aria-label="Refresh cache data">↻</button>

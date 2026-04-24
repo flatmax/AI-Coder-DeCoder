@@ -65,20 +65,24 @@ class TestStateManagement:
         assert state["cross_ref_enabled"] is False
 
     def test_set_selected_files(self, service):
-        """set_selected_files updates and returns copy."""
-        result = service.set_selected_files(["a.py", "b.py"])
-        assert result == ["a.py", "b.py"]
+        """set_selected_files updates and returns copy.
+
+        Uses real files from the temp_repo fixture — set_selected_files
+        silently drops paths that don't exist on disk.
+        """
+        result = service.set_selected_files(["README.md", "src/main.py"])
+        assert result == ["README.md", "src/main.py"]
         # Mutation-safe
-        result.append("c.py")
-        assert service.get_selected_files() == ["a.py", "b.py"]
+        result.append("extra.py")
+        assert service.get_selected_files() == ["README.md", "src/main.py"]
 
     def test_get_selected_files_independent_copy(self, service):
         """get_selected_files returns independent copy."""
-        service.set_selected_files(["a.py"])
+        service.set_selected_files(["README.md"])
         copy1 = service.get_selected_files()
         copy2 = service.get_selected_files()
-        copy1.append("b.py")
-        assert copy2 == ["a.py"]
+        copy1.append("src/main.py")
+        assert copy2 == ["README.md"]
 
 
 # === Streaming Guards ===
@@ -650,3 +654,142 @@ class TestBuildTieredContent:
             assert "history" in tier
             assert "graduated_files" in tier
             assert "graduated_history_indices" in tier
+
+
+# === Cache Rebuild ===
+
+
+class TestRebuildCache:
+    def _mock_symbol_index(self, files=None, block="def foo(): pass", legend=""):
+        """Build a minimal mock SymbolIndex for rebuild tests."""
+        from unittest.mock import MagicMock
+        mock = MagicMock()
+        mock._all_symbols = {f: {} for f in (files or [])}
+        mock.reference_index = MagicMock()
+        mock.reference_index.connected_components.return_value = []
+        mock.reference_index.file_ref_count.return_value = 1
+        mock.get_file_symbol_block.return_value = block
+        mock.get_signature_hash.return_value = "sig"
+        mock.get_legend.return_value = legend
+        return mock
+
+    def test_rebuild_returns_error_without_index(self, service):
+        """rebuild_cache returns error when symbol index is unavailable."""
+        service._symbol_index = None
+        result = service.rebuild_cache()
+        assert "error" in result
+
+    def test_rebuild_preserves_history_entries(self, service):
+        """Rebuild wipes non-history items but preserves history entries."""
+        from ac_dc.stability_tracker import TrackedItem
+        service._symbol_index = self._mock_symbol_index(["src/main.py"])
+        service._context.add_message("user", "hello")
+        service._context.add_message("assistant", "hi")
+        service._stability_tracker._items["history:0"] = TrackedItem(
+            key="history:0", tier=Tier.ACTIVE, n=0,
+            content_hash="h1", tokens=10,
+        )
+        result = service.rebuild_cache()
+        assert result["status"] == "rebuilt"
+        history_items = [k for k in service._stability_tracker._items
+                         if k.startswith("history:")]
+        assert len(history_items) > 0
+
+    def test_rebuild_swaps_selected_files_to_file_entries(self, service):
+        """Selected files get file: entries, not symbol: entries, after rebuild."""
+        service._symbol_index = self._mock_symbol_index(
+            ["src/main.py", "src/util.py"]
+        )
+        service.set_selected_files(["src/main.py"])
+        result = service.rebuild_cache()
+        assert result["status"] == "rebuilt"
+        assert service._stability_tracker.get_item("file:src/main.py") is not None
+        assert service._stability_tracker.get_item("symbol:src/main.py") is None
+
+    def test_rebuild_unselected_files_stay_as_symbol_entries(self, service):
+        """Unselected indexed files keep their symbol: entry."""
+        service._symbol_index = self._mock_symbol_index(
+            ["src/main.py", "src/other.py"]
+        )
+        service.set_selected_files([])
+        result = service.rebuild_cache()
+        assert result["status"] == "rebuilt"
+        assert service._stability_tracker.get_item("symbol:src/main.py") is not None
+        assert service._stability_tracker.get_item("symbol:src/other.py") is not None
+
+    def test_rebuild_reseeds_system_prompt_into_l0(self, service):
+        """Rebuild re-seeds system:prompt into L0."""
+        service._symbol_index = self._mock_symbol_index(
+            ["src/main.py"], legend="legend text"
+        )
+        service.rebuild_cache()
+        sys_item = service._stability_tracker.get_item("system:prompt")
+        assert sys_item is not None
+        assert sys_item.tier == Tier.L0
+
+    def test_rebuild_sets_initialized_flag(self, service):
+        """Rebuild sets _stability_initialized so next request skips init."""
+        service._symbol_index = self._mock_symbol_index([])
+        service._stability_initialized = False
+        service.rebuild_cache()
+        assert service._stability_initialized is True
+
+    def test_rebuild_returns_tier_counts(self, service):
+        """Rebuild response includes tier_counts and file_tier_counts."""
+        service._symbol_index = self._mock_symbol_index(["src/main.py"])
+        result = service.rebuild_cache()
+        assert "tier_counts" in result
+        assert "file_tier_counts" in result
+        for tier_name in ("L0", "L1", "L2", "L3", "ACTIVE"):
+            assert tier_name in result["tier_counts"]
+            assert tier_name in result["file_tier_counts"]
+
+    def test_rebuild_localhost_only(self, service):
+        """Rebuild is restricted to localhost — remote callers get error."""
+        from unittest.mock import MagicMock
+        mock_collab = MagicMock()
+        mock_collab._is_caller_localhost.return_value = False
+        service._collab = mock_collab
+        result = service.rebuild_cache()
+        assert result.get("error") == "restricted"
+
+    def test_rebuild_does_not_call_update_stability(self, service):
+        """Rebuild skips _update_stability so deterministic placement is final."""
+        from unittest.mock import patch
+        service._symbol_index = self._mock_symbol_index(["src/main.py"])
+        with patch.object(service, "_update_stability") as mock_update:
+            service.rebuild_cache()
+            mock_update.assert_not_called()
+
+    def test_rebuild_returns_items_before_and_after(self, service):
+        """Rebuild response reports items_before and items_after counts."""
+        service._symbol_index = self._mock_symbol_index(["src/main.py"])
+        result = service.rebuild_cache()
+        assert "items_before" in result
+        assert "items_after" in result
+        assert isinstance(result["items_before"], int)
+        assert isinstance(result["items_after"], int)
+
+    def test_rebuild_history_graduates_to_l3(self, service):
+        """Older history messages graduate to L3 via piggyback rule."""
+        service._symbol_index = self._mock_symbol_index([])
+        # Add many history messages so older ones exceed verbatim window
+        for i in range(20):
+            service._context.add_message("user", f"message {i} " + "x" * 500)
+            service._context.add_message("assistant", f"reply {i} " + "y" * 500)
+        service.rebuild_cache()
+        l3_history = [
+            k for k, item in service._stability_tracker._items.items()
+            if k.startswith("history:") and item.tier == Tier.L3
+        ]
+        assert len(l3_history) > 0
+
+    def test_rebuild_orphan_files_distributed_to_cache_tiers(self, service):
+        """Orphan selected files (not in symbol index) land in L1/L2/L3, not ACTIVE."""
+        # README.md is selected but not in the symbol index (markdown file)
+        service._symbol_index = self._mock_symbol_index(["src/main.py"])
+        service.set_selected_files(["README.md"])
+        service.rebuild_cache()
+        orphan = service._stability_tracker.get_item("file:README.md")
+        assert orphan is not None
+        assert orphan.tier in (Tier.L1, Tier.L2, Tier.L3)

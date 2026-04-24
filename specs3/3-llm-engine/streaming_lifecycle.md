@@ -242,6 +242,7 @@ During streaming, the Send button transforms into a **Stop button** (⏹). Click
 StreamCompleteResult:
     response: string                    # Full assistant response text
     token_usage: TokenUsage             # Token counts for HUD display
+    finish_reason: string?              # LiteLLM-normalized stop reason (see below)
     edit_blocks: [{file, is_create}]?   # Parsed blocks with create flag
     shell_commands: [string]?           # Detected shell suggestions
     passed: integer                     # Count of applied edits
@@ -489,6 +490,53 @@ Token usage is extracted from the LLM provider's response. Different providers r
 | litellm unified | `cache_read_tokens` | `cache_creation_tokens` |
 
 The extraction uses a dual-mode getter (attribute + key access) with fallback chains. Stream-level usage is captured from any chunk with it (typically the final chunk). Response-level usage merged as fallback. Completion tokens are estimated from content length (~4 chars/token) only if the provider reported no completion count.
+
+## Finish Reason
+
+The LLM provider reports a `finish_reason` on the final chunk of a stream, indicating why generation stopped. LiteLLM normalizes these across providers to OpenAI-style strings:
+
+| Value | Meaning | UI treatment |
+|-------|---------|--------------|
+| `stop` | Model finished naturally | Subtle muted "✓ stopped" badge |
+| `end_turn` | Anthropic passthrough (natural stop) | Subtle muted "✓ end of turn" badge |
+| `length` | Hit `max_tokens` — response truncated | Red "✂️ truncated (max_tokens)" badge + error toast |
+| `content_filter` | Blocked by provider safety filter | Red "🚫 content filter" badge + error toast |
+| `tool_calls` | Model wants to call a tool | Red "🔧 tool call requested" badge + error toast |
+| `function_call` | Legacy function-call variant | Red "🔧 function call requested" badge + error toast |
+| `null` / missing | Provider did not report | No badge rendered |
+
+### Extraction
+
+`_extract_finish_reason(chunk)` walks `chunk.choices[0].finish_reason` using the same dual-mode getter pattern (attribute + key access) as token usage. Only the final chunk carries a non-null value; earlier chunks report `None`. The streaming loop captures whichever chunk first reports a reason and stores it in `finish_reason` on the result.
+
+### Max-Tokens Source
+
+`litellm.completion(..., max_tokens=max_output)` is called with an explicit max token count, derived from:
+
+1. `config.max_output_tokens` (if explicitly configured in LLM config), else
+2. `counter.max_output_tokens` (the hardcoded per-model ceiling in `TokenCounter`)
+
+This means a `length` finish is attributable to either user configuration or the model's native ceiling. The terminal log records `finish_reason` on every response:
+
+```
+INFO: LLM finish_reason='stop'
+WARN: LLM finish_reason='length' (non-natural stop — response may be incomplete)
+```
+
+### Frontend Handling
+
+On `streamComplete`, the chat panel:
+
+1. Stores `finish_reason` on the assistant message (`msg.finish_reason`)
+2. For non-natural, non-cancelled stops, shows an error toast:
+   - `length` → `⚠️ Response truncated — hit max_tokens`
+   - `content_filter` → `⚠️ Response blocked by content filter`
+   - anything else → `⚠️ Stopped: {reason}`
+3. Renders a `.finish-reason` badge inside the message card via `_renderFinishReason(msg)`, placed between the edit summary and the bottom action toolbar. Natural stops use `.finish-reason.natural` (muted, opacity 0.6); non-natural stops use `.finish-reason.warn` (red border, tinted background). Cancelled streams suppress the toast (the `[stopped]` marker in the response body is sufficient).
+
+### Not Retried Automatically
+
+A `length` finish does not trigger an automatic continuation prompt. The user sees the truncated output + badge + toast and decides whether to ask the model to continue. This parallels the ambiguous-anchor and not-in-context retry patterns — surface the problem, suggest no action.
 
 ## Terminal HUD
 
