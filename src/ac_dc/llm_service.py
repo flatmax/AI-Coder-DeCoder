@@ -2571,9 +2571,18 @@ class LLMService:
 
         if mode == Mode.DOC:
             prefix = "doc:"
-            # Doc index not yet available — no files qualify
-            # for doc: prefix. Leaves indexed_files empty.
-            indexed_files: list[str] = []
+            # Doc index populated by the background build
+            # (2.8.2b). Rebuild iterates the outlines dict
+            # directly rather than filtering the repo file
+            # list, because the doc index may include files
+            # that aren't in the repo's flat listing (e.g.,
+            # when the repo walker and doc index walker
+            # disagree on a hidden directory edge case).
+            # Using _all_outlines as the authoritative source
+            # matches how code mode uses _all_symbols.
+            indexed_files: list[str] = list(
+                self._doc_index._all_outlines.keys()
+            )
         else:
             prefix = "symbol:"
             indexed_files = [

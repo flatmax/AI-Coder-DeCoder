@@ -4133,6 +4133,285 @@ class TestRebuildCache:
         assert "error" in result
         assert "simulated failure" in result["error"]
 
+    def _seed_doc_outlines(
+        self, svc: LLMService, paths: list[str]
+    ) -> None:
+        """Seed the doc index with markdown outlines for rebuild tests.
+
+        Helper that mirrors the pattern used in cross-reference
+        tests — constructs real DocOutline objects via the
+        markdown extractor rather than mocking the doc index's
+        interface. Rebuild reads from ``_all_outlines.keys()``
+        so we populate that dict directly.
+        """
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody content.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+    def test_doc_mode_places_doc_entries_across_tiers(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doc mode rebuild iterates the doc index, not the symbol index.
+
+        Before 2.8.2h the doc-mode branch produced an empty
+        indexed_files list with a TODO. Now it reads from
+        ``_doc_index._all_outlines`` and places ``doc:`` entries
+        in cached tiers via the same clustering algorithm used
+        for symbol entries in code mode.
+        """
+        # Symbol index has some files, but doc mode shouldn't
+        # care — rebuild in doc mode dispatches to the doc
+        # index's outlines, not the symbol index.
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={"ignored.py": "block"},
+            ref_counts={"ignored.py": 5},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["ignored.py"],
+            monkeypatch=monkeypatch,
+        )
+        # Seed doc outlines.
+        self._seed_doc_outlines(
+            svc, ["README.md", "guide.md", "api.md"]
+        )
+        # Switch to doc mode via the context manager (avoids
+        # switch_mode's side effects).
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+
+        result = svc.rebuild_cache()
+        assert result["status"] == "rebuilt"
+        assert result["mode"] == "doc"
+
+        # All three doc files appear as doc: entries somewhere.
+        tracker = svc._stability_tracker
+        all_keys = set(tracker.get_all_items().keys())
+        assert "doc:README.md" in all_keys
+        assert "doc:guide.md" in all_keys
+        assert "doc:api.md" in all_keys
+
+        # No symbol: entries — rebuild didn't iterate the symbol
+        # index in doc mode.
+        assert "symbol:ignored.py" not in all_keys
+
+    def test_doc_mode_rebuild_swaps_selected_doc_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Selected doc file → file: entry, not doc: entry.
+
+        The "never appears twice" invariant applies in doc mode
+        the same way as code mode. A selected markdown file
+        becomes a file: entry with full content; its doc: entry
+        (if any was placed by clustering) gets swapped out.
+        """
+        (repo_dir / "README.md").write_text(
+            "# Readme\n\nbody.\n"
+        )
+        fake_symbol_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["README.md"],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["README.md", "guide.md"])
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+        svc.set_selected_files(["README.md"])
+
+        svc.rebuild_cache()
+
+        tracker = svc._stability_tracker
+        all_keys = set(tracker.get_all_items().keys())
+        # Selected doc swapped to file: entry.
+        assert "file:README.md" in all_keys
+        assert "doc:README.md" not in all_keys
+        # Unselected doc retains its doc: entry.
+        assert "doc:guide.md" in all_keys
+
+    def test_doc_mode_rebuild_distributes_orphan_non_markdown_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Selected non-markdown files in doc mode become orphans.
+
+        In doc mode, anything not in the doc index is an orphan
+        — including .py files that would be indexed in code mode.
+        Orphan distribution works identically: bin-pack across
+        L1/L2/L3, never land in ACTIVE or L0.
+        """
+        (repo_dir / "script.py").write_text("x = 1\n")
+        (repo_dir / "config.json").write_text('{"a": 1}\n')
+        fake_symbol_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["script.py", "config.json"],
+            monkeypatch=monkeypatch,
+        )
+        # Doc index is empty — the selected files are orphans.
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+        svc.set_selected_files(["script.py", "config.json"])
+
+        svc.rebuild_cache()
+
+        from ac_dc.stability_tracker import Tier
+        tracker = svc._stability_tracker
+        script_item = tracker.get_all_items().get(
+            "file:script.py"
+        )
+        cfg_item = tracker.get_all_items().get(
+            "file:config.json"
+        )
+        assert script_item is not None
+        assert cfg_item is not None
+        # Both in cached tiers, never ACTIVE or L0.
+        assert script_item.tier in (Tier.L1, Tier.L2, Tier.L3)
+        assert cfg_item.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+    def test_doc_mode_rebuild_result_mode_field(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Result dict's mode field reflects the active mode."""
+        fake_symbol_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=[],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["guide.md"])
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+
+        result = svc.rebuild_cache()
+        assert result["mode"] == "doc"
+        # Summary message mentions doc mode.
+        assert "doc" in result["message"].lower()
+
+    def test_doc_mode_empty_doc_index_still_succeeds(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doc mode with no doc outlines still produces a valid rebuild.
+
+        The tracker ends up with just system:prompt (plus any
+        preserved history). No doc: entries because there are
+        no outlines to seed.
+        """
+        fake_symbol_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=[],
+            monkeypatch=monkeypatch,
+        )
+        # No doc outlines seeded.
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+
+        result = svc.rebuild_cache()
+        assert result["status"] == "rebuilt"
+        assert result["mode"] == "doc"
+
+        tracker = svc._stability_tracker
+        all_keys = set(tracker.get_all_items().keys())
+        # No doc: entries.
+        assert not any(
+            k.startswith("doc:") for k in all_keys
+        )
+        # system:prompt still reseeded.
+        assert "system:prompt" in all_keys
+
+    def test_doc_mode_preserves_history_across_rebuild(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """History preservation works the same way in doc mode."""
+        fake_symbol_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=[],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["guide.md"])
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+
+        # Seed a history entry.
+        from ac_dc.stability_tracker import Tier, TrackedItem
+        tracker = svc._stability_tracker
+        tracker._items["history:0"] = TrackedItem(
+            key="history:0",
+            tier=Tier.L2,
+            n_value=4,
+            content_hash="h0",
+            tokens=10,
+        )
+        svc._context.add_message("user", "earlier message")
+
+        svc.rebuild_cache()
+
+        # history:0 preserved (verbatim window keeps it).
+        existing = tracker.get_all_items().get("history:0")
+        assert existing is not None
+        assert existing.n_value == 4
+
 
 # ---------------------------------------------------------------------------
 # _update_stability — mode-aware index entry dispatch (Layer 2.8.2f)
