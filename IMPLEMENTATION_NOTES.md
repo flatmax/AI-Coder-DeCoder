@@ -2698,6 +2698,32 @@ Two separate flags exposed on `get_mode`:
 
 After 2.8.2 ships, doc mode actually works and cross-reference toggle has material effect. User-visible. Enrichment is still deferred to 2.8.4 — outlines render with empty keyword slots but structure is fully navigable.
 
+### Layer 2.8.2 — complete
+
+All nine sub-commits delivered: DocIndex construction, background build, readiness flags, tier-builder dispatch, legend dispatch, stability-update dispatch, cross-reference lifecycle, rebuild-cache dispatch, lazy-init dispatch. Doc mode produces content via the doc index. Cross-reference toggle has material effect — enabling seeds items into the active tracker with the opposite prefix; disabling cleans them up.
+
+**Notes from delivery:**
+
+- **The readiness gate is structural-only.** `doc_index_ready` flips when structure extraction completes; `doc_index_enriched` is wired but always False in 2.8.2. Cross-reference gates on structure only, per specs4 — enrichment improves quality but isn't a prerequisite. When 2.8.4 lands, enrichment completion will re-hash affected outlines and the tracker will demote-and-restabilize them naturally across a few cycles.
+
+- **The "never appears twice" invariant required three touchpoints.** Selected files' cross-reference entries are excluded in three places — the active-items build (step 2 of `_update_stability`), the cross-ref seeding pass (`_seed_cross_reference_items`), and rebuild's step 7 swap. All three must agree or selected files end up both as file: (full content) and doc:/symbol: (index block) in the tracker. Pinned by explicit tests for each path.
+
+- **Mode switch cleanup ordering.** `switch_mode` calls `_remove_cross_reference_items` BEFORE swapping trackers. The removal strips items matching the OLD mode's opposite prefix (doc: in code mode, symbol: in doc mode) from the current tracker. After the swap, the new mode's tracker starts clean. Tests pin this — a naive implementation that swapped first then tried to strip would remove the wrong prefix.
+
+- **`_doc_index._ref_index` is the reference graph contract.** Both lazy init (2.8.2i) and rebuild (2.8.2h) reach into this attribute. `DocReferenceIndex` exposes the same `file_ref_count` + `connected_components` protocol as `SymbolIndex._ref_index`, so the shared `initialize_with_keys` clustering algorithm works uniformly.
+
+- **`initialize_with_keys` vs `initialize_from_reference_graph`.** The older `initialize_from_reference_graph` hardcodes `symbol:` prefix. Layer 2.8.2i switched lazy init to use `initialize_with_keys` with an explicit prefix parameter. Rebuild was already using the keyed variant from its 2.8.2h pass. The older method is kept for backward compatibility but every new caller should use the keyed variant.
+
+## Layer 2.8 — next sub-commits
+
+**2.8.3 — SVG extractor.** Adds architecture diagrams and flowcharts to the doc index. Specs4/2-indexing/document-index.md § "SVG Extraction" spec is detailed. Builds containment tree from bounding boxes, attaches text to smallest containing box, uses three-level labeling (explicit label > single-text box > neutral identifier), filters Inkscape auto-generated IDs, captures long text (>80 chars) as prose blocks for enrichment.
+
+Independent of 2.8.4. Can ship before or after.
+
+**2.8.4 — Keyword enrichment via KeyBERT.** Adds the disambiguation layer. specs4/2-indexing/keyword-enrichment.md. Optional dependency (`[project.optional-dependencies].docs`). Lazy model load, batched extraction, TF-IDF fallback for short sections, corpus-aware document-frequency filter, graceful degradation when KeyBERT unavailable.
+
+Independent of 2.8.3. When both land, SVG prose blocks flow through the enrichment pipeline alongside markdown sections.
+
 **2.8.3 — SVG extractor.** Adds architecture diagrams and flowcharts to doc mode.
 
 - `src/ac_dc/doc_index/extractors/svg.py` — implement the design in specs4/2-indexing/document-index.md § SVG Extraction
