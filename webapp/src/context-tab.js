@@ -16,6 +16,29 @@ import { RpcMixin } from './rpc-mixin.js';
 /** localStorage key for the active sub-view. */
 const _SUBVIEW_KEY = 'ac-dc-context-subview';
 
+/** localStorage key for expanded tiers in the cache sub-view. */
+const _CACHE_EXPANDED_KEY = 'ac-dc-cache-expanded';
+
+/** Tier colors for the cache sub-view. */
+const _TIER_COLORS = {
+  L0: '#50c878',
+  L1: '#2dd4bf',
+  L2: '#60a5fa',
+  L3: '#f59e0b',
+  active: '#f97316',
+};
+
+/** Content type icons for cache tier items. */
+const _TYPE_ICONS = {
+  system: '⚙️',
+  legend: '📖',
+  symbols: '📦',
+  doc_symbols: '📝',
+  files: '📄',
+  urls: '🔗',
+  history: '💬',
+};
+
 /** Category colors for the stacked bar. */
 const _COLORS = {
   system: '#50c878',
@@ -56,6 +79,8 @@ export class ContextTab extends RpcMixin(LitElement) {
     _loading: { type: Boolean, state: true },
     /** Whether the data is stale (hidden during an update). */
     _stale: { type: Boolean, state: true },
+    /** Set of expanded tier names in the cache sub-view. */
+    _cacheExpanded: { type: Object, state: true },
   };
 
   static styles = css`
@@ -270,12 +295,154 @@ export class ContextTab extends RpcMixin(LitElement) {
       color: #f59e0b;
     }
 
-    /* Cache sub-view placeholder */
-    .cache-placeholder {
-      padding: 2rem;
+    /* Cache sub-view */
+    .cache-header {
+      margin-bottom: 1rem;
+    }
+    .cache-hit-bar-container {
+      background: rgba(240, 246, 252, 0.08);
+      border-radius: 4px;
+      height: 6px;
+      overflow: hidden;
+      margin-bottom: 0.25rem;
+    }
+    .cache-hit-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 300ms ease;
+    }
+    .cache-hit-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .changes-section {
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.06);
+    }
+    .changes-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 0.35rem;
+    }
+    .change-item {
+      font-size: 0.75rem;
+      padding: 0.1rem 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tier-group {
+      margin-bottom: 0.5rem;
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .tier-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.75rem;
+      cursor: pointer;
+      user-select: none;
+      background: rgba(22, 27, 34, 0.4);
+    }
+    .tier-header:hover {
+      background: rgba(240, 246, 252, 0.03);
+    }
+    .tier-toggle {
+      font-size: 0.625rem;
+      width: 0.75rem;
       text-align: center;
       color: var(--text-secondary, #8b949e);
+    }
+    .tier-name {
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+    .tier-spacer {
+      flex: 1;
+    }
+    .tier-tokens {
+      font-size: 0.75rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: #7ee787;
+    }
+    .tier-cached-icon {
+      font-size: 0.625rem;
+      color: var(--text-secondary, #8b949e);
+    }
+    .tier-body {
+      padding: 0.25rem 0.75rem 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+    .tier-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+    }
+    .tier-item-icon {
+      flex-shrink: 0;
+      width: 1rem;
+      text-align: center;
+    }
+    .tier-item-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tier-item-tokens {
+      flex-shrink: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: #7ee787;
+      font-size: 0.7rem;
+    }
+    .tier-item-bar {
+      flex-shrink: 0;
+      width: 40px;
+      height: 3px;
+      background: rgba(240, 246, 252, 0.08);
+      border-radius: 1.5px;
+      overflow: hidden;
+    }
+    .tier-item-bar-fill {
+      height: 100%;
+      border-radius: 1.5px;
+    }
+    .tier-item-n {
+      flex-shrink: 0;
+      font-size: 0.625rem;
+      color: var(--text-secondary, #8b949e);
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      min-width: 2.5rem;
+      text-align: right;
+    }
+    .tier-unmeasured {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
       font-style: italic;
+      padding: 0.15rem 0;
+    }
+
+    .cache-footer {
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+      padding-top: 0.5rem;
+      margin-top: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      display: flex;
+      justify-content: space-between;
     }
   `;
 
@@ -285,6 +452,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._data = null;
     this._loading = false;
     this._stale = false;
+    this._cacheExpanded = this._loadCacheExpanded();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -394,6 +562,38 @@ export class ContextTab extends RpcMixin(LitElement) {
     try {
       localStorage.setItem(_SUBVIEW_KEY, v);
     } catch (_) {}
+  }
+
+  _loadCacheExpanded() {
+    try {
+      const raw = localStorage.getItem(_CACHE_EXPANDED_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
+    } catch (_) {}
+    // Default: L0 and active expanded, others collapsed.
+    return new Set(['L0', 'active']);
+  }
+
+  _saveCacheExpanded() {
+    try {
+      localStorage.setItem(
+        _CACHE_EXPANDED_KEY,
+        JSON.stringify([...this._cacheExpanded]),
+      );
+    } catch (_) {}
+  }
+
+  _toggleCacheTier(name) {
+    const next = new Set(this._cacheExpanded);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    this._cacheExpanded = next;
+    this._saveCacheExpanded();
   }
 
   // ---------------------------------------------------------------
@@ -556,13 +756,137 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
-  // Cache sub-view (placeholder for follow-up commit)
+  // Cache sub-view
   // ---------------------------------------------------------------
 
   _renderCache() {
-    return html`<div class="cache-placeholder">
-      Cache tier viewer — coming in Phase 3.5
-    </div>`;
+    if (!this._data) {
+      return html`<div class="empty-state">
+        ${this._loading ? 'Loading…' : 'No data yet — send a message first'}
+      </div>`;
+    }
+    const d = this._data;
+    const cacheRate = d.provider_cache_rate ?? d.cache_hit_rate ?? 0;
+    const blocks = Array.isArray(d.blocks) ? d.blocks : [];
+    const promotions = Array.isArray(d.promotions) ? d.promotions : [];
+    const demotions = Array.isArray(d.demotions) ? d.demotions : [];
+    const hasChanges = promotions.length > 0 || demotions.length > 0;
+
+    return html`
+      <div class="cache-header">
+        <div class="cache-hit-label">
+          <span>Cache Performance</span>
+          <span>${cacheRate > 0 ? `${Math.round(cacheRate * 100)}% hit rate` : 'No cache data'}</span>
+        </div>
+        <div class="cache-hit-bar-container">
+          <div
+            class="cache-hit-bar-fill"
+            style="width: ${Math.min(100, cacheRate * 100)}%; background: ${cacheRate >= 0.5 ? '#7ee787' : cacheRate >= 0.2 ? '#d29922' : '#f85149'};"
+          ></div>
+        </div>
+      </div>
+
+      ${hasChanges
+        ? html`
+            <div class="changes-section">
+              <div class="changes-title">Recent Changes</div>
+              ${promotions.map(
+                (p) => html`<div class="change-item">📈 ${p}</div>`,
+              )}
+              ${demotions.map(
+                (d_) => html`<div class="change-item">📉 ${d_}</div>`,
+              )}
+            </div>
+          `
+        : ''}
+
+      ${blocks.map((block) => this._renderCacheTier(block))}
+
+      <div class="cache-footer">
+        <span>${d.model || '—'}</span>
+        <span>Total: ${_fmtTokens(d.total_tokens || 0)}</span>
+      </div>
+    `;
+  }
+
+  _renderCacheTier(block) {
+    const name = block.name || 'unknown';
+    const color = _TIER_COLORS[name] || _TIER_COLORS.active;
+    const expanded = this._cacheExpanded.has(name);
+    const contents = Array.isArray(block.contents) ? block.contents : [];
+
+    // Split into measured (tokens > 0) and unmeasured.
+    const measured = contents.filter((c) => (c.tokens || 0) > 0);
+    const unmeasuredCount = contents.length - measured.length;
+
+    return html`
+      <div class="tier-group">
+        <div
+          class="tier-header"
+          @click=${() => this._toggleCacheTier(name)}
+          role="button"
+          aria-expanded=${expanded}
+        >
+          <span class="tier-toggle">${expanded ? '▼' : '▶'}</span>
+          <span class="tier-name" style="color: ${color};">${name}</span>
+          <span class="tier-spacer"></span>
+          <span class="tier-tokens">${_fmtTokens(block.tokens || 0)}</span>
+          ${block.cached
+            ? html`<span class="tier-cached-icon">🔒</span>`
+            : ''}
+        </div>
+        ${expanded
+          ? html`
+              <div class="tier-body">
+                ${measured.map((item) =>
+                  this._renderCacheItem(item, block, color),
+                )}
+                ${unmeasuredCount > 0
+                  ? html`
+                      <div class="tier-unmeasured">
+                        📦 ${unmeasuredCount} pre-indexed
+                        ${this._data?.mode === 'doc' ? 'documents' : 'symbols'}
+                        (awaiting measurement)
+                      </div>
+                    `
+                  : ''}
+                ${contents.length === 0
+                  ? html`<div class="tier-unmeasured">Empty tier</div>`
+                  : ''}
+              </div>
+            `
+          : ''}
+      </div>
+    `;
+  }
+
+  _renderCacheItem(item, block, tierColor) {
+    const icon = _TYPE_ICONS[item.type] || '📋';
+    const hasN = typeof item.n === 'number' && typeof item.threshold === 'number';
+    const nPct = hasN && item.threshold > 0
+      ? Math.min(100, (item.n / item.threshold) * 100)
+      : 0;
+
+    return html`
+      <div class="tier-item">
+        <span class="tier-item-icon">${icon}</span>
+        <span class="tier-item-name" title=${item.path || item.name || ''}>
+          ${item.name || item.path || '—'}
+        </span>
+        ${hasN
+          ? html`
+              <div class="tier-item-bar" title="N=${item.n}/${item.threshold}">
+                <div
+                  class="tier-item-bar-fill"
+                  style="width: ${nPct}%; background: ${tierColor};"
+                ></div>
+              </div>
+              <span class="tier-item-n">${item.n}/${item.threshold}</span>
+            `
+          : ''}
+        <span class="tier-item-tokens">${_fmtTokens(item.tokens || 0)}</span>
+      </div>
+    `;
   }
 }
 

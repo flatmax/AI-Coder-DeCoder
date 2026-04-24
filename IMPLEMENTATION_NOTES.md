@@ -1667,7 +1667,7 @@ Implements the 2D spatial file navigation grid with Alt+Arrow traversal and full
   - `_onGridKeyUp` — Alt release hides HUD
   - `_onNavigateFile` — registers files with the grid unless `_fromNav` or `_refresh` flags are set
 
-### 5.27 — Phase 3.4 Context tab (Budget sub-view) — **delivered**
+### 5.27 — Phase 3.4 Context tab (Budget + Cache sub-views) — **delivered**
 
 Wires the Context dialog tab to `LLMService.get_context_breakdown`. Budget/Cache pill toggle at the top; active sub-view persisted to localStorage. Both sub-views listen for `stream-complete`, `files-changed`, and `mode-changed` window events — refresh when visible, mark stale when hidden, auto-refresh on `onTabVisible()`.
 
@@ -1679,9 +1679,17 @@ Budget sub-view shows:
 - Per-category detail rows with proportional bars
 - Session totals grid (prompt in, completion out, total, cache read/write when non-zero)
 
-Cache sub-view is a placeholder — lands in Phase 3.5.
+Cache sub-view shows:
+- Cache performance header with hit-rate bar (color-coded: ≥50% green, ≥20% amber, <20% red)
+- Recent changes section (promotions 📈 and demotions 📉) when any occurred this cycle
+- Per-tier collapsible groups with tier-colored headers, total tokens, and cached lock icon
+- Per-item rows within expanded tiers: type icon (⚙️/📖/📦/📝/📄/🔗/💬), name/path, stability bar (N/threshold with tier-colored fill), and token count
+- Unmeasured items collapsed into a summary line ("N pre-indexed symbols/documents (awaiting measurement)")
+- Empty tiers show "Empty tier" placeholder
+- Tier expand/collapse state persisted to `ac-dc-cache-expanded` localStorage key (defaults: L0 and active expanded)
+- Footer with model name and total token count
 
-- `webapp/src/context-tab.js` — new `ContextTab(RpcMixin(LitElement))` component:
+- `webapp/src/context-tab.js` — `ContextTab(RpcMixin(LitElement))` component:
   - `_subview` persisted to `ac-dc-context-subview` localStorage key
   - `_refresh()` fetches via `get_context_breakdown`, guarded by loading flag
   - `_isTabActive()` checks parent `.tab-panel.active` class
@@ -1690,7 +1698,16 @@ Cache sub-view is a placeholder — lands in Phase 3.5.
   - `_fmtTokens(n)` formats with K suffix
   - `_budgetColor(pct)` returns green/amber/red by threshold
   - `_COLORS` map for category segments
-  - Handles missing/partial backend data gracefully (empty state, field defaults)
+  - Budget sub-view handles missing/partial backend data gracefully (empty state, field defaults)
+  - Cache sub-view:
+    - `_cacheExpanded` Set persisted to `ac-dc-cache-expanded` (defaults: L0, active)
+    - `_TIER_COLORS` map (L0 green → L1 teal → L2 blue → L3 amber → active orange)
+    - `_TYPE_ICONS` map for per-item type classification
+    - `_renderCacheTier(block)` — collapsible tier group with measured/unmeasured item split
+    - `_renderCacheItem(item, block, tierColor)` — per-item row with icon, name, stability bar, N/threshold label, token count
+    - Unmeasured items (tokens=0) collapsed into summary line with mode-aware label
+    - Recent changes section (promotions/demotions) rendered above tier groups
+    - Footer with model name and total tokens
 
 - `webapp/src/app-shell.js` — imports `context-tab.js`, renders `<ac-context-tab>` when `activeTab === 'context'`. Removes the last placeholder tab fallback.
 
