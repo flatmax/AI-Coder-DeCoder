@@ -145,13 +145,40 @@
 //     (single-click selection still works)
 //   - Detach during an edit cancels and rolls back
 //
-// Phase 3.2c editing surface is complete for visible SVG
-// content: every shape supports selection, drag-to-move,
-// and (where meaningful) resize or vertex edit. Text
-// elements additionally support inline content editing.
+// Phase 3.2c.4 adds: multi-selection and marquee.
+//   - Shift+click toggles an element into or out of the
+//     selection set. Click without shift still replaces
+//     the selection with the clicked element (single-
+//     selection semantics preserved)
+//   - `_selected` tracks the "primary" element (last
+//     clicked); `_selectedSet` tracks every element in
+//     the selection. Resize handles, vertex edit, and
+//     text edit all dispatch against `_selected` so
+//     single-element operations still work when a set
+//     is active
+//   - Shift+drag on empty space starts a marquee. Forward
+//     drag (top-left to bottom-right) uses containment
+//     mode — only elements fully inside the marquee are
+//     selected, rendered with solid border. Reverse drag
+//     uses crossing mode — any intersection selects,
+//     rendered with dashed border. Matches Illustrator /
+//     Figma conventions
+//   - Marquee hit-test scans direct children of the root
+//     SVG plus one level inside `<g>` groups. Deeper
+//     nesting is deliberately out of scope — elements
+//     in deeply-nested groups select by clicking the
+//     group
+//   - Clicking a member of a multi-selection and
+//     dragging moves every selected element as a group.
+//     Each element's positional attributes are
+//     snapshotted and deltas applied uniformly
+//   - Delete removes every selected element
+//   - Double-click on a text element in a multi-
+//     selection collapses to single-selection of that
+//     text AND enters the inline edit. Matches
+//     user intent — double-click is a "focus this" gesture
 //
-// Deferred beyond 3.2c.3:
-//   - Multi-selection + marquee (3.2c.4)
+// Deferred beyond 3.2c.4:
 //   - Undo stack + copy/paste (3.2c.5)
 //
 // Design:
@@ -235,6 +262,44 @@ export const HANDLE_ROLE_ATTR = 'data-handle-role';
  * that won't render as visually zero at normal zoom.
  */
 const _MIN_RESIZE_DIMENSION = 1;
+
+/**
+ * Minimum marquee drag distance (screen pixels) before
+ * treating it as a deliberate marquee rather than a jittery
+ * click. Below this, a shift+click+tiny-drag on empty space
+ * is a no-op — same rule as the drag threshold for moves.
+ */
+const _MARQUEE_MIN_SCREEN = 3;
+
+/**
+ * ID of the marquee rectangle element while it's alive.
+ * Placed inside the handle group so hit-test exclusion
+ * finds it.
+ */
+const MARQUEE_ID = 'svg-editor-marquee';
+
+/**
+ * Axis-aligned bounding box in SVG root coords.
+ * Used by marquee hit-test to check containment /
+ * intersection.
+ */
+function _bboxOverlaps(a, b) {
+  return !(
+    a.x + a.width < b.x ||
+    b.x + b.width < a.x ||
+    a.y + a.height < b.y ||
+    b.y + b.height < a.y
+  );
+}
+
+function _bboxContains(outer, inner) {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height
+  );
+}
 
 /**
  * Parse a numeric SVG attribute value to a number. SVG
@@ -755,8 +820,42 @@ export class SvgEditor {
     this._onChange = options.onChange || (() => {});
     this._onSelectionChange = options.onSelectionChange || (() => {});
 
-    /** Currently-selected element, or null. */
+    /**
+     * Primary selected element — the "active" element that
+     * single-element operations (resize handles, vertex
+     * edit, text edit) dispatch against. Null when nothing
+     * is selected OR when the set is empty.
+     *
+     * When multi-selection is active, `_selected` is one
+     * of the elements in `_selectedSet` (typically the
+     * most recently shift+clicked one). Callers that
+     * ignore the set and look only at `_selected` still
+     * get a reasonable single-element contract.
+     */
     this._selected = null;
+
+    /**
+     * Full selection set. Always contains `_selected` when
+     * non-empty. Single-click replaces the set with just
+     * the clicked element; shift+click toggles. Empty when
+     * nothing is selected.
+     */
+    this._selectedSet = new Set();
+
+    /**
+     * Active marquee state. Null when not marqueeing;
+     * populated on shift+drag from empty space. Fields:
+     *   pointerId — captured pointer
+     *   startX, startY — origin in SVG root coords
+     *   currentX, currentY — latest pointer in SVG root
+     *   rect — the rendered <rect> element, or null until
+     *     the user moves beyond the min-drag threshold
+     *   originalSet — snapshot of `_selectedSet` at
+     *     marquee start, so each move computes the new
+     *     union from that baseline rather than
+     *     compounding as the marquee grows/shrinks
+     */
+    this._marquee = null;
 
     /** Handle overlay group, lazily created on first render. */
     this._handleGroup = null;
@@ -860,6 +959,9 @@ export class SvgEditor {
     // during a drag would leave the element partially
     // moved and the captured pointer orphaned.
     this._cancelDrag();
+    // Cancel any in-flight marquee. Same reasoning —
+    // orphaned rect + captured pointer otherwise.
+    this._cancelMarquee();
     // Cancel any in-flight text edit so the foreignObject
     // overlay doesn't orphan on the SVG and the element's
     // original content is restored.
@@ -886,44 +988,103 @@ export class SvgEditor {
   }
 
   /**
-   * Return the currently-selected element, or null. Reads
+   * Return the primary selected element, or null. Reads
    * live — subsequent mutations by the caller are visible.
+   *
+   * For the full set of selected elements (including
+   * multi-selection), use `getSelectionSet`.
    */
   getSelection() {
     return this._selected;
   }
 
   /**
-   * Programmatically select an element. Bypasses pointer
-   * event machinery; used by tests and by future
-   * load-selection flows.
+   * Return the full selection set. Always contains at
+   * least the primary (`getSelection()`) unless empty.
+   * Returns a fresh Set each call — caller mutations
+   * don't affect the editor's state.
+   */
+  getSelectionSet() {
+    return new Set(this._selectedSet);
+  }
+
+  /**
+   * Programmatically select a single element, replacing
+   * any prior selection (including multi-selection).
+   * Bypasses pointer event machinery; used by tests and
+   * by future load-selection flows.
+   *
+   * Passing null clears the selection entirely.
    *
    * @param {SVGElement | null} element
    */
   setSelection(element) {
     const resolved = element ? this._resolveTarget(element) : null;
-    if (resolved === this._selected) return;
+    if (resolved === this._selected && this._selectedSet.size <= 1) {
+      // Already the sole selection — no-op.
+      return;
+    }
     this._selected = resolved;
+    this._selectedSet = resolved ? new Set([resolved]) : new Set();
     this._renderHandles();
     this._onSelectionChange();
   }
 
   /**
-   * Delete the currently-selected element from the DOM.
-   * Fires `onChange`. No-op when no selection.
+   * Toggle an element in or out of the selection set.
+   * Used by shift+click. When the element is already
+   * selected, it's removed; when it isn't, it's added
+   * and becomes the new primary.
+   *
+   * Passing a non-selectable element (tspan resolves to
+   * its parent; defs / style / etc. reject entirely) is
+   * a no-op.
+   *
+   * @param {SVGElement} element
+   */
+  toggleSelection(element) {
+    const resolved = element ? this._resolveTarget(element) : null;
+    if (!resolved) return;
+    if (this._selectedSet.has(resolved)) {
+      this._selectedSet.delete(resolved);
+      // If we removed the primary, pick a new primary
+      // from whatever's left (or null if empty).
+      if (this._selected === resolved) {
+        const remaining = this._selectedSet.values().next().value;
+        this._selected = remaining || null;
+      }
+    } else {
+      this._selectedSet.add(resolved);
+      this._selected = resolved;
+    }
+    this._renderHandles();
+    this._onSelectionChange();
+  }
+
+  /**
+   * Delete every selected element from the DOM. Fires
+   * `onChange` exactly once regardless of how many
+   * elements were removed. No-op when nothing is
+   * selected.
    */
   deleteSelection() {
-    if (!this._selected) return;
-    // If the element has a parent, remove it. Root SVG
-    // isn't a valid selection target so this is defensive.
-    const parent = this._selected.parentNode;
-    if (parent && parent !== this._svg.parentNode) {
-      parent.removeChild(this._selected);
-      this._selected = null;
-      this._renderHandles();
-      this._onSelectionChange();
-      this._onChange();
+    if (this._selectedSet.size === 0) return;
+    let removed = 0;
+    for (const el of this._selectedSet) {
+      const parent = el.parentNode;
+      // Root SVG isn't a valid selection target so this
+      // check is defensive — in practice every selectable
+      // element has a real parent inside the SVG.
+      if (parent && parent !== this._svg.parentNode) {
+        parent.removeChild(el);
+        removed += 1;
+      }
     }
+    this._selected = null;
+    this._selectedSet = new Set();
+    this._renderHandles();
+    this._onSelectionChange();
+    if (removed > 0) this._onChange();
   }
 
   // ---------------------------------------------------------------
@@ -1186,6 +1347,13 @@ export class SvgEditor {
    * when the target is a `<text>` element (or a `<tspan>`
    * that resolves to its parent text). Other elements
    * ignore the gesture.
+   *
+   * When the target is part of a multi-selection, the
+   * set collapses to just the target before the edit
+   * opens. Rationale: double-click is a "focus this
+   * specific element" gesture; silently leaving other
+   * elements selected in the background would confuse
+   * the follow-up "what does Delete do now?" question.
    */
   _onDoubleClick(event) {
     const target = this._hitTest(event.clientX, event.clientY);
@@ -1193,6 +1361,10 @@ export class SvgEditor {
     if (target.tagName?.toLowerCase() !== 'text') return;
     event.stopPropagation();
     event.preventDefault();
+    if (this._selectedSet.size > 1) {
+      // Collapse to just this element.
+      this.setSelection(target);
+    }
     this.beginTextEdit(target);
   }
 
@@ -1204,8 +1376,10 @@ export class SvgEditor {
     // a resize drag rather than a move/select. Only fires
     // when there's already a selection, so a fresh click on
     // an unselected shape can't accidentally initiate a
-    // resize.
-    if (this._selected) {
+    // resize. Resize handles are shown only in single-
+    // selection mode (size === 1) so multi-selection
+    // skips this path.
+    if (this._selected && this._selectedSet.size === 1) {
       const role = this._hitTestHandle(
         event.clientX,
         event.clientY,
@@ -1218,23 +1392,41 @@ export class SvgEditor {
     }
     const target = this._hitTest(event.clientX, event.clientY);
     if (!target) {
-      // Click on empty space deselects.
-      this._clearSelection();
+      // Click on empty space — behavior depends on shift:
+      //   - plain: deselect everything
+      //   - shift: start a marquee (preserve current set
+      //     as the baseline; elements inside the marquee
+      //     are added/toggled relative to it)
+      if (event.shiftKey) {
+        event.stopPropagation();
+        this._beginMarquee(event);
+      } else {
+        this._clearSelection();
+      }
       return;
     }
     // Stop propagation so the SvgViewer's pan/zoom doesn't
     // also react. Without this, a click would start a pan
     // on the left panel via the sync callback.
     event.stopPropagation();
-    // Two cases:
-    //   1. Click on the already-selected element → start
-    //      drag. The existing selection stays as-is.
-    //   2. Click on a different element → select it. Drag
-    //      would require a second click; matches most
-    //      editors' click-to-select-first, click-to-drag
-    //      behavior and prevents accidental drags when
-    //      the user is just trying to select.
-    if (target === this._selected) {
+    // Shift+click toggles in/out of the set. Drag never
+    // starts from a shift+click — the gesture is
+    // deliberately "modify selection", not "move".
+    if (event.shiftKey) {
+      this.toggleSelection(target);
+      return;
+    }
+    // Plain click — three cases:
+    //   1. Click on a member of a multi-selection → start
+    //      a group drag. The existing set stays as-is;
+    //      the drag moves every element uniformly.
+    //   2. Click on the already-sole-selected element →
+    //      start a single-element drag.
+    //   3. Click on something else → replace selection.
+    //      Drag requires a second click — matches the
+    //      click-to-select-first, click-to-drag
+    //      convention and prevents accidental drags.
+    if (this._selectedSet.has(target)) {
       this._beginDrag(event);
     } else {
       this.setSelection(target);
@@ -1276,17 +1468,32 @@ export class SvgEditor {
   // ---------------------------------------------------------------
 
   /**
-   * Start a drag on the selected element. Captures the
+   * Start a drag on the selected element(s). Captures the
    * pointer so subsequent move events flow here even when
    * the pointer leaves the SVG bounds.
+   *
+   * When multi-selection is active, snapshots every
+   * element's positional attributes so the move handler
+   * can apply the drag delta uniformly to each. Elements
+   * whose tag has no dispatch (and therefore no snapshot)
+   * are silently excluded from the group drag — matches
+   * the single-element path which no-ops on unsupported
+   * tags.
    */
   _beginDrag(event) {
     if (!this._selected) return;
     const origin = this._screenToSvg(event.clientX, event.clientY);
-    const originAttrs = this._captureDragAttributes(this._selected);
-    if (!originAttrs) {
-      // Element isn't draggable (no supported attribute
-      // dispatch). Silently drop; selection stays.
+    // Build one entry per element in the set. Single-
+    // selection produces a one-entry array. Filter out
+    // elements with no supported dispatch — they won't
+    // move but the rest of the group will.
+    const entries = [];
+    for (const el of this._selectedSet) {
+      const attrs = this._captureDragAttributes(el);
+      if (attrs) entries.push({ el, originAttrs: attrs });
+    }
+    if (entries.length === 0) {
+      // Nothing draggable in the set. Silently drop.
       return;
     }
     this._drag = {
@@ -1294,7 +1501,11 @@ export class SvgEditor {
       pointerId: event.pointerId,
       startX: origin.x,
       startY: origin.y,
-      originAttrs,
+      entries,
+      // Keep single-element compatibility fields for
+      // tests and for any code that reads `originAttrs`
+      // directly — points at the primary's snapshot.
+      originAttrs: entries[0].originAttrs,
       committed: false,
     };
     try {
@@ -1338,6 +1549,13 @@ export class SvgEditor {
   }
 
   _onPointerMove(event) {
+    // Marquee takes precedence — if we're marqueeing,
+    // the same event stream is consumed by marquee
+    // update rather than drag.
+    if (this._marquee) {
+      this._updateMarquee(event);
+      return;
+    }
     if (!this._drag) return;
     if (event.pointerId !== this._drag.pointerId) return;
     const current = this._screenToSvg(event.clientX, event.clientY);
@@ -1364,6 +1582,12 @@ export class SvgEditor {
   }
 
   _onPointerUp(event) {
+    // Marquee is finalized here too — it runs as a
+    // separate pointer interaction from drag.
+    if (this._marquee) {
+      this._endMarquee(event);
+      return;
+    }
     if (!this._drag) return;
     if (event.pointerId !== this._drag.pointerId) return;
     const wasCommitted = this._drag.committed;
@@ -1386,27 +1610,338 @@ export class SvgEditor {
    * Cancel an in-flight drag without committing. Rolls
    * back to the original attribute values and releases
    * pointer capture. Used by detach().
+   *
+   * Group drags iterate every entry to restore each
+   * element independently; resize drags have only one
+   * element since resize handles only appear in single-
+   * selection mode.
    */
   _cancelDrag() {
     if (!this._drag) return;
     // Roll back to the snapshot. Dispatch by drag mode —
-    // move uses position attributes, resize uses dimension
-    // attributes.
+    // move uses position attributes (possibly multiple
+    // entries for group drag), resize uses dimension
+    // attributes (always one element).
     if (this._drag.mode === 'resize') {
       this._restoreResizeAttributes(
         this._selected,
         this._drag.originAttrs,
       );
     } else {
-      this._restoreDragAttributes(
-        this._selected,
-        this._drag.originAttrs,
-      );
+      const entries = this._drag.entries || [];
+      for (const entry of entries) {
+        this._restoreDragAttributes(entry.el, entry.originAttrs);
+      }
     }
     try {
       this._svg.releasePointerCapture(this._drag.pointerId);
     } catch (_) {}
     this._drag = null;
+  }
+
+  // ---------------------------------------------------------------
+  // Marquee selection
+  // ---------------------------------------------------------------
+
+  /**
+   * Start a marquee on shift+drag from empty space.
+   * Captures the origin in SVG root coords and snapshots
+   * the current selection set as the baseline. The rect
+   * element is lazily created on the first pointermove
+   * that crosses the min-drag threshold — a shift+click
+   * on empty space with no drag still clears to a pure
+   * click (no marquee residue).
+   */
+  _beginMarquee(event) {
+    const origin = this._screenToSvg(event.clientX, event.clientY);
+    this._marquee = {
+      pointerId: event.pointerId,
+      startX: origin.x,
+      startY: origin.y,
+      currentX: origin.x,
+      currentY: origin.y,
+      rect: null,
+      originalSet: new Set(this._selectedSet),
+    };
+    try {
+      this._svg.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  }
+
+  /**
+   * Update the marquee on pointermove. Lazily creates
+   * the rect element once the drag passes the min
+   * threshold. Updates the rect's geometry and the
+   * direction-dependent border style (solid for forward
+   * containment drag, dashed for reverse crossing drag).
+   *
+   * Returns true when a pointermove was consumed as
+   * marquee motion; false otherwise so callers know to
+   * fall through.
+   */
+  _updateMarquee(event) {
+    if (!this._marquee) return false;
+    if (event.pointerId !== this._marquee.pointerId) return false;
+    const current = this._screenToSvg(event.clientX, event.clientY);
+    this._marquee.currentX = current.x;
+    this._marquee.currentY = current.y;
+    const m = this._marquee;
+    const dxScreen = this._svgDistToScreenDist(
+      Math.abs(current.x - m.startX),
+    );
+    const dyScreen = this._svgDistToScreenDist(
+      Math.abs(current.y - m.startY),
+    );
+    // Below threshold — no visible rect yet, but the
+    // marquee state is live so pointerup can still
+    // distinguish click-with-shift from a real marquee.
+    if (
+      !m.rect &&
+      dxScreen < _MARQUEE_MIN_SCREEN &&
+      dyScreen < _MARQUEE_MIN_SCREEN
+    ) {
+      return true;
+    }
+    // Crossed threshold (or already alive) — render.
+    if (!m.rect) {
+      m.rect = this._createMarqueeRect();
+      this._ensureHandleGroup().appendChild(m.rect);
+    }
+    const bbox = this._marqueeBBox();
+    m.rect.setAttribute('x', String(bbox.x));
+    m.rect.setAttribute('y', String(bbox.y));
+    m.rect.setAttribute('width', String(bbox.width));
+    m.rect.setAttribute('height', String(bbox.height));
+    // Direction: forward = pointer strictly to the right
+    // AND strictly below origin → containment mode (solid).
+    // Anything else = crossing mode (dashed).
+    const forward =
+      current.x > m.startX && current.y > m.startY;
+    const stroke = forward ? '#4fc3f7' : '#7ee787';
+    const dashArray = forward
+      ? 'none'
+      : `${this._screenDistToSvgDist(4)},${this._screenDistToSvgDist(3)}`;
+    const fill = forward
+      ? 'rgba(79, 195, 247, 0.12)'
+      : 'rgba(126, 231, 135, 0.10)';
+    m.rect.setAttribute('stroke', stroke);
+    m.rect.setAttribute('stroke-dasharray', dashArray);
+    m.rect.setAttribute('fill', fill);
+    return true;
+  }
+
+  /**
+   * Finalize the marquee on pointerup. Computes the
+   * selection update based on drag direction:
+   *   - forward: elements fully contained → ADDED to
+   *     baseline (shift adds, not replaces)
+   *   - reverse: elements overlapping → ADDED to baseline
+   *
+   * In practice specs4 calls for the marquee to TOGGLE
+   * rather than ADD (so drag-selecting then drag-
+   * deselecting works). We add-only here — a
+   * tiny-scope decision; 3.2c.5's undo stack plus
+   * manual shift+click covers the remove case.
+   *
+   * Click-with-shift-without-drag (rect never rendered)
+   * is treated as a no-op on the current selection,
+   * matching "shift+click empty space" convention — it
+   * doesn't clear, doesn't add.
+   */
+  _endMarquee(event) {
+    if (!this._marquee) return;
+    if (event && event.pointerId !== this._marquee.pointerId) return;
+    const m = this._marquee;
+    const hadRect = !!m.rect;
+    // Tear down the rect regardless of whether a real
+    // selection update happened.
+    if (m.rect && m.rect.parentNode) {
+      m.rect.parentNode.removeChild(m.rect);
+    }
+    try {
+      this._svg.releasePointerCapture(m.pointerId);
+    } catch (_) {}
+    this._marquee = null;
+    if (!hadRect) {
+      // Shift+click without drag — no-op on selection.
+      return;
+    }
+    // Compute the final selection set: baseline ∪ hits.
+    const bbox = this._marqueeBBoxFor(m);
+    const forward = m.currentX > m.startX && m.currentY > m.startY;
+    const hits = this._marqueeHitTest(bbox, forward);
+    const next = new Set(m.originalSet);
+    for (const el of hits) next.add(el);
+    // Pick a primary. If the baseline was non-empty, keep
+    // its primary; otherwise use the first hit.
+    let primary = this._selected;
+    if (!primary || !next.has(primary)) {
+      primary = hits.length > 0 ? hits[0] : null;
+    }
+    this._selectedSet = next;
+    this._selected = primary;
+    this._renderHandles();
+    this._onSelectionChange();
+  }
+
+  /**
+   * Cancel an in-flight marquee without applying any
+   * selection changes. Used by detach(). Removes the
+   * rendered rect, releases pointer capture, nulls
+   * state.
+   */
+  _cancelMarquee() {
+    if (!this._marquee) return;
+    const m = this._marquee;
+    if (m.rect && m.rect.parentNode) {
+      m.rect.parentNode.removeChild(m.rect);
+    }
+    try {
+      this._svg.releasePointerCapture(m.pointerId);
+    } catch (_) {}
+    this._marquee = null;
+  }
+
+  /**
+   * Walk the SVG DOM collecting candidate elements for
+   * marquee hit-test. Direct children of the root SVG
+   * plus one level inside `<g>` groups. Deeper nesting
+   * is deliberately out of scope per specs4.
+   */
+  _marqueeCandidates() {
+    const out = [];
+    const rootChildren = Array.from(this._svg.children);
+    for (const child of rootChildren) {
+      if (!child.tagName) continue;
+      const tag = child.tagName.toLowerCase();
+      if (_NON_SELECTABLE_TAGS.has(tag)) continue;
+      if (child.classList && child.classList.contains(HANDLE_CLASS)) {
+        continue;
+      }
+      if (child.id === HANDLE_GROUP_ID) continue;
+      if (tag === 'g') {
+        // One level deeper.
+        for (const inner of Array.from(child.children)) {
+          if (!inner.tagName) continue;
+          const innerTag = inner.tagName.toLowerCase();
+          if (_NON_SELECTABLE_TAGS.has(innerTag)) continue;
+          if (_SELECTABLE_TAGS.has(innerTag) || innerTag === 'g') {
+            out.push(inner);
+          }
+        }
+        // The group itself is also selectable.
+        out.push(child);
+      } else if (_SELECTABLE_TAGS.has(tag)) {
+        out.push(child);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Run the marquee hit-test against candidate elements.
+   * Forward drags use containment (element fully inside
+   * marquee); reverse drags use crossing (any overlap).
+   *
+   * Returns candidates that pass in DOM order — stable
+   * for deterministic "first hit" primary selection.
+   */
+  _marqueeHitTest(marqueeBBox, forward) {
+    const hits = [];
+    for (const el of this._marqueeCandidates()) {
+      const elBBox = this._elementBBoxInSvgRoot(el);
+      if (!elBBox) continue;
+      const passes = forward
+        ? _bboxContains(marqueeBBox, elBBox)
+        : _bboxOverlaps(marqueeBBox, elBBox);
+      if (passes) hits.push(el);
+    }
+    return hits;
+  }
+
+  /**
+   * Compute an element's bounding box in SVG root coords.
+   * `getBBox` returns local coords; for elements inside
+   * transformed groups we map the four corners through
+   * the element's CTM.
+   */
+  _elementBBoxInSvgRoot(el) {
+    let bbox;
+    try {
+      bbox = el.getBBox?.();
+    } catch (_) {
+      return null;
+    }
+    if (!bbox) return null;
+    const tl = this._localToSvgRoot(el, bbox.x, bbox.y);
+    const br = this._localToSvgRoot(
+      el,
+      bbox.x + bbox.width,
+      bbox.y + bbox.height,
+    );
+    const tr = this._localToSvgRoot(
+      el,
+      bbox.x + bbox.width,
+      bbox.y,
+    );
+    const bl = this._localToSvgRoot(
+      el,
+      bbox.x,
+      bbox.y + bbox.height,
+    );
+    const xs = [tl.x, tr.x, bl.x, br.x];
+    const ys = [tl.y, tr.y, bl.y, br.y];
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+  }
+
+  /** Build the marquee <rect> element. Geometry filled
+   * in by the caller. Styling applied on each move based
+   * on drag direction. */
+  _createMarqueeRect() {
+    const ns = 'http://www.w3.org/2000/svg';
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('id', MARQUEE_ID);
+    rect.setAttribute('class', HANDLE_CLASS);
+    rect.setAttribute('pointer-events', 'none');
+    const sw = this._screenDistToSvgDist(1);
+    rect.setAttribute('stroke-width', String(sw));
+    return rect;
+  }
+
+  /** Axis-aligned bbox from the marquee's start and
+   * current points. Read from `this._marquee`. */
+  _marqueeBBox() {
+    return this._marqueeBBoxFor(this._marquee);
+  }
+
+  /** Axis-aligned bbox for a given marquee state
+   * object. Factored out so `_endMarquee` can pass the
+   * cleared snapshot rather than relying on
+   * `this._marquee` (which was nulled above it). */
+  _marqueeBBoxFor(m) {
+    const x = Math.min(m.startX, m.currentX);
+    const y = Math.min(m.startY, m.currentY);
+    const width = Math.abs(m.currentX - m.startX);
+    const height = Math.abs(m.currentY - m.startY);
+    return { x, y, width, height };
+  }
+
+  /** Convert an SVG-unit distance to screen pixels.
+   * Inverse of `_screenDistToSvgDist`. Used by the
+   * marquee threshold check. */
+  _svgDistToScreenDist(svgDist) {
+    if (svgDist === 0) return 0;
+    const per = this._screenDistToSvgDist(1);
+    return per > 0 ? svgDist / per : svgDist;
   }
 
   // ---------------------------------------------------------------
@@ -1497,16 +2032,34 @@ export class SvgEditor {
   }
 
   /**
-   * Apply a translation delta to the currently-dragging
-   * element. Uses the snapshot stored on `_drag.originAttrs`
-   * as the origin (so repeated pointermoves don't compound
-   * — each move is relative to the drag start, not the
-   * previous position).
+   * Apply a translation delta to every element in the
+   * current drag. Uses the per-element snapshots stored
+   * on `_drag.entries` so repeated pointermoves don't
+   * compound — each move is relative to the drag start,
+   * not the previous position.
+   *
+   * Single-element drags have one entry in the array;
+   * group drags have N. The math per element is
+   * identical to the single-element case — each element
+   * reads its own snapshot and writes its own attributes.
    */
   _applyDragDelta(dx, dy) {
-    if (!this._drag || !this._selected) return;
-    const el = this._selected;
-    const o = this._drag.originAttrs;
+    if (!this._drag) return;
+    const entries = this._drag.entries || [];
+    for (const entry of entries) {
+      this._applyDragDeltaToEntry(entry, dx, dy);
+    }
+  }
+
+  /**
+   * Apply a drag delta to a single entry (element +
+   * snapshot). Extracted from `_applyDragDelta` so the
+   * per-element logic stays in one place; the outer
+   * method just iterates.
+   */
+  _applyDragDeltaToEntry(entry, dx, dy) {
+    const el = entry.el;
+    const o = entry.originAttrs;
     switch (o.kind) {
       case 'xy':
         el.setAttribute('x', String(o.x + dx));
@@ -2169,8 +2722,9 @@ export class SvgEditor {
   }
 
   _clearSelection() {
-    if (!this._selected) return;
+    if (!this._selected && this._selectedSet.size === 0) return;
     this._selected = null;
+    this._selectedSet = new Set();
     this._renderHandles();
     this._onSelectionChange();
   }
@@ -2341,10 +2895,21 @@ export class SvgEditor {
   }
 
   /**
-   * Render the selection handles for the current selected
-   * element. Always draws a dashed bounding-box outline;
-   * for rect/circle/ellipse, also draws the per-shape
-   * resize handles at their appropriate positions.
+   * Render the selection handles for the current
+   * selection. Behavior depends on set size:
+   *
+   *   - Empty: nothing rendered (group cleared).
+   *   - Single: dashed bbox + per-shape resize handles
+   *     (rect corners, line endpoints, path vertices,
+   *     etc.).
+   *   - Multi: one dashed bbox per selected element, no
+   *     resize handles. Resize math only makes sense for
+   *     a single element; multi-selection is for "move
+   *     these together" and "delete these" operations.
+   *
+   * The primary element's bbox is rendered last in
+   * multi-selection mode so the "active" element is
+   * visually distinguishable if the overlays overlap.
    *
    * Drag-in-flight detection — during an active resize
    * drag, skip re-rendering to avoid churning the DOM on
@@ -2357,15 +2922,59 @@ export class SvgEditor {
    */
   _renderHandles() {
     const group = this._ensureHandleGroup();
-    // Clear prior contents.
+    // Clear prior contents. Preserve an in-flight marquee
+    // rect — it lives in this group too and would
+    // disappear otherwise.
+    const marqueeRect = this._marquee && this._marquee.rect;
     while (group.firstChild) {
       group.removeChild(group.firstChild);
     }
+    if (this._selectedSet.size === 0) {
+      // Nothing selected. Restore the marquee rect (if
+      // any) and bail.
+      if (marqueeRect) group.appendChild(marqueeRect);
+      return;
+    }
+    if (this._selectedSet.size > 1) {
+      // Multi-selection — bbox per element, no resize
+      // handles. Render non-primary elements first, then
+      // primary on top.
+      const others = [];
+      for (const el of this._selectedSet) {
+        if (el !== this._selected) others.push(el);
+      }
+      for (const el of others) {
+        this._renderBBoxOverlay(group, el, false);
+      }
+      if (this._selected) {
+        this._renderBBoxOverlay(group, this._selected, true);
+      }
+      if (marqueeRect) group.appendChild(marqueeRect);
+      return;
+    }
+    // Single selection — full handle set.
     if (!this._selected) return;
     const bbox = this._getSelectionBBox();
     if (!bbox) return;
+    this._renderBBoxOverlay(group, this._selected, true);
+    // Per-shape resize handles.
+    this._renderResizeHandles(group, this._selected, bbox);
+    if (marqueeRect) group.appendChild(marqueeRect);
+  }
+
+  /**
+   * Render a dashed bounding-box overlay for a single
+   * element. Used by both single-selection rendering
+   * and multi-selection rendering; the `isPrimary` flag
+   * controls styling (primary uses accent blue; non-
+   * primary uses a slightly muted shade so the user
+   * can see which element single-element operations
+   * would target).
+   */
+  _renderBBoxOverlay(group, element, isPrimary) {
+    const bbox = this._elementBBoxInSvgRoot(element);
+    if (!bbox) return;
     const ns = 'http://www.w3.org/2000/svg';
-    // Bounding-box dashed outline.
     const rect = document.createElementNS(ns, 'rect');
     rect.setAttribute('class', HANDLE_CLASS);
     rect.setAttribute('x', String(bbox.x));
@@ -2373,15 +2982,19 @@ export class SvgEditor {
     rect.setAttribute('width', String(bbox.width));
     rect.setAttribute('height', String(bbox.height));
     rect.setAttribute('fill', 'none');
-    rect.setAttribute('stroke', '#4fc3f7');
+    rect.setAttribute(
+      'stroke',
+      isPrimary ? '#4fc3f7' : '#7aa9c7',
+    );
     const strokeWidth = this._screenDistToSvgDist(1.5);
     rect.setAttribute('stroke-width', String(strokeWidth));
     const dashLen = this._screenDistToSvgDist(4);
-    rect.setAttribute('stroke-dasharray', `${dashLen},${dashLen}`);
+    rect.setAttribute(
+      'stroke-dasharray',
+      `${dashLen},${dashLen}`,
+    );
     rect.setAttribute('pointer-events', 'none');
     group.appendChild(rect);
-    // Per-shape resize handles.
-    this._renderResizeHandles(group, this._selected, bbox);
   }
 
   /**

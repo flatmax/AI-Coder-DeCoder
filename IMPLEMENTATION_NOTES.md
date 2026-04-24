@@ -1628,6 +1628,31 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.22 — Phase 3.2c.4 SvgEditor multi-selection + marquee — **delivered**
+
+Adds shift+click toggle, marquee selection (forward=containment, reverse=crossing), group drag, and multi-element delete. Per-element bounding-box rendering in multi-selection mode (no resize handles — those only make sense for single selection). Double-click on text in a multi-selection collapses to single + opens inline edit.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `_selectedSet: Set` alongside `_selected`. `_selected` is the "primary" for single-element operations; `_selectedSet` holds every selected element.
+  - `getSelectionSet()` returns a fresh Set copy each call.
+  - `toggleSelection(element)` adds/removes from set; updates primary.
+  - `setSelection` now clears the set and replaces with a single element.
+  - `deleteSelection` iterates the full set; fires onChange once.
+  - `_onPointerDown` branches on `event.shiftKey`: shift+click on element → toggle; shift+click on empty → begin marquee; plain click on set member → group drag; plain click elsewhere → replace selection.
+  - `_beginDrag` snapshots every element in `_selectedSet` via `entries` array. `_applyDragDelta` iterates entries. `_cancelDrag` restores every entry.
+  - Marquee machinery: `_beginMarquee`, `_updateMarquee`, `_endMarquee`, `_cancelMarquee`, `_marqueeCandidates`, `_marqueeHitTest`, `_elementBBoxInSvgRoot`, `_createMarqueeRect`, `_marqueeBBox`, `_marqueeBBoxFor`, `_svgDistToScreenDist`.
+  - `_renderHandles` dispatches by set size: empty→clear, single→full handles, multi→per-element bbox overlay via new `_renderBBoxOverlay(group, element, isPrimary)`.
+  - `_onDoubleClick` collapses multi-selection to the double-clicked text element before opening edit.
+  - Module-level helpers: `_bboxOverlaps`, `_bboxContains`, `_MARQUEE_MIN_SCREEN`, `MARQUEE_ID`.
+
+- `webapp/src/svg-editor.test.js` — 34 new tests across 7 describe blocks:
+  - **Shift+click** (6): add, remove, primary promotion, last-removal clears, plain click replaces, non-selectable no-op.
+  - **Rendering** (4): single → bbox + handles, multi → per-element bbox no handles, three-element → three bboxes, clearing removes all.
+  - **Group drag** (6): starts on set member, moves all uniformly, onChange once, mixed types, detach rolls back all, click-unselected collapses.
+  - **Delete** (3): removes all, keyboard removes all, onChange once.
+  - **Double-click on text** (1): collapses + opens edit.
+  - **Marquee** (10): shift+drag starts, shift+click no-op, forward containment, reverse crossing, adds to baseline, no-hits preserves, renders rect, below-threshold no rect, detach removes, scans `<g>` children.
+
 ### 5.21 — Phase 3.2c.3c SvgEditor inline text editing — **delivered**
 
 Double-clicking a `<text>` element opens a foreignObject-hosted textarea positioned at the element's bounding box. The textarea inherits the text's font size and color. Enter commits, Escape cancels, blur commits (user-friendly — accidental click-aways don't discard work). Only one edit can be active at a time. Completes the 3.2c editing surface for visible SVG content.
