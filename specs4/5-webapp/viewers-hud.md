@@ -75,6 +75,15 @@ Fixed footer with cumulative session totals — total, prompt in, completion out
 Delegates rendering to an embedded cache-tab component. When switching to the Cache sub-view, the embedded component receives a visibility call to refresh stale data.
 #### Cache Performance Header
 Summary at top with cache hit rate as a percentage label and a proportional bar. Prefers provider-cache-rate when available, falls back to local rate.
+#### Rebuild Button
+- A **🔄 Rebuild** button at the top-right of the cache body, above the performance header
+- Triggers a server-side cache tier redistribution via the rebuild RPC — see [cache-tiering.md — Manual Cache Rebuild](../3-llm/cache-tiering.md#manual-cache-rebuild)
+- Tooltip sells the outcome in user terms, not tier mechanics — e.g., "Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
+- States — idle (🔄 Rebuild), in-flight (⏳ Rebuilding…, disabled), cross-disabled while a concurrent refresh is loading
+- On success — toast the server's message string (includes before/after item counts and per-tier distribution) and refresh the cache view
+- On restricted (non-localhost) — info toast explaining the localhost-only policy
+- On error — error toast with the server's error text; view still refreshes so the user can see current state
+- Visible to all clients but the underlying RPC is localhost-only; remote collaborators who click receive the restricted-error toast rather than triggering the rebuild
 #### Layout
 - Filter input for fuzzy match
 - Size / Name sort toggle
@@ -194,3 +203,5 @@ Mode-aware labels — "Symbol Map" in code mode, "Doc Map" in document mode. Whe
 - Map-block modal dispatches to the correct index based on item key prefix, with cross-mode fallback when the primary index has no data
 - Terminal HUD is printed after every completed LLM response, whether the stream succeeded or was cancelled
 - Startup init HUD is printed exactly once per server start, after stability tracker initialization completes
+- Cache sub-view Rebuild button is visible to all clients but rejected server-side for non-localhost callers; the restricted-error toast path is exercised rather than silently allowing a client-side dispatch
+- Rebuild button is disabled during both its own in-flight state and a concurrent context-breakdown refresh — the two reads of tracker state never overlap

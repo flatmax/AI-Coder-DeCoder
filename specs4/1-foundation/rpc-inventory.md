@@ -32,7 +32,7 @@ Authoritative catalog of every RPC method in the system. Other specs reference m
 - Sessions — new session, load session into context, list sessions, get session messages, search history, get history status
 - Commit workflow — generate commit message, commit-all (background)
 - Reset — reset-to-HEAD (records system event)
-- Context inspection — context breakdown (tiers, categories, session totals), file map block (symbol or doc block for a path)
+- Context inspection — context breakdown (tiers, categories, session totals), file map block (symbol or doc block for a path), manual cache rebuild (wipe + redistribute tier assignments; localhost-only)
 - Snippets — current snippets (mode-aware), review-specific snippets
 - Review — check ready, start, end, get state, get file diff, delegates to commit graph
 - URL handling — detect, fetch, detect-and-fetch, get content, invalidate cache, remove fetched, clear cache

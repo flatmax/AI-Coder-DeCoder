@@ -110,6 +110,63 @@ For each tier:
 - Deselected file cleanup runs during stability update; affected tier marked broken
 - Stale entries for deleted files cleaned up in a dedicated phase
 
+## Manual Cache Rebuild
+
+A user-initiated disruptive operation that wipes all tier assignments (except history) and redistributes using the reference-graph clustering algorithm. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
+
+### Motivation
+
+Normal operation grows the active tier with file entries as users select files, and those entries only graduate to L3 via the standard N-value progression across multiple request cycles. When many files are selected at once (e.g., loading a large working set at session start), the active tier can be dominated by full-content entries that take many requests to graduate. Rebuild immediately redistributes into L0–L3 using the same clustering algorithm as startup initialization, giving users control over cache layout without waiting for natural graduation.
+
+### Sequence
+
+Atomic from the RPC caller's perspective:
+
+- Preserve history entries in the current tracker (history graduation is controlled separately below)
+- Wipe everything else — system, symbol, doc, file, URL entries
+- Mark all tiers broken so any follow-up cascade can freely rebalance
+- Load content for selected files into file context so real hashes and token counts can be computed
+- Re-initialize from the reference graph — every indexed file is placed as a symbol or doc entry across L0–L3 via clustering, using the mode-appropriate key prefix
+- Measure tokens — replace placeholder counts from init with real counts derived from formatted blocks
+- **Swap selected files from index entries to full-content file entries at the same tier** — enforces the "never appears twice" invariant; selected files become full-content file entries in cached tiers rather than landing in active
+- **Distribute orphan selected files** — selected files not present in the primary index (non-source files like markdown, JSON, config, images) are bin-packed across L1/L2/L3 by current tier token count. Without this step, orphans would default to active and defeat the purpose of rebuild. L0 is excluded as a distribution target — L0 must be earned via promotion or explicit seeding
+- Re-seed the system prompt into L0
+- Re-seed cross-reference items if cross-reference mode is active
+- **Graduate history via piggyback** — rebuild is treated as a disruptive event equivalent to L3 already being rebuilt this cycle, which unlocks the piggyback path. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3 with L3's entry N
+- Mark the tracker as initialized so subsequent chat requests skip the lazy-init path
+
+### What Rebuild Does Not Do
+
+- **Does not run the stability update cascade.** The deterministic placement computed during rebuild is the final state. Running the cascade would demote underfilled tiers and undo the careful placement. The next real chat request runs the cascade normally and rebuilt tiers behave identically to any other tier state.
+- **Does not change file selection.** The user's selected-files list is untouched; only how those selections are tracked in tiers changes.
+- **Does not change session state.** History content, session ID, and review state are preserved.
+- **Does not persist.** Like startup initialization, the rebuilt state lives only in memory and is recomputed on the next server start.
+
+### Orphan File Handling
+
+The primary index in code mode contains only files the language parsers recognize. Selected markdown, JSON, config, and other non-source files are not in this index. Without special handling they bypass tier placement entirely and land in active. Rebuild's orphan distribution pass places them in L1/L2/L3 via the same bin-packing used for clustered initialization, tracked by current tier token count so the distribution stays balanced.
+
+The symmetric situation applies in document mode — source files selected alongside documents become orphans in the doc index and receive the same treatment.
+
+### History Graduation Detail
+
+Rebuild is treated as equivalent to "L3 is already being rebuilt this cycle", matching the piggyback condition in [history graduation](#history-graduation). This lets rebuild preempt the normal cache-target-threshold wait and graduate history immediately. The verbatim window walks newest → oldest, accumulating tokens until the next message would exceed the cache target. Everything newer stays in active; everything older graduates to L3.
+
+When the cache target is zero (history stays in active permanently), no history graduates regardless of rebuild.
+
+### Response Shape
+
+Rebuild returns a status dict with per-tier counts, a file-specific tier count (how many file entries landed in each tier), item counts before and after, and a human-readable summary string suitable for a toast. On failure returns an error dict — rebuild is all-or-nothing from the caller's perspective, though the next chat request's stability update repairs any partial state the failure might have left.
+
+### When to Use Rebuild
+
+- After selecting a large working set at the start of a session, to avoid many graduation cycles
+- After a mode switch that populated the tracker from an empty state
+- When the cache viewer shows most content in active and the user wants to force redistribution
+- For debugging tier placement — rebuild reproduces a fresh initialization state
+
+Rebuild is not needed during normal use. Tiers evolve correctly through the standard stability cycle. It is a user-facing convenience, not a required maintenance step.
+
 ## Cross-Reference Mode
 
 - User toggle — primary mode keeps its index; the *other* index's file blocks are added alongside
@@ -209,3 +266,7 @@ When a file is in active context, its index entry is excluded from all tiers to 
 - Ripple cascade propagates only into broken tiers
 - Anchored items have frozen N
 - Post-init measurement replaces placeholder tokens with real counts before any tier display
+- Manual rebuild preserves history entries and wipes everything else before re-initializing; deterministic placement is the final state, no follow-up cascade runs
+- Manual rebuild swaps selected files from index entries to file entries at the same tier; selected files never land in active after rebuild
+- Manual rebuild distributes orphan selected files (non-indexed) across L1/L2/L3, never into active or L0
+- Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape
