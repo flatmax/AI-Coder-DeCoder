@@ -1690,15 +1690,39 @@ Notes from delivery:
 
 - **Scroll-to-edit highlight duration.** 3 seconds, per specs4. Long enough that the user sees where the edit landed; short enough that stale highlights don't clutter the editor. The timer is cleared on a new highlight or on file switch.
 
-Open carried over for Phase 3.1 follow-ups:
+### 5.8 — Phase 3.1b Markdown preview — **delivered**
 
-- **3.1b — Markdown preview.** Separate Marked instance (markedSourceMap) with source-line annotation injection. Split editor/preview layout on toggle. Bidirectional scroll sync via data-source-line anchors. Image resolution via Repo.get_file_base64 for binary images and Repo.get_file_content for SVGs (injected as data URIs). Relative path resolution against current file's directory. KaTeX math via raw-import CSS. The Preview button floats on the right panel when preview mode is active so the user can exit from where they're reading.
+Split-view live markdown preview for `.md` and `.markdown` files, with bidirectional scroll sync, image resolution, and preview-pane link navigation.
+
+Delivered across three passes:
+
+**Step 2a — toggle + live rendering.** Preview button on markdown files, split layout on toggle, inline diff on the editor side, live markdown rendering via the separate `markedSourceMap` instance from `markdown-preview.js` (created in Layer 5 alongside the pure helpers). Content flows through `_updatePreview` on every content-change event. Auto-exit when switching to a non-markdown file.
+
+**Step 2b — scroll sync + KaTeX CSS.** Bidirectional scroll sync via `data-source-line` anchors injected by `renderMarkdownWithSourceMap`. `_collectPreviewAnchors` dedupes first-seen-per-line and filters for monotonic `offsetTop` (nested containers can have children with earlier positions than their outer block). Binary search + linear interpolation via `_mapLineToOffsetTop` / `_mapOffsetTopToLine`. Scroll-lock mutex (`_scrollLock` + `_scrollLockTimer`) prevents feedback loops — auto-releases after 120ms, which covers Monaco's smooth-scroll duration without suppressing genuine user scrolling. KaTeX CSS imported as raw string via Vite's `?raw` loader, injected into shadow root with a sentinel fallback for environments where the import doesn't resolve (vitest's default resolver). Editor scroll listener attached only in preview mode via `_refreshEditorScrollListener` so non-markdown files don't pay for scroll-sync machinery.
+
+**Step 2c — image resolution + link navigation.** Post-render scan of `<img>` tags in the preview pane. Absolute URLs (`data:`, `blob:`, `http://`, `https://`) pass through. Relative paths are percent-decoded (to undo `_encodeImagePaths`'s space encoding), resolved against the current file's directory via `resolveRelativePath`, and fetched in parallel. SVG files use `Repo.get_file_content` + URL-encoded data URI (preserves internal relative refs, unlike base64); raster images use `Repo.get_file_base64` which already returns a ready data URI. Failed loads degrade gracefully — alt text indicates the problem, image dimmed via opacity. A generation counter (`_imageResolveGeneration`) bumped on every `_updatePreview` call discards stale fetches whose DOM writes would otherwise clobber fresher content. Preview pane click listener intercepts `<a>` clicks with relative `href`, resolves the path, and dispatches `navigate-file` events. Absolute URLs, fragment-only refs, and scheme-qualified URLs (`mailto:`, `tel:`, etc.) pass through to browser defaults.
+
+Design points pinned by tests:
+
+- **Dual Marked instances.** `markedChat` (chat panel) and `markedSourceMap` (preview) share KaTeX math but have completely separate renderer overrides. `markedSourceMap` injects `data-source-line` attributes on block-level elements; `markedChat` doesn't. Keeping them separate means preview-specific logic never affects chat rendering.
+
+- **Generation counter for stale fetches.** Without it, a slow image RPC from keystroke N could overwrite an img's src after keystroke N+1 populated the DOM with a different image. Every `_updatePreview` bumps the counter; stale DOM writes check `generation !== this._imageResolveGeneration` before writing and bail.
+
+- **SVG inline via URL-encoding, not base64.** Larger output but preserves searchability in devtools and — more importantly — lets relative refs *inside* the SVG work after data-URI injection. Base64 would break those. Matches specs4/5-webapp/diff-viewer.md's explicit "SVG files fetched as text and injected as data URIs with URL-encoded content" rule.
+
+- **`.closest('a')` in the click handler, not `target.tagName === 'A'`.** Users click on `<em>` / `<strong>` inside links; `.closest()` walks up to find the anchor. Without it, clicking bold text inside a link would fall through to browser default navigation.
+
+- **`preventDefault()` only fires when we're handling the click.** Ignored-click tests (absolute URL, fragment-only, mailto) assert `ev.defaultPrevented === false` so we're not silently breaking browser defaults for out-of-scope clicks.
+
+- **KaTeX CSS fallback sentinel.** Vitest's default module resolver doesn't understand Vite's `?raw` suffix — the import returns `undefined` in tests. Without a fallback, `_ensureKatexCss` would bail early at the `typeof` check and the shadow DOM would never get the marker element, breaking tests. The fallback is a one-line CSS comment — production gets real KaTeX styles, tests get the sentinel, the injection path is always exercised.
+
+Open carried over for Phase 3.1 follow-ups:
 
 - **3.1c — TeX preview.** Depends on Repo's compile_tex_preview RPC. Save-triggered (not keystroke) since compilation is subprocess-bound. KaTeX client-side math rendering via sentinel comments. Two-pass anchor-and-interpolation scroll sync (structural anchor extraction → block-element interpolation → back-to-front attribute injection). Availability check hides Preview button on .tex/.latex when make4ht isn't installed.
 
 - **3.1d — LSP integration.** Four Monaco providers: hover, definition, references, completions. Each dispatches to the corresponding Repo.lsp_* RPC. Coordinate system is already 1-indexed on both sides (Monaco's convention, specs4's convention); no conversion needed. Cross-file go-to-definition already wired via the code-editor-service patch; this adds the provider side.
 
-- **3.1e — Markdown link provider.** Monaco LinkProvider for `.md` language. Matches `[text](relative-path)` patterns, skips absolute URLs and `#` anchors. Maps matched links to `ac-navigate:///` URIs; a companion LinkOpener intercepts that scheme and dispatches `navigate-markdown-link` events. Preview pane also intercepts clicks on `<a>` elements with relative `href` attributes, resolving the same way. Path resolution via `_resolveRelativePath` helper against current file's directory.
+- **3.1e — Markdown link provider.** Monaco LinkProvider for `.md` language. Matches `[text](relative-path)` patterns, skips absolute URLs and `#` anchors. Maps matched links to `ac-navigate:///` URIs; a companion LinkOpener intercepts that scheme and dispatches `navigate-markdown-link` events. The preview pane's click-based link navigation is already delivered in 3.1b — 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also works.
 
 ### 5.6 — Phase 3 groundwork Viewer background routing — **delivered**
 

@@ -73,7 +73,10 @@ import { LitElement, css, html } from 'lit';
 // effects (worker env, MATLAB registration) must run
 // before any editor construction.
 import { languageForPath, monaco } from './monaco-setup.js';
-import { renderMarkdownWithSourceMap } from './markdown-preview.js';
+import {
+  renderMarkdownWithSourceMap,
+  resolveRelativePath,
+} from './markdown-preview.js';
 import { SharedRpc } from './rpc.js';
 
 // KaTeX CSS — imported as a raw string via Vite's ?raw
@@ -434,6 +437,14 @@ export class DiffViewer extends LitElement {
     this._onContentChange = this._onContentChange.bind(this);
     this._onHeadMutation = this._onHeadMutation.bind(this);
     this._onEditorScroll = this._onEditorScroll.bind(this);
+    this._onPreviewClick = this._onPreviewClick.bind(this);
+    // Image-resolution generation counter. Bumped on
+    // every _updatePreview call so in-flight fetches from
+    // a previous render can detect they're stale and skip
+    // DOM writes. Without this, rapid keystrokes produce
+    // a race where a slow fetch from render N overwrites
+    // the DOM populated by render N+1.
+    this._imageResolveGeneration = 0;
   }
 
   // ---------------------------------------------------------------
@@ -1103,6 +1114,13 @@ export class DiffViewer extends LitElement {
       // Defensive log in case something else throws.
       console.error('[diff-viewer] preview render failed', err);
     }
+    // Bump generation and resolve relative image refs.
+    // Image resolution is async (RPC fetches) and
+    // fire-and-forget; the generation check inside the
+    // resolver discards stale DOM writes from earlier
+    // renders.
+    this._imageResolveGeneration += 1;
+    this._resolvePreviewImages(this._imageResolveGeneration);
   }
 
   /**
@@ -1123,6 +1141,12 @@ export class DiffViewer extends LitElement {
       this._onPreviewScroll,
       { passive: true },
     );
+    // Relative-link click interception — same lifecycle
+    // as scroll sync (only relevant in preview mode).
+    this._previewPane.addEventListener(
+      'click',
+      this._onPreviewClick,
+    );
     // Scroll listener on the editor side too — scope this
     // attach to preview mode since the listener is only
     // meaningful here.
@@ -1135,6 +1159,12 @@ export class DiffViewer extends LitElement {
         this._previewPane.removeEventListener(
           'scroll',
           this._onPreviewScroll,
+        );
+      } catch (_) {}
+      try {
+        this._previewPane.removeEventListener(
+          'click',
+          this._onPreviewClick,
         );
       } catch (_) {}
     }
@@ -1348,6 +1378,187 @@ export class DiffViewer extends LitElement {
     } catch (_) {
       return 0;
     }
+  }
+
+  /**
+   * Resolve relative image refs in the rendered preview.
+   * Runs as a post-processing step after _updatePreview;
+   * the `generation` argument lets us discard stale
+   * fetches when a newer render has already landed.
+   *
+   * Resolution rules (spec-mandated):
+   *   - Skip absolute URLs (http, https, data, blob)
+   *   - Decode percent-encoded characters (undoes
+   *     encodeImagePaths that renderMarkdownWithSourceMap
+   *     applied for marked compatibility)
+   *   - Resolve relative path against the current file's
+   *     directory
+   *   - SVG files fetched as text via Repo.get_file_content
+   *     and injected as data:image/svg+xml;charset=utf-8,…
+   *   - Other images fetched via Repo.get_file_base64
+   *     which already returns a data URI
+   *   - Failed loads degrade gracefully: alt text
+   *     indicates the problem, image dimmed via opacity
+   */
+  async _resolvePreviewImages(generation) {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file || !this._previewPane) return;
+    const imgs = this._previewPane.querySelectorAll('img');
+    if (imgs.length === 0) return;
+    const call = this._getRpcCall();
+    if (!call) return;
+    // Resolve in parallel; each promise settles
+    // independently so one failure doesn't block other
+    // images.
+    const tasks = [];
+    for (const img of imgs) {
+      const src = img.getAttribute('src') || '';
+      if (!src) continue;
+      if (this._isAbsoluteUrl(src)) continue;
+      tasks.push(this._resolveOneImage(img, src, file, call, generation));
+    }
+    // No need to await Promise.all — fire-and-forget is
+    // correct here, each task updates its own img when
+    // ready.
+    Promise.all(tasks).catch(() => {
+      // Individual failures already handled inside
+      // _resolveOneImage; this catch is purely defensive
+      // in case the gather itself throws.
+    });
+  }
+
+  async _resolveOneImage(img, src, file, call, generation) {
+    let relPath;
+    try {
+      // Decode percent-encoding first — the preview
+      // renderer encoded spaces as %20 for marked
+      // compatibility, but Repo RPCs want the literal
+      // filesystem path.
+      relPath = decodeURIComponent(src);
+    } catch (_) {
+      relPath = src;
+    }
+    const resolved = resolveRelativePath(file.path, relPath);
+    if (!resolved || this._isAbsoluteUrl(resolved)) return;
+    const isSvg = resolved.toLowerCase().endsWith('.svg');
+    try {
+      let dataUri;
+      if (isSvg) {
+        const result = await call['Repo.get_file_content'](resolved);
+        const text = this._extractRpcContent(result);
+        if (!text) {
+          this._markImageMissing(img, resolved, generation);
+          return;
+        }
+        dataUri =
+          'data:image/svg+xml;charset=utf-8,' +
+          encodeURIComponent(text);
+      } else {
+        const result = await call['Repo.get_file_base64'](resolved);
+        dataUri = this._extractBase64Uri(result);
+        if (!dataUri) {
+          this._markImageMissing(img, resolved, generation);
+          return;
+        }
+      }
+      if (generation !== this._imageResolveGeneration) return;
+      img.setAttribute('src', dataUri);
+    } catch (err) {
+      this._markImageFailed(img, resolved, err, generation);
+    }
+  }
+
+  /**
+   * Extract the data URI from a Repo.get_file_base64
+   * response. Handles the same three shapes as
+   * _extractRpcContent — plain string, object with a
+   * `data_uri` field, or jrpc-oo single-key envelope.
+   */
+  _extractBase64Uri(result) {
+    if (typeof result === 'string') return result;
+    if (result && typeof result === 'object') {
+      if (typeof result.data_uri === 'string') return result.data_uri;
+      if (typeof result.content === 'string') return result.content;
+      const keys = Object.keys(result);
+      if (keys.length === 1) {
+        return this._extractBase64Uri(result[keys[0]]);
+      }
+    }
+    return '';
+  }
+
+  _isAbsoluteUrl(url) {
+    if (typeof url !== 'string') return false;
+    return (
+      url.startsWith('data:') ||
+      url.startsWith('blob:') ||
+      url.startsWith('http://') ||
+      url.startsWith('https://')
+    );
+  }
+
+  _markImageMissing(img, path, generation) {
+    if (generation !== this._imageResolveGeneration) return;
+    img.setAttribute('alt', `[Image not found: ${path}]`);
+    img.style.opacity = '0.4';
+  }
+
+  _markImageFailed(img, path, err, generation) {
+    if (generation !== this._imageResolveGeneration) return;
+    const message = err?.message || 'unknown error';
+    img.setAttribute(
+      'alt',
+      `[Failed to load: ${path} — ${message}]`,
+    );
+    img.style.opacity = '0.4';
+  }
+
+  /**
+   * Intercept clicks on relative <a href> elements in
+   * the preview pane. Absolute URLs (http, https, mailto,
+   * file, etc.) and fragment-only refs pass through to
+   * the browser's default behavior. Relative paths
+   * resolve against the current file's directory and
+   * dispatch navigate-file events for the app shell to
+   * route.
+   */
+  _onPreviewClick(event) {
+    const anchor = event.target?.closest?.('a');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (!href) return;
+    if (this._isAbsoluteUrl(href)) return;
+    if (href.startsWith('#')) return;
+    // Absolute-path refs starting with / fall through to
+    // the browser; the repo has no concept of root-anchored
+    // links.
+    if (href.startsWith('/')) return;
+    // mailto:, tel:, etc. — anything with a scheme prefix.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    let relPath;
+    try {
+      relPath = decodeURIComponent(href);
+    } catch (_) {
+      relPath = href;
+    }
+    // Strip fragment — navigate-file carries just the path.
+    const hashIdx = relPath.indexOf('#');
+    const pathPart =
+      hashIdx >= 0 ? relPath.slice(0, hashIdx) : relPath;
+    const resolved = resolveRelativePath(file.path, pathPart);
+    if (!resolved || this._isAbsoluteUrl(resolved)) return;
+    event.preventDefault();
+    this.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: { path: resolved },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _onContentChange() {
