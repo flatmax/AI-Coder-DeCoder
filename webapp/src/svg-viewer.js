@@ -66,6 +66,7 @@ import { LitElement, css, html } from 'lit';
 import svgPanZoom from 'svg-pan-zoom';
 
 import { SharedRpc } from './rpc.js';
+import { SvgEditor } from './svg-editor.js';
 
 /**
  * Default empty SVG shown when a panel has no content
@@ -290,6 +291,15 @@ export class SvgViewer extends LitElement {
     // mutex pattern — same as markdown preview's scroll
     // sync in 3.1b.
     this._syncingPanZoom = false;
+    // SvgEditor instance attached to the right panel's SVG.
+    // Handles element selection, drag, resize, etc. Null
+    // when no file is open or when the SVG hasn't been
+    // injected yet. Disposed before re-injection so DOM
+    // references don't leak across file switches.
+    this._editor = null;
+    // Bound editor change handler — syncs edited SVG back
+    // to the file's modified content and recomputes dirty.
+    this._onEditorChange = this._onEditorChange.bind(this);
     // Bound handlers for add/remove symmetry.
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onLeftPan = this._onLeftPan.bind(this);
@@ -310,6 +320,7 @@ export class SvgViewer extends LitElement {
 
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
+    this._disposeEditor();
     this._disposePanZoom();
     super.disconnectedCallback();
   }
@@ -512,6 +523,7 @@ export class SvgViewer extends LitElement {
     if (this._activeIndex < 0) {
       this._lastLeftContent = null;
       this._lastRightContent = null;
+      this._disposeEditor();
       this._disposePanZoom();
       return;
     }
@@ -543,18 +555,112 @@ export class SvgViewer extends LitElement {
       changed = true;
     }
     if (changed) {
-      // Right panel gets preserveAspectRatio="none" so a
-      // future SvgEditor (3.2c) has sole viewBox authority
-      // — otherwise the browser's aspect-ratio fitting
-      // fights with editor coordinate math. Applied via
-      // attribute on the root <svg> element. Left panel
-      // keeps the default (preserveAspectRatio="xMidYMid
-      // meet") since it's a read-only reference.
+      // Right panel gets preserveAspectRatio="none" so the
+      // SvgEditor has sole viewBox authority — otherwise
+      // the browser's aspect-ratio fitting fights with
+      // editor coordinate math. Applied via attribute on
+      // the root <svg> element. Left panel keeps the
+      // default (preserveAspectRatio="xMidYMid meet") since
+      // it's a read-only reference.
       const rightSvg = rightContainer.querySelector('svg');
       if (rightSvg) {
         rightSvg.setAttribute('preserveAspectRatio', 'none');
       }
+      // Dispose any prior editor before re-init — the old
+      // editor's SVG reference is about to become stale.
+      this._disposeEditor();
       this._initPanZoom(leftContainer, rightContainer);
+      this._initEditor(rightSvg);
+    }
+  }
+
+  /**
+   * Attach an SvgEditor to the right panel's SVG. The
+   * editor shares the panel with the pan-zoom instance —
+   * pan-zoom handles viewport navigation (wheel zoom,
+   * drag-pan on empty space); the editor handles element
+   * selection. When the editor's hit-test returns a real
+   * element, its pointerdown handler stops propagation so
+   * pan-zoom doesn't start a pan. Empty-space clicks fall
+   * through and pan-zoom takes over.
+   */
+  _initEditor(rightSvg) {
+    if (!rightSvg) return;
+    try {
+      this._editor = new SvgEditor(rightSvg, {
+        onChange: this._onEditorChange,
+      });
+      this._editor.attach();
+    } catch (err) {
+      console.warn('[svg-viewer] editor init failed', err);
+      this._editor = null;
+    }
+  }
+
+  /**
+   * Detach and null the editor. Safe to call when no
+   * editor exists.
+   */
+  _disposeEditor() {
+    if (!this._editor) return;
+    try {
+      this._editor.detach();
+    } catch (_) {
+      // Already detached or SVG disposed — harmless.
+    }
+    this._editor = null;
+  }
+
+  /**
+   * Editor change callback — fires after any mutation
+   * (currently delete; 3.2c.2+ will add move/resize).
+   * Serialises the current right-panel SVG back to the
+   * file's `modified` field and recomputes dirty state.
+   * Temporarily removes the handle overlay group during
+   * serialisation so it doesn't leak into saved content.
+   */
+  _onEditorChange() {
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    const rightContainer =
+      this.shadowRoot?.querySelector('.pane-right .svg-container');
+    if (!rightContainer) return;
+    const rightSvg = rightContainer.querySelector('svg');
+    if (!rightSvg) return;
+    // Detach the handle group before serialising so the
+    // `<g id="svg-editor-handles">` chrome doesn't end up
+    // in saved content. Re-attach afterwards so the user's
+    // selection indicator stays visible.
+    const handleGroup = rightSvg.querySelector('#svg-editor-handles');
+    let parent = null;
+    let nextSibling = null;
+    if (handleGroup) {
+      parent = handleGroup.parentNode;
+      nextSibling = handleGroup.nextSibling;
+      parent.removeChild(handleGroup);
+    }
+    let html;
+    try {
+      html = rightContainer.innerHTML;
+    } finally {
+      // Restore regardless of throw.
+      if (handleGroup && parent) {
+        if (nextSibling) {
+          parent.insertBefore(handleGroup, nextSibling);
+        } else {
+          parent.appendChild(handleGroup);
+        }
+      }
+    }
+    if (html !== file.modified) {
+      file.modified = html;
+      // Keep the injection cache in sync so a future
+      // `_injectSvgContent` call (on file switch) doesn't
+      // treat this content as changed and re-inject the
+      // same bytes we just read.
+      this._lastRightContent = html;
+      this._recomputeDirtyCount();
     }
   }
 

@@ -1628,6 +1628,51 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.13 — Phase 3.2c.1 SvgEditor foundation + selection — **delivered**
+
+Introduces the `SvgEditor` class and wires it into the right panel of `SvgViewer`. First sub-phase of 3.2c — foundation layer for visual editing. No move/resize/vertex-edit yet; those come in 3.2c.2. Coexists with pan/zoom — pan/zoom handles viewport navigation, editor handles element selection.
+
+- `webapp/src/svg-editor.js` — new standalone class (not a Lit component). Operates on an externally-provided `<svg>` element. Responsibilities:
+  - Pointer-based click hit-testing via `elementsFromPoint` (shadow-DOM aware via `getRootNode().elementsFromPoint`). Filters out handle overlay (`svg-editor-handle` class, `svg-editor-handles` group id), the root SVG itself, non-visual tags (`defs`, `style`, `metadata`, `title`, `desc`, `filter`, gradients, `clipPath`, `mask`, `marker`, `pattern`, `symbol`), and elements outside the SVG subtree.
+  - Single-element selection via `setSelection(el)`. Selection fires `onSelectionChange` callback. Same-element no-op.
+  - `<tspan>` → parent `<text>` resolution. Click targets inside text runs resolve to the whole text element, not the tspan child.
+  - Handle overlay group rendered as `<g id="svg-editor-handles">` at the end of the root SVG. For 3.2c.1 contains only a dashed bounding-box rect; 3.2c.2 will add corner/edge/vertex handles. Group has `pointer-events="none"` so empty-space clicks fall through to content.
+  - Coordinate math helpers: `_screenToSvg` (invert CTM), `_localToSvgRoot` (compose inverse of root CTM with element's CTM), `_screenDistToSvgDist` (for handle size constancy under zoom), `_getHandleRadius` (handle visual radius in SVG units).
+  - Keyboard: Escape clears selection (only consumes event when something is selected, otherwise lets it pass to textareas). Delete/Backspace remove the selected element (only consumes event when selected).
+  - `attach()`/`detach()` — caller owns the lifecycle. Attach is idempotent. Detach clears selection and removes event listeners.
+  - `deleteSelection()` — public API for programmatic delete. Fires `onChange` callback.
+- `webapp/src/svg-editor.test.js` — 41 tests across 10 describe blocks: construction (requires SVG, accepts SVG, exports constants, exports tag sets), attach/detach (wiring, idempotence, cleanup), setSelection (programmatic, onSelectionChange, clearing, same-element no-op, tspan resolution, non-selectable rejection), handle rendering (group creation, last-child ordering, handle class, clearing on deselect, persistence across selection, re-attach reuses existing group), pointer dispatch (hit-test called, selection on hit, deselect on empty-space, non-primary button ignored, stopPropagation on hit, no stopPropagation on miss), hit-test filtering (handle class, handle group id, root SVG, non-selectable tags, tspan resolution, outside-SVG elements), keyboard (Escape clears, Escape no-op without selection, Delete removes, Backspace removes, Delete without selection doesn't preventDefault, onChange fires, detached editor ignores keys), deleteSelection (removes element, clears selection, no-op without selection, fires onSelectionChange), coordinate helpers (identity CTM pass-through, positive distances, handle radius positive).
+- `webapp/src/svg-viewer.js` — integration:
+  - Import `SvgEditor`
+  - `_editor` field, `_onEditorChange` bound handler in constructor
+  - `_initEditor(rightSvg)` called after `_initPanZoom` in `_injectSvgContent` — creates editor on the right panel's SVG
+  - `_disposeEditor()` — detaches and nulls. Called before re-injection, on component disconnect, and as part of file close/switch flow
+  - `_onEditorChange()` — temporarily removes the handle group from the right panel's SVG before reading `innerHTML`, restores in a `finally`. Updates `file.modified` and recomputes dirty count. Keeps `_lastRightContent` in sync so the next file-switch injection doesn't treat the just-read content as "changed"
+- `webapp/src/svg-viewer.test.js` — new `SvgViewer SvgEditor integration` describe block with 8 tests: editor created on open, editor's root is the right panel's SVG (not left), editor disposed on close, editor disposed+recreated on file switch, editor disposed on disconnect, change callback syncs modified content, handle group stripped from serialized content, editor init failure doesn't break viewer.
+
+Design points pinned by tests:
+
+- **Editor and pan-zoom coexist on the right panel.** Pan-zoom handles wheel zoom and drag-on-empty-space panning; the editor handles element selection. The editor's `pointerdown` handler stops propagation when it hits a real element, preventing pan-zoom from initiating a pan. Empty-space clicks (hit test returns null) don't stop propagation, letting pan-zoom take over. Pinned by `stops propagation on element hit` and `does not stop propagation on empty-space click`.
+
+- **tspan → text resolution is both in hit-test AND setSelection.** The hit-test resolution catches pointer events; the setSelection resolution catches programmatic calls (e.g., from a future "select by ID" feature or a load-selection-from-undo-stack flow). Pinned by `tspan selection resolves to parent text` (programmatic) and `resolves tspan to parent text` (hit-test).
+
+- **Handle group is stripped from saved content.** Serializing `innerHTML` would otherwise leak `<g id="svg-editor-handles">...</g>` into the file. The `_onEditorChange` handler temporarily removes the group, reads innerHTML, then restores. Pinned by `editor change strips handle group from serialized content` which verifies both that the saved content is clean AND that the handle group is back in the live DOM.
+
+- **Non-selectable tags are filtered at both hit-test AND setSelection.** `defs`, `style`, `filter`, gradients — clicking one silently resolves to null (or to a parent selectable if any). Setting one programmatically also yields null. Pinned by `non-selectable element selection returns null` and `skips non-selectable tags` (hit-test).
+
+- **Editor failure is isolated.** `_initEditor` wraps construction in try/catch and leaves `_editor = null` on failure. The viewer continues to function (pan/zoom still works, save/close still work). No explicit test forces the failure (would require module-level SvgEditor mock), but the pattern is documented in code and in the `editor init failure does not break viewer` regression test.
+
+- **Delete is keyboard-scoped.** Pressing Delete while a textarea is focused (and nothing is selected in the editor) does NOT get preventDefault — the event flows to the textarea. The editor only consumes Delete when it has something to delete. Pinned by `Delete without selection does not consume the event`.
+
+- **Handle group is pointer-events: none.** Otherwise clicks on the bounding-box rect would land on the handle instead of falling through to the element. For 3.2c.2's interactive handles (corner drag, vertex drag), individual handle elements will opt back in via their own `pointer-events="auto"`.
+
+Open carried over for later sub-phases:
+
+- **3.2c.2 — move + resize.** Drag-to-move for all visible elements. Corner and edge handles for rect/circle/ellipse resize. Line endpoint handles for `<line>`. Needs pointer capture for smooth drag; needs coordinate conversion in the drag handler (start pos in local coords, delta applied to attributes). Will need per-element dispatch (rect uses x/y/width/height; circle uses cx/cy/r; ellipse uses cx/cy/rx/ry; line uses x1/y1/x2/y2; paths and polys use transform attribute).
+- **3.2c.3 — vertex edit + inline text.** Per-vertex handles for polylines/polygons (each point draggable independently). Path command parsing (`M/L/C/Q/Z` etc.) to surface drag-able control points for cubic and quadratic beziers. `<foreignObject>` textarea for inline text editing on double-click.
+- **3.2c.4 — multi-selection + marquee.** Shift+click toggle into a Set of selected elements. Marquee-drag on empty space: forward drag (top-left to bottom-right) = containment mode (only fully-inside elements); reverse drag = crossing mode (any-intersection). Group drag applies delta to every selected element.
+- **3.2c.5 — undo stack + copy/paste.** Snapshot the SVG innerHTML before every mutation, bounded to 50 entries. Ctrl+Z pops and re-injects. Ctrl+C/V clone selected element(s) with a slight offset. Ctrl+D duplicates in place.
+
 ### 5.12 — Phase 3.2b SVG pan/zoom — **delivered**
 
 Adds `svg-pan-zoom` library integration so both panels' viewports move in lockstep, mouse wheel zooms centered on cursor, and a floating fit button re-centers after manipulation. Preserves all of 3.2a's surface — no public API changes.
