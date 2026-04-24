@@ -1628,6 +1628,34 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.20 — Phase 3.2c.3b-iii SvgEditor path arc endpoint edit (A) — **delivered**
+
+Arc commands get an endpoint handle using the standard `p{N}` role format. Arc shape parameters (rx, ry, rotation, flags) stay fixed during drag — only args[5..6] move. Completes the path editing surface for all SVG path commands.
+
+- `webapp/src/svg-editor.js` — no code changes needed.
+  - `_computePathEndpoints` already emits arc endpoints (had since 3.2c.3b-i to support pen-position tracking across multi-command paths that include arcs)
+  - `_renderResizeHandles` path branch already emits a `p{N}` handle for any non-null endpoint, which includes arcs
+  - `_applyPathEndpointResize` already has a `case 'A':` branch (`args[5] += dx; args[6] += dy`) from 3.2c.3b-i
+  - Module docstring updated with 3.2c.3b-iii scope note
+
+- `webapp/src/svg-editor.test.js` — 17 new tests across 2 describe blocks:
+  - **Path arc endpoint rendering** (5 tests): A command produces exactly one handle (p0 + p1, no c-handles), handle positioned at absolute endpoint, relative arc handle positioned at computed pen+delta endpoint, A produces no tangent lines (no control points → no tangents), multi-arc path renders one handle per arc endpoint with no cross-contamination.
+  - **Path arc endpoint drag** (12 tests): dragging arc endpoint moves only args[5..6]; shape parameters preserved during drag (rx=15, ry=25, rotation=45, large-arc=1, sweep=0 all verified); relative arc endpoint drag applies delta to relative args; flag args stay as integers across round-trip (no "0.0" drift); arc drag in multi-command path leaves other commands alone; negative deltas work; repeated pointermoves recompute from origin; onChange fires after committed drag; tiny move doesn't commit; detach mid-drag restores `d`; clicking arc endpoint handle starts resize drag with correct kind+role; parse-serialize round-trip is lossless (re-parsed output matches expected command structure with mutated endpoint).
+
+Design points pinned by tests:
+
+- **Arc shape preserved during drag.** Dragging an arc endpoint doesn't reshape the curve — rx, ry, rotation, and the two flags stay exactly as they were. Pinned by `arc shape parameters preserved during drag` which uses distinctive shape values (45° rotation, large-arc=1, sweep=0) and asserts byte-exact preservation after a drag.
+
+- **No control-point handles for arc shape parameters.** rx, ry, rotation are scalars; large-arc-flag and sweep-flag are booleans. None have a natural positional interpretation on screen, so there's nothing meaningful to drag. Users wanting to reshape an arc edit the source directly. Pinned by `A command produces exactly one handle (endpoint only)` which asserts only two handles exist total for a `M A` path (initial M's p0 plus A's p1).
+
+- **Flag integers survive round-trip.** SVG path flag args are 0 or 1 — never fractional. The serializer's `String(n)` conversion handles these cleanly (integer numbers stringify as "0" and "1", not "0.0"). Pinned by `flags stay as integers across round-trip` which drags an arc with both flags set to 1 and asserts the output is byte-exact.
+
+- **Endpoint dispatch was already correct.** The existing `case 'A': args[5] += dx; args[6] += dy; break;` in `_applyPathEndpointResize` has been there since 3.2c.3b-i landed. This sub-phase is primarily test coverage — proving the existing dispatch behaves correctly through the full pipeline (handle render → hit test → drag → serialize → re-parse). The parser round-trip test explicitly verifies this end-to-end.
+
+- **No per-command relative math special-casing.** Arc's relative form uses the same "args are deltas from pen, adding drag delta shifts endpoint by exactly that delta" rule as every other relative command. Pinned by `relative arc endpoint drag applies delta to args`.
+
+3.2c.3b is complete. The path editing surface covers every SVG path command — M, L, H, V, C, S, Q, T, A, Z — with appropriate handle shapes (endpoints for all non-Z, plus control points for C/S/Q). 3.2c.3c will add inline text editing via foreignObject textarea on double-click.
+
 ### 5.19 — Phase 3.2c.3b-ii SvgEditor path control-point edit (C/S/Q) — **delivered**
 
 Cubic and quadratic Bézier curve commands get draggable control-point handles in addition to the endpoint handles from 3.2c.3b-i. Each control point is independently draggable with dashed tangent lines showing the connection to its endpoint.

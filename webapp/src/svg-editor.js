@@ -105,10 +105,29 @@
 //     relative args shifts the absolute control point by
 //     exactly that delta)
 //
-// Deferred to 3.2c.3b-iii+:
-//   - A arc endpoint handles (arc shape parameters
-//     stay as-is)
-//   - Inline text edit via foreignObject textarea (3.2c.3c)
+// Phase 3.2c.3b-iii adds: A (arc) endpoint handles.
+//   - Arc commands render their endpoint as a draggable
+//     handle with the standard `p{N}` role format
+//   - Arc shape parameters — rx, ry, x-axis-rotation,
+//     large-arc-flag, sweep-flag — stay fixed during
+//     drag; only args[5..6] (the endpoint) move
+//   - Visual result: the arc preserves its shape and
+//     curvature while its destination tracks the pointer
+//   - No control-point-style handles for shape
+//     parameters — they're either scalars (rx, ry,
+//     rotation) or booleans (flags) with no natural
+//     positional interpretation. Users reshaping an arc
+//     edit the source directly or regenerate the path
+//   - Endpoint dispatch in `_applyPathEndpointResize`
+//     already handled this case (args[5] += dx;
+//     args[6] += dy) from 3.2c.3b-i; this sub-phase
+//     adds the test coverage to pin the contract
+//
+// Path editing surface is now complete for all SVG path
+// commands. Deferred to 3.2c.3c:
+//   - Inline text edit via foreignObject textarea
+//
+// Deferred beyond 3.2c.3:
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
 //
