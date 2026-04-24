@@ -1655,7 +1655,7 @@ Remaining Layer 5 work:
 - **Doc Convert tab** — frontend UI for the DocConvert backend (Layer 4.6). Scan display, status badges, conversion progress, clean-tree gate rendering. The backend is complete; this is the UI surface.
 - **Dialog polish** — dragging, resizing, minimizing, position persistence to localStorage. Currently the dialog is fixed left-docked at 50% width.
 - **File picker enhancements** — git status badges (M/S/U/D), branch badge at root, context menu (stage/unstage/rename/delete/new file), three-state checkbox with exclusion, keyboard navigation, sort modes (mtime/size), active-file highlight from viewer events, middle-click path insertion.
-- **App shell polish** — state restoration cascade (get_current_state on setupDone), file/viewport persistence to localStorage, window resize handling, global keyboard shortcuts (Alt+1..4 for tabs, Alt+M for minimize, Ctrl+Shift+F prefill from selection).
+- **App shell polish** — ~~state restoration cascade (get_current_state on setupDone)~~, ~~file/viewport persistence to localStorage~~, window resize handling, global keyboard shortcuts (Alt+1..4 for tabs, Alt+M for minimize, Ctrl+Shift+F prefill from selection).
 - **Collaboration UI** — admission flow (pending screen, admission toast), participant UI restrictions, connected users indicator, collab popover with share link.
 
 These are enhancement-level items that build on the working foundation. The core interaction loop (chat + file selection + file viewing + editing + search) is fully functional.

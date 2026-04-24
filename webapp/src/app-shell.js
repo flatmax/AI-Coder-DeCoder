@@ -33,6 +33,24 @@ import './file-nav.js';
 import './token-hud.js';
 import { viewerForPath } from './viewer-routing.js';
 
+// ---------------------------------------------------------------
+// localStorage persistence helpers
+// ---------------------------------------------------------------
+
+/**
+ * Build a repo-scoped localStorage key. Falls back to the
+ * bare key when the repo name isn't known yet. Scoping
+ * prevents opening a different repo from restoring the
+ * wrong file.
+ */
+function _repoKey(key, repoName) {
+  if (repoName) return `${key}:${repoName}`;
+  return key;
+}
+
+const _LAST_OPEN_FILE_KEY = 'ac-last-open-file';
+const _LAST_VIEWPORT_KEY = 'ac-last-viewport';
+
 /**
  * Read the WebSocket port from the URL, falling back to 18080.
  *
@@ -95,13 +113,9 @@ export class AppShell extends JRPCClient {
     toasts: { type: Array, state: true },
     /** Number of reconnect attempts (display only). */
     reconnectAttempt: { type: Number, state: true },
-    /**
-     * Which viewer is currently visible — `'diff'` or
-     * `'svg'`. The viewer that isn't active gets the
-     * `viewer-hidden` class (CSS opacity + pointer-events
-     * off). Defaults to diff since it's the common case.
-     */
     _activeViewer: { type: String, state: true },
+    _repoName: { type: String, state: true },
+    _initComplete: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -303,6 +317,11 @@ export class AppShell extends JRPCClient {
     // Default to diff viewer — most files route there.
     // Flipped to 'svg' on navigate-file to an .svg path.
     this._activeViewer = 'diff';
+    this._repoName = '';
+    this._initComplete = false;
+    // Whether a file reopen is pending (waiting for the
+    // startup overlay to dismiss before issuing the RPC).
+    this._pendingReopen = false;
 
     // Whether we've ever connected successfully. Controls
     // whether disconnects show the startup overlay (first
@@ -319,6 +338,7 @@ export class AppShell extends JRPCClient {
     this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
     this._onGridKeyDown = this._onGridKeyDown.bind(this);
     this._onGridKeyUp = this._onGridKeyUp.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
   }
 
   connectedCallback() {
@@ -356,6 +376,7 @@ export class AppShell extends JRPCClient {
       'load-diff-panel',
       this._onLoadDiffPanel,
     );
+    window.addEventListener('beforeunload', this._onBeforeUnload);
   }
 
   disconnectedCallback() {
@@ -374,6 +395,7 @@ export class AppShell extends JRPCClient {
       'load-diff-panel',
       this._onLoadDiffPanel,
     );
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -400,6 +422,52 @@ export class AppShell extends JRPCClient {
       this._showToast('Reconnected', 'success');
     }
     this._wasConnected = true;
+
+    // Fetch the authoritative state snapshot. This gives us
+    // the repo name (for the browser tab title), the message
+    // history (restored from the last session on the server),
+    // selected files, streaming status, and init_complete.
+    this._fetchCurrentState();
+  }
+
+  /**
+   * Fetch get_current_state and dispatch the state-loaded
+   * event so child components (files tab, chat panel) can
+   * restore their UI.
+   */
+  async _fetchCurrentState() {
+    if (!this.call) return;
+    try {
+      const fn = this.call['LLMService.get_current_state'];
+      if (typeof fn !== 'function') return;
+      const raw = await fn();
+      // Unwrap jrpc-oo envelope.
+      let state = raw;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const keys = Object.keys(raw);
+        if (keys.length === 1) {
+          const inner = raw[keys[0]];
+          if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+            state = inner;
+          }
+        }
+      }
+      if (!state || typeof state !== 'object') return;
+      // Update browser tab title from repo name.
+      if (state.repo_name) {
+        this._repoName = state.repo_name;
+        document.title = state.repo_name;
+      }
+      this._initComplete = !!state.init_complete;
+      // Dispatch state-loaded so child components restore.
+      window.dispatchEvent(
+        new CustomEvent('state-loaded', { detail: state }),
+      );
+      // After state is loaded, try to reopen the last file.
+      this._tryReopenLastFile();
+    } catch (err) {
+      console.warn('[app-shell] get_current_state failed', err);
+    }
   }
 
   remoteDisconnected() {
@@ -448,10 +516,17 @@ export class AppShell extends JRPCClient {
     this.startupMessage = message || '';
     this.startupPercent = Math.max(0, Math.min(100, percent || 0));
     if (stage === 'ready') {
+      this._initComplete = true;
       // Fade out shortly after ready so the user briefly sees
       // 100%. The CSS transition handles the actual fade.
       setTimeout(() => {
         this.overlayVisible = false;
+        // If a file reopen was deferred waiting for the
+        // overlay to dismiss, do it now.
+        if (this._pendingReopen) {
+          const path = this._loadLastOpenFile();
+          if (path) this._doReopenLastFile(path);
+        }
       }, 400);
     }
     return true;
@@ -609,6 +684,16 @@ export class AppShell extends JRPCClient {
     if (typeof path !== 'string' || !path) return;
     const target = viewerForPath(path);
     if (!target) return;
+    // Save viewport of the current file before navigating
+    // away (so switching files preserves the prior file's
+    // scroll state in localStorage).
+    try {
+      this._saveViewportState();
+    } catch (_) {
+      // Don't let a save failure block navigation.
+    }
+    // Persist the new path so page refresh reopens it.
+    this._saveLastOpenFile(path);
     // Register with the file navigation grid unless the
     // event came from the grid itself or is a programmatic
     // refresh.
@@ -731,6 +816,198 @@ export class AppShell extends JRPCClient {
         }
       }
     });
+  }
+
+  // ---------------------------------------------------------------
+  // File and viewport persistence
+  // ---------------------------------------------------------------
+
+  /**
+   * Save the current viewport state on page unload. This
+   * captures the scroll position and cursor so the next
+   * page load can restore the exact view.
+   */
+  _onBeforeUnload() {
+    this._saveViewportState();
+  }
+
+  /**
+   * Save the last-opened file path to localStorage.
+   * Called on every navigate-file event.
+   */
+  _saveLastOpenFile(path) {
+    if (typeof path !== 'string' || !path) return;
+    try {
+      const key = _repoKey(_LAST_OPEN_FILE_KEY, this._repoName);
+      localStorage.setItem(key, path);
+    } catch (_) {}
+  }
+
+  /**
+   * Read the last-opened file path from localStorage.
+   */
+  _loadLastOpenFile() {
+    try {
+      const key = _repoKey(_LAST_OPEN_FILE_KEY, this._repoName);
+      return localStorage.getItem(key) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Save the current diff viewer's viewport state to
+   * localStorage. SVG files are excluded (SVG zoom
+   * restore is not yet supported).
+   */
+  _saveViewportState() {
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (!viewer) return;
+    if (viewer._activeIndex < 0) return;
+    const file = viewer._files?.[viewer._activeIndex];
+    if (!file || !file.path) return;
+    // Skip SVG files — SVG zoom restore not yet supported.
+    if (file.path.toLowerCase().endsWith('.svg')) return;
+    try {
+      const modifiedEditor = viewer._getModifiedEditor?.();
+      if (!modifiedEditor) return;
+      const pos = modifiedEditor.getPosition?.();
+      const state = {
+        path: file.path,
+        type: 'diff',
+        diff: {
+          scrollTop: modifiedEditor.getScrollTop?.() || 0,
+          scrollLeft: modifiedEditor.getScrollLeft?.() || 0,
+          lineNumber: pos?.lineNumber || 1,
+          column: pos?.column || 1,
+        },
+      };
+      const key = _repoKey(_LAST_VIEWPORT_KEY, this._repoName);
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch (_) {
+      // Monaco mock or broken editor — skip silently.
+    }
+  }
+
+  /**
+   * Load the saved viewport state from localStorage.
+   * Returns null when nothing is saved or the data is
+   * malformed.
+   */
+  _loadViewportState() {
+    try {
+      const key = _repoKey(_LAST_VIEWPORT_KEY, this._repoName);
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && parsed.path) {
+        return parsed;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * Try to reopen the last-viewed file. Deferred until
+   * the startup overlay dismisses on first connect (to
+   * avoid file-fetch RPCs blocking the server during
+   * heavy init). On reconnect (init already complete),
+   * reopens immediately.
+   */
+  _tryReopenLastFile() {
+    const path = this._loadLastOpenFile();
+    if (!path) return;
+    if (this._initComplete || !this.overlayVisible) {
+      // Init already complete (reconnect) or overlay
+      // already dismissed — reopen now.
+      this._doReopenLastFile(path);
+    } else {
+      // First connect, overlay still showing — defer.
+      this._pendingReopen = true;
+    }
+  }
+
+  /**
+   * Actually reopen the file and restore viewport state.
+   */
+  _doReopenLastFile(path) {
+    this._pendingReopen = false;
+    if (!path) return;
+    // Dispatch navigate-file to open the file.
+    window.dispatchEvent(
+      new CustomEvent('navigate-file', {
+        detail: { path, _refresh: true },
+      }),
+    );
+    // Restore viewport state if it matches the file.
+    const viewport = this._loadViewportState();
+    if (!viewport || viewport.path !== path) return;
+    if (!viewport.diff) return;
+    // Wait for the file to open, then restore. Use a
+    // one-shot active-file-changed listener filtered
+    // to the target path. Timeout after 10 seconds.
+    const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
+    if (!viewer) return;
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      settled = true;
+    }, 10000);
+    const handler = (event) => {
+      if (settled) return;
+      if (event.detail?.path !== path) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      viewer.removeEventListener('active-file-changed', handler);
+      // Wait for diff computation to settle before
+      // restoring scroll + cursor.
+      this._restoreViewport(viewer, viewport.diff);
+    };
+    viewer.addEventListener('active-file-changed', handler);
+  }
+
+  /**
+   * Restore scroll position and cursor on the diff
+   * viewer's modified editor. Polls up to 20 animation
+   * frames for the editor to be ready (it's created
+   * asynchronously after the file content fetch
+   * completes).
+   */
+  _restoreViewport(viewer, state) {
+    let attempts = 0;
+    const maxAttempts = 20;
+    const tryRestore = () => {
+      attempts += 1;
+      const modifiedEditor = viewer._getModifiedEditor?.();
+      if (!modifiedEditor) {
+        if (attempts < maxAttempts) {
+          requestAnimationFrame(tryRestore);
+        }
+        return;
+      }
+      // Wait for diff ready, then set position + scroll.
+      if (typeof viewer._waitForDiffReady === 'function') {
+        viewer._waitForDiffReady().then(() => {
+          try {
+            modifiedEditor.setPosition?.({
+              lineNumber: state.lineNumber || 1,
+              column: state.column || 1,
+            });
+            modifiedEditor.setScrollTop?.(state.scrollTop || 0);
+            modifiedEditor.setScrollLeft?.(state.scrollLeft || 0);
+          } catch (_) {}
+        });
+      } else {
+        try {
+          modifiedEditor.setPosition?.({
+            lineNumber: state.lineNumber || 1,
+            column: state.column || 1,
+          });
+          modifiedEditor.setScrollTop?.(state.scrollTop || 0);
+          modifiedEditor.setScrollLeft?.(state.scrollLeft || 0);
+        } catch (_) {}
+      }
+    };
+    requestAnimationFrame(tryRestore);
   }
 
   // ---------------------------------------------------------------
