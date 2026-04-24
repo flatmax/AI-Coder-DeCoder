@@ -3524,46 +3524,128 @@ class LLMService:
         measures real token counts for all tier items, and seeds
         the system prompt into L0.
 
+        Mode-aware dispatch — in code mode the primary index is
+        the symbol index and entries use the ``symbol:`` prefix;
+        in doc mode the primary index is the doc index and
+        entries use the ``doc:`` prefix. The two paths share the
+        same clustering algorithm via
+        ``initialize_with_keys``; the only differences are which
+        index contributes the file list and which prefix the
+        tracker keys get.
+
+        In doc mode, if the doc index isn't ready yet
+        (``_doc_index_ready is False`` — the background build
+        hasn't completed), this method bails without setting
+        ``_stability_initialized = True``. The next chat request's
+        lazy-init retry will try again; once structural extraction
+        completes, initialization succeeds on the retry. Users
+        who switch to code mode in the interim get normal code-
+        mode init on the switch.
+
         Safe to call multiple times — sets _stability_initialized
         to True on the first successful run. Subsequent calls are
         no-ops.
         """
         if getattr(self, "_stability_initialized", False):
             return
-        if self._symbol_index is None or self._repo is None:
+        if self._repo is None:
             return
 
+        # Mode dispatch — doc mode needs the doc index ready;
+        # code mode needs the symbol index attached.
+        mode = self._context.mode
+        if mode == Mode.DOC:
+            if not self._doc_index_ready:
+                # Doc index still building. Skip init; the next
+                # request's retry catches it, or a mode switch
+                # to code picks up the code-mode path.
+                return
+        else:
+            if self._symbol_index is None:
+                return
+
         try:
-            # Step 1: Index the repository.
+            # Step 1: Index the repository. In code mode we
+            # re-run the symbol index's incremental pass (cheap
+            # thanks to mtime caching — unchanged files return
+            # from cache). In doc mode, the background build
+            # (2.8.2b) has already indexed every doc file; we
+            # don't need to re-walk.
             file_list_raw = self._repo.get_flat_file_list()
             file_list = [f for f in file_list_raw.split("\n") if f]
-            self._symbol_index.index_repo(file_list)
+            if mode == Mode.CODE:
+                assert self._symbol_index is not None
+                self._symbol_index.index_repo(file_list)
 
             # Step 2: Initialize tier assignments from reference
             # graph. The tracker's key prefix must match the
-            # content type — symbol: only for files the symbol
-            # index actually recognized. Passing the raw file
-            # list would prefix every .md, .json, image, etc.
-            # with symbol:, producing spurious entries in the
-            # cache viewer and polluting cross-reference mode
-            # down the line. We intersect the full file list
-            # with _all_symbols (the authoritative indexed set)
-            # to produce the symbol-mode init list.
-            ref_index = self._symbol_index._ref_index
+            # content type — ``symbol:`` for code mode, ``doc:``
+            # for doc mode. Passing the raw repo file list would
+            # prefix every unrelated file (.json, images, config)
+            # with the wrong marker, producing spurious entries
+            # in the cache viewer and polluting cross-reference
+            # mode down the line. We intersect the repo file
+            # list with the mode-appropriate index's authoritative
+            # set to produce the init list.
             cache_target = self._config.cache_target_tokens_for_model()
             self._stability_tracker.set_cache_target_tokens(cache_target)
-            indexed_files = [
-                path for path in file_list
-                if path in self._symbol_index._all_symbols
-            ]
-            self._stability_tracker.initialize_from_reference_graph(
-                ref_index, indexed_files, l0_target_tokens=cache_target
+            if mode == Mode.DOC:
+                # Doc index is authoritative for which files
+                # have outlines. Use _all_outlines directly
+                # rather than intersecting with file_list — the
+                # background build already applied the
+                # doc-specific walker rules (hidden-dir exclusion
+                # except .github, extension filter) and those
+                # may not match what the repo's flat listing
+                # produces.
+                indexed_files = list(
+                    self._doc_index._all_outlines.keys()
+                )
+                ref_index = self._doc_index._ref_index
+                prefix = "doc:"
+            else:
+                assert self._symbol_index is not None
+                indexed_files = [
+                    path for path in file_list
+                    if path in self._symbol_index._all_symbols
+                ]
+                ref_index = self._symbol_index._ref_index
+                prefix = "symbol:"
+
+            # Use initialize_with_keys so we can pass the
+            # mode-appropriate prefix explicitly. The older
+            # initialize_from_reference_graph hardcodes the
+            # ``symbol:`` prefix — fine for code mode callers
+            # but wrong for doc mode.
+            keys = [f"{prefix}{path}" for path in indexed_files]
+            self._stability_tracker.initialize_with_keys(
+                ref_index,
+                keys=keys,
+                files=indexed_files,
+                l0_target_tokens=cache_target,
             )
 
-            # Step 3: Seed system prompt into L0.
+            # Step 3: Seed system prompt into L0. Use the
+            # mode-appropriate prompt — switching modes later
+            # demotes-and-reinstalls the prompt cleanly, so
+            # initializing with the current mode's prompt is
+            # correct even when the user has just loaded a
+            # session that started in the other mode.
             import hashlib
-            system_prompt = self._config.get_system_prompt()
-            legend = self._symbol_index.get_legend()
+            if mode == Mode.DOC:
+                system_prompt = self._config.get_doc_system_prompt()
+            else:
+                system_prompt = self._config.get_system_prompt()
+            # Legend: doc mode uses the doc index's legend;
+            # code mode uses the symbol index's. Both are empty
+            # strings when the index is empty, which is fine —
+            # register_system_prompt just adds the token count
+            # to the system: entry.
+            if mode == Mode.DOC:
+                legend = self._doc_index.get_legend()
+            else:
+                assert self._symbol_index is not None
+                legend = self._symbol_index.get_legend()
             prompt_hash = hashlib.sha256(
                 system_prompt.encode("utf-8")
             ).hexdigest()
@@ -3578,7 +3660,8 @@ class LLMService:
 
             self._stability_initialized = True
             logger.info(
-                "Stability tracker initialized: %d items",
+                "Stability tracker initialized (%s mode): %d items",
+                mode.value,
                 len(self._stability_tracker.get_all_items()),
             )
 
@@ -3593,18 +3676,32 @@ class LLMService:
     def _measure_tracker_tokens(self) -> None:
         """Replace placeholder token counts with real measured values.
 
-        Iterates all symbol: items and replaces their placeholder
-        tokens (400) with the actual token count of the formatted
-        symbol block. Also updates content hashes from signature
-        hashes for accurate stability tracking.
+        Iterates all symbol: and doc: items and replaces their
+        placeholder tokens (from ``initialize_with_keys``) with
+        the actual token count of the formatted block. Skips
+        items whose index isn't attached or whose path doesn't
+        resolve to a block — those keep the placeholder, which
+        the next update cycle will refresh from the measured
+        active-items data.
+
+        Both prefixes are handled so doc-mode init gets real
+        token counts too (2.8.2i). A tracker may hold items of
+        both kinds simultaneously (cross-reference mode), and
+        each prefix dispatches to its own index.
         """
-        if self._symbol_index is None:
-            return
         all_items = self._stability_tracker.get_all_items()
         for key in all_items:
             if key.startswith("symbol:"):
+                if self._symbol_index is None:
+                    continue
                 path = key[len("symbol:"):]
                 block = self._symbol_index.get_file_symbol_block(path)
+                if block:
+                    tokens = self._counter.count(block)
+                    self._stability_tracker.measure_tokens(key, tokens)
+            elif key.startswith("doc:"):
+                path = key[len("doc:"):]
+                block = self._doc_index.get_file_doc_block(path)
                 if block:
                     tokens = self._counter.count(block)
                     self._stability_tracker.measure_tokens(key, tokens)
